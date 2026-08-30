@@ -3539,72 +3539,48 @@ fn verify_event_transition_contract(
                 states, target, before, "Project")
             let demand = verifier_decided_transfer(body, event, 0).demand
             let mode = transfer_demand_mode(demand)
-            let needs_cleanup = verifier_logical_shape_may_take(
-                    solved.logical_shapes.get(value_type_index).unwrap()) ||
+            let owns_result = param_mode_same(mode, param_mode_own())
+            let logical_unique = verifier_logical_shape_may_take(
+                solved.logical_shapes.get(value_type_index).unwrap())
+            if owns_result && logical_unique {
+                panic("ResourcePlanner verifier: owning field projection crossed diagnostics")
+            }
+            let needs_clone = owns_result &&
                 verifier_physical_shape_may_drop(
                     solved.physical_shapes.get(value_type_index).unwrap())
             if partial {
-                let takes_place = param_mode_same(mode, param_mode_own()) &&
-                    needs_cleanup
                 let source_state = states.get(source).unwrap()
                 if !slot_flow_is_live(source_state) {
                     panic("ResourcePlanner verifier: partial Project source is not live")
                 }
-                if takes_place && !slot_flow_cleanup_owner(source_state) {
-                    panic("ResourcePlanner verifier: owning partial Project source is not owner")
-                }
-                if takes_place && !body.slots.get(target).unwrap().owns_storage {
-                    panic("ResourcePlanner verifier: owning partial Project target is borrowed")
-                }
                 require_transition_count(
                     before, before_offset + 1, "partial Project source")
-                if takes_place {
-                    require_transition(
-                        before.get(before_offset).unwrap(), source,
-                        slot_reason_take_projected_source(),
-                        "partial Project source")
-                } else {
-                    require_transition(
-                        before.get(before_offset).unwrap(), source,
-                        slot_reason_borrow(), "partial Project source")
-                }
+                require_transition(
+                    before.get(before_offset).unwrap(), source,
+                    slot_reason_borrow(), "partial Project source")
                 require_transition_after_state(
                     before.get(before_offset).unwrap(), source_state,
                     "partial Project source")
             } else {
-                if param_mode_same(mode, param_mode_own()) &&
-                   verifier_logical_shape_may_take(
-                        solved.logical_shapes.get(value_type_index).unwrap()) {
-                    panic("ResourcePlanner verifier: owning field projection crossed diagnostics")
-                }
                 require_transition_count(
                     before, before_offset + 1, "Project source")
                 require_transition(
                     before.get(before_offset).unwrap(), source,
                     slot_reason_borrow(), "Project source")
             }
-            let needs_clone = !partial &&
-                param_mode_same(mode, param_mode_own()) &&
-                verifier_physical_shape_may_drop(
-                    solved.physical_shapes.get(value_type_index).unwrap())
             if needs_clone && !body.slots.get(target).unwrap().owns_storage {
-                panic("ResourcePlanner verifier: owning field projection targets borrowed storage")
+                panic("ResourcePlanner verifier: owning projection targets borrowed storage")
             }
             require_transition_count(semantic, 1, "Project target")
             require_transition(
                 semantic.get(0).unwrap(), target,
-                if partial && param_mode_same(mode, param_mode_own()) &&
-                        needs_cleanup { slot_reason_take_target() }
-                else if partial { slot_reason_assign_scalar() }
-                else if needs_clone { slot_reason_clone_target() }
+                if needs_clone { slot_reason_clone_target() }
                 else { slot_reason_assign_scalar() },
                 "Project target")
             if partial {
                 require_transition_after_state(
                     semantic.get(0).unwrap(),
-                    slot_flow_live_owner(
-                        param_mode_same(mode, param_mode_own()) &&
-                            needs_cleanup),
+                    slot_flow_live_owner(needs_clone),
                     "partial Project target")
             }
             require_transition_count(
@@ -3970,69 +3946,38 @@ fn verify_event_operation_contract(
             }
         },
         PlannerEventValue::ProjectValue {
-            source, target, projection, value_type_index, partial
+            target, value_type_index, ..
         } => {
             let operation_index = verify_reusable_target_drop_operation(
                 body, event, target, solved, states, before, "Project")
-            if partial {
-                if after.len() != 0 {
-                    panic("ResourcePlanner verifier: partial Project has after-resource op")
+            if before.len() != operation_index {
+                panic("ResourcePlanner verifier: Project touches aggregate base")
+            }
+            let demand = verifier_decided_transfer(body, event, 0).demand
+            let owns_result = param_mode_same(
+                transfer_demand_mode(demand), param_mode_own())
+            if owns_result && verifier_logical_shape_may_take(
+                    solved.logical_shapes.get(value_type_index).unwrap()) {
+                panic("ResourcePlanner verifier: owning field projection crossed diagnostics")
+            }
+            let needs_clone = owns_result &&
+                verifier_physical_shape_may_drop(
+                    solved.physical_shapes.get(value_type_index).unwrap())
+            if after.len() != if needs_clone { 1 } else { 0 } {
+                panic("ResourcePlanner verifier: Project result Clone census drifted")
+            }
+            if needs_clone {
+                let operation = after.get(0).unwrap()
+                if rc_semantic_site_operand_ordinal(
+                        rc_operation_site(operation)) != 0 ||
+                   !rc_op_kind_same(
+                        rc_operation_kind(operation), rc_op_kind_clone()) ||
+                   rc_operation_place_projection(operation).is_some() {
+                    panic("ResourcePlanner verifier: Project result Clone drifted")
                 }
-                let demand = verifier_decided_transfer(body, event, 0).demand
-                let needs_take = param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) &&
-                    (verifier_logical_shape_may_take(
-                        solved.logical_shapes.get(value_type_index).unwrap()) ||
-                     verifier_physical_shape_may_drop(
-                        solved.physical_shapes.get(value_type_index).unwrap()))
-                let take_count = if needs_take { 1 } else { 0 }
-                if before.len() != operation_index + take_count {
-                    panic("ResourcePlanner verifier: partial Project Take census drifted")
-                }
-                if needs_take {
-                    let operation = before.get(operation_index).unwrap()
-                    if rc_semantic_site_operand_ordinal(
-                            rc_operation_site(operation)) != 0 ||
-                       !rc_op_kind_same(
-                            rc_operation_kind(operation), rc_op_kind_take()) {
-                        panic("ResourcePlanner verifier: partial Project operation drifted")
-                    }
-                    verify_operation_slots_exact(
-                        operation, body.slots.get(source).unwrap().reference,
-                        some(body.slots.get(target).unwrap().reference))
-                    match rc_operation_place_projection(operation) {
-                        some(value) => if !flow_projection_contract_same(
-                                value, projection) {
-                            panic("ResourcePlanner verifier: projected Take identity drifted")
-                        },
-                        none => panic("ResourcePlanner verifier: projected Take is untyped")
-                    }
-                }
-            } else {
-                if before.len() != operation_index {
-                    panic("ResourcePlanner verifier: ordinary Project touches aggregate base")
-                }
-                let demand = verifier_decided_transfer(body, event, 0).demand
-                let needs_clone = param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) &&
-                    verifier_physical_shape_may_drop(
-                        solved.physical_shapes.get(value_type_index).unwrap())
-                if after.len() != if needs_clone { 1 } else { 0 } {
-                    panic("ResourcePlanner verifier: Project result Clone census drifted")
-                }
-                if needs_clone {
-                    let operation = after.get(0).unwrap()
-                    if rc_semantic_site_operand_ordinal(
-                            rc_operation_site(operation)) != 0 ||
-                       !rc_op_kind_same(
-                            rc_operation_kind(operation), rc_op_kind_clone()) ||
-                       rc_operation_place_projection(operation).is_some() {
-                        panic("ResourcePlanner verifier: Project result Clone drifted")
-                    }
-                    verify_operation_slots_exact(
-                        operation, body.slots.get(target).unwrap().reference,
-                        none)
-                }
+                verify_operation_slots_exact(
+                    operation, body.slots.get(target).unwrap().reference,
+                    none)
             }
         },
         PlannerEventValue::CaptureValue { source, target, .. } => {

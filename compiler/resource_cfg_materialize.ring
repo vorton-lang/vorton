@@ -27,7 +27,7 @@ use resource_model::{
 use rc_ir::{
     RcBody, RcBlock, RcStep, RcEdge, RcSlot, RcOperation, RcSemanticSite,
     make_rc_body, make_rc_block, make_rc_step, make_rc_edge, make_rc_slot,
-    make_rc_clone_at, make_rc_take_at, make_rc_take_place_at,
+    make_rc_clone_at, make_rc_take_at,
     make_rc_drop_at, make_rc_cleanup_at,
     make_rc_drop_old_place_at, make_rc_instruction_site,
     make_rc_terminator_site, make_rc_edge_site,
@@ -47,8 +47,7 @@ use resource_certificate::{
     slot_reason_take_source, slot_reason_take_target,
     slot_reason_drop, slot_reason_cleanup,
     slot_reason_assign_scalar, slot_reason_call_result,
-    slot_reason_scope_end, slot_reason_drop_projected_old,
-    slot_reason_take_projected_source}
+    slot_reason_scope_end, slot_reason_drop_projected_old}
 use resource_type_lfp::{
     FrozenPlannerInput, PlannerBody,
     PlannerEdge, PlannerEvent, PlannerEventValue, PlannerSlot, PlannerPlace,
@@ -468,47 +467,33 @@ fn apply_event_abstract(
                 collect, findings)
             let logical = logical_shapes.get(value_type_index).unwrap()
             let physical = physical_shapes.get(value_type_index).unwrap()
-            let takes_place = partial && param_mode_same(
-                    transfer_demand_mode(demand), param_mode_own()) &&
-                type_requires_cleanup(logical, physical)
-            if takes_place && source_live &&
-               !slot_flow_cleanup_owner(states.get(source).unwrap()) {
-                panic("ResourcePlanner: owning partial projection lacks source ownership")
+            let owns_result = param_mode_same(
+                transfer_demand_mode(demand), param_mode_own())
+            let logical_unique = logical_shape_may_take(logical)
+            let needs_clone = owns_result && !logical_unique &&
+                physical_shape_may_drop(physical)
+            if source_live && collect && owns_result && logical_unique {
+                append_resource_finding(
+                    findings, make_place_resource_diagnostic(
+                        event.step, 0,
+                        make_planner_project_place(
+                            source, projection, value_type_index,
+                            make_flow_project_place(
+                                body.slots.get(source).unwrap().reference,
+                                projection,
+                                flow_projection_contract_result_type(
+                                    projection))),
+                        slot_flow_moved()))
             }
-            if takes_place && !body.slots.get(target).unwrap().owns_storage {
-                panic("ResourcePlanner: owning partial projection targets borrowed storage")
-            }
-            if !partial {
-                if source_live && collect &&
-                   param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) &&
-                   logical_shape_may_take(logical) {
-                    append_resource_finding(
-                        findings, make_place_resource_diagnostic(
-                            event.step, 0,
-                            make_planner_project_place(
-                                source, projection, value_type_index,
-                                make_flow_project_place(
-                                    body.slots.get(source).unwrap().reference,
-                                    projection,
-                                    flow_projection_contract_result_type(
-                                        projection))),
-                            slot_flow_moved()))
-                }
+            if needs_clone && !body.slots.get(target).unwrap().owns_storage {
+                panic("ResourcePlanner: owning projection targets borrowed storage")
             }
             if partial && !source_live {
                 // Do not manufacture a live pattern binder from an unavailable
                 // base; the exact source diagnostic remains authoritative.
                 states.set(target, slot_flow_empty())
             } else {
-                let target_owner = if partial { takes_place } else {
-                    body.slots.get(target).unwrap().owns_storage &&
-                        param_mode_same(
-                            transfer_demand_mode(demand), param_mode_own()) &&
-                        !logical_shape_may_take(
-                            logical) && physical_shape_may_drop(physical)
-                }
-                states.set(target, slot_flow_live_owner(target_owner))
+                states.set(target, slot_flow_live_owner(needs_clone))
             }
         },
         PlannerEventValue::CaptureValue { source, target, demand } => {
@@ -1385,79 +1370,37 @@ fn materialize_event(
             }
         },
         PlannerEventValue::ProjectValue {
-            source, target, projection, value_type_index, partial
+            source, target, value_type_index, ..
         } => {
             normalize_reusable_target_materialized(
                 body, event, instruction, target, "Project",
                 solved, states, before_ops, before_transitions)
             let source_before = states.get(source).unwrap()
-            let target_before = states.get(target).unwrap()
             require_live_state(source_before, "projection")
             let demand = decided_transfer(body, event, 0).demand
             let logical = solved.logical_shapes.get(value_type_index).unwrap()
             let physical = solved.physical_shapes.get(value_type_index).unwrap()
-            if partial {
-                let takes_place = param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) &&
-                    type_requires_cleanup(logical, physical)
-                if takes_place {
-                    if !slot_flow_cleanup_owner(source_before) {
-                        panic("ResourcePlanner: owning partial projection lacks source ownership")
-                    }
-                    if !body.slots.get(target).unwrap().owns_storage {
-                        panic("ResourcePlanner: owning partial projection targets borrowed storage")
-                    }
-                    before_ops.push(make_rc_take_place_at(
-                        make_rc_instruction_site(
-                            instruction, rc_site_before_instruction(), 0),
-                        rc_slot_for(body, source), rc_slot_for(body, target),
-                        projection))
-                    push_transition(
-                        before_transitions, source, source_before,
-                        source_before, slot_reason_take_projected_source())
-                } else {
-                    // Borrow aliases and scalar Own projections still need an
-                    // exact, operation-free witness bound to the source slot.
-                    push_transition(
-                        before_transitions, source, source_before,
-                        source_before, slot_reason_borrow())
-                }
-            } else {
-                if param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) &&
-                   logical_shape_may_take(logical) {
-                    panic("ResourcePlanner: owning field projection crossed diagnostics")
-                }
-                push_transition(
-                    before_transitions, source, source_before, source_before,
-                    slot_reason_borrow())
+            let owns_result = param_mode_same(
+                transfer_demand_mode(demand), param_mode_own())
+            let logical_unique = logical_shape_may_take(logical)
+            if owns_result && logical_unique {
+                panic("ResourcePlanner: owning field projection crossed diagnostics")
             }
+            // A partial projection can still fall through at its guard. The
+            // aggregate remains live; shareable ownership is established by
+            // cloning the projected result slot below.
+            push_transition(
+                before_transitions, source, source_before, source_before,
+                slot_reason_borrow())
             let before_target_write = states.get(target).unwrap()
-            let needs_clone = !partial &&
-                param_mode_same(
-                    transfer_demand_mode(demand), param_mode_own()) &&
+            let needs_clone = owns_result &&
                 physical_shape_may_drop(physical)
             if needs_clone && !body.slots.get(target).unwrap().owns_storage {
-                panic("ResourcePlanner: owning field projection targets borrowed storage")
+                panic("ResourcePlanner: owning projection targets borrowed storage")
             }
-            let target_state = slot_flow_live_owner(
-                if partial {
-                    param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) &&
-                        type_requires_cleanup(logical, physical)
-                } else {
-                    body.slots.get(target).unwrap().owns_storage &&
-                        param_mode_same(
-                            transfer_demand_mode(demand), param_mode_own()) &&
-                        needs_clone
-                })
+            let target_state = slot_flow_live_owner(needs_clone)
             states.set(target, target_state)
-            let target_reason = if partial &&
-                    param_mode_same(
-                        transfer_demand_mode(demand), param_mode_own()) &&
-                    type_requires_cleanup(logical, physical) {
-                slot_reason_take_target()
-            } else if needs_clone {
+            let target_reason = if needs_clone {
                 slot_reason_clone_target()
             } else {
                 slot_reason_assign_scalar()
