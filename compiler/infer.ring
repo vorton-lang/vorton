@@ -4380,6 +4380,25 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 }
             }
 
+            match op_def {
+                some(operation) => if
+                        handler.params.len() != operation.params.len() {
+                    let effect_display = nominal_display_name(
+                        canonical_effect_name)
+                    let _ = type_error(
+                        ctx.sink, E0301,
+                        "Handler operation '${effect_display}.${handler.op_name}' expects ${operation.params.len().to_str()} parameter(s), got ${handler.params.len().to_str()}",
+                        handler.span,
+                        DiagnosticContext::TypeMismatch {
+                            expected: "${operation.params.len().to_str()} parameters",
+                            actual: "${handler.params.len().to_str()} parameters",
+                            expression: none
+                        })
+                    fail.raise(CompileError {})
+                },
+                none => {}
+            }
+
             let mut hparams: List<HParam> = []
             let mut hi = 0
             for p in handler.params {
@@ -4392,6 +4411,20 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                         },
                         none => ctx.env.fresh_var()
                     }
+                }
+                match op_def {
+                    some(operation) => match operation.params.get(hi) {
+                        some(operation_param) => {
+                            let expected = apply_subst_map(
+                                handler_inst_map, operation_param)
+                            s = unify_at(
+                                ctx.sink, ctx.env, pt, expected, s, p.span)
+                            pt = apply_subst(s, expected)
+                        },
+                        none => panic(
+                            "handler parameter census differs after preflight")
+                    },
+                    none => {}
                 }
                 if is_abort_handler && hi == 0 {
                     match abort_payload_type {
