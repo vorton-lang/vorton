@@ -76,7 +76,7 @@ pub enum ImportIssueKind {
     SourceNameMissing,
     AmbiguousBinding,
     UnresolvedImportCycle,
-    ReservedNominal
+    ReservedType
 }
 
 pub struct AstSite {
@@ -150,6 +150,11 @@ pub struct DuplicateDirectDeclaration {
     pub name: Str,
     pub first_span: Span,
     pub duplicate_span: Span
+}
+
+struct ReservedTypeDeclaration {
+    name: Str,
+    span: Span
 }
 
 fn direct_declaration_namespace_key(
@@ -262,20 +267,35 @@ pub fn first_duplicate_direct_declaration(
     first_duplicate_direct_declaration_in_scope(program.decls)
 }
 
-fn first_reserved_range_declaration_in_scope(
+// One exact leaf-name authority for both direct declarations and the final
+// exposed name of imported/re-exported type bindings.
+const RESERVED_0_1_TYPE_NAMES: List<Str> = [
+    "Int", "Float", "Str", "Bool", "Unit", "Never", "Ptr", "Range",
+    "Cell", "Option", "List", "ListIterator", "Map", "MapIterator",
+    "Set", "SetIterator", "StringBuilder", "Result"
+]
+
+fn is_reserved_0_1_type_name(name: Str) -> Bool {
+    RESERVED_0_1_TYPE_NAMES.any(fn(reserved) { reserved == name })
+}
+
+fn first_reserved_type_declaration_in_scope(
     decls: List<Decl>
-) -> Span? {
+) -> ReservedTypeDeclaration? {
     for decl in decls {
         match decl {
             Decl::Struct { name, span, .. } |
             Decl::ExternType { name, span, .. } |
             Decl::Enum { name, span, .. } |
-            Decl::TypeAlias { name, span, .. } => if name == "Range" {
-                return some(span)
+            Decl::TypeAlias { name, span, .. } => if
+                    is_reserved_0_1_type_name(name) {
+                return some(ReservedTypeDeclaration {
+                    name: name, span: span
+                })
             },
             Decl::ModBlock { decls: nested, .. } => match
-                    first_reserved_range_declaration_in_scope(nested) {
-                some(span) => return some(span), none => {}
+                    first_reserved_type_declaration_in_scope(nested) {
+                some(reserved) => return some(reserved), none => {}
             },
             _ => {}
         }
@@ -283,18 +303,35 @@ fn first_reserved_range_declaration_in_scope(
     none
 }
 
-pub fn first_reserved_range_declaration(program: Program) -> Span? {
-    first_reserved_range_declaration_in_scope(program.decls)
+fn first_reserved_type_declaration(
+    program: Program
+) -> ReservedTypeDeclaration? {
+    first_reserved_type_declaration_in_scope(program.decls)
 }
 
-pub fn reserved_range_declaration_diagnostic(span: Span) -> Diagnostic {
+pub fn reserved_type_name_diagnostic(
+    name: Str, span: Span
+) -> Diagnostic {
+    if !is_reserved_0_1_type_name(name) {
+        panic("reserved type diagnostic: name is not reserved")
+    }
     make_diag(
         E0207, Severity::SevError,
-        "Duplicate definition: builtin type 'Range' is already defined",
+        "Duplicate definition: builtin type '${name}' is already defined",
         span,
         DiagnosticContext::OtherContext {
-            detail: some("Range is the reserved 0.1 builtin nominal")
+            detail: some("${name} is a reserved 0.1 builtin type")
         })
+}
+
+pub fn reserved_type_declaration_diagnostic(
+    program: Program
+) -> Diagnostic? {
+    match first_reserved_type_declaration(program) {
+        some(reserved) => some(reserved_type_name_diagnostic(
+            reserved.name, reserved.span)),
+        none => none
+    }
 }
 
 fn direct_declaration_namespace_is_module(
@@ -1839,9 +1876,11 @@ pub fn resolve_prelude_namespace_plan(
     if file == "" {
         panic("namespace invariant violated: prelude file key is empty")
     }
-    resolve_namespace_plan([census_module_namespaces([
-        "$prelude$", stable_source_basename(file, "$invalid-prelude$")
-    ], program)])
+    resolve_namespace_plan_with_reserved_type_seeds([
+        census_module_namespaces([
+            "$prelude$", stable_source_basename(file, "$invalid-prelude$")
+        ], program)
+    ], true)
 }
 
 // ============================================================
@@ -1867,7 +1906,7 @@ fn import_issue_kind_rank(kind: ImportIssueKind) -> Int {
         ImportIssueKind::SourceNameMissing => 2,
         ImportIssueKind::AmbiguousBinding => 3,
         ImportIssueKind::UnresolvedImportCycle => 4,
-        ImportIssueKind::ReservedNominal => 5
+        ImportIssueKind::ReservedType => 5
     }
 }
 
@@ -2271,6 +2310,7 @@ fn add_namespace_fact(
     candidate: ResolvedNamespaceBinding,
     occurrence: NamespaceFactOccurrence,
     preloading_seeds: Bool,
+    allow_reserved_type_seed: Bool,
     mut bindings: List<ResolvedNamespaceBinding>,
     mut winner_occurrences: List<NamespaceFactOccurrence>,
     mut publication_bindings: List<ResolvedNamespaceBinding?>,
@@ -2286,12 +2326,14 @@ fn add_namespace_fact(
         panic(
             "namespace invariant violated: fact candidate and occurrence targets differ")
     }
-    if namespace_is_reserved_range_type(
-            candidate.namespace, candidate.exposed_name) {
+    if namespace_is_reserved_0_1_type(
+            candidate.namespace, candidate.exposed_name) &&
+       !(allow_reserved_type_seed &&
+            provenance_is_seed(occurrence.provenance)) {
         let mut already_reported = false
         for issue in issues {
             match issue.kind {
-                ImportIssueKind::ReservedNominal => if
+                ImportIssueKind::ReservedType => if
                     issue.site.file_key == occurrence.site.file_key &&
                     issue.site.frame_index == occurrence.site.frame_index &&
                     issue.site.use_index == occurrence.site.use_index &&
@@ -2303,7 +2345,7 @@ fn add_namespace_fact(
         }
         if !already_reported {
             issues.push(ImportIssue {
-                kind: ImportIssueKind::ReservedNominal,
+                kind: ImportIssueKind::ReservedType,
                 site: occurrence.site,
                 source_owner: candidate.owner,
                 source_name: candidate.exposed_name,
@@ -2612,10 +2654,10 @@ fn structural_value_import_producer(
     }
 }
 
-fn namespace_is_reserved_range_type(
+fn namespace_is_reserved_0_1_type(
     namespace: NamespaceKind, exposed_name: Str
 ) -> Bool {
-    if exposed_name != "Range" { return false }
+    if !is_reserved_0_1_type_name(exposed_name) { return false }
     match namespace {
         NamespaceKind::Struct | NamespaceKind::Enum |
         NamespaceKind::TypeAlias => true,
@@ -3238,7 +3280,7 @@ fn project_public_inline_fact(
                         target_frame_index: root_frame.frame_index,
                         seed_role: occurrence.seed_role,
                         is_projection: true
-                    }, false, bindings, winner_occurrences,
+                    }, false, false, bindings, winner_occurrences,
                     publication_bindings, publication_occurrences,
                     binding_indices, queue,
                     import_ledger, ambiguous_keys, issues)
@@ -3311,7 +3353,7 @@ fn deliver_namespace_fact(
                         target_frame_index: obligation.target_frame_index,
                         seed_role: none,
                         is_projection: false
-                    }, false, bindings, winner_occurrences,
+                    }, false, false, bindings, winner_occurrences,
                     publication_bindings, publication_occurrences,
                     binding_indices, queue, import_ledger,
                     ambiguous_keys, issues)
@@ -5298,8 +5340,9 @@ fn append_unresolved_issues(
     }
 }
 
-pub fn resolve_namespace_plan(
-    censuses: List<ModuleNamespaceCensus>
+fn resolve_namespace_plan_with_reserved_type_seeds(
+    censuses: List<ModuleNamespaceCensus>,
+    allow_reserved_type_seeds: Bool
 ) -> ResolvedNamespacePlan {
     let mut frames: List<ModuleFramePlan> = []
     let mut imports: List<ImportObligation> = []
@@ -5452,7 +5495,8 @@ pub fn resolve_namespace_plan(
                     target_frame_index: seed.frame_index,
                     seed_role: some(seed.role),
                     is_projection: seed.is_projection
-                }, true, bindings, winner_occurrences,
+                }, true, allow_reserved_type_seeds,
+                bindings, winner_occurrences,
                 publication_bindings, publication_occurrences,
                 binding_indices, queue, import_ledger,
                 ambiguous_keys, issues)
@@ -5587,6 +5631,12 @@ pub fn resolve_namespace_plan(
     }
 }
 
+pub fn resolve_namespace_plan(
+    censuses: List<ModuleNamespaceCensus>
+) -> ResolvedNamespacePlan {
+    resolve_namespace_plan_with_reserved_type_seeds(censuses, false)
+}
+
 // AstSite is portable; only this resolver adapter may recover a concrete Span.
 // Physical dependencies are root UseDecl sites, while the fallback keeps the
 // adapter total if a future plan consumer passes a non-root site.
@@ -5680,10 +5730,9 @@ pub fn build_module_graph(entry_file: Str, error_format: Str) -> ModuleGraph? {
                             },
                             none => {}
                         }
-                        match first_reserved_range_declaration(ast) {
-                            some(span) => {
-                                resolve_sink.report(
-                                    reserved_range_declaration_diagnostic(span))
+                        match reserved_type_declaration_diagnostic(ast) {
+                            some(diagnostic) => {
+                                resolve_sink.report(diagnostic)
                                 if error_format == "llm" {
                                     eprintln(format_llm(
                                         resolve_sink.diagnostics(),

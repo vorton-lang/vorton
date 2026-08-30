@@ -1,11 +1,11 @@
 // Test: Enum named fields with generics
 
-enum Result<T, E> {
+enum LocalResult<T, E> {
     Ok { value: T },
     Err { message: E },
 }
 
-fn unwrap_or<T, E>(r: Result<T, E>, default: T) -> T {
+fn unwrap_or<T, E>(r: LocalResult<T, E>, default: T) -> T {
     match r {
         Ok { value } => value,
         Err { .. } => default,
