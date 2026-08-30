@@ -1,6 +1,6 @@
-use origin::{PublicBox, make_public, read_public}
+use facade::{ExportedBox, make_public, read_public}
 
-fn pass_through(value: PublicBox) -> Int {
+fn pass_through(value: ExportedBox<Int>) -> Int {
     read_public(value)
 }
 

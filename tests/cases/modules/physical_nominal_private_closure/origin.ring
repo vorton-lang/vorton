@@ -1,23 +1,25 @@
-enum HiddenLeaf {
-    Number(Int),
-    Text(Str),
+enum HiddenLeaf<T> {
+    Value(T),
+    Link(HiddenLink<T>),
 }
 
-struct HiddenBox {
-    value: HiddenLeaf,
+struct HiddenLink<T> {
+    leaf: HiddenLeaf<T>,
 }
 
-pub struct PublicBox {
-    hidden: HiddenBox,
+type HiddenAlias<T> = HiddenLeaf<T>
+
+pub struct PublicBox<T> {
+    hidden: HiddenAlias<T>,
 }
 
-pub fn make_public(value: Int) -> PublicBox {
-    PublicBox { hidden: HiddenBox { value: HiddenLeaf::Number(value) } }
+pub fn make_public(value: Int) -> PublicBox<Int> {
+    PublicBox { hidden: HiddenLeaf::Value(value) }
 }
 
-pub fn read_public(value: PublicBox) -> Int {
-    match value.hidden.value {
-        HiddenLeaf::Number(number) => number,
-        HiddenLeaf::Text(_) => -1,
+pub fn read_public(value: PublicBox<Int>) -> Int {
+    match value.hidden {
+        HiddenLeaf::Value(number) => number,
+        HiddenLeaf::Link(_) => -1,
     }
 }
