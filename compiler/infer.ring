@@ -130,10 +130,12 @@ use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
     make_named_executable_ref, make_system_host_callable_ref,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_anonymous_path, executable_ref_same}
-use effect_contract::{typed_effect_header_schema_bindings,
+use effect_contract::{TypedHandledEffectInstance,
+    typed_effect_header_schema_bindings,
     empty_typed_effect_header_schema,
     make_typed_handled_effect_instance, typed_handled_effect_instance_same,
     typed_handled_effect_instance_reference,
+    typed_handled_effect_instance_type_arguments,
     make_empty_effect_ctx_source}
 
 fn exact_ident_variant_constructor_target(
@@ -4128,8 +4130,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
     // One runtime evidence value backs every operation arm for a canonical
     // effect in this handle. Share its type arguments even when the body is
     // pure or contains only an unknown open tail.
-    let mut handler_inst_type_args_by_effect:
-        List<(HandledEffectRef, List<Type>)> = []
+    let mut handler_instances_by_effect:
+        List<TypedHandledEffectInstance> = []
     let mut dedicated_handler_inst_type_args: Map<Str, List<Type>> = map_new()
 
     for handler in handlers {
@@ -4208,32 +4210,45 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
             // the shared instance.
             let mut handler_inst_map: Map<Int, Type> = map_new()
             let mut handler_inst_type_args: List<Type> = []
+            let mut handler_instance: TypedHandledEffectInstance? = none
             match effect_def {
                 some(ed) => {
                     match handler_handled_ref {
                         some(reference) => {
-                            let mut shared: List<Type>? = none
-                            for entry in handler_inst_type_args_by_effect {
+                            let mut shared: TypedHandledEffectInstance? = none
+                            for instance in handler_instances_by_effect {
                                 if handled_effect_ref_same(
-                                        entry.0, reference) {
+                                        typed_handled_effect_instance_reference(
+                                            instance), reference) {
                                     if shared.is_some() {
                                         panic("handler census: exact instance repeats")
                                     }
-                                    shared = some(entry.1)
+                                    shared = some(instance)
                                 }
                             }
                             match shared {
-                                some(shared_type_args) => {
-                                    handler_inst_type_args = shared_type_args
+                                some(instance) => {
+                                    handler_inst_type_args =
+                                        typed_handled_effect_instance_type_arguments(
+                                            instance)
+                                    handler_instance = some(instance)
                                 },
                                 none => {
                                     for _tpv in ed.type_param_vars {
                                         handler_inst_type_args.push(
                                             ctx.env.fresh_var())
                                     }
-                                    handler_inst_type_args_by_effect.push(
-                                        (reference, handler_inst_type_args))
+                                    let instance =
+                                        make_typed_handled_effect_instance(
+                                            reference,
+                                            handler_inst_type_args)
+                                    handler_instances_by_effect.push(instance)
+                                    handler_instance = some(instance)
                                 }
+                            }
+                            if handler_inst_type_args.len() !=
+                                   ed.type_param_vars.len() {
+                                panic("handler census: exact instance arity differs")
                             }
                         },
                         none => match dedicated_handler_inst_type_args.get(
@@ -4555,12 +4570,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     },
                     none => 0
                 },
-                handled_instance: handler_handled_ref.map(fn(reference) {
-                    make_typed_handled_effect_instance(
-                        reference, handler_inst_type_args.map(fn(ty) {
-                            apply_subst(s, ty)
-                        }))
-                }),
+                handled_instance: handler_instance,
                 operation_ref: match op_def {
                     some(operation) => operation.operation_ref,
                     none => none
