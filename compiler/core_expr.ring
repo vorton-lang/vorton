@@ -5416,7 +5416,7 @@ fn require_registered_impl_owner(
 fn validate_dictionary_provider(
     value: ExactDictRef, body: CoreBody,
     impls: List<CoreImplMetadata>
-) {
+) with {} {
     validate_dictionary_binder(value, body)
     if dict_ref_is_local(value) { return }
     let owner = if dict_ref_is_static(value) {
