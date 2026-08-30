@@ -5202,7 +5202,7 @@ fn validate_move_update_with_graph(
 fn validate_pattern_with_graph(
     pattern: CorePattern, expected_type: CoreTypeRef,
     body: CoreBody, graph: CoreTypeGraph
-) {
+) with {} {
     require_core_type_same(
         pattern.ty, expected_type,
         "CoreHIR: pattern type differs from scrutinee")
