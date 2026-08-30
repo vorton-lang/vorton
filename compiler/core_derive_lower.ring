@@ -1659,7 +1659,7 @@ pub fn elaborate_core_derived_json_body(
 // Clone — recursive typed tuple reconstruction and outer nominal construct
 // ============================================================
 
-fn validate_clone_field(value: CoreDerivedFieldPlan) {
+fn validate_clone_field(value: CoreDerivedFieldPlan) with {} {
     if value.right.is_some() {
         panic("Core derive Clone: field unexpectedly has right operand")
     }
@@ -1683,7 +1683,7 @@ fn validate_clone_field(value: CoreDerivedFieldPlan) {
     }
 }
 
-fn clone_field_expr(value: CoreDerivedFieldPlan) -> CoreExpr {
+fn clone_field_expr(value: CoreDerivedFieldPlan) -> CoreExpr with {} {
     if value.right.is_some() {
         panic("Core derive Clone: field unexpectedly has right operand")
     }
