@@ -7,10 +7,7 @@
 use ast::{Span, Position, Pattern, LiteralValue, BinOp, UnaryOp}
 use types::{Type, Effect, EffectRow, types_equal, type_to_string, EMPTY_ROW}
 use env::{
-    TypeEnv, TraitDef, AssocTypeDef, PhysicalNominalFact,
-    physical_nominal_owner, physical_nominal_name,
-    physical_nominal_is_struct, physical_nominal_struct,
-    physical_nominal_enum, physical_nominal_drop_method,
+    TypeEnv, TraitDef, AssocTypeDef,
     RegisteredTraitAssocContract, RegisteredTraitMethodContract,
     registered_trait_contract_owner,
     registered_trait_contract_methods,
@@ -20,7 +17,7 @@ use env::{
     registered_trait_assoc_default, registered_trait_assoc_bounds,
     registered_trait_method_ref,
     registered_trait_method_signature,
-    registered_trait_method_mutabilities, apply_subst_map,
+    registered_trait_method_mutabilities, apply_subst_map, find_impl,
     ordered_effect_tail_vars
 }
 use builtins::{
@@ -104,7 +101,7 @@ use ir_identity::{
     intrinsic_ref_same, trait_method_ref_same,
     BUILTIN_METHOD_SITE_COUNT,
     builtin_value_site_tag, BUILTIN_VALUE_SITE_COUNT,
-    registered_nominal_ref_symbol, registered_nominal_ref_same,
+    registered_nominal_ref_symbol,
     registered_trait_ref_symbol,
     impl_owner_ref_target,
     handled_effect_ref_symbol,
@@ -666,8 +663,6 @@ struct ClosedCoreProducer {
     module_key: Str,
     recorded_types: List<ProducerRecordedType>,
     parameter_facts: Map<Int, FlowGenericParamFact>,
-    physical_nominals: List<PhysicalNominalFact>,
-    used_physical_nominals: List<PhysicalNominalFact>,
     type_sources: List<CoreTypeSourceFact>,
     effect_ctx_type: CoreTypeFactRef?,
     effect_parameters: List<TypedEffectFormalFact>
@@ -675,15 +670,12 @@ struct ClosedCoreProducer {
 
 fn new_closed_core_producer(
     module_key: Str, module_order: Int, env: TypeEnv,
-    physical_nominals: List<PhysicalNominalFact>,
     effect_parameters: List<TypedEffectFormalFact>
 ) -> ClosedCoreProducer {
     ClosedCoreProducer {
         recorder: new_core_assembly_recorder(module_key, module_order),
         env: env, module_key: module_key, recorded_types: [],
         parameter_facts: map_new(),
-        physical_nominals: physical_nominals.map(fn(fact) { fact }),
-        used_physical_nominals: [],
         type_sources: [], effect_ctx_type: none,
         effect_parameters: effect_parameters.map(fn(fact) { fact })
     }
@@ -869,58 +861,15 @@ fn producer_nominal_parameters(
     result
 }
 
-fn producer_use_physical_nominal(
-    mut producer: ClosedCoreProducer, name: Str, want_struct: Bool
-) -> PhysicalNominalFact {
-    let mut found: PhysicalNominalFact? = none
-    for candidate in producer.physical_nominals {
-        if physical_nominal_name(candidate) == name {
-            if physical_nominal_is_struct(candidate) != want_struct {
-                panic("Core producer: physical nominal kind differs: ${name}")
-            }
-            match found {
-                some(existing) => if !registered_nominal_ref_same(
-                        physical_nominal_owner(existing),
-                        physical_nominal_owner(candidate)) {
-                    panic("Core producer: physical nominal identity repeats: ${name}")
-                },
-                none => { found = some(candidate) }
-            }
-        }
-    }
-    let result = found.unwrap_or_else(fn() {
-        panic("Core producer: physical nominal is absent: ${name}")
-    })
-    if !producer.used_physical_nominals.any(fn(existing) {
-            registered_nominal_ref_same(
-                physical_nominal_owner(existing),
-                physical_nominal_owner(result))
-        }) {
-        producer.used_physical_nominals.push(result)
-    }
-    result
-}
-
-fn producer_use_physical_nominal_owner(
-    mut producer: ClosedCoreProducer, owner: SymbolRef, want_struct: Bool
-) -> PhysicalNominalFact {
-    let name = symbol_ref_canonical_payload(owner)
-    let result = producer_use_physical_nominal(
-        producer, name, want_struct)
-    if !symbol_ref_same(
-            registered_nominal_ref_symbol(physical_nominal_owner(result)),
-            owner) {
-        panic("Core producer: physical nominal owner differs")
-    }
-    result
-}
-
 fn producer_nominal_drop_contract(
-    value: PhysicalNominalFact
+    producer: ClosedCoreProducer, name: Str
 ) -> FlowDropContract? {
-    match physical_nominal_drop_method(value) {
-        some(method) => some(make_flow_drop_contract(
-            make_named_executable_ref(impl_method_ref_member(method)))),
+    match find_impl(producer.env.trait_reg, name, "Drop") {
+        some(owner) => match owner.method_refs.get("drop") {
+            some(method) => some(make_flow_drop_contract(
+                make_named_executable_ref(impl_method_ref_member(method)))),
+            none => panic("Core producer: Drop owner lacks method")
+        },
         none => none
     }
 }
@@ -1027,9 +976,9 @@ fn producer_record_type(
                 effect_contract)
         },
         Type::StructType { name, type_params } => {
-            let physical = producer_use_physical_nominal(
-                producer, name, true)
-            let def = physical_nominal_struct(physical)
+            let def = producer.env.types.structs.get(name).unwrap_or_else(fn() {
+                panic("Core producer: struct registry owner is absent")
+            })
             let nominal = registered_nominal_ref_symbol(def.owner_ref)
             if def.type_param_vars.len() != type_params.len() {
                 panic("Core producer: struct application arity differs")
@@ -1060,7 +1009,7 @@ fn producer_record_type(
                         make_nominal_flow_field_identity(field.field_ref),
                         field_fact))
                 }
-                let drop_contract = producer_nominal_drop_contract(physical)
+                let drop_contract = producer_nominal_drop_contract(producer, name)
                 define_core_nominal_type_fact(
                     producer.recorder, fact, flow_type_kind_struct(),
                     nominal, arguments,
@@ -1070,9 +1019,9 @@ fn producer_record_type(
             }
         },
         Type::EnumType { name, type_params } => {
-            let physical = producer_use_physical_nominal(
-                producer, name, false)
-            let def = physical_nominal_enum(physical)
+            let def = producer.env.types.enums.get(name).unwrap_or_else(fn() {
+                panic("Core producer: enum registry owner is absent: ${name}")
+            })
             let nominal = registered_nominal_ref_symbol(def.owner_ref)
             if def.type_param_vars.len() != type_params.len() {
                 panic("Core producer: enum application arity differs")
@@ -1106,7 +1055,7 @@ fn producer_record_type(
                 }
                 variant_index = variant_index + 1
             }
-            let drop_contract = producer_nominal_drop_contract(physical)
+            let drop_contract = producer_nominal_drop_contract(producer, name)
             define_core_nominal_type_fact(
                 producer.recorder, fact, flow_type_kind_enum(),
                 nominal, arguments,
@@ -1233,14 +1182,39 @@ fn producer_register_trait_method_formals(
 }
 
 fn producer_nominal_definition_raw_parameters(
-    mut producer: ClosedCoreProducer, owner: SymbolRef, is_struct: Bool
+    producer: ClosedCoreProducer, owner: SymbolRef, is_struct: Bool
 ) -> List<Int> {
-    let physical = producer_use_physical_nominal_owner(
-        producer, owner, is_struct)
+    let mut found: List<Int>? = none
     if is_struct {
-        physical_nominal_struct(physical).type_param_vars
+        for entry in producer.env.types.structs.entries() {
+            if symbol_ref_same(
+                    registered_nominal_ref_symbol(entry.1.owner_ref), owner) {
+                match found {
+                    some(existing) => if !producer_int_lists_same(
+                            existing, entry.1.type_param_vars) {
+                        panic("Core producer: local struct formal aliases differ")
+                    },
+                    none => { found = some(entry.1.type_param_vars) }
+                }
+            }
+        }
     } else {
-        physical_nominal_enum(physical).type_param_vars
+        for entry in producer.env.types.enums.entries() {
+            if symbol_ref_same(
+                    registered_nominal_ref_symbol(entry.1.owner_ref), owner) {
+                match found {
+                    some(existing) => if !producer_int_lists_same(
+                            existing, entry.1.type_param_vars) {
+                        panic("Core producer: local enum formal aliases differ")
+                    },
+                    none => { found = some(entry.1.type_param_vars) }
+                }
+            }
+        }
+    }
+    match found {
+        some(values) => values,
+        none => panic("Core producer: local nominal definition is absent")
     }
 }
 
@@ -2967,7 +2941,6 @@ pub struct FrozenCoreAssemblyFacts {
     module_key: Str, module_order: Int,
     type_refs: List<CoreTypeFactRef>, type_nodes: List<FlowTypeNode>,
     type_sources: List<CoreTypeSourceFact>,
-    physical_nominals: List<PhysicalNominalFact>,
     effect_parameters: List<TypedEffectFormalFact>,
     callable_effect_rows: List<TypedCallableEffectFact>,
     project_callable_effects: List<ProjectCallableEffectSource>,
@@ -3011,7 +2984,6 @@ fn physical_callable_effect_rows(
 pub fn produce_closed_core_assembly_facts(
     module_key: Str, module_order: Int,
     closed_program: HProgram, env: TypeEnv,
-    physical_nominals: List<PhysicalNominalFact>,
     effect_parameters: List<TypedEffectFormalFact>,
     callable_effect_rows: List<TypedCallableEffectFact>
 ) -> FrozenCoreAssemblyFacts {
@@ -3027,8 +2999,7 @@ pub fn produce_closed_core_assembly_facts(
         drop_types: closed_program.drop_types
     }
     let producer = new_closed_core_producer(
-        module_key, module_order, env,
-        physical_nominals, effect_parameters)
+        module_key, module_order, env, effect_parameters)
     producer_register_decl_parameters(producer, physical_program.decls)
     producer_register_environment_effect_parameters(producer)
     producer_record_builtin_trait_types(producer)
@@ -3049,8 +3020,7 @@ pub fn produce_closed_core_assembly_facts(
         module_order, callable_effect_rows, diagnostic_seed.owners)
     freeze_closed_core_assembly_facts(
         producer.recorder, physical_program, env,
-        producer.type_sources, producer.used_physical_nominals,
-        effect_ctx_type,
+        producer.type_sources, effect_ctx_type,
         producer.effect_parameters, physical_effect_rows,
         diagnostic_seed)
 }
@@ -3084,9 +3054,7 @@ pub fn mutate_core_unowned_effect_tail(
     let mutated = FrozenCoreAssemblyFacts {
         module_key: value.module_key, module_order: value.module_order,
         type_refs: value.type_refs, type_nodes: value.type_nodes,
-        type_sources: value.type_sources,
-        physical_nominals: value.physical_nominals,
-        effect_parameters: retained,
+        type_sources: value.type_sources, effect_parameters: retained,
         callable_effect_rows: value.callable_effect_rows,
         project_callable_effects: [], project_callable_type_formals: [],
         project_host_imports: [],
@@ -3104,7 +3072,6 @@ pub fn mutate_core_unowned_effect_tail(
 fn freeze_closed_core_assembly_facts(
     mut recorder: CoreAssemblyRecorder, closed_program: HProgram, env: TypeEnv,
     type_sources: List<CoreTypeSourceFact>,
-    physical_nominals: List<PhysicalNominalFact>,
     effect_ctx_type: CoreEffectCtxTypeSource,
     effect_parameters: List<TypedEffectFormalFact>,
     callable_effect_rows: List<TypedCallableEffectFact>,
@@ -3162,7 +3129,6 @@ fn freeze_closed_core_assembly_facts(
         module_key: recorder.module_key, module_order: recorder.module_order,
         type_refs: recorder.refs, type_nodes: nodes,
         type_sources: type_sources,
-        physical_nominals: physical_nominals,
         effect_parameters: effect_parameters,
         callable_effect_rows: callable_effect_rows,
         project_callable_effects: [], project_callable_type_formals: [],
@@ -7362,7 +7328,6 @@ fn with_project_effect_sources(
         module_key: facts.module_key, module_order: facts.module_order,
         type_refs: facts.type_refs, type_nodes: facts.type_nodes,
         type_sources: facts.type_sources,
-        physical_nominals: facts.physical_nominals,
         effect_parameters: facts.effect_parameters,
         callable_effect_rows: facts.callable_effect_rows,
         project_callable_effects: sources.map(fn(item) { item }),

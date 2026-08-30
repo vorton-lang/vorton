@@ -6,7 +6,7 @@
 use types::{Type, EffectRow, types_equal, effects_equal, type_to_string}
 use ast::{TypeParam, span_zero}
 use env::{
-    TypeEnv, PhysicalNominalFact, registered_trait_contract_methods,
+    TypeEnv, registered_trait_contract_methods,
     registered_trait_method_ref, registered_trait_method_signature
 }
 use hir::{
@@ -1430,14 +1430,13 @@ fn freeze_legacy_semantic_facts(
 pub fn freeze_core_and_legacy_facts(
     module_key: Str, module_order: Int,
     program: HProgram, env: TypeEnv,
-    physical_nominals: List<PhysicalNominalFact>,
     prelude_physical_owner_module_key: Str,
     physical_module_prefix: Str
 ) -> FrozenCoreAndLegacyFacts {
     let closed = close_hir_surface(program, env)
     let effect_freeze = freeze_typed_effect_formals(env)
     let core = produce_closed_core_assembly_facts(
-        module_key, module_order, closed, env, physical_nominals,
+        module_key, module_order, closed, env,
         typed_effect_freeze_formals(effect_freeze),
         typed_effect_freeze_callables(effect_freeze))
     let sealed_program = frozen_core_assembly_program(core)

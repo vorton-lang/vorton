@@ -1,16 +1,11 @@
-use types::{Type, Effect}
+use types::{Type}
 use ast::{Program, Decl, UseDecl, UseImport, NamedImport}
 use hir::{HProgram, HDecl, ValueBindingKind, ModuleImplFact, compare_by_first}
 use diagnostics::{CollectingSink, DiagnosticContext, Severity, make_diag}
 use codes::{E0703}
 use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef, TraitDef, ImplEntry,
     TypeAliasDef, EffectAliasDef,
-    PhysicalNominalFact, make_physical_struct_fact,
-    make_physical_enum_fact, physical_nominal_owner,
-    physical_nominal_name, physical_nominal_is_struct,
-    physical_nominal_struct, physical_nominal_enum,
-    physical_nominal_drop_method, localize_physical_nominal_fact,
-    find_impl, find_impl_by_provider,
+    find_impl_by_provider,
     impl_entry_exact_key_same, impl_entry_final_same,
     optional_symbol_ref_same}
 use ir_identity::{SymbolRef, ImplMethodRef, RegisteredNominalRef,
@@ -46,8 +41,7 @@ pub struct ModuleExports {
     pub struct_field_orders: Map<Str, List<Str>>,
     pub extern_values: Set<Str>,
     pub mut_methods: Map<Str, Set<Str>>,
-    pub fn_mut_params: Map<Str, List<Bool>>,
-    physical_nominals: List<PhysicalNominalFact>
+    pub fn_mut_params: Map<Str, List<Bool>>
 }
 
 pub enum TypeDef {
@@ -162,254 +156,6 @@ fn variant_ctor_scheme(def: EnumDef) -> TypeScheme {
         effect_schema: empty_typed_effect_header_schema(),
         def_id: none
     }
-}
-
-pub fn module_export_physical_nominals(
-    value: ModuleExports
-) -> List<PhysicalNominalFact> {
-    value.physical_nominals.map(fn(item) { item })
-}
-
-fn physical_drop_method(env: TypeEnv, name: Str) -> ImplMethodRef? {
-    match find_impl(env.trait_reg, name, "Drop") {
-        some(owner) => match owner.method_refs.get("drop") {
-            some(method) => some(method),
-            none => panic("physical nominal export: Drop owner lacks method")
-        },
-        none => none
-    }
-}
-
-fn append_physical_nominal(
-    mut values: List<PhysicalNominalFact>, candidate: PhysicalNominalFact
-) {
-    for index in 0..values.len() {
-        let existing = values.get(index).unwrap()
-        if registered_nominal_ref_same(
-                physical_nominal_owner(existing),
-                physical_nominal_owner(candidate)) {
-            if physical_nominal_name(existing) !=
-                    physical_nominal_name(candidate) ||
-               physical_nominal_is_struct(existing) !=
-                    physical_nominal_is_struct(candidate) {
-                panic("physical nominal export: exact owner layout differs")
-            }
-            match (physical_nominal_drop_method(existing),
-                   physical_nominal_drop_method(candidate)) {
-                (some(left), some(right)) => if
-                        !impl_method_ref_same(left, right) {
-                    panic("physical nominal export: Drop method differs")
-                },
-                (none, some(_)) => { values.set(index, candidate) },
-                _ => {}
-            }
-            return
-        }
-    }
-    values.push(candidate)
-}
-
-fn append_dependency_physical_nominals(
-    dependencies: List<ModuleExports>,
-    mut values: List<PhysicalNominalFact>
-) {
-    for dependency in dependencies {
-        for fact in module_export_physical_nominals(dependency) {
-            append_physical_nominal(values, fact)
-        }
-    }
-}
-
-fn append_environment_physical_nominals(
-    env: TypeEnv, mut values: List<PhysicalNominalFact>
-) {
-    let mut structs = env.types.structs.entries()
-    structs.sort_by(compare_by_first)
-    for entry in structs {
-        append_physical_nominal(values, make_physical_struct_fact(
-            entry.1, physical_drop_method(env, entry.1.name)))
-    }
-    let mut externs = env.types.extern_structs.entries()
-    externs.sort_by(compare_by_first)
-    for entry in externs {
-        append_physical_nominal(values, make_physical_struct_fact(
-            entry.1, physical_drop_method(env, entry.1.name)))
-    }
-    let mut enums = env.types.enums.entries()
-    enums.sort_by(compare_by_first)
-    for entry in enums {
-        append_physical_nominal(values, make_physical_enum_fact(
-            entry.1, physical_drop_method(env, entry.1.name)))
-    }
-}
-
-pub fn physical_nominal_inputs_for_core(
-    mut env: TypeEnv, dependencies: List<ModuleExports>
-) -> List<PhysicalNominalFact> {
-    let raw_dependencies: List<PhysicalNominalFact> = []
-    append_dependency_physical_nominals(dependencies, raw_dependencies)
-    let result: List<PhysicalNominalFact> = []
-    for fact in raw_dependencies {
-        append_physical_nominal(
-            result, localize_physical_nominal_fact(env, fact))
-    }
-    append_environment_physical_nominals(env, result)
-    result
-}
-
-fn append_nominal_type_name(mut names: List<Str>, name: Str) {
-    if !names.contains(name) { names.push(name) }
-}
-
-fn collect_nominal_type_names(ty: Type, mut names: List<Str>) {
-    match ty {
-        Type::FnType { params, return_type, effects } => {
-            for parameter in params {
-                collect_nominal_type_names(parameter, names)
-            }
-            collect_nominal_type_names(return_type, names)
-            for atom in effects.effects {
-                match atom {
-                    Effect::FailEffect { error_type } =>
-                        collect_nominal_type_names(error_type, names),
-                    Effect::MutEffect { state_type } =>
-                        collect_nominal_type_names(state_type, names),
-                    Effect::CustomEffect { type_args, .. } => {
-                        for argument in type_args {
-                            collect_nominal_type_names(argument, names)
-                        }
-                    },
-                    _ => {}
-                }
-            }
-        },
-        Type::StructType { name, type_params } |
-        Type::EnumType { name, type_params } => {
-            append_nominal_type_name(names, name)
-            for parameter in type_params {
-                collect_nominal_type_names(parameter, names)
-            }
-        },
-        Type::GenericType { base, args } => {
-            collect_nominal_type_names(base, names)
-            for argument in args {
-                collect_nominal_type_names(argument, names)
-            }
-        },
-        Type::RecordType { fields, .. } => {
-            for field in fields {
-                collect_nominal_type_names(field.ty, names)
-            }
-        },
-        Type::EffectRowType { effects, .. } => {
-            for atom in effects {
-                match atom {
-                    Effect::FailEffect { error_type } =>
-                        collect_nominal_type_names(error_type, names),
-                    Effect::MutEffect { state_type } =>
-                        collect_nominal_type_names(state_type, names),
-                    Effect::CustomEffect { type_args, .. } => {
-                        for argument in type_args {
-                            collect_nominal_type_names(argument, names)
-                        }
-                    },
-                    _ => {}
-                }
-            }
-        },
-        Type::TupleType { elements } => {
-            for element in elements {
-                collect_nominal_type_names(element, names)
-            }
-        },
-        Type::PtrType { pointee } => collect_nominal_type_names(pointee, names),
-        _ => {}
-    }
-}
-
-fn physical_fact_for_name(
-    values: List<PhysicalNominalFact>, name: Str
-) -> PhysicalNominalFact {
-    let mut found: PhysicalNominalFact? = none
-    for value in values {
-        if physical_nominal_name(value) == name {
-            if found.is_some() && !registered_nominal_ref_same(
-                    physical_nominal_owner(found.unwrap()),
-                    physical_nominal_owner(value)) {
-                panic("physical nominal export: canonical identity repeats")
-            }
-            found = some(value)
-        }
-    }
-    match found {
-        some(value) => value,
-        none => panic(
-            "physical nominal export: dependency is absent: ${name}")
-    }
-}
-
-fn physical_nominal_field_types(
-    value: PhysicalNominalFact
-) -> List<Type> {
-    if physical_nominal_is_struct(value) {
-        return physical_nominal_struct(value).fields.map(fn(field) {
-            field.ty
-        })
-    }
-    let mut result: List<Type> = []
-    for variant in physical_nominal_enum(value).variants {
-        for field in variant.fields { result.push(field) }
-    }
-    result
-}
-
-fn exported_physical_nominal_closure(
-    env: TypeEnv, types: Map<Str, TypeDef>,
-    dependencies: List<ModuleExports>
-) -> List<PhysicalNominalFact> {
-    let pool: List<PhysicalNominalFact> = []
-    append_dependency_physical_nominals(dependencies, pool)
-    append_environment_physical_nominals(env, pool)
-    let pending: List<PhysicalNominalFact> = []
-    let mut roots = types.entries()
-    roots.sort_by(compare_by_first)
-    for entry in roots {
-        let owner = match entry.1 {
-            TypeDef::StructDef_(def) => def.owner_ref,
-            TypeDef::EnumDef_(def) => def.owner_ref
-        }
-        let mut found: PhysicalNominalFact? = none
-        for candidate in pool {
-            if registered_nominal_ref_same(
-                    physical_nominal_owner(candidate), owner) {
-                found = some(candidate)
-            }
-        }
-        pending.push(found.unwrap_or_else(fn() {
-            panic("physical nominal export: public root is absent")
-        }))
-    }
-    let result: List<PhysicalNominalFact> = []
-    let mut cursor = 0
-    while cursor < pending.len() {
-        let fact = pending.get(cursor).unwrap()
-        cursor = cursor + 1
-        let already = result.any(fn(existing) {
-            registered_nominal_ref_same(
-                physical_nominal_owner(existing),
-                physical_nominal_owner(fact))
-        })
-        if already { continue }
-        append_physical_nominal(result, fact)
-        let names: List<Str> = []
-        for field in physical_nominal_field_types(fact) {
-            collect_nominal_type_names(field, names)
-        }
-        for name in names {
-            pending.push(physical_fact_for_name(pool, name))
-        }
-    }
-    result
 }
 
 // Resolve a relative pub-use inside an inline module to the same canonical
@@ -1299,9 +1045,6 @@ pub fn extract_exports(
     validate_impl_export_closure(
         trait_impls, method_index, inherent_methods)
 
-    let physical_nominals = exported_physical_nominal_closure(
-        env, types, available_modules)
-
     some(ModuleExports {
         module_key: module_key,
         module_prefix: module_prefix,
@@ -1319,8 +1062,7 @@ pub fn extract_exports(
         struct_field_orders: struct_field_orders,
         extern_values: extern_values,
         mut_methods: mut_methods,
-        fn_mut_params: fn_mut_params,
-        physical_nominals: physical_nominals
+        fn_mut_params: fn_mut_params
     })
 }
 
