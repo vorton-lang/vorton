@@ -299,6 +299,7 @@ fn al_expr(e: HExpr) -> HExpr {
                     executable_ref: h.executable_ref, op_name: h.op_name,
                     captures: h.captures.map(fn(capture) { HLambdaCapture {
                         source: capture.source, target: capture.target,
+                        ty: capture.ty,
                         value: capture.value.map(fn(value) { al_expr(value) }),
                         resource_site: capture.resource_site } }),
                     effect_ctx: h.effect_ctx,
@@ -315,6 +316,7 @@ fn al_expr(e: HExpr) -> HExpr {
                 params: params,
                 captures: captures.map(fn(capture) { HLambdaCapture {
                     source: capture.source, target: capture.target,
+                    ty: capture.ty,
                     value: capture.value.map(fn(value) { al_expr(value) }),
                     resource_site: capture.resource_site } }),
                 effect_ctx: effect_ctx,

@@ -665,6 +665,7 @@ fn dl_expr(
                     executable_ref: h.executable_ref, op_name: h.op_name,
                     captures: h.captures.map(fn(capture) { HLambdaCapture {
                         source: capture.source, target: capture.target,
+                        ty: capture.ty,
                         value: capture.value.map(fn(value) {
                             dl_expr(value, defs, seen, counter, owner) }),
                         resource_site: capture.resource_site } }),
@@ -684,6 +685,7 @@ fn dl_expr(
                 params: params,
                 captures: captures.map(fn(capture) { HLambdaCapture {
                     source: capture.source, target: capture.target,
+                    ty: capture.ty,
                     value: capture.value.map(fn(value) {
                         dl_expr(value, defs, seen, counter, owner) }),
                     resource_site: capture.resource_site } }),

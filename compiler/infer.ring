@@ -114,6 +114,8 @@ use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
     compiler_extern_ref_symbol, COMPILER_EXTERN_SLOT_ALLOC,
     callee_ref_is_named, callee_ref_named_symbol,
     slot_domain_lexical, slot_ref_same,
+    slot_ref_is_source, slot_ref_source_def_id,
+    slot_ref_source_domain_is_lexical,
     path_owner_for_symbol, make_path_ref, path_role_synthetic,
     path_role_handler, path_role_child,
     variant_ref_member}
@@ -4400,7 +4402,8 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
 // ============================================================
 
 fn append_lambda_capture(
-    ctx: InferCtx, def_id: Int, lambda_depth: Int,
+    ctx: InferCtx, def_id: Int, source_type: Type,
+    lambda_depth: Int,
     executable: ExecutableRef,
     mut captures: List<HLambdaCapture>
 ) {
@@ -4417,6 +4420,7 @@ fn append_lambda_capture(
     captures.push(HLambdaCapture {
         source: source,
         target: executable_capture_slot(executable, captures.len()),
+        ty: source_type,
         value: none, resource_site: none
     })
 }
@@ -4433,6 +4437,7 @@ fn append_dictionary_capture(
         captures.push(HLambdaCapture {
             source: source,
             target: executable_capture_slot(executable, captures.len()),
+            ty: UNIT,
             value: none, resource_site: none
         })
     } else if dict_ref_is_wrapped(value) {
@@ -4534,10 +4539,11 @@ fn collect_lambda_capture_expr(
     mut captures: List<HLambdaCapture>
 ) {
     match expr {
-        HExpr::Ident { def_id, dict_closure_dicts, .. } => {
+        HExpr::Ident { def_id, dict_closure_dicts, ty, .. } => {
             match def_id {
                 some(id) => append_lambda_capture(
-                    ctx, id, lambda_depth, executable, captures),
+                    ctx, id, ty,
+                    lambda_depth, executable, captures),
                 none => {}
             }
             match dict_closure_dicts {
@@ -4643,6 +4649,13 @@ fn collect_lambda_capture_expr(
         },
         HExpr::Lambda { captures: nested, .. } => {
             for capture in nested {
+                if slot_ref_is_source(capture.source) &&
+                   slot_ref_source_domain_is_lexical(capture.source) &&
+                   slot_ref_source_def_id(capture.source) >= 0 {
+                    append_lambda_capture(
+                        ctx, slot_ref_source_def_id(capture.source),
+                        capture.ty, lambda_depth, executable, captures)
+                }
                 match capture.value { some(value) => collect_lambda_capture_expr(
                     ctx, value, lambda_depth, executable, captures), none => {} }
             }

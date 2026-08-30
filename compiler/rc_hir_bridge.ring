@@ -1864,6 +1864,8 @@ fn simple_core_expr(
             }
             let result = HLambdaCapture {
                 source: source, target: core_capture_target(capture),
+                ty: legacy_binder_projection_type(
+                    projected_binder_for(ctx.projection, source)),
                 value: some(wrap_resource_operand(
                     ctx, node_ordinal, capture_ordinal, source,
                     BRIDGE_ROLE_EXPR_PRIMARY, 0)),
@@ -2548,6 +2550,8 @@ fn serialize_handler(
         }
         let result = HLambdaCapture {
             source: source, target: core_capture_target(capture),
+            ty: legacy_binder_projection_type(
+                projected_binder_for(ctx.projection, source)),
             value: some(wrap_resource_operand(
                 ctx, node_ordinal, capture_ordinal, source,
                 BRIDGE_ROLE_CONTROL_DISPATCH, dispatch_ordinal)),

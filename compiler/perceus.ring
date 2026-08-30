@@ -1207,6 +1207,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                     executable_ref: h.executable_ref,
                     captures: h.captures.map(fn(capture) { HLambdaCapture {
                         source: capture.source, target: capture.target,
+                        ty: capture.ty,
                         value: capture.value.map(fn(value) {
                             anf_operand(value, hoists, externs, counter) }),
                         resource_site: capture.resource_site } }),
@@ -1229,6 +1230,7 @@ fn anf_expr(expr: HExpr, mut hoists: List<HStmt>, externs: Set<Str>, mut counter
                 params: params,
                 captures: captures.map(fn(capture) { HLambdaCapture {
                     source: capture.source, target: capture.target,
+                    ty: capture.ty,
                     value: capture.value.map(fn(value) {
                         anf_operand(value, hoists, externs, counter) }),
                     resource_site: capture.resource_site } }),
@@ -2918,6 +2920,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                     executable_ref: h.executable_ref,
                     captures: h.captures.map(fn(capture) { HLambdaCapture {
                         source: capture.source, target: capture.target,
+                        ty: capture.ty,
                         value: capture.value.map(fn(value) {
                             rc_escape(value, owned, boxed, externs,
                                 drop_types, gensym, loop_base) }),
@@ -2948,6 +2951,7 @@ fn rc_expr(expr: HExpr, escape: Bool, owned: List<OwnedSlot>, boxed: Set<Int>, e
                 params: params,
                 captures: captures.map(fn(capture) { HLambdaCapture {
                     source: capture.source, target: capture.target,
+                    ty: capture.ty,
                     value: capture.value.map(fn(value) {
                         rc_escape(value, owned, boxed, externs, drop_types,
                             gensym, loop_base) }),

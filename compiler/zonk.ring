@@ -740,6 +740,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                         executable_ref: h.executable_ref, op_name: h.op_name,
                         captures: h.captures.map(fn(capture) { HLambdaCapture {
                             source: capture.source, target: capture.target,
+                            ty: zonk_type(ctx, capture.ty),
                             value: capture.value.map(fn(value) {
                                 zonk_expr(ctx, value) }),
                             resource_site: capture.resource_site } }),
@@ -770,6 +771,7 @@ pub fn zonk_expr(ctx: ZonkCtx, expr: HExpr) -> HExpr {
                 params: params.map(fn(p) { zonk_param(ctx, p) }),
                 captures: captures.map(fn(capture) { HLambdaCapture {
                     source: capture.source, target: capture.target,
+                    ty: zonk_type(ctx, capture.ty),
                     value: capture.value.map(fn(value) {
                         zonk_expr(ctx, value) }),
                     resource_site: capture.resource_site } }),

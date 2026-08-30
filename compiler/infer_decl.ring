@@ -1409,6 +1409,7 @@ fn finalize_effect_ctx_captures(
 ) -> List<HLambdaCapture> {
     values.map(fn(value) { HLambdaCapture {
         source: value.source, target: value.target,
+        ty: value.ty,
         value: value.value.map(fn(expr) {
             finalize_effect_ctx_expr(ctx, batch, expr)
         }),

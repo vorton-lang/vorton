@@ -1489,6 +1489,9 @@ fn producer_record_handler(
         none => {}
     }
     for capture in handler.captures {
+        let _ = producer_record_type(
+            producer, capture.ty,
+            some(executable_origin(handler.executable_ref)))
         match capture.value {
             some(value) => producer_record_expr(
                 producer, handler.executable_ref, value),
@@ -1766,6 +1769,9 @@ fn producer_record_expr(
             let _ = producer_record_type(
                 producer, return_type, some(executable_origin(executable_ref)))
             for capture in captures {
+                let _ = producer_record_type(
+                    producer, capture.ty,
+                    some(executable_origin(executable_ref)))
                 match capture.value {
                     some(value) => producer_record_expr(
                         producer, executable_ref, value),
@@ -3277,11 +3283,13 @@ fn executable_origin(value: ExecutableRef) -> OriginRef {
     } else { make_path_origin_ref(executable_ref_anonymous_path(value)) }
 }
 
-struct CaptureSlotMap { source: SlotRef, target: SlotRef }
+struct CaptureSlotMap { source: SlotRef, target: SlotRef, ty: Type }
 
 fn capture_slot_maps(values: List<HLambdaCapture>) -> List<CaptureSlotMap> {
     values.map(fn(value) {
-        CaptureSlotMap { source: value.source, target: value.target }
+        CaptureSlotMap {
+            source: value.source, target: value.target, ty: value.ty
+        }
     })
 }
 
@@ -6384,6 +6392,14 @@ fn add_executable_body(
                 panic("Core assembly: parameter role is absent")
             })))
         parameter_index = parameter_index + 1
+    }
+    for capture in capture_bindings {
+        let activated = ensure_binder_with_storage(
+            ctx, capture.source, capture.ty,
+            binder_kind_lambda_capture(), flow_borrow_storage(), false)
+        if !slot_ref_same(activated, capture.target) {
+            panic("Core assembly: typed capture binder target differs")
+        }
     }
     let block = block_from_expr(ctx, body_expr)
     let body = make_core_body(reference, executable_origin(reference),

@@ -386,9 +386,12 @@ pub enum HStringInterpPart {
     Expression(HExpr)
 }
 
+// Source/target identity and the final source type are one capture fact; Core
+// must not reconstruct a capture binder from a later call's actual effects.
 pub struct HLambdaCapture {
     pub source: SlotRef,
     pub target: SlotRef,
+    pub ty: Type,
     pub value: HExpr?,
     pub resource_site: HResourceSite?
 }
@@ -1771,7 +1774,12 @@ fn validate_hir_expr(
                     right = right + 1
                 }
                 match capture.value {
-                    some(value) => validate_hir_expr(value, seen, scope),
+                    some(value) => {
+                        if !types_equal(hexpr_type(value), capture.ty) {
+                            panic("HIR lambda: capture value/type differs")
+                        }
+                        validate_hir_expr(value, seen, scope)
+                    },
                     none => {}
                 }
                 capture_index = capture_index + 1

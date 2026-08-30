@@ -1179,6 +1179,7 @@ fn close_captures(values: List<HLambdaCapture>) -> List<HLambdaCapture> {
     for capture in values {
         result.push(HLambdaCapture {
             source: capture.source, target: capture.target,
+            ty: capture.ty,
             value: close_optional_expr(capture.value),
             resource_site: capture.resource_site
         })
