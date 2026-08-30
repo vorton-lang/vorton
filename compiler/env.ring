@@ -2409,13 +2409,15 @@ pub fn build_type_var_map(
     result
 }
 
-fn append_ordered_type_var(mut result: List<Int>, id: Int) {
+fn append_ordered_type_var(
+    mut result: List<Int>, id: Int
+) with {mut<List<Int>>} {
     if !result.contains(id) { result.push(id) }
 }
 
 fn collect_ordered_effect_vars(
     eff: Effect, mut result: List<Int>
-) {
+) with {mut<List<Int>>} {
     match eff {
         Effect::FailEffect { error_type } =>
             collect_ordered_type_var_ids(error_type, result),
@@ -2432,7 +2434,7 @@ fn collect_ordered_effect_vars(
 
 fn collect_ordered_effect_row_vars(
     row: EffectRow, mut result: List<Int>
-) {
+) with {mut<List<Int>>} {
     for eff in row.effects {
         collect_ordered_effect_vars(eff, result)
     }
@@ -2444,7 +2446,7 @@ fn collect_ordered_effect_row_vars(
 
 fn collect_ordered_type_var_ids(
     ty: Type, mut result: List<Int>
-) {
+) with {mut<List<Int>>} {
     match ty {
         Type::TypeVar { id, .. } => append_ordered_type_var(result, id),
         Type::FnType { params, return_type, effects } => {
@@ -2491,7 +2493,9 @@ fn collect_ordered_type_var_ids(
     }
 }
 
-fn collect_type_var_ids(ty: Type, mut result: Set<Int>) {
+fn collect_type_var_ids(
+    ty: Type, mut result: Set<Int>
+) with {mut<Set<Int>>} {
     let mut ordered: List<Int> = []
     collect_ordered_type_var_ids(ty, ordered)
     for id in ordered { result.insert(id) }
@@ -2499,7 +2503,7 @@ fn collect_type_var_ids(ty: Type, mut result: Set<Int>) {
 
 fn collect_effect_tail_ids_in_type(
     ty: Type, mut result: List<Int>
-) {
+) with {mut<List<Int>>} {
     match ty {
         Type::FnType { params, return_type, effects } => {
             for param in params {
@@ -2555,7 +2559,7 @@ fn collect_effect_tail_ids_in_type(
 
 fn collect_effect_tail_ids_in_atom(
     atom: Effect, mut result: List<Int>
-) {
+) with {mut<List<Int>>} {
     match atom {
         Effect::FailEffect { error_type } =>
             collect_effect_tail_ids_in_type(error_type, result),
@@ -2570,7 +2574,7 @@ fn collect_effect_tail_ids_in_atom(
     }
 }
 
-pub fn ordered_effect_tail_vars(value: Type) -> List<Int> {
+pub fn ordered_effect_tail_vars(value: Type) -> List<Int> with {} {
     let result: List<Int> = []
     collect_effect_tail_ids_in_type(value, result)
     result
