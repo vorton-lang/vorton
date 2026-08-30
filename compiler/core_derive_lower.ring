@@ -597,7 +597,7 @@ fn field_binary_call(value: CoreDerivedFieldPlan) -> CoreExpr {
 fn eq_field(
     value: CoreDerivedFieldPlan,
     bool_type: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef
-) -> CoreExpr {
+) -> CoreExpr with {} {
     match value.value {
         CoreDerivedFieldPlanValue::DerivedLeaf { .. } =>
             field_binary_call(value),
@@ -609,7 +609,7 @@ fn eq_field(
 fn eq_fields(
     fields: List<CoreDerivedFieldPlan>, index: Int,
     bool_type: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef
-) -> CoreExpr {
+) -> CoreExpr with {} {
     if index >= fields.len() { return bool_literal(bool_type, true, origin) }
     let condition = eq_field(
         fields.get(index).unwrap(), bool_type, effects, origin)
