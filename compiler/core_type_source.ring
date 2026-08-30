@@ -758,7 +758,7 @@ pub fn flow_type_node_resource_storage_parameter_ordinals(
 
 fn flow_satisfaction_field_name(
     field: FlowNominalFieldFact, kind_tag: Int
-) -> Str? {
+) -> Str? with {} {
     if kind_tag == FLOW_TYPE_STRUCT &&
        flow_field_identity_is_nominal(field.identity) {
         return some(nominal_field_ref_name(
@@ -774,7 +774,7 @@ fn flow_satisfaction_field_name(
 
 fn flow_satisfaction_type_node(
     nodes: List<FlowTypeNode>, reference: CoreTypeRef
-) -> FlowTypeNode {
+) -> FlowTypeNode with {} {
     for node in nodes {
         if core_type_ref_same(node.reference, reference) { return node }
     }
@@ -784,7 +784,7 @@ fn flow_satisfaction_type_node(
 fn flow_satisfaction_pair_active(
     actual: CoreTypeRef, formal: CoreTypeRef,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
-) -> Bool {
+) -> Bool with {} {
     if actual_path.len() != formal_path.len() {
         panic("CoreHIR: type compatibility path is malformed")
     }
@@ -801,7 +801,7 @@ fn flow_satisfaction_pair_active(
 
 fn substituted_parameter_replacement(
     substitutions: List<FlowTypeSubstitution>, parameter: FlowGenericParamFact
-) -> CoreTypeRef? {
+) -> CoreTypeRef? with {} {
     let mut found: CoreTypeRef? = none
     for substitution in substitutions {
         if flow_generic_param_identity_same(
@@ -822,7 +822,7 @@ fn exact_record_shape_satisfies(
     effect_actuals: List<CoreEffectSubstitution>,
     exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
-) -> Bool {
+) -> Bool with {mut<List<CoreTypeRef>>} {
     if actual.nominal_fields.len() != formal.nominal_fields.len() {
         return false
     }
@@ -854,7 +854,7 @@ fn substituted_effect_atom_matches(
     effect_actuals: List<CoreEffectSubstitution>,
     exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
-) -> Bool {
+) -> Bool with {} {
     let kind = core_effect_atom_kind_tag(formal)
     if core_effect_atom_kind_tag(actual) != kind { return false }
     if kind == 0 || kind == 1 {
@@ -900,7 +900,7 @@ fn substituted_effect_atom_matches(
 fn substituted_effect_parameter_matches(
     actual: EffectParamRef, formal: EffectParamRef,
     substitutions: List<FlowEffectParamSubstitution>
-) -> Bool {
+) -> Bool with {} {
     if effect_param_ref_same(actual, formal) { return true }
     let mut found: EffectParamRef? = none
     for substitution in substitutions {
@@ -920,7 +920,7 @@ fn substituted_effect_parameter_matches(
 fn instantiate_nested_callable_effect_formal(
     formal: CoreEffectContract,
     actuals: List<CoreEffectSubstitution>
-) -> CoreEffectContract? {
+) -> CoreEffectContract? with {} {
     let parameter = match core_effect_contract_parameter(formal) {
         some(value) => value,
         none => return some(formal)
@@ -960,7 +960,7 @@ fn substituted_effect_contract_satisfies(
     effect_actuals: List<CoreEffectSubstitution>,
     exact: Bool,
     actual_path: List<CoreTypeRef>, formal_path: List<CoreTypeRef>
-) -> Bool {
+) -> Bool with {} {
     if substitutions.len() == 0 && effect_substitutions.len() == 0 &&
        effect_actuals.len() == 0 && !exact {
         return core_effect_contract_actual_satisfies_formal(actual, formal)
@@ -1004,7 +1004,7 @@ fn flow_type_actual_satisfies_formal_inner(
     exact: Bool,
     allow_record_widening: Bool,
     mut actual_path: List<CoreTypeRef>, mut formal_path: List<CoreTypeRef>
-) -> Bool {
+) -> Bool with {mut<List<CoreTypeRef>>} {
     let actual_kind = flow_type_kind_tag(actual.kind)
     let formal_kind = flow_type_kind_tag(formal.kind)
     if core_type_ref_same(actual.reference, formal.reference) &&
@@ -1152,7 +1152,7 @@ fn flow_type_actual_satisfies_formal_inner(
 // actual slot's physical type.
 pub fn flow_type_actual_satisfies_formal(
     nodes: List<FlowTypeNode>, actual: FlowTypeNode, formal: FlowTypeNode
-) -> Bool {
+) -> Bool with {mut<List<CoreTypeRef>>} {
     flow_type_actual_satisfies_formal_inner(
         nodes, actual, formal, [], [], [], false, true, [], [])
 }
@@ -1165,7 +1165,7 @@ pub fn flow_type_actual_satisfies_substituted_formal(
     nodes: List<FlowTypeNode>, actual: CoreTypeRef, formal: CoreTypeRef,
     substitutions: List<FlowTypeSubstitution>,
     effect_actuals: List<CoreEffectSubstitution>
-) -> Bool {
+) -> Bool with {mut<List<CoreTypeRef>>} {
     flow_type_actual_satisfies_formal_inner(
         nodes, flow_satisfaction_type_node(nodes, actual),
         flow_satisfaction_type_node(nodes, formal),
@@ -1179,7 +1179,7 @@ pub fn flow_type_actual_matches_formal_exact(
     nodes: List<FlowTypeNode>, actual: CoreTypeRef, formal: CoreTypeRef,
     substitutions: List<FlowTypeSubstitution>,
     effect_substitutions: List<FlowEffectParamSubstitution>
-) -> Bool {
+) -> Bool with {mut<List<CoreTypeRef>>} {
     flow_type_actual_satisfies_formal_inner(
         nodes, flow_satisfaction_type_node(nodes, actual),
         flow_satisfaction_type_node(nodes, formal),
@@ -1191,13 +1191,13 @@ pub fn flow_effect_actual_satisfies_substituted_formal(
     formal: CoreEffectContract,
     substitutions: List<FlowTypeSubstitution>,
     effect_actuals: List<CoreEffectSubstitution>
-) -> Bool {
+) -> Bool with {} {
     substituted_effect_contract_satisfies(
         nodes, actual, formal, substitutions, [], effect_actuals,
         false, [], [])
 }
 
-fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> {
+fn copy_type_nodes(values: List<FlowTypeNode>) -> List<FlowTypeNode> with {} {
     let mut result: List<FlowTypeNode> = []
     for value in values {
         result.push(FlowTypeNode {
@@ -1862,7 +1862,7 @@ pub fn core_type_graph_ref_from_flow(
 fn runtime_effect_ctx_token_type_closed_inner(
     graph: CoreTypeGraph, reference: CoreTypeRef,
     mut active: List<CoreTypeRef>
-) -> Bool {
+) -> Bool with {mut<List<CoreTypeRef>>} {
     if active.any(fn(value) { core_type_ref_same(value, reference) }) {
         return true
     }
@@ -1919,7 +1919,7 @@ fn runtime_effect_ctx_token_type_closed_inner(
 
 pub fn validate_runtime_effect_ctx_token_type(
     graph: CoreTypeGraph, reference: CoreTypeRef
-) {
+) with {mut<List<CoreTypeRef>>} {
     if !runtime_effect_ctx_token_type_closed_inner(graph, reference, []) {
         panic("CoreHIR: runtime EffectCtx token type argument is not closed")
     }
