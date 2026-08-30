@@ -1149,7 +1149,7 @@ pub fn make_flow_callable_value_contract(
         make_fresh_flow_value_origin())
 }
 
-fn exact_dictionary_contains_local(value: ExactDictRef) -> Bool {
+fn exact_dictionary_contains_local(value: ExactDictRef) -> Bool with {} {
     if dict_ref_is_local(value) { return true }
     if dict_ref_is_static(value) { return false }
     for inner in dict_ref_wrapped_inner(value) {
