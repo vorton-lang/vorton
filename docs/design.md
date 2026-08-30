@@ -619,6 +619,8 @@ handle {
 
 `console` / `fs` / `process` 是 system effect，不能在此处被 `handle`；需要替换宿主依赖时，业务函数使用 custom effect，生产 adapter再调用system API。
 
+**0.1 complete handler（2026-08-30 用户批准 A）**：一个`handle...with`若包含某exact custom `HandledEffectRef`的任一operation arm，就必须按对应`EffectDef`完整覆盖全部declared `EffectOperationRef`，各恰好一次；源码顺序任意，TypedHIR按声明ordinal冻结dense evidence。Missing、duplicate、unknown或cross-owner arm在发布handler facts及消除effect atom前稳定报错，Core复核exact owner/count/`0..N-1`全集，现有dense C ABI不变。0.1不实现partial residual row、未覆盖operation parent forwarding或sparse evidence；System effect仍不可handle。
+
 ### 2.5 Effect Handler 用于测试 Mock
 
 ```
@@ -1321,6 +1323,8 @@ Policy只由existing exact Core/Flow type graph、formal substitution与Physical
 
 Verifier/certificate分别证明shell owner conservation与payload-policy conservation：`NoRc`路径永不进入`ring_dup/drop`，`RingRc`路径不得漏retain/release，且raw payload不能使shell或managed sibling泄漏。C runtime只机械执行`NoRc/RingRc`分支，不按name/header/pointer形状猜类型，不决定ownership，也不引入function table、monomorphization、runtime type solver或第二authority。把ownership-sensitive容器循环迁回Ring的D+B不在本checkpoint前移，继续由既有B-152逐步收口。
 
+**B-min执行状态（2026-08-30 用户暂停）**：上述correctness设计保留为shared/erased generic的条件fallback，但production、runtime/codegen ABI与相关验收当前冻结，先完成full reachable monomorphization feasibility并由用户裁决M与shared-context路线。若相关concrete aggregate最终全部单态化，policy直接常量化，B-min的hidden evidence/shell mask不得实施；只有M被拒绝，或测量证明仍存在必须共享的generic ABI边界时，才恢复该边界所需的最小B-min。禁止同时建设mask与完整单态化两套物理实现。
+
 **A′ 与 S′ 统一**：exact source clear、overwrite old-value Drop、exact-none 与 scope/early-exit cleanup属于同一个 slot-state machine，不再有独立 S′ producer/tail analysis。所有可能 physical-own 的 storage 在 normalization 预建并初始化为空；Assign 固定为“完整求值 RHS → ownership转入预建 temp → Drop旧target → temp写入target → 清temp ownership”，RHS divergence无后继。`Take` 固定为保存 exact source 值并立即清空 source；normal/return/break/continue/current-frame catch/handler exit按逆词法序显式 cleanup。`ring_drop(NULL)`、tagged scalar与never-drop `Option::none`均no-op；Extern/Ptr/NoDrop仍由Physical RcShape排除。
 
 **Planner 后职责**：RcIR 的 binder set 与 FlowIR 完全相同，资源操作全部显式；旧 Perceus 不再是独立 ownership pass，不造 `__anf/__rc_scope`、不猜 fresh/escape/sink/producer。Verifier不运行resolver或第二solver：certificate记录frozen graph hash、seeds、final cells、每次提升的rule/premises/严格较低rank、CFG states与每个RC op witness；检查全部约束与有限推导两侧，从而证明 claimed 解恰是least fixed point，并验证每条路径的owner守恒。Codegen只接受verified RcIR，机械lower `Clone`、`Take(save; source=NULL)`、`Drop`与cleanup。
@@ -1867,7 +1871,7 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 
 **与 Rust 的根本差异**：Ring 只要求值类型单态化，引用类型默认共享代码；能否显著降低编译膨胀必须由 B-105 与性能基线验证，不能只凭架构推断。
 
-**与 Generic Physical RC B-min 的联动**：共享实现按§7的B-min携带必要payload mask；单态化实现不得机械保留该动态carrier。任何被完整特化到concrete payload的实例都应把policy常量折叠进生成代码并移除shell mask/hidden evidence。该条件不要求0.1前移全单态化，也不把B-min的临时布局冻结为公开ABI。
+**与 Generic Physical RC B-min 的联动**：B-min当前只是shared/erased generic的已批准条件fallback，production按§7暂停等待full-monomorphization feasibility与用户裁决。任何被完整特化到concrete payload的实例都必须把policy常量折叠进生成代码并移除shell mask/hidden evidence；只有最终保留的shared ABI边界可恢复最小mask。本决策不把B-min临时布局冻结为公开ABI，也禁止在路线未决时并行实现两套物理路径。
 
 **编译性能额外措施（按需实现）**：
 - Debug 快速路径：只有实测证明 clang 路径不足后才单独选型，不预设 Cranelift 或其他永久依赖
