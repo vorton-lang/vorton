@@ -465,6 +465,8 @@ Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2�
 
 通过 trait 实现。算术（`Add/Sub/Mul/Div/Rem/Neg`）、比较（`Eq/Ord`，`Ord: Eq`）、位运算（`BitAnd/BitOr/BitXor/BitNot/Shl/Shr`）与索引读取（`Index`）。不支持跨类型运算。14 个数值类型各自 impl 全套 trait（编译器内置）。0.1 不支持 `IndexMut` 或 `x[i] = value`；容器 mutation 使用具名方法，完整 index-assignment 语义仅由 post-0.1 B-202 在真实 consumer 下重新设计。
 
+Ring 0.1 的 builtin public `Eq` contract 只有 exact `eq` member。`==` dispatch 到 `Eq.eq`，`!=` 固定降低为同一 exact dispatch 的 Bool 取反；不存在 `Eq.ne`、独立 `Ne` intrinsic、override slot、derived body 或默认特化。该 clean break 不改变一般 source trait default method：只有 builtin `Eq.ne` 这一零 consumer surface 被删除。
+
 #### 尾调用优化（2026-05-24 决策）
 
 编译器自动检测，无新语法。尾位置 + 无 Drop + 签名匹配 → 保证 TCO（debug/release 都做）。自递归转循环；互递归/间接尾调用由后端使用受保证的 tail-call 机制或 trampoline 实现，不能把优化器“碰巧消除”当作语义保证。
@@ -481,7 +483,9 @@ Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2�
 | **整数除零** | panic | 所有 native lane 一致 |
 | **栈溢出** | 实现定义的 panic 或 abort | 不保证所有平台均可捕获 |
 
-**`Range` 内建类型名（2026-08-27 用户决定）**：`Range<T>` 是语言预声明的 nominal type；`start..end` 与 `start..=end` 固定产生 exact builtin `Range<Int>`，range annotation、构造与 `for-in` 特化必须引用同一 owner。`Range` 只在 type namespace 中保留：用户的 struct、enum、extern type、type alias 或 import/re-export 不得在可见 type namespace 建立同名绑定，冲突稳定报 `E0207`。它不是词法关键字，也不限制 value/function namespace 中的同名绑定；本规则不顺带保留其他 builtin 名称。
+**0.1 保留 type binding gate（2026-08-30 用户批准 Nominal B）**：0.1 的 type namespace 暂时保留完整集合 `Int Float Str Bool Unit Never Ptr Range Cell Option List ListIterator Map MapIterator Set SetIterator StringBuilder Result`。用户的 struct、enum、extern type、type alias 或 import/re-export 不得建立这些最终本地绑定名，冲突稳定报 `E0207`；只有固定 canonical builtin/std loader producer可建立它们。该集合不是 lexer keyword，也不限制 value、function、trait、effect 或 module namespace。实现不得用local-wins覆盖、Type name side map或exact-owner Type纵切绕过本门。
+
+其中真正的语言 builtin type继续永久不可覆盖；当前以内建方式注入但最终属于标准库的类型，本门明确作为0.1已知限制。它们随既有标准库/RIIR迁移逐项成为ordinary module type后解除对应保留名，同名来源通过qualified path或import alias消歧，不静默覆盖。该解锁复用既有迁移真值，不新增post-0.1 item。`Range<T>`仍是语言预声明nominal；range语法、annotation、构造与`for-in`特化固定引用同一exact builtin owner。
 
 #### 1.7.1 字符串编码模型
 
@@ -614,6 +618,8 @@ handle {
 ```
 
 `console` / `fs` / `process` 是 system effect，不能在此处被 `handle`；需要替换宿主依赖时，业务函数使用 custom effect，生产 adapter再调用system API。
+
+**0.1 complete handler（2026-08-30 用户批准 A）**：一个`handle...with`若包含某exact custom `HandledEffectRef`的任一operation arm，就必须按对应`EffectDef`完整覆盖全部declared `EffectOperationRef`，各恰好一次；源码顺序任意，TypedHIR按声明ordinal冻结dense evidence。Missing、duplicate、unknown或cross-owner arm在发布handler facts及消除effect atom前稳定报错，Core复核exact owner/count/`0..N-1`全集，现有dense C ABI不变。0.1不实现partial residual row、未覆盖operation parent forwarding或sparse evidence；System effect仍不可handle。
 
 ### 2.5 Effect Handler 用于测试 Mock
 
@@ -1242,13 +1248,17 @@ let zs = xs.clone()    // 递归深拷贝，完全独立
 
 **无 `&T`/`&mut T` 类型**：非 Drop 赋值用 rc+1 代替零成本引用。rc+1 不是深拷贝（仅一个计数器加一），且可被后续优化（reuse / RC 消除 / 逃逸分析）消除至零成本。不引入二等类型、逃逸规则等复杂度。
 
-#### 7.2.1 Struct / enum update spread
+#### 7.2.1 Struct update spread
 
-`Type { ..base, field: value }` 采用 **move spread**。它是消费 `base` 构造 fresh result 的语法，不是隐式 `.clone()`，也不按字段是否 shareable 选择不同的公开语义。
+对 struct，`Type { ..base, field: value }` 采用 **move spread**。它是消费 `base` 构造 fresh result 的语法，不是隐式 `.clone()`，也不按字段是否 shareable 选择不同的公开语义。
 
 求值顺序固定为：`base` 只求值一次但暂不消费；随后所有显式 override RHS 按源码顺序完整求值，此时可继续读取或借用 `base`；只有全部 RHS 成功后，未覆盖字段才以 Own transfer 进入 fresh result，被覆盖字段在 `base` 中的旧值执行 Drop，override temporary 再转入对应结果字段，最后 `base` 整体失活。若任一 RHS 产生 `fail`，不得留下部分 move 的 `base`。override RHS 若试图在提交前 ownership-move `base` 的子字段，则按既有 partial-move 禁令拒绝；要保留该字段就省略 override，要保留整个 base 则显式写 `Type { ..base.clone(), ... }`。
 
-Planner 依据字段的 Logical OwnershipShape / Physical RcShape 将 Own transfer 兑现为 scalar copy、RC dup 或 exact Take，并负责旧字段恰好一次 Drop 与 source clear；这不改变上述统一用户语义。Ring 0.1 必须创建 fresh result shell 并逐字段填充：禁止先将 whole base MovePlace 到结果再原地覆盖字段，禁止因 base 物理唯一而复用其 storage，也禁止在字段已转移或清理后额外执行 whole-container Drop。struct 与 named enum/variant update 使用同一规则。
+对 struct update，Planner 依据字段的 Logical OwnershipShape / Physical RcShape 将 Own transfer 兑现为 scalar copy、physical RC dup 或 exact Take，并负责旧字段恰好一次 Drop 与 source clear；这不改变字段的静态类型 `T`。Flow / Planner 另行维护每条字段 path 的 storage occupancy（`Live` / `Moved`）：exact Take 后 source slot 变为物理 empty / NULL 并标记 `Moved`，而不是把字段类型改写成 `Option<T>`、`MaybeUninit<T>` 或其他公开类型。全 shareable 的字段通过 physical RC dup 进入结果，base 字段保持 `Live`，随后仍走普通 Drop。
+
+Ring 0.1 必须创建 fresh result shell 并逐字段填充：禁止先将 whole base MovePlace 到结果再原地覆盖字段，也禁止因 base 物理唯一而复用其 storage。提交完成后，base 仍执行唯一的普通 aggregate Drop：它只 Drop `Live` 字段，对 physical empty / `Moved` 字段 no-op，最后正常 release shell，因而不会 double-drop 已转移字段。禁止新增 `ReleaseMovedAggregate`、shell bypass、额外 whole-container Drop 或用 backend 猜测 occupancy。直接定义用户 `Drop` 的 aggregate 若该 spread 需要任一字段 exact Take，则稳定拒绝；编译器不得把 partial value 传给要求完整 `Self` 的用户 destructor。
+
+Ring 0.1 不支持 named enum / variant update spread。`Variant { ..base, field: value }` 稳定产生 source diagnostic；在已经匹配出 exact variant 的 arm 中，显式重建全部字段，例如 `Circle { radius, color: next }`。这不影响 named-field variant construction、generic enum、pattern matching、字段 move 或普通 struct spread。编译器不为该纯缩写引入 runtime tag check、variant-refinement carrier、fallback 或第二条 MoveUpdate 路径。
 
 ### 7.3 参数传递
 
@@ -1307,9 +1317,17 @@ Parse / project Resolver / Type+Effect
 
 **唯一 Planner 的固定内部顺序**：
 
-1. `Logical OwnershipShape` 与 `Physical RcShape` 分轴求有限最小不动点。前者记录 direct Drop / may-unique-own / type-parameter 依赖，决定 compile-time失效与 `Take`；后者记录 physical RC / boxing / drop glue / foreign containment / 参数依赖，决定 `Clone/Drop`。Int/Ptr 的显式 FORCE 可逻辑失效但不参与 RC；shareable RC 的 Own edge 产生 `Clone`，unique Resource 的 Own edge 产生 whole-slot `Take`。
+1. `Logical OwnershipShape` 与 `Physical RcShape` 分轴求有限最小不动点。前者记录 direct Drop / may-unique-own / type-parameter 依赖，决定 compile-time失效与 `Take`；后者分别记录 aggregate shell RC、direct payload 的 `NoRc/RingRc`、boxing/drop glue 与参数依赖，决定物理 `Clone/Drop`。Foreign/raw payload只能令对应字段或formal为`NoRc`，不得抑制外层aggregate shell或managed sibling的cleanup。Int/Ptr 的显式 FORCE 可逻辑失效但不参与 RC；shareable RC 的 Own edge 产生 `Clone`，unique Resource 的 Own edge 产生 whole-slot `Take`。
 2. Project-wide callable graph在 solve 前一次冻结，统一 direct/member/extern/effect/dictionary、delegate-origin ordinary ImplFn、function value/HOF、Lambda、factory/call-result、re-export/diamond 与 extern bridge。Enum construction只贡献其显式字段Own/value-result edge，不伪装为callable node。参数格为有限 `Borrow < MutBorrow < Own`，FORCE 独立；返回值保留 owned/borrowed contract。Worklist 从 bottom 单调求 least fixed point，solve 期间禁止新增 node/edge，也不回写或重跑 type/effect inference。
 3. 每个 executable body 建 ephemeral CFG，以 `Empty / Live / Moved / MaybeMoved` 做 branch/loop/catch join，并一次性输出 `Clone/Take/Drop/Cleanup`。每个 value edge 必须精确分类 Borrow/MutBorrow/Own/Discard；may-own projection 的 partial move 按现行设计 fail loud，只有完整 slot 可 `Take`。
+
+**Generic Physical RC B-min（2026-08-30 用户批准）**：Ring 0.1保留`List/Map/Option/Box`等generic aggregate承载`Ptr`或non-RC extern payload的能力。Outer shell lifecycle与payload policy是两个独立事实：除immortal `Option.none`外，aggregate shell及其buffer始终按自身owner规则release；每个generic storage formal/field只冻结二值physical policy `NoRc`或`RingRc`。Logical Unique、Borrow/Own、Clone/Take与source clear仍由唯一Planner静态决定，不进入runtime mask。必须删除whole-value `foreign_containment => no cleanup`一类aggregate veto。
+
+Policy只由existing exact Core/Flow type graph、formal substitution与Physical facts机械投影。仅真实执行retain、release或store-for-later义务的generic constructor/operation接收hidden evidence；escaping `List<T>`、`Map<K,V>`、`Option.some<T>`与generic `Box` dependent fields（以及同类census证明的storage）把各direct payload policy打包进shell，通常一个machine word。K/V和每个dependent field彼此独立；identity、pass-through、普通HOF及无物理义务的generic不携带evidence；已有shell的操作读取其mask。Nested aggregate逐层只描述direct payload，runtime不得解释完整Ring type。该mask是当前shared/erased generic representation的物理carrier，不是语言语义或永久ABI；若某个concrete aggregate实例以后被完整单态化，`NoRc/RingRc`必须成为编译期常量，specialized constructor/operation/drop glue与shell layout应删除对应hidden evidence和mask字段。
+
+Verifier/certificate分别证明shell owner conservation与payload-policy conservation：`NoRc`路径永不进入`ring_dup/drop`，`RingRc`路径不得漏retain/release，且raw payload不能使shell或managed sibling泄漏。C runtime只机械执行`NoRc/RingRc`分支，不按name/header/pointer形状猜类型，不决定ownership，也不引入function table、monomorphization、runtime type solver或第二authority。把ownership-sensitive容器循环迁回Ring的D+B不在本checkpoint前移，继续由既有B-152逐步收口。
+
+**B-min执行状态（2026-08-30 用户暂停）**：上述correctness设计保留为shared/erased generic的条件fallback，但production、runtime/codegen ABI与相关验收当前冻结，先完成full reachable monomorphization feasibility并由用户裁决M与shared-context路线。若相关concrete aggregate最终全部单态化，policy直接常量化，B-min的hidden evidence/shell mask不得实施；只有M被拒绝，或测量证明仍存在必须共享的generic ABI边界时，才恢复该边界所需的最小B-min。禁止同时建设mask与完整单态化两套物理实现。
 
 **A′ 与 S′ 统一**：exact source clear、overwrite old-value Drop、exact-none 与 scope/early-exit cleanup属于同一个 slot-state machine，不再有独立 S′ producer/tail analysis。所有可能 physical-own 的 storage 在 normalization 预建并初始化为空；Assign 固定为“完整求值 RHS → ownership转入预建 temp → Drop旧target → temp写入target → 清temp ownership”，RHS divergence无后继。`Take` 固定为保存 exact source 值并立即清空 source；normal/return/break/continue/current-frame catch/handler exit按逆词法序显式 cleanup。`ring_drop(NULL)`、tagged scalar与never-drop `Option::none`均no-op；Extern/Ptr/NoDrop仍由Physical RcShape排除。
 
@@ -1856,6 +1874,8 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 | JIT（远期） | 运行时 tiered compilation | — | 最佳 |
 
 **与 Rust 的根本差异**：Ring 只要求值类型单态化，引用类型默认共享代码；能否显著降低编译膨胀必须由 B-105 与性能基线验证，不能只凭架构推断。
+
+**与 Generic Physical RC B-min 的联动**：B-min当前只是shared/erased generic的已批准条件fallback，production按§7暂停等待full-monomorphization feasibility与用户裁决。任何被完整特化到concrete payload的实例都必须把policy常量折叠进生成代码并移除shell mask/hidden evidence；只有最终保留的shared ABI边界可恢复最小mask。本决策不把B-min临时布局冻结为公开ABI，也禁止在路线未决时并行实现两套物理路径。
 
 **编译性能额外措施（按需实现）**：
 - Debug 快速路径：只有实测证明 clang 路径不足后才单独选型，不预设 Cranelift 或其他永久依赖

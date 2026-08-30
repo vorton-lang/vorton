@@ -211,6 +211,8 @@ let result = handle {
 
 Handler 在其body的动态调用范围内提供 handled-effect operations。被显式处理的 exact handled effect 从 body row 中消除；开放尾未知 effect 与 handler arm 新产生的 effect继续传播。System effect、`mut<T>` 与 `unsafe` 不能由 `handle` 删去。只在该范围内创建但未调用的ordinary closure不会捕获handler；它逃逸后的effect仍由未来调用点处理。
 
+Ring 0.1 对 custom handled effect 采用 **whole-effect complete handler**：同一个 `handle...with` 只要为某个 exact `HandledEffectRef` 写出任一 operation arm，就必须覆盖该 `EffectDef` 声明的全部 operations，各恰好一次。源码 arm 顺序任意；TypedHIR 按 exact `EffectOperationRef` 的声明 ordinal 重排并冻结 dense `0..N-1` evidence，只有完整 census 后才可删除整个 effect atom并发布handler facts。Missing、duplicate、unknown operation或cross-owner arm均稳定报源码诊断；Core再次验证owner、count与ordinal全集。0.1不支持partial residual effect、未覆盖operation向parent自动转发或sparse evidence ABI；需要部分拦截时必须拆分effect或为其余operations写显式转发/re-perform arm。
+
 ## Handler 语义
 
 非 abort operation 是 tail-resumptive：arm 结果作为 operation 返回值，计算随后继续。Arm 结果必须与 operation return type兼容；返回`Unit`的operation位于语句语义位置，arm值被丢弃，`Never`作为bottom可用于任何返回位置。Ring 不支持显式 `resume`、post-resume 或 multi-shot continuation。
