@@ -106,6 +106,7 @@ use infer_helpers::{MethodLookupResult, StmtResult, CalleeMetadata,
     lookup_impl_method, lookup_trait_method,
     rewrite_bare_enum_bindings}
 use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
+    SlotRef,
     HandledEffectRef, SystemEffectRef, handled_effect_ref_same,
     make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
     builtin_str_identity_symbol, builtin_bool_to_str_symbol,
@@ -115,16 +116,18 @@ use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
     callee_ref_is_named, callee_ref_named_symbol,
     slot_domain_lexical, slot_ref_same,
     slot_ref_is_source, slot_ref_source_def_id,
-    slot_ref_source_domain_is_lexical,
+    slot_ref_source_domain_is_lexical, slot_ref_synthetic_path,
     path_owner_for_symbol, make_path_ref, path_role_synthetic,
-    path_role_handler, path_role_child,
+    path_role_handler, path_role_child, path_role_parameter,
+    path_ref_same, path_ref_owner, path_ref_role,
+    path_ref_normalized_child_path, path_role_same,
     variant_ref_member}
 use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
     ExactDictRef, dict_ref_is_local, dict_ref_is_wrapped,
     dict_ref_local, dict_ref_wrapped_inner,
     make_named_executable_ref, make_system_host_callable_ref,
     executable_ref_is_named, executable_ref_named_symbol,
-    executable_ref_same}
+    executable_ref_anonymous_path, executable_ref_same}
 use effect_contract::{typed_effect_header_schema_bindings,
     empty_typed_effect_header_schema,
     make_typed_handled_effect_instance, typed_handled_effect_instance_same,
@@ -4425,26 +4428,62 @@ fn append_lambda_capture(
     })
 }
 
+fn append_exact_dictionary_capture(
+    source: SlotRef, source_type: Type, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    for capture in captures {
+        if slot_ref_same(capture.source, source) { return }
+    }
+    captures.push(HLambdaCapture {
+        source: source,
+        target: executable_capture_slot(executable, captures.len()),
+        ty: source_type,
+        value: none, resource_site: none
+    })
+}
+
 fn append_dictionary_capture(
     value: ExactDictRef, executable: ExecutableRef,
     mut captures: List<HLambdaCapture>
 ) {
     if dict_ref_is_local(value) {
-        let source = dict_ref_local(value)
-        for capture in captures {
-            if slot_ref_same(capture.source, source) { return }
-        }
-        captures.push(HLambdaCapture {
-            source: source,
-            target: executable_capture_slot(executable, captures.len()),
-            ty: UNIT,
-            value: none, resource_site: none
-        })
+        append_exact_dictionary_capture(
+            dict_ref_local(value), UNIT, executable, captures)
     } else if dict_ref_is_wrapped(value) {
         for inner in dict_ref_wrapped_inner(value) {
             append_dictionary_capture(inner, executable, captures)
         }
     }
+}
+
+fn is_synthetic_dictionary_parameter(
+    value: SlotRef, source_type: Type
+) -> Bool {
+    if slot_ref_is_source(value) { return false }
+    let site = slot_ref_synthetic_path(value)
+    path_role_same(path_ref_role(site), path_role_parameter()) &&
+        types_equal(source_type, UNIT)
+}
+
+fn dictionary_parameter_belongs_to(
+    value: SlotRef, source_type: Type, executable: ExecutableRef
+) -> Bool {
+    if !is_synthetic_dictionary_parameter(value, source_type) {
+        return false
+    }
+    let site = slot_ref_synthetic_path(value)
+    let component = path_ref_normalized_child_path(site).last().unwrap()
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut expected_path = prefix
+    expected_path.push(component)
+    path_ref_same(site, make_path_ref(
+        owner, expected_path, path_role_parameter()))
 }
 
 fn collect_dict_capture(
@@ -4655,6 +4694,12 @@ fn collect_lambda_capture_expr(
                     append_lambda_capture(
                         ctx, slot_ref_source_def_id(capture.source),
                         capture.ty, lambda_depth, executable, captures)
+                } else if is_synthetic_dictionary_parameter(
+                        capture.source, capture.ty) &&
+                        !dictionary_parameter_belongs_to(
+                            capture.source, capture.ty, executable) {
+                    append_exact_dictionary_capture(
+                        capture.source, capture.ty, executable, captures)
                 }
                 match capture.value { some(value) => collect_lambda_capture_expr(
                     ctx, value, lambda_depth, executable, captures), none => {} }
