@@ -11,7 +11,8 @@ use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     HandledEffectRef,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     VariantRef, VariantFieldRef,
-    registered_nominal_ref_symbol, registered_trait_ref_symbol,
+    registered_nominal_ref_symbol, registered_nominal_ref_same,
+    registered_trait_ref_symbol,
     make_symbol_ref, namespace_nominal,
     symbol_ref_canonical_payload, symbol_ref_origin_module_key,
     make_impl_owner_ref, impl_owner_ref_target, impl_owner_ref_provider,
@@ -141,6 +142,106 @@ pub struct EnumDef {
     pub derived_provider_plan: NominalDerivedProviderPlan?,
     pub variant_index: Map<Str, Int>
 }
+
+// Frozen physical layout authority transported across compiler modules. This
+// carrier is never installed into a source-visible type namespace.
+pub struct PhysicalNominalFact {
+    owner: RegisteredNominalRef,
+    struct_def: StructDef?,
+    enum_def: EnumDef?,
+    drop_method: ImplMethodRef?
+}
+
+fn validate_physical_nominal_owner(
+    owner: RegisteredNominalRef, name: Str, drop_method: ImplMethodRef?
+) {
+    let symbol = registered_nominal_ref_symbol(owner)
+    if name == "" || symbol_ref_canonical_payload(symbol) != name {
+        panic("physical nominal fact: canonical name differs")
+    }
+    match drop_method {
+        some(method) => if
+                !symbol_ref_same(
+                    impl_owner_ref_target(impl_method_ref_owner(method)),
+                    symbol) ||
+                impl_method_ref_name(method) != "drop" {
+            panic("physical nominal fact: Drop method owner differs")
+        },
+        none => {}
+    }
+}
+
+pub fn make_physical_struct_fact(
+    def: StructDef, drop_method: ImplMethodRef?
+) -> PhysicalNominalFact {
+    validate_physical_nominal_owner(def.owner_ref, def.name, drop_method)
+    PhysicalNominalFact {
+        owner: def.owner_ref,
+        struct_def: some(def), enum_def: none,
+        drop_method: drop_method
+    }
+}
+
+pub fn make_physical_enum_fact(
+    def: EnumDef, drop_method: ImplMethodRef?
+) -> PhysicalNominalFact {
+    validate_physical_nominal_owner(def.owner_ref, def.name, drop_method)
+    PhysicalNominalFact {
+        owner: def.owner_ref,
+        struct_def: none, enum_def: some(def),
+        drop_method: drop_method
+    }
+}
+
+pub fn physical_nominal_owner(
+    value: PhysicalNominalFact
+) -> RegisteredNominalRef {
+    match (value.struct_def, value.enum_def) {
+        (some(def), none) => if registered_nominal_ref_same(
+                value.owner, def.owner_ref) { value.owner } else {
+            panic("physical nominal fact: struct owner differs")
+        },
+        (none, some(def)) => if registered_nominal_ref_same(
+                value.owner, def.owner_ref) { value.owner } else {
+            panic("physical nominal fact: enum owner differs")
+        },
+        _ => panic("physical nominal fact: layout cardinality differs")
+    }
+}
+
+pub fn physical_nominal_name(value: PhysicalNominalFact) -> Str {
+    match (value.struct_def, value.enum_def) {
+        (some(def), none) => def.name,
+        (none, some(def)) => def.name,
+        _ => panic("physical nominal fact: layout cardinality differs")
+    }
+}
+
+pub fn physical_nominal_is_struct(value: PhysicalNominalFact) -> Bool {
+    match (value.struct_def, value.enum_def) {
+        (some(_), none) => true,
+        (none, some(_)) => false,
+        _ => panic("physical nominal fact: layout cardinality differs")
+    }
+}
+
+pub fn physical_nominal_struct(value: PhysicalNominalFact) -> StructDef {
+    match (value.struct_def, value.enum_def) {
+        (some(def), none) => def,
+        _ => panic("physical nominal fact: layout is not a struct")
+    }
+}
+
+pub fn physical_nominal_enum(value: PhysicalNominalFact) -> EnumDef {
+    match (value.struct_def, value.enum_def) {
+        (none, some(def)) => def,
+        _ => panic("physical nominal fact: layout is not an enum")
+    }
+}
+
+pub fn physical_nominal_drop_method(
+    value: PhysicalNominalFact
+) -> ImplMethodRef? { value.drop_method }
 
 pub fn lookup_variant(def: EnumDef, name: Str) -> EnumVariant? {
     match def.variant_index.get(name) {
@@ -3601,6 +3702,23 @@ pub fn localize_imported_enum_def(
         derive_attrs: value.derive_attrs,
         derived_provider_plan: value.derived_provider_plan,
         variant_index: value.variant_index
+    }
+}
+
+pub fn localize_physical_nominal_fact(
+    mut env: TypeEnv, value: PhysicalNominalFact
+) -> PhysicalNominalFact {
+    let drop_method = physical_nominal_drop_method(value)
+    if physical_nominal_is_struct(value) {
+        make_physical_struct_fact(
+            localize_imported_struct_def(
+                env, physical_nominal_struct(value)),
+            drop_method)
+    } else {
+        make_physical_enum_fact(
+            localize_imported_enum_def(
+                env, physical_nominal_enum(value)),
+            drop_method)
     }
 }
 

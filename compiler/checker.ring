@@ -41,7 +41,7 @@ use infer_ctx::{InferCtx, new_infer_ctx as new_base_infer_ctx,
     install_struct_identity_ledger, enter_struct_identity_root_frame,
     exit_struct_identity_frame, close_struct_identity_ledger}
 use infer_register::{register_decl_public}
-use exports::{ModuleExports, TypeDef}
+use exports::{ModuleExports, TypeDef, physical_nominal_inputs_for_core}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, AstSite, ImportIssue,
     ImportIssueKind, NamespaceKind, first_duplicate_direct_declaration,
     duplicate_direct_declaration_diagnostic,
@@ -843,6 +843,7 @@ pub fn check(program: Program, sink: CollectingSink) -> CheckResult {
         freeze_core_and_legacy_facts(
             ctx.core_module_key, ctx.core_module_order,
             checked_program, ctx.env,
+            physical_nominal_inputs_for_core(ctx.env, []),
             file_key, "")) }
     CheckResult {
         program: checked_program,
@@ -1121,6 +1122,7 @@ pub fn check_module(
         freeze_core_and_legacy_facts(
             ctx.core_module_key, ctx.core_module_order,
             checked_program, ctx.env,
+            physical_nominal_inputs_for_core(ctx.env, module_exports),
             prelude_physical_owner_module_key, module_prefix)) }
     CheckResult {
         program: checked_program,
