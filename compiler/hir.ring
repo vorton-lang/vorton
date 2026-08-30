@@ -2856,14 +2856,18 @@ pub fn is_user_drop_type(ty: Type, drop_types: Set<Str>) -> Bool {
 // signature, and drop_closure_env releases captures, not param/return values.
 // Recursive types terminate via an on-stack visited set (struct/enum names);
 // monotone OR + one full exploration per name keeps reachability exact.
-pub fn type_contains_extern_handle(ty: Type, externs: Set<Str>) -> Bool {
+pub fn type_contains_extern_handle(
+    ty: Type, externs: Set<Str>
+) -> Bool with {} {
     // Ptr<T> is foreign containment even in programs with no extern type
     // declarations, so an empty extern registry cannot short-circuit the walk.
     let mut visited: Set<Str> = set_new()
     type_contains_extern_rec(ty, externs, visited)
 }
 
-fn type_contains_extern_rec(ty: Type, externs: Set<Str>, mut visited: Set<Str>) -> Bool {
+fn type_contains_extern_rec(
+    ty: Type, externs: Set<Str>, mut visited: Set<Str>
+) -> Bool with {mut<Set<Str>>} {
     match ty {
         // B-152: Ptr<T> is RC-excluded (B-125); ring_drop on a raw pointer reads
         // garbage headers.  Skip it in the field-drop loop, same as extern handles.
