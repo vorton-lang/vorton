@@ -11,7 +11,8 @@ use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     HandledEffectRef,
     RegisteredNominalRef, RegisteredTraitRef, symbol_ref_same,
     VariantRef, VariantFieldRef,
-    registered_nominal_ref_symbol, registered_nominal_ref_same,
+    registered_nominal_ref_symbol, registered_nominal_ref_display_name,
+    registered_nominal_ref_same,
     registered_trait_ref_symbol,
     make_symbol_ref, namespace_nominal,
     symbol_ref_canonical_payload, symbol_ref_origin_module_key,
@@ -155,8 +156,8 @@ fn validate_physical_nominal_owner(
     owner: RegisteredNominalRef, name: Str, drop_method: ImplMethodRef?
 ) {
     let symbol = registered_nominal_ref_symbol(owner)
-    if name == "" || symbol_ref_canonical_payload(symbol) != name {
-        panic("physical nominal fact: canonical name differs")
+    if name == "" || registered_nominal_ref_display_name(owner) != name {
+        panic("physical nominal fact: display name differs")
     }
     match drop_method {
         some(method) => if
@@ -226,11 +227,8 @@ pub fn physical_nominal_owner(
 }
 
 pub fn physical_nominal_name(value: PhysicalNominalFact) -> Str {
-    match (value.struct_def, value.enum_def) {
-        (some(def), none) => def.name,
-        (none, some(def)) => def.name,
-        _ => panic("physical nominal fact: layout cardinality differs")
-    }
+    symbol_ref_canonical_payload(registered_nominal_ref_symbol(
+        physical_nominal_owner(value)))
 }
 
 pub fn physical_nominal_is_struct(value: PhysicalNominalFact) -> Bool {
