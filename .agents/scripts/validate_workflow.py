@@ -196,6 +196,40 @@ EXECUTION_EVIDENCE_ECONOMY_CONTRACT = TextContract(
 )
 
 
+ROOT_EVIDENCE_GATE_CONTRACT = TextContract(
+    "root EvidenceKey and causal reconciliation gate",
+    (
+        ("Root EvidenceKey",),
+        ("source SHA",),
+        ("artifact或patch SHA", "artifact/patch SHA"),
+        ("producer command/receipt",),
+        ("observed stage",),
+        ("root必须亲自核对", "Root亲自读取"),
+        ("不能替代root",),
+        ("observed fact",),
+        ("inference",),
+        ("hypothesis",),
+        ("unverified assumption",),
+        ("默认失效",),
+        ("diff不影响结论", "diff independence"),
+        ("static CLEAR", "static review"),
+        ("behavior",),
+        ("一个root-owned causal hypothesis",),
+        ("expected first falsifier",),
+        ("retained facts",),
+        ("root完成因果对账前",),
+        ("同一EvidenceKey",),
+        ("causal owner",),
+    ),
+    (
+        "artifact身份无需核对",
+        "旧census继续有效",
+        "static CLEAR直接成为behavior",
+        "agent agreement可以替代root",
+    ),
+)
+
+
 STEWARD_BEHAVIOR_CONTRACTS = (
     TextContract(
         "waiting-feedback backfill",
@@ -589,6 +623,26 @@ STEWARD_PAIR_CONTRACT = TextContract(
     ),
 )
 
+STEWARD_ADAPTER_CONTRACT = TextContract(
+    "concise Steward provider adapter",
+    (
+        ("docs/workflow.md",),
+        ("唯一完整契约",),
+        ("Root EvidenceKey",),
+        ("source SHA",),
+        ("artifact/patch SHA",),
+        ("producer command/receipt",),
+        ("observed stage",),
+        ("Root亲自",),
+        ("agent agreement",),
+        ("Static CLEAR", "static CLEAR"),
+        ("behavior",),
+        ("expected first falsifier",),
+        ("一个writer", "单一writer"),
+        ("reconcile", "Reconcile"),
+    ),
+)
+
 AUDIT_CONTRACT = TextContract(
     "bounded Audit handoff",
     (
@@ -848,6 +902,22 @@ ROLE_FORBIDDEN = (
     "向用户请求决定",
 )
 
+ROLE_EVIDENCE_HEADER_CONTRACT = TextContract(
+    "read-only role EvidenceHeader",
+    (
+        ("EvidenceHeader",),
+        ("fixed source SHA",),
+        ("artifact或patch SHA/path",),
+        ("observed stage",),
+        ("exact question",),
+        ("observed fact",),
+        ("inference",),
+        ("hypothesis",),
+        ("unverified assumption",),
+        ("insufficient-evidence", "static CLEAR"),
+    ),
+)
+
 
 def check_text_contract(text: str, contract: TextContract) -> list[str]:
     """Return deterministic errors for one structured text contract."""
@@ -957,6 +1027,10 @@ def skill_layout_contract_errors(existing_paths: set[str]) -> list[str]:
 
 def role_contract_errors(role: str, instructions: str) -> list[str]:
     errors = check_text_contract(instructions, ROLE_CONTRACTS[role])
+    if role in {"reviewer", "finder", "skeptic"}:
+        errors.extend(
+            check_text_contract(instructions, ROLE_EVIDENCE_HEADER_CONTRACT)
+        )
     for fragment in ROLE_FORBIDDEN:
         if fragment in instructions:
             errors.append(
@@ -1017,6 +1091,7 @@ class WorkflowValidator:
         if text is None:
             return
         for contract in (
+            ROOT_EVIDENCE_GATE_CONTRACT,
             WORKFLOW_AUDIT_LEDGER_CONTRACT,
             LONG_COMMAND_WAIT_CONTRACT,
             REPOSITORY_CONVERGENCE_CONTRACT,
@@ -1083,11 +1158,8 @@ class WorkflowValidator:
                                 f"{relative}: steward frontmatter missing "
                                 f"compatibility trigger {trigger!r}"
                             )
-                    for contract in STEWARD_BEHAVIOR_CONTRACTS:
-                        for error in check_text_contract(text, contract):
-                            self.errors.append(f"{relative}: {error}")
                     for error in check_text_contract(
-                        text, GUARANTEE_BOUNDARY_CONTRACT
+                        text, STEWARD_ADAPTER_CONTRACT
                     ):
                         self.errors.append(f"{relative}: {error}")
                     for error in check_text_contract(
@@ -1434,6 +1506,17 @@ paired-session 通过 main mutation lease 串行提交。
 fallback 在 latest main 先完成 S-prime，再重放 A-prime。
 """
 
+GOOD_ROOT_EVIDENCE_FIXTURE = """
+### 4.3.4 Root EvidenceKey 与因果对账门
+EvidenceKey绑定source SHA、artifact或patch SHA、producer command/receipt和observed stage。
+root必须亲自核对exact evidence，subagent一致和review CLEAR不能替代root。
+结论分为observed fact、inference、hypothesis和unverified assumption；static CLEAR
+不是behavior claim。Source/artifact/stage变化使旧证据默认失效，只有直接证明diff不影响结论
+才能复用。每次只有一个root-owned causal hypothesis，启动前记录expected first falsifier、
+retained facts和invalidated facts。root完成因果对账前不派生下一patch；并行lens绑定
+同一EvidenceKey，但不能形成多个causal owner。
+"""
+
 GOOD_PAIRED_WORKFLOW_FIXTURE = """
 ## 0. Discussion–Steward 双 session 控制面
 唯一配对一个 Discussion session 与一个 Steward session；counterpart 缺失时使用
@@ -1547,6 +1630,14 @@ def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
         failures.append(
             f"self-test good steward fixture rejected: {good_errors!r}"
         )
+    root_evidence_errors = check_text_contract(
+        GOOD_ROOT_EVIDENCE_FIXTURE, ROOT_EVIDENCE_GATE_CONTRACT
+    )
+    if root_evidence_errors:
+        failures.append(
+            "self-test good root EvidenceKey fixture rejected: "
+            f"{root_evidence_errors!r}"
+        )
     evidence_errors = check_text_contract(
         GOOD_AUDIT_EVIDENCE_FIXTURE, AUDIT_EVIDENCE_CONTRACT
     )
@@ -1604,6 +1695,52 @@ def run_self_tests(*, include_audit_ledger_process: bool) -> list[str]:
             "evidence durable-ref helper fixture",
             durable_ref_helper_fixture_errors,
             "if not durable_refs",
+        )
+    )
+
+    bad_wrong_artifact = GOOD_ROOT_EVIDENCE_FIXTURE.replace(
+        "EvidenceKey绑定source SHA、artifact或patch SHA、producer command/receipt和observed stage。",
+        "EvidenceKey只需source SHA；artifact身份无需核对。",
+    )
+    failures.extend(
+        deterministic_failure(
+            "wrong-artifact EvidenceKey fixture",
+            lambda: check_text_contract(
+                bad_wrong_artifact, ROOT_EVIDENCE_GATE_CONTRACT
+            ),
+            "root EvidenceKey and causal reconciliation gate",
+        )
+    )
+    failures.extend(
+        deterministic_failure(
+            "stale-SHA evidence fixture",
+            lambda: check_text_contract(
+                GOOD_ROOT_EVIDENCE_FIXTURE + "\n旧census继续有效。",
+                ROOT_EVIDENCE_GATE_CONTRACT,
+            ),
+            "root EvidenceKey and causal reconciliation gate",
+        )
+    )
+    failures.extend(
+        deterministic_failure(
+            "static-to-behavior promotion fixture",
+            lambda: check_text_contract(
+                GOOD_ROOT_EVIDENCE_FIXTURE
+                + "\nstatic CLEAR直接成为behavior。",
+                ROOT_EVIDENCE_GATE_CONTRACT,
+            ),
+            "root EvidenceKey and causal reconciliation gate",
+        )
+    )
+    failures.extend(
+        deterministic_failure(
+            "agent-consensus root substitution fixture",
+            lambda: check_text_contract(
+                GOOD_ROOT_EVIDENCE_FIXTURE
+                + "\nagent agreement可以替代root。",
+                ROOT_EVIDENCE_GATE_CONTRACT,
+            ),
+            "root EvidenceKey and causal reconciliation gate",
         )
     )
 
@@ -1978,7 +2115,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(
             "workflow validator self-test passed: "
-            "26 legacy/broken fixtures rejected deterministically; "
+            "30 legacy/broken fixtures rejected deterministically; "
             "2 durable-ledger regressions passed"
         )
         return 0
@@ -2008,7 +2145,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{backlog_count} active backlog items, "
         f"{audit_count} active audit items, "
         "2 steward adapters, 4 Codex roles, "
-        "26 fast negative fixtures; "
+        "30 fast negative fixtures; "
         "run --self-test for 2 durable-ledger process regressions"
     )
     return 0
