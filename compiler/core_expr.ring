@@ -1760,7 +1760,7 @@ pub fn make_core_primitive_expr(
 pub fn make_core_dict_construct_expr(
     ty: CoreTypeRef, effects: CoreEffectSet, origin: OriginRef,
     dictionary: ExactDictRef, result: SlotRef
-) -> CoreExpr {
+) -> CoreExpr with {} {
     if core_effect_set_atoms(effects).len() != 0 ||
        !dict_ref_is_wrapped(dictionary) ||
        !slot_ref_is_source(result) ||
