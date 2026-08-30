@@ -18,7 +18,7 @@ use ir_identity::{SymbolRef, ImplMethodRef, RegisteredNominalRef,
     impl_owner_ref_target,
     impl_method_ref_owner, impl_method_ref_name, impl_method_ref_same,
     variant_ref_owner, variant_ref_member,
-    registered_nominal_ref_same,
+    registered_nominal_ref_same, registered_nominal_ref_symbol,
     registered_nominal_ref_display_name,
     registered_trait_ref_symbol,
     symbol_ref_same, symbol_ref_canonical_payload}
