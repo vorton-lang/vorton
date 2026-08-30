@@ -690,7 +690,9 @@ pub struct CoreDerivedHashPlan {
     mix: CoreDerivedCallPlan
 }
 
-fn validate_hash_field(value: CoreDerivedFieldPlan, int_type: CoreTypeRef) {
+fn validate_hash_field(
+    value: CoreDerivedFieldPlan, int_type: CoreTypeRef
+) with {} {
     if value.right.is_some() {
         panic("Core derive Hash: field unexpectedly has right operand")
     }
@@ -743,7 +745,7 @@ pub fn make_core_derived_hash_plan(
 fn hash_fields(
     fields: List<CoreDerivedFieldPlan>, mut accumulator: CoreExpr,
     mix: CoreDerivedCallPlan
-) -> CoreExpr {
+) -> CoreExpr with {mut<CoreExpr>} {
     for field in fields {
         match field.value {
             CoreDerivedFieldPlanValue::DerivedLeaf { operation, .. } => {
