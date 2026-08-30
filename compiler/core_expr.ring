@@ -2809,7 +2809,7 @@ fn validate_parent_ctx_capture(
 
 fn validate_pattern(
     value: CorePattern, binders: List<CoreBinder>, seen: List<SlotRef>
-) -> List<SlotRef> {
+) -> List<SlotRef> with {} {
     let mut result = copy_slot_refs(seen)
     match value.value {
         CorePatternValue::WildcardPatternValue |
