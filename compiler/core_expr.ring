@@ -5612,7 +5612,7 @@ fn validate_expr_with_program(
     callables: List<CoreCallableContract>,
     impls: List<CoreImplMetadata>,
     current_callable: CoreCallableContract, loop_depth: Int
-) {
+) with {mut<List<CoreTypeRef>>} {
     validate_expr_with_loop_depth(value, body, loop_depth)
     let _ = core_type_graph_node(graph, value.ty)
     match value.value {
@@ -5952,7 +5952,7 @@ fn validate_statement_with_program(
     callables: List<CoreCallableContract>,
     impls: List<CoreImplMetadata>,
     current_callable: CoreCallableContract, loop_depth: Int
-) {
+) with {mut<List<CoreTypeRef>>} {
     validate_statement(value, body, loop_depth)
     match value.value {
         CoreStmtValue::Bind { target, value: expr, .. } => {
@@ -6025,7 +6025,7 @@ fn validate_block_with_program(
     callables: List<CoreCallableContract>,
     impls: List<CoreImplMetadata>,
     current_callable: CoreCallableContract, loop_depth: Int
-) {
+) with {mut<List<CoreTypeRef>>} {
     for statement in value.statements {
         validate_statement_with_program(
             statement, body, graph, callables,
