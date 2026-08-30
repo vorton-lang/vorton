@@ -22,7 +22,8 @@ use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     trait_method_ref_trait, trait_method_ref_member,
     trait_method_ref_source_member_index,
     trait_method_ref_callable_slot_index, trait_method_ref_same,
-    handled_effect_ref_same, origin_ref_same,
+    handled_effect_ref_same, origin_ref_is_symbol, origin_ref_symbol,
+    origin_ref_same,
     symbol_ref_namespace_kind, namespace_kind_same,
     namespace_member, namespace_trait,
     impl_provider_ref_same, intrinsic_ref_same}
@@ -48,7 +49,8 @@ use effect_contract::{
     TypedCallableEffectFact, make_typed_callable_effect_fact,
     typed_callable_effect_reference, typed_callable_effect_row,
     make_effect_param_ref,
-    effect_param_owner, effect_param_ref_same, make_typed_effect_formal_fact,
+    effect_param_owner, effect_param_ordinal, effect_param_ref_same,
+    make_typed_effect_formal_fact,
     typed_effect_formal_raw_tail, typed_effect_formal_parameter
 }
 use core_type_source::{FlowGenericParamFact,
@@ -2854,13 +2856,25 @@ fn combined_effect_formal_for_raw(
     }
 }
 
+fn effect_param_debug_identity(value: EffectParamRef) -> Str with {} {
+    let owner = effect_param_owner(value)
+    let owner_text = if origin_ref_is_symbol(owner) {
+        symbol_ref_canonical_payload(origin_ref_symbol(owner))
+    } else {
+        "<path-origin>"
+    }
+    "${owner_text}#${effect_param_ordinal(value)}"
+}
+
 fn append_effect_formal_to_batch(
     env: TypeEnv, mut batch: EffectFactBatch,
     raw_tail: Int, parameter: EffectParamRef
 ) {
     match combined_effect_formal_for_raw(env, batch, raw_tail) {
         some(existing) => if !effect_param_ref_same(existing, parameter) {
-            panic("effect fact batch: raw tail changed parameter")
+            panic("effect fact batch: raw tail ${raw_tail} changed parameter " +
+                "${effect_param_debug_identity(existing)} -> " +
+                effect_param_debug_identity(parameter))
         },
         none => batch.effect_formals.push(
             make_typed_effect_formal_fact(raw_tail, parameter))
