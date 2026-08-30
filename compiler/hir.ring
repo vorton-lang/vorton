@@ -2043,7 +2043,7 @@ fn effect_ctx_lookup_is_available(
 fn validate_effect_ctx_lookup_stmt(
     value: HStmt, layout: TypedEffectCtxLayout,
     mut installs: List<List<TypedHandledEffectInstance>>
-) {
+) with {mut<List<List<TypedHandledEffectInstance>>>} {
     match value {
         HStmt::Let { init, .. } =>
             validate_effect_ctx_lookup_expr(init, layout, installs),
@@ -2091,7 +2091,7 @@ fn validate_effect_ctx_lookup_stmt(
 fn validate_effect_ctx_lookup_expr(
     value: HExpr, layout: TypedEffectCtxLayout,
     mut installs: List<List<TypedHandledEffectInstance>>
-) {
+) with {mut<List<List<TypedHandledEffectInstance>>>} {
     match value {
         HExpr::EffectOp { operation_ref: some(_),
                           effect_ctx_lookup: some(lookup), args, .. } => {
@@ -2259,6 +2259,13 @@ fn validate_effect_ctx_lookup_expr(
     }
 }
 
+fn validate_effect_ctx_lookup_root(
+    value: HExpr, layout: TypedEffectCtxLayout
+) with {} {
+    let installs: List<List<TypedHandledEffectInstance>> = []
+    validate_effect_ctx_lookup_expr(value, layout, installs)
+}
+
 fn validate_trait_method_type_formals(method: HTraitMethod) {
     if method.type_params.len() != method.type_formals.len() ||
        method.type_formals.len() == 0 {
@@ -2350,8 +2357,8 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     effects, effect_ctx, executable_ref,
                     "function '${name}'")
                 validate_hir_expr(body, seen, scope)
-                validate_effect_ctx_lookup_expr(
-                    body, typed_callable_effect_ctx_layout(effect_ctx), [])
+                validate_effect_ctx_lookup_root(
+                    body, typed_callable_effect_ctx_layout(effect_ctx))
             },
             HDecl::Impl { owner_ref, provider_ref, trait_name, trait_ref,
                           methods, .. } => {
@@ -2420,8 +2427,8 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                 validate_callable_effect_ctx(
                     hexpr_effects(body), effect_ctx, executable_ref, "test")
                 validate_hir_expr(body, seen, scope)
-                validate_effect_ctx_lookup_expr(
-                    body, typed_callable_effect_ctx_layout(effect_ctx), [])
+                validate_effect_ctx_lookup_root(
+                    body, typed_callable_effect_ctx_layout(effect_ctx))
             },
             HDecl::Trait { name, owner_ref, methods, .. } => {
                 if registered_trait_ref_display_name(owner_ref) != name {
@@ -2475,8 +2482,8 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     hexpr_effects(init), effect_ctx, executable_ref,
                     "const '${name}'")
                 validate_hir_expr(init, seen, scope)
-                validate_effect_ctx_lookup_expr(
-                    init, typed_callable_effect_ctx_layout(effect_ctx), [])
+                validate_effect_ctx_lookup_root(
+                    init, typed_callable_effect_ctx_layout(effect_ctx))
             },
             HDecl::ModBlock { decls: inner, .. } =>
                 validate_hir_decls(inner, seen),
