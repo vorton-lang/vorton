@@ -1311,9 +1311,15 @@ Parse / project Resolver / Type+Effect
 
 **唯一 Planner 的固定内部顺序**：
 
-1. `Logical OwnershipShape` 与 `Physical RcShape` 分轴求有限最小不动点。前者记录 direct Drop / may-unique-own / type-parameter 依赖，决定 compile-time失效与 `Take`；后者记录 physical RC / boxing / drop glue / foreign containment / 参数依赖，决定 `Clone/Drop`。Int/Ptr 的显式 FORCE 可逻辑失效但不参与 RC；shareable RC 的 Own edge 产生 `Clone`，unique Resource 的 Own edge 产生 whole-slot `Take`。
+1. `Logical OwnershipShape` 与 `Physical RcShape` 分轴求有限最小不动点。前者记录 direct Drop / may-unique-own / type-parameter 依赖，决定 compile-time失效与 `Take`；后者分别记录 aggregate shell RC、direct payload 的 `NoRc/RingRc`、boxing/drop glue 与参数依赖，决定物理 `Clone/Drop`。Foreign/raw payload只能令对应字段或formal为`NoRc`，不得抑制外层aggregate shell或managed sibling的cleanup。Int/Ptr 的显式 FORCE 可逻辑失效但不参与 RC；shareable RC 的 Own edge 产生 `Clone`，unique Resource 的 Own edge 产生 whole-slot `Take`。
 2. Project-wide callable graph在 solve 前一次冻结，统一 direct/member/extern/effect/dictionary、delegate-origin ordinary ImplFn、function value/HOF、Lambda、factory/call-result、re-export/diamond 与 extern bridge。Enum construction只贡献其显式字段Own/value-result edge，不伪装为callable node。参数格为有限 `Borrow < MutBorrow < Own`，FORCE 独立；返回值保留 owned/borrowed contract。Worklist 从 bottom 单调求 least fixed point，solve 期间禁止新增 node/edge，也不回写或重跑 type/effect inference。
 3. 每个 executable body 建 ephemeral CFG，以 `Empty / Live / Moved / MaybeMoved` 做 branch/loop/catch join，并一次性输出 `Clone/Take/Drop/Cleanup`。每个 value edge 必须精确分类 Borrow/MutBorrow/Own/Discard；may-own projection 的 partial move 按现行设计 fail loud，只有完整 slot 可 `Take`。
+
+**Generic Physical RC B-min（2026-08-30 用户批准）**：Ring 0.1保留`List/Map/Option/Box`等generic aggregate承载`Ptr`或non-RC extern payload的能力。Outer shell lifecycle与payload policy是两个独立事实：除immortal `Option.none`外，aggregate shell及其buffer始终按自身owner规则release；每个generic storage formal/field只冻结二值physical policy `NoRc`或`RingRc`。Logical Unique、Borrow/Own、Clone/Take与source clear仍由唯一Planner静态决定，不进入runtime mask。必须删除whole-value `foreign_containment => no cleanup`一类aggregate veto。
+
+Policy只由existing exact Core/Flow type graph、formal substitution与Physical facts机械投影。仅真实执行retain、release或store-for-later义务的generic constructor/operation接收hidden evidence；escaping `List<T>`、`Map<K,V>`、`Option.some<T>`与generic `Box` dependent fields（以及同类census证明的storage）把各direct payload policy打包进shell，通常一个machine word。K/V和每个dependent field彼此独立；identity、pass-through、普通HOF及无物理义务的generic不携带evidence；已有shell的操作读取其mask。Nested aggregate逐层只描述direct payload，runtime不得解释完整Ring type。该mask是当前shared/erased generic representation的物理carrier，不是语言语义或永久ABI；若某个concrete aggregate实例以后被完整单态化，`NoRc/RingRc`必须成为编译期常量，specialized constructor/operation/drop glue与shell layout应删除对应hidden evidence和mask字段。
+
+Verifier/certificate分别证明shell owner conservation与payload-policy conservation：`NoRc`路径永不进入`ring_dup/drop`，`RingRc`路径不得漏retain/release，且raw payload不能使shell或managed sibling泄漏。C runtime只机械执行`NoRc/RingRc`分支，不按name/header/pointer形状猜类型，不决定ownership，也不引入function table、monomorphization、runtime type solver或第二authority。把ownership-sensitive容器循环迁回Ring的D+B不在本checkpoint前移，继续由既有B-152逐步收口。
 
 **A′ 与 S′ 统一**：exact source clear、overwrite old-value Drop、exact-none 与 scope/early-exit cleanup属于同一个 slot-state machine，不再有独立 S′ producer/tail analysis。所有可能 physical-own 的 storage 在 normalization 预建并初始化为空；Assign 固定为“完整求值 RHS → ownership转入预建 temp → Drop旧target → temp写入target → 清temp ownership”，RHS divergence无后继。`Take` 固定为保存 exact source 值并立即清空 source；normal/return/break/continue/current-frame catch/handler exit按逆词法序显式 cleanup。`ring_drop(NULL)`、tagged scalar与never-drop `Option::none`均no-op；Extern/Ptr/NoDrop仍由Physical RcShape排除。
 
@@ -1860,6 +1866,8 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 | JIT（远期） | 运行时 tiered compilation | — | 最佳 |
 
 **与 Rust 的根本差异**：Ring 只要求值类型单态化，引用类型默认共享代码；能否显著降低编译膨胀必须由 B-105 与性能基线验证，不能只凭架构推断。
+
+**与 Generic Physical RC B-min 的联动**：共享实现按§7的B-min携带必要payload mask；单态化实现不得机械保留该动态carrier。任何被完整特化到concrete payload的实例都应把policy常量折叠进生成代码并移除shell mask/hidden evidence。该条件不要求0.1前移全单态化，也不把B-min的临时布局冻结为公开ABI。
 
 **编译性能额外措施（按需实现）**：
 - Debug 快速路径：只有实测证明 clang 路径不足后才单独选型，不预设 Cranelift 或其他永久依赖
