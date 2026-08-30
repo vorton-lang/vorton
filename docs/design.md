@@ -421,17 +421,17 @@ Or-pattern 合并的 GADT 变体必须同时满足两道独立门：各 alternat
 
 Auto-boxing 是 codegen 实现细节，对 HIR linearity checker 透明。被闭包写穿捕获的 `let mut` 局部（`boxed_vars`，checker 标记 def_id）必须降低为外层作用域与 closure env 共享的单槽 cell；读写都指向同一 cell，具体 ABI 由当前后端实现。赋值只替换 cell 内容，不能消费仍被外层/closure 持有的 cell 指针；cell 本身按普通 owned 堆值参与 RC（捕获点 dup、作用域末 drop，或 move 进返回 closure）。该不变量由 B-091 回归钉住。
 
-**delegate × Associated Types（自动继承）**
+**显式组合 × Associated Types**
 
-delegate 创建完整 trait impl（包含关联类型绑定）。关联类型从 inner 字段的已有 impl 自动推导——`delegate inner: Iterator<Int>` 自动获得 `type Item = Int`。语义确定：delegate = "我就是它"，关联类型必然与 inner 一致。
+包装类型通过普通trait impl完成组合，并显式声明associated type与forwarding method。Ring 0.1不从字段自动生成impl，也不推导wrapper的associated binding。
 
 **Associated Types × Supertrait（自然组合）**
 
 `T: Collection` 蕴含 `T: Iterable`，`T::Item` 等 supertrait 关联类型自动可用。实现时 supertrait bound 展开时带上关联类型即可，无需额外规则。
 
-**GADTs × Effects / delegate × Effects（正交）**
+**GADTs × Effects（正交）**
 
-GADT 的 scoped type equality 是编译期 unification，effect evidence 是运行时值传递，两层不交叉。delegate 转发方法时完整复制签名（含 effect 标注），evidence 正常传递。两个交互均不需要特殊规则。
+GADT 的 scoped type equality 是编译期 unification，effect evidence 是运行时值传递，两层不交叉。
 
 **mut\<T\> × Ownership（隐式借用 + 无 borrow checker）**
 
@@ -465,7 +465,7 @@ Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2�
 
 通过 trait 实现。算术（`Add/Sub/Mul/Div/Rem/Neg`）、比较（`Eq/Ord`，`Ord: Eq`）、位运算（`BitAnd/BitOr/BitXor/BitNot/Shl/Shr`）与索引读取（`Index`）。不支持跨类型运算。14 个数值类型各自 impl 全套 trait（编译器内置）。0.1 不支持 `IndexMut` 或 `x[i] = value`；容器 mutation 使用具名方法，完整 index-assignment 语义仅由 post-0.1 B-202 在真实 consumer 下重新设计。
 
-Ring 0.1 的 builtin public `Eq` contract 只有 exact `eq` member。`==` dispatch 到 `Eq.eq`，`!=` 固定降低为同一 exact dispatch 的 Bool 取反；不存在 `Eq.ne`、独立 `Ne` intrinsic、override slot、derived body 或默认特化。该 clean break 不改变一般 source trait default method：只有 builtin `Eq.ne` 这一零 consumer surface 被删除。
+Ring 0.1 的 builtin public `Eq` contract 只有 exact `eq` member。`==` dispatch 到 `Eq.eq`，`!=` 固定降低为同一 exact dispatch 的 Bool 取反；不存在 `Eq.ne`、独立 `Ne` intrinsic、override slot、derived body 或默认特化。一般source trait method body也已由convergence clean break删除；builtin/derived exact ordinary impl body仍保留。
 
 #### 尾调用优化（2026-05-24 决策）
 
@@ -1007,7 +1007,7 @@ Ring 有意选择简单 trait 系统，换取更强推断能力：
 - 支持 blanket impl（`impl<T: A> B for T`），不允许 overlap
 - 不支持 specialization（blanket impl + 具体类型覆盖）
 - 性能特化由编译器单态化 + Phase E 热路径优化替代
-- Default 覆盖由 trait 默认方法替代
+- 0.1 trait只有方法签名；复用通过普通函数与显式impl表达
 - 不支持函数重载（破坏 HM principal types）
 
 ### 4.5 泛型约束推断（2026-05-24 确定）
@@ -1028,15 +1028,13 @@ Ring 有意选择简单 trait 系统，换取更强推断能力：
 
 底层没有 OOP 包袱，但给习惯 OOP 的场景提供等价的人体工学。
 
-### 5.1 Trait 默认方法（"继承"的感觉）
+### 5.1 Trait contract 与显式实现
 
 ```
 trait Describable {
     fn name(self) -> Str
     fn kind(self) -> Str
-    fn describe(self) -> Str {
-        "${self.kind()}: ${self.name()}"
-    }
+    fn describe(self) -> Str
 }
 
 struct User { name: Str, age: Int }
@@ -1044,16 +1042,18 @@ struct User { name: Str, age: Int }
 impl Describable for User {
     fn name(self) -> Str { self.name }
     fn kind(self) -> Str { "用户" }
-    // describe 自动获得
+    fn describe(self) -> Str { "${self.kind()}: ${self.name()}" }
 }
 ```
+
+Ring 0.1不允许trait method body；每个impl显式实现完整contract。共同逻辑提取为普通generic helper，而不是由trait声明生成隐藏body。
 
 ### 5.2 Trait 组合（"多继承"无菱形问题）
 
 ```
 trait Loggable {
     fn log_tag(self) -> Str
-    fn log(self, msg: Str) { print("[${self.log_tag()}] ${msg}") }
+    fn log(self, msg: Str) -> Unit with {console}
 }
 
 trait Serializable {
@@ -1062,6 +1062,9 @@ trait Serializable {
 
 impl Loggable for User {
     fn log_tag(self) -> Str { "User:${self.name}" }
+    fn log(self, msg: Str) -> Unit with {console} {
+        print("[${self.log_tag()}] ${msg}")
+    }
 }
 
 impl Serializable for User {
@@ -1071,7 +1074,7 @@ impl Serializable for User {
 // User 现在有 .describe() + .log() + .to_json()
 ```
 
-### 5.3 委托（替代继承的复用机制）✅ 已实现
+### 5.3 显式组合转发
 
 ```
 struct Admin {
@@ -1079,17 +1082,16 @@ struct Admin {
     permissions: List<Str>,
 }
 
-impl Admin {
-    delegate base: Describable, Loggable, Serializable
+impl Describable for Admin {
+    fn name(self) -> Str { self.base.name() }
+    fn kind(self) -> Str { self.base.kind() }
+    fn describe(self) -> Str { self.base.describe() }
 }
 
-admin.describe()    // 转发到 base.describe()
-admin.log("login")  // 转发到 User 的 Loggable 实现
+admin.describe()    // 显式转发到 base.describe()
 ```
 
-`delegate field: Trait...` 为每个 trait 生成一个完整普通 impl（含 associated type、泛型 bound 与 effect/evidence 转发）。同一 target + trait 已有手写 impl 时稳定报 `E0509`；不支持“delegate 后再按方法 partial override”。需要定制任一方法时，改写该 trait 的完整显式 impl。
-
-**实现边界（2026-08-23 用户决定）**：delegate source directive 只允许存活到 TypedHIR；TypedHIR → CoreHIR 一次展开为普通 ImplFn body、associated binding 与 `OriginRef`。CoreHIR、ExecutableInventory、FlowIR、ResourcePlanner、RcIR、AbiIR、verifier 与 codegen 不得出现 delegate 专属 executable kind、identity 或 fallback。
+Ring 0.1不提供`delegate`surface。需要组合复用时写普通impl与普通method call；编译器不生成wrapper、associated binding或evidence forwarding。
 
 ### 5.4 Row Poly + Trait 交叉
 
@@ -1120,7 +1122,7 @@ process_all(things)
 | OOP 概念 | 本语言等价物 |
 |----------|------------|
 | class | struct + impl |
-| 继承 | delegate + trait 默认方法 |
+| 继承 | 多trait显式impl + 普通组合转发 |
 | 接口 | trait |
 | 多态 | 泛型（静态）/ dyn（动态） |
 | 鸭子类型 | row polymorphism |
@@ -1307,7 +1309,7 @@ Parse / project Resolver / Type+Effect
 → mechanical C codegen
 ```
 
-**FlowIR 契约**：TypedHIR → CoreHIR 已完成 trait default、delegate→普通 ImplFn、derive、protocol for-in、and/or、dictionary、extern-forward 与 handled-effect evidence 等全部 semantic elaboration；函数默认参数、effect default body、`sig` 与 impl-member `extern fn` 不属于 0.1 surface。FlowIR 只接收 canonical CoreHIR body/contract；所有非原子值、pattern projection 与 value-yielding control result 已有 exact typed slot；Trait default、Test、Const、Lambda/handler、derived/intrinsic/drop/dict helper 等所有真实callable或helper body及显式contract进入一个共享 `ExecutableInventory`。Enum constructor则是携带exact `VariantRef`与field refs的typed construction operation，不是callable inventory节点。Builtin inherent method在Core闭合前已是exact `IntrinsicRef` contract，而不是由backend按类型名/方法名补造的FFI body。System effect只随exact call contract进入AbiIR HostImport，不成为executable handler root。每个first-class callable同时携带freeze后的effect contract；dynamic candidate不得只按参数/返回类型匹配而丢失system/handled/fail/mut/unsafe或正式effect参数。Neutral ANF只保持同一evaluation region内严格左到右求值，不跨short-circuit、branch、loop/lambda、guard、catch/handle、unsafe或control-transfer边界，也不产生`Clone/Take/Drop/Cleanup`。FlowIR freeze后任何阶段新增binder都是internal error。
+**FlowIR 契约**：TypedHIR → CoreHIR 已完成derive、protocol for-in、and/or、dictionary、extern-forward与handled-effect evidence等0.1 semantic elaboration；函数默认参数、source trait default body、`delegate`、effect default body、`sig`与impl-member `extern fn`不属于0.1 surface。FlowIR只接收canonical CoreHIR body/contract；所有非原子值、pattern projection与value-yielding control result已有exact typed slot；Test、Const、Lambda/handler、derived/intrinsic/drop/dict helper等所有真实callable或helper body及显式contract进入一个共享`ExecutableInventory`。Enum constructor则是携带exact `VariantRef`与field refs的typed construction operation，不是callable inventory节点。Builtin inherent method在Core闭合前已是exact `IntrinsicRef` contract，而不是由backend按类型名/方法名补造的FFI body。System effect只随exact call contract进入AbiIR HostImport，不成为executable handler root。每个first-class callable同时携带freeze后的effect contract；dynamic candidate不得只按参数/返回类型匹配而丢失system/handled/fail/mut/unsafe或正式effect参数。Neutral ANF只保持同一evaluation region内严格左到右求值，不跨short-circuit、branch、loop/lambda、guard、catch/handle、unsafe或control-transfer边界，也不产生`Clone/Take/Drop/Cleanup`。FlowIR freeze后任何阶段新增binder都是internal error。
 
 **Core effect closure（2026-08-26 用户批准）**：CoreHIR不存在“稍后再解”的effect。TypedHIR freeze先求解普通effect inference metavariable；合法多态tail必须generalize为带`owner + ordinal`的稳定`EffectParamRef`，无法归属formal scheme的raw UnionFind/type-var tail直接fail loud。`CoreCallableEffectContract`只允许canonical exact atoms（`SystemEffectRef`、`HandledEffectRef`、`fail<CoreTypeRef>`、`mut<CoreTypeRef>`、`unsafe`）及至多一个正式`EffectParamRef`；effect alias已展开。每个调用点在进入Core前固定formal effect参数的exact实例化。Core/Flow只运输、比较和验证这些契约，不重跑effect inference；ResourcePlanner不消费effect格。正式effect参数等价于已量化类型参数，不等于未解析变量。
 
@@ -1318,16 +1320,10 @@ Parse / project Resolver / Type+Effect
 **唯一 Planner 的固定内部顺序**：
 
 1. `Logical OwnershipShape` 与 `Physical RcShape` 分轴求有限最小不动点。前者记录 direct Drop / may-unique-own / type-parameter 依赖，决定 compile-time失效与 `Take`；后者分别记录 aggregate shell RC、direct payload 的 `NoRc/RingRc`、boxing/drop glue 与参数依赖，决定物理 `Clone/Drop`。Foreign/raw payload只能令对应字段或formal为`NoRc`，不得抑制外层aggregate shell或managed sibling的cleanup。Int/Ptr 的显式 FORCE 可逻辑失效但不参与 RC；shareable RC 的 Own edge 产生 `Clone`，unique Resource 的 Own edge 产生 whole-slot `Take`。
-2. Project-wide callable graph在 solve 前一次冻结，统一 direct/member/extern/effect/dictionary、delegate-origin ordinary ImplFn、function value/HOF、Lambda、factory/call-result、re-export/diamond 与 extern bridge。Enum construction只贡献其显式字段Own/value-result edge，不伪装为callable node。参数格为有限 `Borrow < MutBorrow < Own`，FORCE 独立；返回值保留 owned/borrowed contract。Worklist 从 bottom 单调求 least fixed point，solve 期间禁止新增 node/edge，也不回写或重跑 type/effect inference。
+2. Project-wide callable graph在solve前一次冻结，统一direct/member/extern/effect/dictionary、explicit ImplFn、function value/HOF、Lambda、factory/call-result、re-export/diamond与extern bridge。Enum construction只贡献其显式字段Own/value-result edge，不伪装为callable node。参数格为有限`Borrow < MutBorrow < Own`，FORCE独立；返回值保留owned/borrowed contract。Worklist从bottom单调求least fixed point，solve期间禁止新增node/edge，也不回写或重跑type/effect inference。
 3. 每个 executable body 建 ephemeral CFG，以 `Empty / Live / Moved / MaybeMoved` 做 branch/loop/catch join，并一次性输出 `Clone/Take/Drop/Cleanup`。每个 value edge 必须精确分类 Borrow/MutBorrow/Own/Discard；may-own projection 的 partial move 按现行设计 fail loud，只有完整 slot 可 `Take`。
 
-**Generic Physical RC B-min（2026-08-30 用户批准）**：Ring 0.1保留`List/Map/Option/Box`等generic aggregate承载`Ptr`或non-RC extern payload的能力。Outer shell lifecycle与payload policy是两个独立事实：除immortal `Option.none`外，aggregate shell及其buffer始终按自身owner规则release；每个generic storage formal/field只冻结二值physical policy `NoRc`或`RingRc`。Logical Unique、Borrow/Own、Clone/Take与source clear仍由唯一Planner静态决定，不进入runtime mask。必须删除whole-value `foreign_containment => no cleanup`一类aggregate veto。
-
-Policy只由existing exact Core/Flow type graph、formal substitution与Physical facts机械投影。仅真实执行retain、release或store-for-later义务的generic constructor/operation接收hidden evidence；escaping `List<T>`、`Map<K,V>`、`Option.some<T>`与generic `Box` dependent fields（以及同类census证明的storage）把各direct payload policy打包进shell，通常一个machine word。K/V和每个dependent field彼此独立；identity、pass-through、普通HOF及无物理义务的generic不携带evidence；已有shell的操作读取其mask。Nested aggregate逐层只描述direct payload，runtime不得解释完整Ring type。该mask是当前shared/erased generic representation的物理carrier，不是语言语义或永久ABI；若某个concrete aggregate实例以后被完整单态化，`NoRc/RingRc`必须成为编译期常量，specialized constructor/operation/drop glue与shell layout应删除对应hidden evidence和mask字段。
-
-Verifier/certificate分别证明shell owner conservation与payload-policy conservation：`NoRc`路径永不进入`ring_dup/drop`，`RingRc`路径不得漏retain/release，且raw payload不能使shell或managed sibling泄漏。C runtime只机械执行`NoRc/RingRc`分支，不按name/header/pointer形状猜类型，不决定ownership，也不引入function table、monomorphization、runtime type solver或第二authority。把ownership-sensitive容器循环迁回Ring的D+B不在本checkpoint前移，继续由既有B-152逐步收口。
-
-**B-min执行状态（2026-08-30 用户暂停）**：上述correctness设计保留为shared/erased generic的条件fallback，但production、runtime/codegen ABI与相关验收当前冻结，先完成full reachable monomorphization feasibility并由用户裁决M与shared-context路线。若相关concrete aggregate最终全部单态化，policy直接常量化，B-min的hidden evidence/shell mask不得实施；只有M被拒绝，或测量证明仍存在必须共享的generic ABI边界时，才恢复该边界所需的最小B-min。禁止同时建设mask与完整单态化两套物理实现。
+**0.1 raw generic aggregate clean break（2026-08-30 用户批准）**：`Ptr`或non-RC extern payload不得递归进入generic aggregate storage。Checker在TypedHIR/Core publish前稳定拒绝`List<Ptr<T>>`、`Option<ForeignHandle>`、`Map<K, Ptr<V>>`及用户generic struct/enum的同类actual；direct raw value与普通Ring-managed generic container/HOF保持。由此B-min hidden evidence、packed shell mask、payload-policy LFP与runtime `NoRc/RingRc`分支全部不存在，也不得以name/header sniff、function table或第二solver恢复。Aggregate shell继续按普通owner规则release；该规则不授权whole-value foreign cleanup veto。
 
 **A′ 与 S′ 统一**：exact source clear、overwrite old-value Drop、exact-none 与 scope/early-exit cleanup属于同一个 slot-state machine，不再有独立 S′ producer/tail analysis。所有可能 physical-own 的 storage 在 normalization 预建并初始化为空；Assign 固定为“完整求值 RHS → ownership转入预建 temp → Drop旧target → temp写入target → 清temp ownership”，RHS divergence无后继。`Take` 固定为保存 exact source 值并立即清空 source；normal/return/break/continue/current-frame catch/handler exit按逆词法序显式 cleanup。`ring_drop(NULL)`、tagged scalar与never-drop `Option::none`均no-op；Extern/Ptr/NoDrop仍由Physical RcShape排除。
 
@@ -1875,7 +1871,7 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 
 **与 Rust 的根本差异**：Ring 只要求值类型单态化，引用类型默认共享代码；能否显著降低编译膨胀必须由 B-105 与性能基线验证，不能只凭架构推断。
 
-**与 Generic Physical RC B-min 的联动**：B-min当前只是shared/erased generic的已批准条件fallback，production按§7暂停等待full-monomorphization feasibility与用户裁决。任何被完整特化到concrete payload的实例都必须把policy常量折叠进生成代码并移除shell mask/hidden evidence；只有最终保留的shared ABI边界可恢复最小mask。本决策不把B-min临时布局冻结为公开ABI，也禁止在路线未决时并行实现两套物理路径。
+**与generic raw payload边界的关系**：0.1已禁止raw/non-RC payload进入generic aggregate storage，因此单态化路线不承担删除B-min mask的前置责任——mask在0.1中根本不存在。Full reachable monomorphization feasibility只评估普通generic callable/body的正确性、代码规模与性能收益，不得借机恢复raw generic aggregate surface。
 
 **编译性能额外措施（按需实现）**：
 - Debug 快速路径：只有实测证明 clang 路径不足后才单独选型，不预设 Cranelift 或其他永久依赖
@@ -1943,7 +1939,7 @@ Source
 | `AST` | 忠实保存表面语法、注释所需形状与 Span；不承载名字、类型或后端结论。 |
 | `ResolvedAST` | 每个声明、引用、member、constructor、effect op、import/re-export 与 extern bridge 都携带 exact `SymbolRef`；下游不再查询 resolver 或按叶名回退。 |
 | `TypedHIR` | HM inference metavariable 已收敛；可泛化的type/effect tail已转换为带owner/ordinal的显式量化参数，无法归属formal scheme的raw变量拒绝。类型、effect row、callee/impl/associated-type 选择、call-site effect实例化与公开 module interface 已固定；ownership mode 可仍为 symbolic contract，但不得回写普通 type/effect 结果。 |
-| `CoreHIR` | 所有语言级隐式语义已 elaborated：trait default body、delegate-origin ordinary impl、derive、protocol for-in、short-circuit、trait dictionary、handled-effect evidence、closure/capture、constructor/intrinsic/trait-default specialization 均成为 explicit body、typed edge、typed construction operation或`IntrinsicContract`；真实callable的共享 `ExecutableInventory` 封闭，enum constructor不冒充callable节点。每个callable携带closed atoms或atoms+正式`EffectParamRef`的effect contract；不存在raw effect metavariable。System effect只携带exact host call contract且不进入evidence。函数默认参数、effect default body与`sig`不在0.1 surface。此层仍不含资源操作。 |
+| `CoreHIR` | 所有0.1语言级隐式语义已elaborated：derive、protocol for-in、short-circuit、trait dictionary、handled-effect evidence、closure/capture、constructor与intrinsic均成为explicit body、typed edge、typed construction operation或`IntrinsicContract`；source trait default body与`delegate`不在0.1 surface。真实callable的共享`ExecutableInventory`封闭，enum constructor不冒充callable节点。每个callable携带closed atoms或atoms+正式`EffectParamRef`的effect contract；不存在raw effect metavariable。System effect只携带exact host call contract且不进入evidence。函数默认参数、effect default body与`sig`同样不在0.1 surface。此层仍不含资源操作。 |
 | `FlowIR` | ownership-neutral ANF、pattern decision/projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 已建立；project-wide identity、binder、call/alias/capture graph 冻结，后续新增 node/binder 是 internal error。 |
 | `RcIR` | 唯一 ResourcePlanner 输出 `Clone/Take/Drop/Cleanup` 与 ranked certificate；binder set 与 FlowIR 相同，资源语义完全显式。 |
 | `AbiIR` | 只把已验证语义降为 typeid/tag/field layout、symbol、prototype、closure/dict/evidence layout、drop glue、exact HostImport、extern 与 failure ABI；不得新增调用、控制边、owner、effect class 或语言 fallback。 |

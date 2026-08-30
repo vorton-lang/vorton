@@ -287,7 +287,7 @@ mod console_layer requires {console} {
 
 #### Capability 检查规则
 
-- 检查覆盖模块内所有顶层函数和 impl 方法（包括 delegate 生成的实现）
+- 检查覆盖模块内所有顶层函数和显式 impl 方法
 - 纯函数（无 effect）在任何 `requires` 集合中都合法——开放的 effect row 尾部不会被误判
 - `console` / `fs` / `process` 是 system effect：它们参与静态 capability 检查，但不能由 `handle` 消除，也不产生 handler evidence
 - 用户 custom effect 是 handled effect：它同样参与 `requires` 检查，并且必须在离开 `main` 前由显式 handler 消除

@@ -16,7 +16,8 @@ trait Show {
 
 ```
 TraitDecl = "trait" IDENT TypeParams? (":" TypeBound ("+" TypeBound)*)? "{" TraitMember* "}"
-TraitMember = FnDecl | AssocTypeDecl
+TraitMember = TraitMethodSig | AssocTypeDecl
+TraitMethodSig = "fn" IDENT TypeParams? "(" Params ")" ("->" TypeExpr)? EffectAnnotation?
 AssocTypeDecl = "type" IDENT (":" TypeBound ("+" TypeBound)*)? ("=" TypeExpr)?
 ```
 
@@ -40,18 +41,9 @@ Public item的参数、返回类型、字段、generic bound及effect/trait cont
 
 Ring 0.1不支持return-position`impl Trait`、opaque type或由推断产生的匿名public concrete type。需要隐藏返回值具体类型时，当前使用显式public wrapper/generic contract；post-0.1由B-200在真实consumer下重新设计。`impl`出现在type position必须稳定parse error，不能先建立只transport不约束的占位节点。
 
-### 默认方法
+### 0.1 方法签名边界
 
-```ring
-trait Eq {
-    fn eq(self: Self, other: Self) -> Bool;
-    fn ne(self: Self, other: Self) -> Bool {
-        !self.eq(other)
-    }
-}
-```
-
-有函数体的方法提供默认实现。实现类型可以覆盖默认方法，也可以直接使用默认实现。
+Ring 0.1 的 source trait member 只有方法签名，不允许函数体。Trait declaration 中出现 `{ ... }` 方法体必须稳定报错，并建议把实现写入每个 `impl Trait for Type`；每个 impl 必须显式提供 trait 的全部方法。该限制不删除 associated type default，也不影响编译器内建或 auto-derived 的 exact impl body。
 
 ### Supertrait 继承
 
@@ -69,15 +61,7 @@ trait Printable: Describable {
 
 **多级传递**：约束自动沿继承链传递——若 `T: Printable` 且 `Printable: Describable`，则 `T` 隐含 `Describable`，可直接调用 `describe()`。
 
-**默认方法中的 supertrait 访问**：默认方法体可调用 supertrait 的方法。编译器自动为 dictionary 函数注入 supertrait 的 dictionary 参数。
-
-```ring
-trait Greeter: Named {
-    fn greet(self) -> Str {
-        "Hello, ${self.name()}!"  // 调用 supertrait Named 的方法
-    }
-}
-```
+**Supertrait evidence**：具体 impl 方法可以调用 supertrait 方法；调用使用同一 exact dictionary evidence 链，不需要 source default body。
 
 **循环检测**：`trait A: B` + `trait B: A` 在声明阶段检测，报 E0501。
 
@@ -168,7 +152,7 @@ impl Point {
 
 为类型定义方法，不依赖任何 trait。通过 `.method()` 调用：`point.distance()`。
 
-固有impl只包含普通函数、关联类型与允许的`delegate`声明，不承载FFI link identity。编译器内建的Str/Int/Float方法在语言层仍表现为普通固有方法，其宿主映射属于CoreHIR/AbiIR的exact intrinsic contract。
+固有impl只包含普通函数与关联类型，不承载FFI link identity，也不包含`delegate`声明。编译器内建的Str/Int/Float方法在语言层仍表现为普通固有方法，其宿主映射属于CoreHIR/AbiIR的exact intrinsic contract。
 
 ### Trait 实现
 
@@ -243,54 +227,11 @@ fn show_twice<T: Show>(value: T) -> Str {
 }
 ```
 
-`stringify` 所需的 `Show<T>` evidence 是函数约束的一部分。调用者负责提供或继续转发它；默认方法与 supertrait 调用也使用同一 evidence 链。后端可以直接调用、传递表或采用等价 lowering，只要观察到的 trait 选择与 effect 行为一致。
+`stringify` 所需的 `Show<T>` evidence 是函数约束的一部分。调用者负责提供或继续转发它；supertrait 调用也使用同一 evidence 链。后端可以直接调用、传递表或采用等价 lowering，只要观察到的 trait 选择与 effect 行为一致。
 
-## Delegate（Trait 委托）
+## 显式转发
 
-`delegate` 在固有 impl 块中使用，将 trait 实现委托给某个字段。编译器自动生成转发方法，替代继承的复用机制。
-
-```ring
-struct Admin {
-    base: User,
-    level: Int,
-}
-
-impl Admin {
-    delegate base: Describable, Loggable
-}
-```
-
-`delegate field: Trait1, Trait2` 声明：对于 `Trait1` 和 `Trait2` 的每个方法，生成 `impl Trait for Admin`，方法体转发至 `self.base.method(args...)`。
-
-**语法**：
-
-```
-DelegateDecl = "delegate" IDENT ":" IDENT ("," IDENT)*
-```
-
-`delegate` 只能出现在固有 `impl Type { ... }` 块中（非 trait impl 块）。
-
-**带参数方法**：自动转发所有参数。
-
-```ring
-trait Greeter {
-    fn greet(self, greeting: Str) -> Str
-}
-
-impl Employee {
-    delegate person: Greeter   // 生成 fn greet(self, greeting) { self.person.greet(greeting) }
-}
-```
-
-**冲突检测**：若类型已有该 trait 的手写 impl，`delegate` 报 E0509。
-
-**错误码**：
-
-| 错误码 | 含义 |
-|--------|------|
-| E0507 | 委托字段不存在 |
-| E0508 | 委托字段类型未实现目标 trait |
-| E0509 | 委托与已有 impl 冲突 |
+Ring 0.1 不提供 `delegate` declaration。Impl 中以 `delegate field: Trait` 形式出现的旧表面必须稳定报错，并建议写普通 `impl Trait for Type`，由每个方法显式调用相应字段。普通 trait、associated type、supertrait、dictionary evidence 与手写 forwarding impl 均保持；编译器不得生成 delegate owner、wrapper body或专属 Core/ABI carrier。
 
 ## 自动派生 (Auto-derive)
 
