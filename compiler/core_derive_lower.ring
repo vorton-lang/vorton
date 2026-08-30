@@ -528,7 +528,9 @@ pub struct CoreDerivedEqPlan {
     bool_type: CoreTypeRef
 }
 
-fn validate_eq_field(value: CoreDerivedFieldPlan, bool_type: CoreTypeRef) {
+fn validate_eq_field(
+    value: CoreDerivedFieldPlan, bool_type: CoreTypeRef
+) with {} {
     if value.right.is_none() {
         panic("Core derive Eq: field lacks right operand")
     }
