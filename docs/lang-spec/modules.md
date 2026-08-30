@@ -143,11 +143,11 @@ pub use leaf::Wrap
 
 最后一种写法在re-export处稳定报错并建议同时公开owner enum。直接`pub use`一个enum仍自动携带其constructors；private/local `use`不受该public closure规则影响。实现按exact `VariantRef.owner`核对，不能从constructor leaf、alias spelling或唯一名字猜owner，也不能为接受constructor-only facade而隐式扩大type/impl可见性。
 
-### 0.1 public nominal 的物理布局可见性
+### Private field 与private representation
 
-一个public struct/enum的transitive physical representation中出现的nominal type必须同样public并可由该module正常导出。检查递归覆盖private field、enum payload及nested generic/tuple/function type；因此`pub struct Wrapper { hidden: PrivatePayload }`非法，即使`hidden`字段本身private。修复方式是公开`PrivatePayload`，或让public wrapper不直接保存该private nominal。
+Public struct的private field可以使用private nominal type，例如`pub struct Wrapper { hidden: PrivatePayload }`。外部module可以持有、传递和销毁`Wrapper`，但不能访问`hidden`、命名`PrivatePayload`或用field literal自行构造该值。相反，public函数签名、pub field与public enum variant payload属于真正public interface，仍不得引用更private type。
 
-该规则不公开字段名，也不限制普通private nominal或只在private布局内出现的private依赖。编译器在provider的最终export census给source diagnostic；consumer不会获得private type namespace binding、隐藏physical metadata或backend fallback。
+Provider随正常public root输出仅供compiler使用的exact physical metadata closure；consumer checker不把其中private nominal加入source-visible`types`、import或constructor namespace。Re-export/diamond原样复用exact owner，metadata lookup只接受`RegisteredNominalRef`，禁止name-first fallback。
 
 ### 0.1 保留 type binding 与模块冲突
 

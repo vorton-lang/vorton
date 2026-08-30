@@ -96,9 +96,9 @@ Ring 0.1 在 type namespace 中保留以下 18 个最终本地绑定名：`Int`�
 
 这是 0.1 的已知限制，不把最终会迁入标准库的类型永久定义为语言 builtin。相应类型随既有标准库/RIIR 迁移成为普通 module type 后，逐项解除其保留绑定；届时同名类型遵守普通 module/import 冲突规则，并通过限定路径或 import alias 消歧。真正保留在语言中的 builtin type（例如 `Range`）继续不可覆盖。本规则不新增 exact-owner Type carrier或第二套名字 authority。
 
-### 0.1 public nominal representation
+### Private nominal representation
 
-Public nominal type必须拥有public-closed的物理表示：从其全部struct fields或enum payload types出发，递归展开generic argument、tuple与function type后遇到的每个nominal declaration都必须至少与root同等可见。字段名称的visibility与字段类型的representation visibility是两件事；private字段仍合法，但不能把更private nominal嵌入public值布局。违反在声明module稳定报错，不生成private-layout transport到Core或backend。
+字段名称visibility与compiler所需representation metadata分离。Public struct的private field可以递归包含private nominal；该private type不因布局需要而成为source-public。Compiler以exact-owner metadata取得size/tag/field/Drop信息，consumer源码仍不能命名或取得private field。只有private type进入public函数签名、pub field、public enum payload等真正public interface时才稳定报visibility错误。
 
 ### 类型变量
 
