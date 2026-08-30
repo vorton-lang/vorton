@@ -1123,9 +1123,8 @@ fn validate_physical_type_owner(
     expected_name: Str, actual_name: Str, owner: RegisteredNominalRef
 ) -> RegisteredNominalRef {
     if actual_name != expected_name ||
-       symbol_ref_canonical_payload(
-           registered_nominal_ref_symbol(owner)) != expected_name {
-        panic("physical nominal type: exact owner payload differs")
+       registered_nominal_ref_display_name(owner) != expected_name {
+        panic("physical nominal type: display name differs")
     }
     owner
 }

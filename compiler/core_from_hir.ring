@@ -106,7 +106,8 @@ use ir_identity::{
     intrinsic_ref_same, trait_method_ref_same,
     BUILTIN_METHOD_SITE_COUNT,
     builtin_value_site_tag, BUILTIN_VALUE_SITE_COUNT,
-    registered_nominal_ref_symbol, registered_nominal_ref_same,
+    registered_nominal_ref_symbol, registered_nominal_ref_display_name,
+    registered_nominal_ref_same,
     registered_trait_ref_symbol,
     impl_owner_ref_target,
     handled_effect_ref_symbol,
@@ -944,9 +945,8 @@ fn producer_take_physical_owner(
         panic("Core producer: physical field owner sequence is partial")
     })
     cursor.next = cursor.next + 1
-    if symbol_ref_canonical_payload(
-            registered_nominal_ref_symbol(owner)) != expected_name {
-        panic("Core producer: physical field owner payload differs")
+    if registered_nominal_ref_display_name(owner) != expected_name {
+        panic("Core producer: physical field owner display differs")
     }
     owner
 }
@@ -1080,9 +1080,8 @@ fn producer_record_type_with_nominal_owner(
     let nominal_owner: RegisteredNominalRef? = match ty {
         Type::StructType { name, .. } => match exact_nominal_owner {
             some(owner) => {
-                if symbol_ref_canonical_payload(
-                        registered_nominal_ref_symbol(owner)) != name {
-                    panic("Core producer: supplied nominal owner payload differs")
+                if registered_nominal_ref_display_name(owner) != name {
+                    panic("Core producer: supplied nominal owner display differs")
                 }
                 some(owner)
             },
@@ -1093,9 +1092,8 @@ fn producer_record_type_with_nominal_owner(
         },
         Type::EnumType { name, .. } => match exact_nominal_owner {
             some(owner) => {
-                if symbol_ref_canonical_payload(
-                        registered_nominal_ref_symbol(owner)) != name {
-                    panic("Core producer: supplied nominal owner payload differs")
+                if registered_nominal_ref_display_name(owner) != name {
+                    panic("Core producer: supplied nominal owner display differs")
                 }
                 some(owner)
             },
@@ -1157,8 +1155,8 @@ fn producer_record_type_with_nominal_owner(
                 producer, exact_owner, true)
             let def = physical_nominal_struct(physical)
             let nominal = registered_nominal_ref_symbol(def.owner_ref)
-            if name != symbol_ref_canonical_payload(nominal) {
-                panic("Core producer: struct canonical payload differs")
+            if name != registered_nominal_ref_display_name(def.owner_ref) {
+                panic("Core producer: struct display name differs")
             }
             if def.type_param_vars.len() != type_params.len() {
                 panic("Core producer: struct application arity differs")
@@ -1214,8 +1212,8 @@ fn producer_record_type_with_nominal_owner(
                 producer, exact_owner, false)
             let def = physical_nominal_enum(physical)
             let nominal = registered_nominal_ref_symbol(def.owner_ref)
-            if name != symbol_ref_canonical_payload(nominal) {
-                panic("Core producer: enum canonical payload differs")
+            if name != registered_nominal_ref_display_name(def.owner_ref) {
+                panic("Core producer: enum display name differs")
             }
             if def.type_param_vars.len() != type_params.len() {
                 panic("Core producer: enum application arity differs")
