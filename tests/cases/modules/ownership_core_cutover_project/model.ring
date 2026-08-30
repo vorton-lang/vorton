@@ -3,9 +3,7 @@ pub trait Named {
 }
 
 pub trait Greeter: Named {
-    fn greet(self) -> Str {
-        "Hello ${self.name()}"
-    }
+    fn greet(self) -> Str
 }
 
 pub struct Person { value: Str }
@@ -14,7 +12,9 @@ impl Named for Person {
     fn name(self) -> Str { self.value }
 }
 
-impl Greeter for Person {}
+impl Greeter for Person {
+    fn greet(self) -> Str { "Hello ${self.name()}" }
+}
 
 pub fn project_greeting() -> Str {
     let original = Person { value: "Project" }

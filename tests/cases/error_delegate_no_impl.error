@@ -1,4 +1,0 @@
-E0508
-type 'User' (field 'base') does not implement trait 'Describable'
-delegate field type missing trait impl
-!internal compiler error

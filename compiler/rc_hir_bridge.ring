@@ -34,10 +34,10 @@ use ir_inventory::{
     make_named_executable_ref,
     executable_ref_named_symbol, executable_ref_anonymous_path,
     executable_kind_same, executable_kind_fn,
-    executable_kind_impl_method, executable_kind_trait_default,
+    executable_kind_impl_method,
     executable_kind_test,
     executable_kind_const_getter, executable_kind_lambda,
-    executable_kind_handler, executable_kind_default_specialization,
+    executable_kind_handler,
     executable_kind_derived_impl,
     executable_kind_dict_helper,
     EffectCtxRef, EffectCtxParentCapture,
@@ -2722,24 +2722,17 @@ fn serialize_handler(
 fn serialize_trait_method(
     mut ctx: HirBridgeCtx, value: HTraitMethod
 ) -> HTraitMethod {
-    if value.has_default != value.body.is_some() {
-        panic("RcHIR bridge: trait default metadata differs")
-    }
     HTraitMethod {
         name: value.name, method_ref: value.method_ref,
         type_params: value.type_params,
         type_formals: value.type_formals.map(fn(item) { item }),
-        params: value.params, trait_bounds: [],
+        params: value.params,
         return_type: value.return_type,
         effects: validate_legacy_effect_row(value.effects),
-        // The verified Core body is emitted once as an ordinary HDecl::Fn;
-        // the trait declaration remains dictionary-layout metadata only.
-        has_default: false,
         executable_ref: value.executable_ref,
         effect_ctx: typed_callable_effect_ctx(
             ctx.projection, core_callable_effect_ctx_for(
-                ctx.stages.core, value.executable_ref)),
-        body: none
+                ctx.stages.core, value.executable_ref))
     }
 }
 
@@ -2887,8 +2880,6 @@ fn generated_impl_decl(
         target_ty: legacy_impl_target_type(projection),
         owner_ref: owner, provider_ref: impl_owner_ref_provider(owner),
         trait_ref: legacy_impl_trait(projection),
-        delegate_plan: none,
-        default_specializations: [],
         type_params: legacy_type_params(
             legacy_impl_type_parameters(projection)),
         trait_name: match legacy_impl_trait(projection) {
@@ -2957,12 +2948,8 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
         },
         HDecl::Impl {
             target_type, target_ty, owner_ref, provider_ref, trait_ref,
-            delegate_plan: ignored_delegate_plan,
-            default_specializations: ignored_default_specializations,
             type_params, trait_name, methods, assoc_types, span
         } => {
-            let _ = ignored_delegate_plan
-            let _ = ignored_default_specializations
             let metadata = core_impl_for(
                 core_program_impls(ctx.stages.core), owner_ref)
             let mut serialized: List<HDecl> = []
@@ -2999,8 +2986,6 @@ fn serialize_shell_decl(mut ctx: HirBridgeCtx, value: HDecl) -> HDecl {
                 target_type: target_type, target_ty: target_ty,
                 owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
-                delegate_plan: none,
-                default_specializations: [],
                 type_params: type_params, trait_name: trait_name,
                 methods: serialized, assoc_types: assoc_types, span: span
             }
@@ -3054,28 +3039,6 @@ fn body_was_consumed(values: List<ExecutableRef>, reference: ExecutableRef) -> B
         if executable_ref_same(value, reference) { return true }
     }
     false
-}
-
-fn physical_fn_count(
-    values: List<HDecl>, reference: ExecutableRef
-) -> Int {
-    let mut count = 0
-    for value in values {
-        match value {
-            HDecl::Fn { executable_ref, .. } => if
-                    executable_ref_same(executable_ref, reference) {
-                count = count + 1
-            },
-            HDecl::Impl { methods, .. } => {
-                count = count + physical_fn_count(methods, reference)
-            },
-            HDecl::ModBlock { decls, .. } => {
-                count = count + physical_fn_count(decls, reference)
-            },
-            _ => {}
-        }
-    }
-    count
 }
 
 fn validate_projection_against_core(
@@ -3262,9 +3225,7 @@ pub fn materialize_verified_project_hir(
         if !body_was_consumed(ctx.consumed_bodies, reference) {
             let callable = legacy_projection_callable_for(projection, reference)
             let kind = legacy_callable_kind(callable)
-            if executable_kind_same(kind, executable_kind_dict_helper()) ||
-               executable_kind_same(
-                    kind, executable_kind_trait_default()) {
+            if executable_kind_same(kind, executable_kind_dict_helper()) {
                 let module_key = module_body_ref_origin_module_key(
                     legacy_callable_module(callable))
                 let draft_index = project_draft_index(drafts, module_key)
@@ -3276,26 +3237,10 @@ pub fn materialize_verified_project_hir(
             if executable_kind_same(kind, executable_kind_lambda()) ||
                executable_kind_same(kind, executable_kind_handler()) ||
                executable_kind_same(kind, executable_kind_impl_method()) ||
-               executable_kind_same(kind, executable_kind_default_specialization()) ||
                executable_kind_same(kind, executable_kind_derived_impl()) {
                 panic("RcHIR bridge: nested/generated body was not materialized")
             }
             panic("RcHIR bridge: source executable shell is absent")
-        }
-    }
-    for callable in core_program_callables(stages.core) {
-        if executable_kind_same(
-                legacy_callable_kind(legacy_projection_callable_for(
-                    projection, core_callable_reference(callable))),
-                executable_kind_trait_default()) {
-            let mut count = 0
-            for draft in drafts {
-                count = count + physical_fn_count(
-                    draft.decls, core_callable_reference(callable))
-            }
-            if count != 1 {
-                panic("RcHIR bridge: trait default physical function is not unique")
-            }
         }
     }
     if ctx.consumed_bodies.len() != core_program_bodies(stages.core).len() ||

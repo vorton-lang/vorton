@@ -26,7 +26,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     frozen_impl_predicates, impl_predicate_subject_type_var,
     impl_predicate_trait_name,
     find_impl_by_provider, impl_target_symbol,
-    specialize_trait_method_scheme, delegate_plan_not_applicable}
+    specialize_trait_method_scheme}
 use ast::{TypeParam, span_zero}
 use effect_contract::{empty_typed_effect_header_schema}
 use hir::{HDecl, HStructField, HTypeParam,
@@ -171,8 +171,7 @@ fn install_builtin_trait_contract(
             _ => panic("builtin trait method: signature is not callable")
         }
         method_contracts.push(make_registered_trait_method_contract(
-            method.method_ref, method.ty, method.has_default,
-            method.param_mutabilities))
+            method.method_ref, method.ty, method.param_mutabilities))
     }
     let mut assoc_contracts: List<RegisteredTraitAssocContract> = []
     for assoc in assoc_types {
@@ -514,7 +513,6 @@ fn install_builtin_method_owner(
         provider_ref: some(provider_ref),
         trait_ref: trait_ref,
         owner_ref: some(owner_ref),
-        delegate_plan: delegate_plan_not_applicable(),
         span: span
     }
     add_impl(env.trait_reg, owner)
@@ -624,7 +622,6 @@ fn add_builtin_impl(
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
         owner_ref: some(owner_ref),
-        delegate_plan: delegate_plan_not_applicable(),
         span: span
     })
     let mut entries = exact.entries()
@@ -1996,7 +1993,7 @@ fn register_eq_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Eq")
     install_builtin_trait_contract(
         env, "Eq", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false, false], method_type_params: [] }
+            TraitMethodDef { name: "eq", method_ref: builtin_trait_method(owner_ref, 0, 0, "eq"), ty: eq_fn, effect_schema: empty_typed_effect_header_schema(), param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
 
     // Register Eq impls with the exact intrinsic contract at the producer.
@@ -2046,7 +2043,7 @@ fn register_clone_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Clone")
     install_builtin_trait_contract(
         env, "Clone", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "clone", method_ref: builtin_trait_method(owner_ref, 0, 0, "clone"), ty: clone_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "clone", method_ref: builtin_trait_method(owner_ref, 0, 0, "clone"), ty: clone_fn, effect_schema: empty_typed_effect_header_schema(), param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
     // Primitive impls carry their exact physical intrinsic contract here.
@@ -2085,7 +2082,7 @@ fn register_drop_trait(mut env: TypeEnv) {
     let owner_ref = builtin_trait_symbol("Drop")
     install_builtin_trait_contract(
         env, "Drop", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "drop", method_ref: builtin_trait_method(owner_ref, 0, 0, "drop"), ty: drop_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "drop", method_ref: builtin_trait_method(owner_ref, 0, 0, "drop"), ty: drop_fn, effect_schema: empty_typed_effect_header_schema(), param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 }
 
@@ -2113,7 +2110,7 @@ fn register_ord_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Ord")
     install_builtin_trait_contract(
         env, "Ord", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "cmp", method_ref: builtin_trait_method(owner_ref, 0, 0, "cmp"), ty: cmp_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false, false], method_type_params: [] }
+            TraitMethodDef { name: "cmp", method_ref: builtin_trait_method(owner_ref, 0, 0, "cmp"), ty: cmp_fn, effect_schema: empty_typed_effect_header_schema(), param_mutabilities: [false, false], method_type_params: [] }
         ], [], [])
 
     add_builtin_impl(env, sink, "Ord", "Int", [], [], [], [
@@ -2151,7 +2148,7 @@ fn register_debug_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Debug")
     install_builtin_trait_contract(
         env, "Debug", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "debug", method_ref: builtin_trait_method(owner_ref, 0, 0, "debug"), ty: debug_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "debug", method_ref: builtin_trait_method(owner_ref, 0, 0, "debug"), ty: debug_fn, effect_schema: empty_typed_effect_header_schema(), param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
     // Primitive impls
@@ -2216,7 +2213,7 @@ fn register_hash_trait(mut env: TypeEnv, sink: CollectingSink) {
     let owner_ref = builtin_trait_symbol("Hash")
     install_builtin_trait_contract(
         env, "Hash", owner_ref, [], [self_var_id], self_var_id, [
-            TraitMethodDef { name: "hash", method_ref: builtin_trait_method(owner_ref, 0, 0, "hash"), ty: hash_fn, effect_schema: empty_typed_effect_header_schema(), has_default: false, param_mutabilities: [false], method_type_params: [] }
+            TraitMethodDef { name: "hash", method_ref: builtin_trait_method(owner_ref, 0, 0, "hash"), ty: hash_fn, effect_schema: empty_typed_effect_header_schema(), param_mutabilities: [false], method_type_params: [] }
         ], [], [])
 
     add_builtin_impl(env, sink, "Hash", "Int", [], [], [], [

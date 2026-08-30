@@ -14,8 +14,7 @@ use env::{TypeEnv, TypeScheme, SchemeBound, StructDef, EnumDef,
     impl_predicate_subject_param_index, frozen_impl_predicates,
     impl_assoc_predicate_name, impl_assoc_predicate_type,
     apply_subst_map,
-    impl_target_symbol,
-    delegate_plan_not_applicable}
+    impl_target_symbol}
 use builtins::{builtin_option_derived_owners}
 use effect_contract::{
     empty_typed_effect_header_schema, empty_typed_effect_ctx_layout,
@@ -2837,7 +2836,6 @@ fn register_derived_impl(
         provider_ref: some(provider_ref),
         trait_ref: some(trait_ref),
         owner_ref: some(owner_ref),
-        delegate_plan: delegate_plan_not_applicable(),
         span: span
     }
     add_impl(env.trait_reg, owner)

@@ -1,6 +1,4 @@
-// Delegate-expanded Eq dispatch where dict_param is a static dict name
-// (e.g. __Inner_Eq) rather than a __ring_T_X parameter.  Both == and != route
-// through the exact Eq.eq slot; != negates that result at the operator site.
+// Explicit Eq forwarding where the child dictionary is static.
 
 struct Inner { x: Int }
 
@@ -12,8 +10,10 @@ impl Eq for Inner {
 
 struct Wrapper { inner: Inner }
 
-impl Wrapper {
-    delegate inner: Eq
+impl Eq for Wrapper {
+    fn eq(self, other: Wrapper) -> Bool {
+        self.inner == other.inner
+    }
 }
 
 fn main() {

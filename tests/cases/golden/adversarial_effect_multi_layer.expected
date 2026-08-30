@@ -5,4 +5,4 @@ LOG2: got mode: prod
 LOG2: got host: remote-host
 T2: prod@remote-host
 T3: outer-val+inner-val
-adversarial_effect_multi_delegate: done
+adversarial_effect_multi_layer: done

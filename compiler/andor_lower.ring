@@ -37,7 +37,7 @@ use ast::{Span, BinOp}
 use types::{Type, EffectRow, EMPTY_ROW}
 use hir::{HProgram, HDecl, HStmt, HExpr, HMatchArm, HStructFieldInit,
     HNominalStructFieldInit,
-    HStringInterpPart, HEffectHandler, HEffectOp, HTraitMethod,
+    HStringInterpPart, HEffectHandler, HEffectOp,
     HLambdaCapture}
 
 pub fn lower_andor(program: HProgram) -> HProgram {
@@ -67,7 +67,6 @@ fn al_decl(d: HDecl) -> HDecl {
                 body: al_expr(body),
                 is_pub: is_pub, trait_bounds: trait_bounds, span: span },
         HDecl::Impl { target_type, target_ty, owner_ref, provider_ref, trait_ref,
-                      delegate_plan, default_specializations,
                       type_params, trait_name, methods,
                       assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
@@ -75,8 +74,6 @@ fn al_decl(d: HDecl) -> HDecl {
             HDecl::Impl { target_type: target_type, target_ty: target_ty,
                 owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
-                delegate_plan: delegate_plan,
-                default_specializations: default_specializations,
                 type_params: type_params, trait_name: trait_name,
                 methods: new_methods, assoc_types: assoc_types, span: span }
         },
@@ -96,27 +93,8 @@ fn al_decl(d: HDecl) -> HDecl {
             HDecl::ModBlock { name: name, decls: new_inner, is_pub: is_pub, span: span }
         },
         HDecl::Trait { name, owner_ref: trait_owner_ref, type_params, methods, supertraits, assoc_types, is_pub, span } => {
-            // Default method bodies are real HIR (checked by infer) — lower them too.
-            let mut new_methods: List<HTraitMethod> = []
-            for tm in methods {
-                let new_body = match tm.body {
-                    some(b) => some(al_expr(b)),
-                    none => none,
-                }
-                new_methods.push(HTraitMethod { name: tm.name,
-                    method_ref: tm.method_ref,
-                    type_params: tm.type_params,
-                    type_formals: tm.type_formals.map(fn(item) { item }),
-                    params: tm.params,
-                    return_type: tm.return_type, effects: tm.effects,
-                    has_default: tm.has_default,
-                    executable_ref: tm.executable_ref,
-                    effect_ctx: tm.effect_ctx,
-                    trait_bounds: tm.trait_bounds,
-                    body: new_body })
-            }
             HDecl::Trait { name: name, owner_ref: trait_owner_ref,
-                type_params: type_params, methods: new_methods,
+                type_params: type_params, methods: methods,
                 supertraits: supertraits, assoc_types: assoc_types, is_pub: is_pub, span: span }
         },
         HDecl::Struct { name, owner_ref, type_params, fields, is_pub, span } =>

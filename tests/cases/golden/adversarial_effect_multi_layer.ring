@@ -1,5 +1,5 @@
-// B-100 P1.3: adversarial — multi-layer effect handler + delegate.
-// Handler A handles one effect, delegates to handler B for another.
+// B-100 P1.3: adversarial — multi-layer effect handlers.
+// Handler A handles one effect while handler B handles another.
 // Tests that evidence threading through multiple handler layers and
 // resume value propagation are correct.
 
@@ -64,5 +64,5 @@ fn main() {
     }
     print("T3: ${r3}")
 
-    print("adversarial_effect_multi_delegate: done")
+    print("adversarial_effect_multi_layer: done")
 }

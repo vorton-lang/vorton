@@ -929,7 +929,7 @@ impl Parser {
         self.parse_effect_list()
     }
 
-    fn parse_fn_decl(mut self, is_pub: Bool, body_optional: Bool) -> Decl {
+    fn parse_fn_decl(mut self, is_pub: Bool, body_forbidden: Bool) -> Decl {
         let start = self.current_span_start()
         self.expect(TokenKind::TkFn)
         let name = self.expect(TokenKind::TkIdent).value
@@ -947,13 +947,21 @@ impl Parser {
             declared_effects = some(self.parse_effect_annotation())
         }
         let mut body = Expr::Block { stmts: [], tail: none, span: span_zero() }
-        let mut is_abstract_val = false
-        if body_optional && !self.check(TokenKind::TkLBrace) {
+        let mut end = self.current_span_start()
+        if body_forbidden {
             let pos = self.current_span_start()
             body = Expr::Block { stmts: [], tail: none, span: self.make_span(pos, pos) }
-            is_abstract_val = true
+            if self.check(TokenKind::TkLBrace) {
+                self.report_error(
+                    E0101,
+                    "Trait method bodies are not supported in Ring 0.1; move the body to an explicit impl",
+                    some(self.peek().span))
+                let rejected = self.parse_block_expr()
+                end = expr_span(rejected).end
+            }
         } else {
             body = self.parse_block_expr()
+            end = expr_span(body).end
         }
         Decl::Fn {
             name: name,
@@ -963,8 +971,7 @@ impl Parser {
             declared_effects: declared_effects,
             body: body,
             is_pub: is_pub,
-            is_abstract: is_abstract_val,
-            span: self.make_span(start, expr_span(body).end)
+            span: self.make_span(start, end)
         }
     }
 
@@ -1180,19 +1187,19 @@ impl Parser {
         self.expect(TokenKind::TkLBrace)
         let mut methods: List<Decl> = []
         while !self.check(TokenKind::TkRBrace) && !self.at_end() {
-            // Check for delegate before consuming pub
+            // Consume the removed contextual directive as one diagnostic unit.
             if self.check(TokenKind::TkIdent) && self.peek().value == "delegate" {
-                let d_start = self.current_span_start()
+                self.report_error(
+                    E0101,
+                    "delegate was removed from Ring 0.1; write one explicit impl per trait with forwarding methods",
+                    some(self.peek().span))
                 self.advance()   // consume "delegate"
-                let d_field = self.expect(TokenKind::TkIdent).value
+                self.expect(TokenKind::TkIdent)
                 self.expect(TokenKind::TkColon)
-                let mut d_traits: List<Str> = []
-                d_traits.push(self.expect(TokenKind::TkIdent).value)
+                self.expect(TokenKind::TkIdent)
                 while self.try_consume(TokenKind::TkComma) {
-                    d_traits.push(self.expect(TokenKind::TkIdent).value)
+                    self.expect(TokenKind::TkIdent)
                 }
-                let d_end = self.current_span_start()
-                methods.push(Decl::Delegate { field: d_field, trait_names: d_traits, span: self.make_span(d_start, d_end) })
                 continue
             }
             let m_pub = self.try_consume(TokenKind::TkPub)

@@ -158,7 +158,7 @@ fn collect_decl_edges(
             }
         },
         // Test, Struct, Enum, Effect, Trait, ExternFn, ExternType, TypeAlias, Const,
-        // EffectAlias, Delegate, AssocType — no fn bodies to scan
+        // EffectAlias, AssocType — no fn bodies to scan
         _ => {}
     }
 }
@@ -166,10 +166,10 @@ fn collect_decl_edges(
 // Prefix a declaration name for ModBlock scoping (mirrors prefix_decl_name logic).
 fn prefix_mod_decl(mod_name: Str, decl: Decl) -> Decl {
     match decl {
-        Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, is_abstract, span } =>
+        Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span } =>
             Decl::Fn { name: "${mod_name}::${name}", type_params: type_params, params: params,
                 return_type: return_type, declared_effects: declared_effects, body: body,
-                is_pub: is_pub, is_abstract: is_abstract, span: span },
+                is_pub: is_pub, span: span },
         Decl::Impl { target_type, type_params, trait_name, methods, span } => {
             let prefixed_target = if target_type.contains("::") {
                 target_type

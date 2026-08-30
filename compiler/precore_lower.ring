@@ -23,8 +23,6 @@ use ir_identity::{
     nominal_field_ref_same,
     variant_field_ref_index, variant_field_ref_same,
     intrinsic_ref_symbol, trait_method_ref_member, impl_method_ref_member,
-    impl_provider_ref_kind, impl_provider_kind_delegate,
-    impl_provider_kind_same,
     slot_ref_same, slot_ref_is_source, slot_ref_source_def_id
 }
 use ir_inventory::{
@@ -971,21 +969,14 @@ fn exact_trait_bounds(values: List<TraitBound>) -> List<TraitBound> {
 }
 
 fn close_trait_method(value: HTraitMethod) -> HTraitMethod {
-    let bounds = exact_trait_bounds(value.trait_bounds)
-    let body = close_optional_expr(value.body)
-    if (body.is_some() && bounds.len() == 0) ||
-       (body.is_none() && bounds.len() != 0) {
-        panic("PreCore closure: trait default body/bound relation differs")
-    }
     HTraitMethod {
         name: value.name, method_ref: value.method_ref,
         type_params: exact_h_type_params(value.type_params),
         type_formals: value.type_formals.map(fn(item) { item }),
         params: value.params, return_type: value.return_type,
-        effects: value.effects, has_default: value.has_default,
+        effects: value.effects,
         executable_ref: value.executable_ref,
-        effect_ctx: value.effect_ctx,
-        trait_bounds: bounds, body: body
+        effect_ctx: value.effect_ctx
     }
 }
 
@@ -1617,21 +1608,12 @@ fn close_decl(value: HDecl) -> HDecl {
         },
         HDecl::Impl {
             target_type, target_ty, owner_ref, provider_ref, trait_ref,
-            delegate_plan, default_specializations,
             type_params, trait_name, methods, assoc_types, span
         } => {
-            let is_delegate = impl_provider_kind_same(
-                impl_provider_ref_kind(provider_ref),
-                impl_provider_kind_delegate())
-            if is_delegate != delegate_plan.is_some() {
-                panic("PreCore closure: delegate provider/plan presence differs")
-            }
             HDecl::Impl {
                 target_type: target_type, target_ty: target_ty,
                 owner_ref: owner_ref,
                 provider_ref: provider_ref, trait_ref: trait_ref,
-                delegate_plan: delegate_plan,
-                default_specializations: default_specializations,
                 type_params: exact_h_type_params(type_params),
                 trait_name: trait_name,
                 methods: close_decl_list(methods),

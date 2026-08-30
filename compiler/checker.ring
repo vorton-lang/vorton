@@ -121,7 +121,7 @@ const STD_FILES: List<Str> =
 fn canonicalize_prelude_decl(decl: Decl) -> Decl {
     match decl {
         Decl::Fn { name, type_params, params, return_type, declared_effects,
-                   body, is_pub, is_abstract, span } => {
+                   body, is_pub, span } => {
             if name == map_index_helper_source_name() {
                 // Compiler-synthesised Map indexing must target an identity no
                 // Ring source identifier can spell.  Keep the raw API as an
@@ -131,13 +131,13 @@ fn canonicalize_prelude_decl(decl: Decl) -> Decl {
                     name: map_index_helper_identity(),
                     type_params: type_params, params: params,
                     return_type: return_type, declared_effects: declared_effects,
-                    body: body, is_pub: false, is_abstract: is_abstract, span: span
+                    body: body, is_pub: false, span: span
                 }
             } else {
                 Decl::Fn {
                     name: name, type_params: type_params, params: params,
                     return_type: return_type, declared_effects: declared_effects,
-                    body: body, is_pub: is_pub, is_abstract: is_abstract, span: span
+                    body: body, is_pub: is_pub, span: span
                 }
             }
         },
@@ -892,7 +892,6 @@ fn namespace_decl_span(decl: Decl) -> Span {
         Decl::Const { span, .. } => span,
         Decl::ModBlock { span, .. } => span,
         Decl::EffectAlias { span, .. } => span,
-        Decl::Delegate { span, .. } => span,
         Decl::AssocType { span, .. } => span
     }
 }
@@ -1269,7 +1268,7 @@ fn register_imported_trait_effect_headers(
                     ctx.env, match assoc.default_effect_schema {
                         some(schema) => schema,
                         none => panic(
-                            "effect header schema: trait default schema is absent")
+                            "effect header schema: associated-type default schema is absent")
                     })
             },
             none => {}

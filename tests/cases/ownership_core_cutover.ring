@@ -1,6 +1,6 @@
 // Canary for the 0.1 Core -> Flow -> ownership -> materialized-HIR path.
-// It combines exact custom-effect evidence, omitted trait defaults, delegate
-// forwarding, and generated structural bodies in one observable program.
+// It combines exact custom-effect evidence, explicit trait forwarding, and
+// generated structural bodies in one observable program.
 effect Step {
     fn add_one(value: Int) -> Int
 }
@@ -10,9 +10,7 @@ trait Named {
 }
 
 trait Greeter: Named {
-    fn greet(self) -> Str {
-        "Hello ${self.name()}"
-    }
+    fn greet(self) -> Str
 }
 
 struct Inner { value: Str }
@@ -21,12 +19,14 @@ impl Named for Inner {
     fn name(self) -> Str { self.value }
 }
 
-impl Greeter for Inner {}
+impl Greeter for Inner {
+    fn greet(self) -> Str { "Hello ${self.name()}" }
+}
 
 struct Wrapper { inner: Inner }
 
-impl Wrapper {
-    delegate inner: Named
+impl Named for Wrapper {
+    fn name(self) -> Str { self.inner.name() }
 }
 
 struct TupleBox { value: (Str, Bool) }
@@ -38,9 +38,9 @@ fn main() {
         Step.add_one(value) => value + 1,
     }
     let inner = Inner { value: "Alice" }
-    assert(inner.greet() == "Hello Alice", "trait default body")
+    assert(inner.greet() == "Hello Alice", "explicit trait body")
     let wrapper = Wrapper { inner: Inner { value: "Alice" } }
-    assert(wrapper.name() == "Alice", "delegate body")
+    assert(wrapper.name() == "Alice", "explicit forwarding body")
     let original = TupleBox { value: ("tuple", true) }
     let copied = original.clone()
     assert(copied == original, "derived deep clone")

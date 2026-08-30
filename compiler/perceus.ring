@@ -266,7 +266,6 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
             }
         },
         HDecl::Impl { target_type, target_ty, owner_ref, provider_ref, trait_ref,
-                      delegate_plan, default_specializations,
                       type_params, trait_name, methods,
                       assoc_types, span } => {
             let mut new_methods: List<HDecl> = []
@@ -276,8 +275,6 @@ fn anf_decl(decl: HDecl, externs: Set<Str>, mut counter: List<Int>) -> HDecl {
                 owner_ref: owner_ref,
                 type_params: type_params,
                 provider_ref: provider_ref, trait_ref: trait_ref,
-                delegate_plan: delegate_plan,
-                default_specializations: default_specializations,
                 trait_name: trait_name, methods: new_methods,
                 assoc_types: assoc_types, span: span
             }
@@ -1365,7 +1362,6 @@ fn transform_decl(
             }
         },
         HDecl::Impl { target_type, target_ty, owner_ref, provider_ref, trait_ref,
-                      delegate_plan, default_specializations,
                       type_params, trait_name, methods,
                       assoc_types, span } => {
             let new_methods = transform_decls(
@@ -1375,8 +1371,6 @@ fn transform_decl(
                 owner_ref: owner_ref,
                 type_params: type_params,
                 provider_ref: provider_ref, trait_ref: trait_ref,
-                delegate_plan: delegate_plan,
-                default_specializations: default_specializations,
                 trait_name: trait_name, methods: new_methods,
                 assoc_types: assoc_types, span: span
             }

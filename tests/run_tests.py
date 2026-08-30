@@ -2359,194 +2359,6 @@ def module_check_positive_discovery_errors(modules_dir: Path) -> List[str]:
     return errors
 
 
-def delegate_provider_plan_u1c3_mutation_errors(
-    sources: Mapping[str, str],
-) -> List[str]:
-    errors: List[str] = []
-    mutations = (
-        ("zero-clean child", "env", "make_delegate_child_provider_plan",
-         "produced_owner_count == 0 && !had_semantic_error", "false"),
-        ("negative owner count", "env", "make_delegate_child_provider_plan",
-         "produced_owner_count < 0", "false"),
-        ("Final input copy", "env", "delegate_plan_final",
-         "copy_delegate_child_provider_plans(children)", "children"),
-        ("Final output copy", "env", "delegate_plan_children",
-         "copy_delegate_child_provider_plans(children)", "children"),
-        ("child count equality", "env", "delegate_child_provider_plan_same",
-         "left.produced_owner_count == right.produced_owner_count", "true"),
-        ("child error equality", "env", "delegate_child_provider_plan_same",
-         "left.had_semantic_error == right.had_semantic_error", "true"),
-        ("plan state equality", "env", "delegate_plan_state_same",
-         "(DelegatePlanStateValue::DelegatePending,\n"
-         "         DelegatePlanStateValue::DelegatePending) => true",
-         "(DelegatePlanStateValue::DelegateNotApplicable,\n"
-         "         DelegatePlanStateValue::DelegatePending) => true"),
-        ("full owner plan equality", "env", "impl_entry_final_same",
-         "delegate_plan_state_same(left.delegate_plan, right.delegate_plan)", "true"),
-        ("ordered child index", "env", "validate_impl_entry",
-         "child.source_member_index <= previous_delegate_index", "false"),
-        ("zero-clean validator", "env", "validate_impl_entry",
-         "!child.had_semantic_error", "false"),
-        ("duplicate child provider", "env", "validate_impl_entry",
-         "impl_provider_ref_same(\n                            seen_provider, child.provider_ref)", "false"),
-        ("Pending parent kind", "env", "validate_impl_entry",
-         "pending delegate plan parent is not Source",
-         "pending delegate plan parent kind unchecked"),
-        ("unique finalization", "env", "finalize_delegate_provider_plan",
-         "if matches != 1", "if false"),
-        ("Pending finalization", "env", "finalize_delegate_provider_plan",
-         "!delegate_plan_is_pending(entry.delegate_plan)", "false"),
-        ("pending close", "env", "assert_no_pending_delegate_plans",
-         "delegate_plan_is_pending(owner.delegate_plan)", "false"),
-        ("source phase early fact consume", "register", "register_impl",
-         "some(Decl::Delegate { .. }) => { has_delegate = true }",
-         "some(Decl::Delegate { .. }) => { let _ = peek_delegate_provider_fact(ctx, decl_index, source_member_index); has_delegate = true }"),
-        ("source Pending", "register", "register_impl",
-         "delegate_plan_pending()", "delegate_plan_final([])"),
-        ("phase3 fact consume", "register", "register_phase3_delegate",
-         "commit_delegate_provider_fact(ctx, fact)", "{}"),
-        ("phase3 parent relation", "register", "register_phase3_delegate",
-         "fact.parent_provider_ref, parent_provider_ref", "parent_provider_ref, parent_provider_ref"),
-        ("phase3 owner count", "register", "register_phase3_delegate",
-         "let produced_owner_count = find_impls_by_provider(",
-         "let produced_owner_count = []"),
-        ("phase3 local outcome", "register", "register_phase3_delegate",
-         "let had_semantic_error = outcome.unwrap_or(true)",
-         "let had_semantic_error = false"),
-        ("phase3 early finalize", "register", "register_phase3_delegate",
-         "let outcome = some(register_delegate(",
-         "finalize_delegate_provider_plan(\n"
-         "                                ctx.env.trait_reg, canonical_target,\n"
-         "                                canonical_trait_ref, parent_provider_ref, []\n"
-         "                            )\n"
-         "                            let outcome = some(register_delegate("),
-        ("manual conflict outcome", "register", "register_delegate_traits",
-         "had_semantic_error = true\n                        let _ = type_error(ctx.sink, E0509,",
-         "let _ = type_error(ctx.sink, E0509,"),
-        ("generated owner state", "register", "register_delegate_traits",
-         "delegate_plan: delegate_plan_not_applicable()",
-         "delegate_plan: delegate_plan_pending()"),
-        ("actual provider query", "decl", "expand_delegate_impls",
-         "find_impls_by_provider(", "find_impl("),
-        ("owner count drift", "decl", "expand_delegate_impls",
-         "produced_owners.len() != produced_owner_count", "false"),
-        ("zero local outcome", "decl", "expand_delegate_impls",
-         "if had_semantic_error { return result }", "return result"),
-        ("global error bypass", "decl", "expand_delegate_impls",
-         "if had_semantic_error { return result }",
-         "if ctx.sink.has_errors() { return result }"),
-        ("outer provider query", "decl", "expand_delegate_impls",
-         "find_impl_by_provider(", "find_impl_by_origin("),
-        ("raw index call", "decl", "check_one_decl",
-         "ctx, hd, source_member_index", "ctx, hd, 0"),
-        ("checker missing owner", "checker", "validate_impl_carriers",
-         'none => panic("impl HIR: typed owner is missing")',
-         "none => {}"),
-        ("collector missing owner", "checker", "collect_module_impl_facts",
-         "none => panic(", "none => if ctx.sink.has_errors() { {} } else { panic("),
-    )
-    killed = 0
-    for label, source_name, function_name, anchor, replacement in mutations:
-        mutated_source, mutation_error = _f0_mutate_function_once(
-            sources[source_name], function_name, anchor, replacement)
-        if mutation_error:
-            errors.append(f"delegate provider mutation {label}: {mutation_error}")
-            continue
-        assert mutated_source is not None
-        mutated = dict(sources)
-        mutated[source_name] = mutated_source
-        if not delegate_provider_plan_u1c3_contract_errors(mutated):
-            errors.append(f"delegate provider mutation escaped: {label}")
-        else:
-            killed += 1
-
-    env_source = sources["env"]
-    child_anchor = "pub struct DelegateChildProviderPlan {\n    source_member_index: Int,"
-    if env_source.count(child_anchor) != 1:
-        errors.append("delegate child opacity anchor drifted")
-    else:
-        mutated = dict(sources)
-        mutated["env"] = env_source.replace(
-            child_anchor,
-            "pub struct DelegateChildProviderPlan {\n    pub source_member_index: Int,",
-            1)
-        if not delegate_provider_plan_u1c3_contract_errors(mutated):
-            errors.append("delegate child opacity mutation escaped")
-        else:
-            killed += 1
-    if killed != F2_DELEGATE_PROVIDER_PLAN_MUTATION_COUNT:
-        errors.append(
-            f"delegate provider killed {killed} mutations, expected "
-            f"{F2_DELEGATE_PROVIDER_PLAN_MUTATION_COUNT}")
-    return errors
-
-
-def delegate_provider_plan_u1c3_fixture_errors(ring_exe: str) -> List[str]:
-    errors: List[str] = []
-    compiler_path = Path(ring_exe).resolve(strict=True)
-    compiler = str(compiler_path)
-    compiler_before = _sha256_file(compiler_path)
-    environment = dict(_controlled_environment(compiler))
-    positive = CASES_DIR / "delegate_shared_supertrait_provider.ring"
-    negatives = (
-        CASES_DIR / "delegate_conflict.ring",
-        CASES_DIR / "error_delegate_duplicate_child_provider.ring",
-        CASES_DIR / "error_delegate_no_field.ring",
-        CASES_DIR / "error_delegate_no_impl.ring",
-    )
-    if positive not in discover_positive_cases(CASES_DIR):
-        errors.append("shared-supertrait delegate fixture is not runner-discovered")
-    else:
-        positive_error = _f1_run_ring_check(
-            compiler, positive, environment)
-        if positive_error:
-            errors.append(positive_error)
-    discovered_negatives = discover_negative_cases(CASES_DIR)
-    for negative in negatives:
-        if negative not in discovered_negatives:
-            errors.append(
-                f"delegate negative fixture is not runner-discovered: {negative.name}")
-            continue
-        try:
-            completed = subprocess.run(
-                [compiler, "check", str(negative)],
-                cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="strict",
-                check=False, timeout=120)
-        except subprocess.TimeoutExpired:
-            errors.append(f"delegate negative timed out: {negative.name}")
-            continue
-        if completed.returncode == 0:
-            errors.append(
-                f"delegate negative unexpectedly passed: {negative.name}")
-            continue
-        contract = negative.with_suffix(".error").read_text(encoding="utf-8")
-        combined = (completed.stdout or "") + (completed.stderr or "")
-        contract_error = error_contract_failure(contract, combined)
-        if contract_error is not None:
-            errors.append(
-                f"delegate negative contract failed for {negative.name}: "
-                f"{contract_error}; output={combined[:300]!r}")
-    if _sha256_file(compiler_path) != compiler_before:
-        errors.append("pinned Ring compiler changed across delegate fixtures")
-    return errors
-
-
-def delegate_provider_plan_u1c3_source_errors() -> List[str]:
-    sources: dict[str, str] = {}
-    try:
-        for name, path in F2_DELEGATE_PROVIDER_PLAN_PATHS.items():
-            sources[name] = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        return [f"cannot read delegate provider plan sources: {exc}"]
-    errors = delegate_provider_plan_u1c3_contract_errors(sources)
-    if errors:
-        return errors
-    errors.extend(delegate_provider_plan_u1c3_mutation_errors(sources))
-    return errors
-
-
 def module_check_positive_discovery_unit_errors() -> List[str]:
     """Exercise overlap and orphan marker rejection without invoking Ring."""
     errors: List[str] = []
@@ -5420,7 +5232,7 @@ def identity_ledger_contract_errors(
     runner = sources.get("runner", "")
     candidate_mode_match = re.search(
         r"(?ms)^def run_identity_candidate_mode\(.*?"
-        r"(?=^def default_body_identity_generated_c_errors\()",
+        r"(?=^def callable_identity_generated_c_errors\()",
         runner,
     )
     if candidate_mode_match is None:
@@ -5440,7 +5252,7 @@ def identity_ledger_contract_errors(
                 "run_identity_candidate_mode rebuilt a controlled nested environment")
     coff_helper_match = re.search(
         r"(?ms)^def coff_object_timestamp_equality_errors\(.*?"
-        r"(?=^def default_body_identity_generated_c_errors\()",
+        r"(?=^def callable_identity_generated_c_errors\()",
         runner,
     )
     if coff_helper_match is None:
@@ -5459,7 +5271,7 @@ def identity_ledger_contract_errors(
             if coff_helper_source.count(token) != 1:
                 errors.append(f"COFF timestamp equality authority missing {token!r}")
     generated_gate_match = re.search(
-        r"(?ms)^def default_body_identity_generated_c_errors\(.*?"
+        r"(?ms)^def callable_identity_generated_c_errors\(.*?"
         r"(?=^def identity_checkpoint_source_errors\()",
         runner,
     )
@@ -5488,7 +5300,7 @@ def identity_ledger_contract_errors(
         "canonicalize_identity_stdout_root(",
         'IDENTITY_EVIDENCE_ROOT_ENV = "RING_IDENTITY_EVIDENCE_ROOT"',
         "evidence_root, evidence_error = identity_checkpoint_evidence_root()",
-        "default_body_identity_generated_c_errors(\n            candidate, evidence_root, evidence_log)",
+        "callable_identity_generated_c_errors(\n            candidate, evidence_root, evidence_log)",
         "audit_one_shot_attempt(evidence_dir)",
         "archive_sha256",
         "def identity_ledger_event_shape_errors(",
@@ -5505,7 +5317,7 @@ def identity_ledger_contract_errors(
         errors.append("Python ledger relation bypasses event-shape authority")
     evidence_anchor = (
         "evidence_root, evidence_error = identity_checkpoint_evidence_root()")
-    candidate_anchor = "errors.extend(default_body_identity_generated_c_errors("
+    candidate_anchor = "errors.extend(callable_identity_generated_c_errors("
     if evidence_anchor in runner and candidate_anchor in runner and (
             runner.index(evidence_anchor) > runner.index(candidate_anchor)):
         errors.append("candidate command can precede evidence-root authority")
@@ -5656,11 +5468,8 @@ def identity_checkpoint_contract_errors(
             "bound_evidence = some(DictRef::Simple(",
         ),
         "infer_decl": (
-            "trait default parameter has no exact DefId",
             "params: op_params, return_type: op.return_type",
             "def_id: some(trait_param_def_id)",
-            "def_id: some(exact_trait_def_id)",
-            "DictRef::Static(dict_name), tm.ty",
             "let fn_def_id = match registration_scheme {",
         ),
         "checker": (
@@ -6316,10 +6125,6 @@ def identity_checkpoint_contract_errors(
             "                        bound, evidence, callee_type," not in
             sources["infer"]):
         errors.append("infer bound method producer is not uniquely Simple/exact")
-    if sources["infer_decl"].count(
-            "DictRef::Static(dict_name), tm.ty") != 1 or (
-            "make_bound_method_call_ref(" not in sources["infer_decl"]):
-        errors.append("infer_decl delegated bound evidence is not uniquely Static")
     for label in ("derive", "dict", "cgen"):
         if "FieldAction::Call { dict_name" in sources[label]:
             errors.append(f"{label}: FieldAction base lost explicit DictRef tag")
@@ -6448,10 +6253,6 @@ def identity_checkpoint_contract_errors(
         ("check_trait_decl", (
             "let trait_param_def_id = ctx.env.fresh_def_id()",
             "def_id: some(trait_param_def_id)",
-        )),
-        ("check_trait_default_body", (
-            "let exact_trait_def_id = match p.def_id",
-            "def_id: some(exact_trait_def_id)",
         )),
     ):
         body, extract_error = extract_ring_function_body(
@@ -6819,7 +6620,7 @@ def coff_object_timestamp_equality_errors(
     return []
 
 
-def default_body_identity_generated_c_errors(
+def callable_identity_generated_c_errors(
     ring_exe: str, evidence_root: Path, evidence_log: List[str],
 ) -> List[str]:
     """Run off/on/on H+T acceptance through durable one-shot receipts."""
@@ -7670,9 +7471,9 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
 
 
 IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
-F1_EXECUTABLE_KIND_COUNT = 19
+F1_EXECUTABLE_KIND_COUNT = 17
 F1_BINDER_KIND_COUNT = 25
-F1_SEMANTIC_MUTATION_COUNT = 72
+F1_SEMANTIC_MUTATION_COUNT = 70
 F1_SCOPE_GUARD_COUNT = 13
 
 F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
@@ -7686,13 +7487,11 @@ F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 36
 F1_EXECUTABLE_KINDS = (
     ("fn", "EXECUTABLE_FN"),
     ("impl_method", "EXECUTABLE_IMPL_METHOD"),
-    ("trait_default", "EXECUTABLE_TRAIT_DEFAULT"),
     ("test", "EXECUTABLE_TEST"),
     ("const_initializer", "EXECUTABLE_CONST_INITIALIZER"),
     ("module_body", "EXECUTABLE_MODULE_BODY"),
     ("lambda", "EXECUTABLE_LAMBDA"),
     ("handler", "EXECUTABLE_HANDLER"),
-    ("default_specialization", "EXECUTABLE_DEFAULT_SPECIALIZATION"),
     ("derived_impl", "EXECUTABLE_DERIVED_IMPL"),
     ("dict_helper", "EXECUTABLE_DICT_HELPER"),
     ("const_getter", "EXECUTABLE_CONST_GETTER"),
@@ -7805,7 +7604,7 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
         ), errors)
     if len(F1_EXECUTABLE_KINDS) != F1_EXECUTABLE_KIND_COUNT:
         errors.append("F1 executable kind test census is incomplete")
-    if "const EXECUTABLE_KIND_COUNT: Int = 19" not in source:
+    if "const EXECUTABLE_KIND_COUNT: Int = 17" not in source:
         errors.append("F1 executable kind count drifted")
 
     allowed_modes, allowed_error = _f0_int_list(
@@ -7829,34 +7628,29 @@ def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     if parent_form_error:
         errors.append(parent_form_error)
     expected_modes = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0,
         2, 0, 2, 2,
-        1, 1, 1, 1,
-        2, 2,
+        1, 1, 1, 1, 2, 2,
     ]
     expected_ref_forms = [
-        0, 0, 0, 1, 0, 1, 1, 1, 0,
+        0, 0, 1, 0, 1, 1, 1,
         0, 1, 0, 0,
-        0, 0, 0, 0,
-        0, 0,
+        0, 0, 0, 0, 0, 0,
     ]
     expected_namespaces = [
-        0, 4, 4, 5, 0, 5, 5, 5, 4,
+        0, 4, 5, 0, 5, 5, 5,
         4, 5, 0, 4,
-        4, 4, 4, 0,
-        0, 0,
+        4, 4, 4, 0, 0, 0,
     ]
     expected_executable_roles = [
-        7, 7, 7, 0, 7, 0, 1, 5, 7,
+        7, 7, 0, 7, 0, 1, 5,
         7, 6, 7, 7,
-        7, 7, 7, 7,
-        7, 7,
+        7, 7, 7, 7, 7, 7,
     ]
     expected_parent_forms = [
-        0, 0, 0, 0, 0, 0, 1, 1, 0,
+        0, 0, 0, 0, 0, 1, 1,
         0, 2, 0, 0,
-        0, 0, 0, 0,
-        0, 0,
+        0, 0, 0, 0, 0, 0,
     ]
     if allowed_modes is not None and allowed_modes != expected_modes:
         errors.append("F1 executable kind/body-mode matrix drifted")
@@ -8128,15 +7922,15 @@ def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], in
                 f"expected only {expected!r}")
 
     table_mutations = (
-        ("DropGlue body-mode", "EXECUTABLE_KIND_ALLOWED_MODE_TAGS", 13, 0,
+        ("DropGlue body-mode", "EXECUTABLE_KIND_ALLOWED_MODE_TAGS", 10, 0,
          "F1 executable kind/body-mode matrix drifted"),
-        ("dict-helper ref form", "EXECUTABLE_KIND_REF_FORM_TAGS", 11, 0,
+        ("dict-helper ref form", "EXECUTABLE_KIND_REF_FORM_TAGS", 8, 0,
          "F1 executable kind/ref-form matrix drifted"),
         ("Fn namespace", "EXECUTABLE_KIND_NAMESPACE_TAGS", 0, 5,
          "F1 executable kind/namespace matrix drifted"),
-        ("handler executable role", "EXECUTABLE_KIND_PATH_ROLE_TAGS", 7, 1,
+        ("handler executable role", "EXECUTABLE_KIND_PATH_ROLE_TAGS", 6, 1,
          "F1 executable kind/path-role matrix drifted"),
-        ("lambda parent form", "EXECUTABLE_KIND_PARENT_FORM_TAGS", 6, 0,
+        ("lambda parent form", "EXECUTABLE_KIND_PARENT_FORM_TAGS", 5, 0,
          "F1 executable kind/parent-form matrix drifted"),
         ("lambda-capture role", "BINDER_KIND_PATH_ROLE_TAGS", 11, 1,
          "F1 binder kind/path-role matrix drifted"),
@@ -10172,7 +9966,7 @@ F2_TRAIT_METHOD_IDENTITY_PATHS = {
     "dict": REPO / "compiler" / "dict_lower.ring",
     "codegen": REPO / "compiler" / "codegen_c_expr.ring",
 }
-F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 42
+F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 41
 
 
 def _trait_method_function_body(
@@ -10372,7 +10166,7 @@ def trait_method_identity_u1c_contract_errors(
         errors.append(method_def_error)
     elif method_def_fields is not None and [
             name for _, name in method_def_fields] != [
-                "name", "method_ref", "ty", "has_default",
+                "name", "method_ref", "ty", "effect_schema",
                 "param_mutabilities", "method_type_params"]:
         errors.append("TraitMethodDef exact ref inventory drifted")
     trait_def_fields, trait_def_error = _f0_struct_fields(env, "TraitDef")
@@ -10381,7 +10175,8 @@ def trait_method_identity_u1c_contract_errors(
     elif trait_def_fields is not None and [
             name for _, name in trait_def_fields] != [
                 "name", "owner_ref", "type_params", "type_param_vars",
-                "methods", "supertraits", "assoc_types", "contract"]:
+                "self_type_var_id", "methods", "supertraits", "assoc_types",
+                "contract"]:
         errors.append("TraitDef registered owner inventory drifted")
 
     register_body = _trait_method_function_body(
@@ -10430,8 +10225,9 @@ def trait_method_identity_u1c_contract_errors(
         errors.append(hmethod_error)
     elif hmethod_fields is not None and [
             name for _, name in hmethod_fields] != [
-                "name", "method_ref", "params", "return_type", "effects",
-                "has_default", "body"]:
+                "name", "method_ref", "type_params", "type_formals",
+                "params", "return_type", "effects",
+                "executable_ref", "effect_ctx"]:
         errors.append("HTraitMethod exact ref inventory drifted")
     validate_body = _trait_method_function_body(
         sources, "hir", "validate_hir_decls", errors)
@@ -10462,8 +10258,8 @@ def trait_method_identity_u1c_contract_errors(
         "source_member_index < method_index",
         "trait_method_ref_name(m.method_ref) != m.name",
         "ast_methods.get(source_member_index)",
-        "Decl::Fn { name: source_name, is_abstract, .. }",
-        "source_name != m.name || m.has_default == is_abstract",
+        "Decl::Fn { name: source_name, .. }",
+        "source_name != m.name",
         "source_param.name", "source_param.is_mutable",
         "method_ref: m.method_ref", "owner_ref: trait_def.owner_ref"):
         if token not in decl_body:
@@ -10480,7 +10276,7 @@ def trait_method_identity_u1c_contract_errors(
         visitor_body = _trait_method_function_body(
             sources, source_name, function_name, errors)
         for token in (
-            "owner_ref: trait_owner_ref", "method_ref: tm.method_ref"):
+            "owner_ref: trait_owner_ref", "methods: methods"):
             if token not in visitor_body:
                 errors.append(
                     f"{source_name} trait transport misses {token!r}")
@@ -10711,7 +10507,7 @@ F2_IMPL_PROVIDER_PATHS = {
     "decl": REPO / "compiler" / "infer_decl.ring",
     "codegen": REPO / "compiler" / "codegen_c_expr.ring",
 }
-F2_IMPL_PROVIDER_MUTATION_COUNT = 54
+F2_IMPL_PROVIDER_MUTATION_COUNT = 42
 
 
 def impl_provider_u1c1_contract_errors(
@@ -10761,9 +10557,6 @@ def impl_provider_u1c1_contract_errors(
         ("SourceImplProviderFact", [
             "file_key", "frame_index", "decl_index", "provider_ref",
             "methods"]),
-        ("DelegateProviderFact", [
-            "file_key", "frame_index", "parent_decl_index",
-            "source_member_index", "parent_provider_ref", "provider_ref"]),
         ("ExplicitDerivedProviderFact", ["attr_index", "provider_ref"]),
         ("NominalDerivedProviderPlanFact", [
             "file_key", "frame_index", "decl_index",
@@ -10787,8 +10580,7 @@ def impl_provider_u1c1_contract_errors(
         assert fields is not None
         names = [name for _, name in fields]
         for required in (
-                "source_impl_providers", "delegate_providers",
-                "nominal_derived_providers"):
+                "source_impl_providers", "nominal_derived_providers"):
             if required not in names:
                 errors.append(f"{container} loses {required}")
 
@@ -10802,14 +10594,6 @@ def impl_provider_u1c1_contract_errors(
     ):
         if token not in source_provider_body:
             errors.append(f"resolver provider producer misses {token!r}")
-    delegate_provider_body = _trait_method_function_body(
-        sources, "resolver", "source_delegate_provider_ref", errors)
-    for token in (
-        '"decl:${decl_index}", "delegate:${source_member_index}"',
-        "path_role_synthetic()", "impl_provider_kind_delegate()",
-    ):
-        if token not in delegate_provider_body:
-            errors.append(f"delegate provider producer misses {token!r}")
     nominal_body = _trait_method_function_body(
         sources, "resolver", "collect_nominal_derived_provider_fact", errors)
     for token in (
@@ -10823,25 +10607,14 @@ def impl_provider_u1c1_contract_errors(
             errors.append(f"nominal derive producer misses {token!r}")
     impl_fact_body = _trait_method_function_body(
         sources, "resolver", "collect_impl_provider_facts", errors)
-    for token in (
-        '"decl:${decl_index}", "impl"',
-        "for source_member_index in 0..methods.len()",
-        "some(Decl::Delegate { .. })",
-        "parent_provider_ref: source",
-        "source_delegate_provider_ref(",
-    ):
+    for token in ('"decl:${decl_index}", "impl"',):
         if token not in impl_fact_body:
-            errors.append(f"source/delegate provider producer misses {token!r}")
+            errors.append(f"source provider producer misses {token!r}")
     for function_name, tokens in (
         ("append_source_impl_provider_fact", (
             "existing.file_key == fact.file_key",
             "existing.frame_index == fact.frame_index",
             "existing.decl_index == fact.decl_index")),
-        ("append_delegate_provider_fact", (
-            "existing.file_key == fact.file_key",
-            "existing.frame_index == fact.frame_index",
-            "existing.parent_decl_index == fact.parent_decl_index",
-            "existing.source_member_index == fact.source_member_index")),
         ("append_nominal_derived_provider_fact", (
             "existing.file_key == fact.file_key",
             "existing.frame_index == fact.frame_index",
@@ -10856,7 +10629,6 @@ def impl_provider_u1c1_contract_errors(
         sources, "resolver", "resolve_namespace_plan", errors)
     for token in (
         "append_source_impl_provider_fact(fact, source_impl_providers)",
-        "append_delegate_provider_fact(fact, delegate_providers)",
         "append_nominal_derived_provider_fact(",
     ):
         if token not in resolve_body:
@@ -10869,12 +10641,14 @@ def impl_provider_u1c1_contract_errors(
         ("EnumDef", [
             "name", "owner_ref", "type_params", "type_param_vars",
             "variants", "variant_refs", "variant_field_refs",
-            "derive_attrs", "derived_provider_plan", "variant_index"]),
+            "variant_field_effect_schemas", "derive_attrs",
+            "derived_provider_plan", "variant_index"]),
         ("ImplEntry", [
             "trait_name", "target_type_name", "type_params",
             "type_param_vars", "predicates", "method_names", "assoc_types",
-            "method_schemes", "method_refs", "method_intrinsics",
-            "provider_ref", "trait_ref", "owner_ref", "delegate_plan",
+            "assoc_type_effect_schemas", "method_schemes", "method_refs",
+            "method_intrinsics", "method_resource_contracts",
+            "provider_ref", "trait_ref", "owner_ref",
             "span"]),
     )
     for struct_name, expected_fields in env_schemas:
@@ -10933,13 +10707,6 @@ def impl_provider_u1c1_contract_errors(
         ("commit_source_impl_provider_fact", (
             "source_impl_provider_fact_same(existing, fact)",
             "if matches != 1")),
-        ("peek_delegate_provider_fact", (
-            "fact.parent_decl_index == parent_decl_index",
-            "fact.source_member_index == source_member_index",
-            "missing delegate fact")),
-        ("commit_delegate_provider_fact", (
-            "delegate_provider_fact_same(existing, fact)",
-            "if matches != 1")),
         ("peek_nominal_derived_provider_fact", (
             "fact.explicit_providers.len() != attr_count",
             "explicit.attr_index != index", "derive attribute order changed")),
@@ -10957,7 +10724,6 @@ def impl_provider_u1c1_contract_errors(
         sources, "ctx", "close_struct_identity_ledger", errors)
     for token in (
         "ctx.source_impl_provider_unconsumed.len() != 0",
-        "ctx.delegate_provider_unconsumed.len() != 0",
         "ctx.nominal_derived_provider_unconsumed.len() != 0",
     ):
         if token not in close_body:
@@ -10996,29 +10762,6 @@ def impl_provider_u1c1_contract_errors(
         if ("consume_nominal_derived_provider_plan(" not in body or
                 "derived_provider_plan: some(derived_provider_plan)" not in body):
             errors.append(f"{function_name} loses the nominal provider plan")
-    phase3_body = _trait_method_function_body(
-        sources, "register", "register_phase3_delegate", errors)
-    for token in (
-        "peek_delegate_provider_fact(",
-        "commit_delegate_provider_fact(ctx, fact)",
-        "find_impl_by_provider(", "parent_provider_ref",
-        "impl_provider_ref_same(",
-        "fact.source_member_index != source_member_index",
-        "fact.provider_ref",
-    ):
-        if token not in phase3_body:
-            errors.append(f"delegate phase3 provider closure misses {token!r}")
-    for forbidden in ("impl_decl_origin(", "find_impl_by_origin("):
-        if forbidden in phase3_body:
-            errors.append(f"delegate phase3 retained fallback {forbidden!r}")
-    for function_name in (
-            "register_nonproject_phase3_delegate",
-            "register_project_phase3_delegate"):
-        body = _trait_method_function_body(
-            sources, "register", function_name, errors)
-        if ("enter_struct_identity_child_frame(ctx, item.decl_index)" not in body or
-                "exit_struct_identity_frame(ctx)" not in body):
-            errors.append(f"{function_name} does not pair provider frames")
 
     builtin_provider = _trait_method_function_body(
         sources, "builtins", "builtin_impl_provider", errors)
@@ -11146,11 +10889,6 @@ def impl_provider_u1c1_mutation_errors(
         ("source module frame", "resolver", "source_provider_ref",
          'frame.file_key, "frame:${frame.frame_index}"',
          'frame.file_key, "frame:0"'),
-        ("delegate raw member", "resolver", "source_delegate_provider_ref",
-         '"decl:${decl_index}", "delegate:${source_member_index}"',
-         '"decl:${decl_index}", "delegate:0"'),
-        ("delegate provider kind", "resolver", "source_delegate_provider_ref",
-         "impl_provider_kind_delegate()", "impl_provider_kind_derived()"),
         ("implicit derive site", "resolver", "collect_nominal_derived_provider_fact",
          '"decl:${decl_index}", "derive:implicit"',
          '"decl:${decl_index}", "derive:attr:0"'),
@@ -11159,30 +10897,19 @@ def impl_provider_u1c1_mutation_errors(
          '"decl:${decl_index}", "derive:implicit"'),
         ("explicit attr order", "resolver", "collect_nominal_derived_provider_fact",
          "attr_index: attr_index", "attr_index: 0"),
-        ("delegate parent provider", "resolver", "collect_impl_provider_facts",
-         "parent_provider_ref: source", "parent_provider_ref: provider_ref"),
         ("source fact exact frame", "resolver", "append_source_impl_provider_fact",
          "existing.frame_index == fact.frame_index", "true"),
-        ("delegate fact exact member", "resolver", "append_delegate_provider_fact",
-         "existing.source_member_index == fact.source_member_index", "true"),
         ("nominal fact exact decl", "resolver", "append_nominal_derived_provider_fact",
          "existing.decl_index == fact.decl_index", "true"),
         ("resolved source fact dedupe", "resolver", "resolve_namespace_plan",
          "append_source_impl_provider_fact(fact, source_impl_providers)",
          "source_impl_providers.push(fact)"),
-        ("resolved delegate fact dedupe", "resolver", "resolve_namespace_plan",
-         "append_delegate_provider_fact(fact, delegate_providers)",
-         "delegate_providers.push(fact)"),
         ("resolved nominal fact dedupe", "resolver", "resolve_namespace_plan",
          "append_nominal_derived_provider_fact(\n                fact, nominal_derived_providers)",
          "nominal_derived_providers.push(fact)"),
         ("source peek declaration", "ctx", "peek_source_impl_provider_fact",
          "fact.decl_index == decl_index", "true"),
         ("source consume once", "ctx", "commit_source_impl_provider_fact",
-         "if matches != 1", "if false"),
-        ("delegate peek member", "ctx", "peek_delegate_provider_fact",
-         "fact.source_member_index == source_member_index", "true"),
-        ("delegate consume once", "ctx", "commit_delegate_provider_fact",
          "if matches != 1", "if false"),
         ("derive attr count", "ctx", "peek_nominal_derived_provider_fact",
          "fact.explicit_providers.len() != attr_count", "false"),
@@ -11192,8 +10919,6 @@ def impl_provider_u1c1_mutation_errors(
          "if matches != 1", "if false"),
         ("close source facts", "ctx", "close_struct_identity_ledger",
          "ctx.source_impl_provider_unconsumed.len() != 0", "false"),
-        ("close delegate facts", "ctx", "close_struct_identity_ledger",
-         "ctx.delegate_provider_unconsumed.len() != 0", "false"),
         ("close derive facts", "ctx", "close_struct_identity_ledger",
          "ctx.nominal_derived_provider_unconsumed.len() != 0", "false"),
         ("method/provider closure", "env", "validate_impl_entry",
@@ -11225,15 +10950,6 @@ def impl_provider_u1c1_mutation_errors(
          "commit_nominal_derived_provider_fact(ctx, fact)", "{}"),
         ("nominal derive attr order", "register", "consume_nominal_derived_provider_plan",
          "value.attr_index != attr_index", "false"),
-        ("delegate typed lookup", "register", "register_phase3_delegate",
-         "find_impl_by_provider(", "find_impl_by_origin("),
-        ("delegate parent relation", "register", "register_phase3_delegate",
-         "impl_provider_ref_same(\n                            fact.parent_provider_ref, parent_provider_ref)",
-         "true"),
-        ("nonproject provider frame", "register", "register_nonproject_phase3_delegate",
-         "enter_struct_identity_child_frame(ctx, item.decl_index)", "{}"),
-        ("project provider frame", "register", "register_project_phase3_delegate",
-         "exit_struct_identity_frame(ctx)", "{}"),
         ("builtin provider domain", "builtins", "builtin_impl_provider",
          "impl_provider_kind_builtin()", "impl_provider_kind_derived()"),
         ("builtin string path", "builtins", "builtin_impl_provider",
@@ -11302,7 +11018,7 @@ F2_IMPL_PROVIDER_CARRIER_PATHS = {
     "core_expr": REPO / "compiler" / "core_expr.ring",
     "codegen": REPO / "compiler" / "codegen_c.ring",
 }
-F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 17
+F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 15
 F2_IMPL_PROVIDER_CARRIER_SCOPE_COUNT = 1
 
 
@@ -11344,17 +11060,6 @@ def impl_provider_u1c2_contract_errors(
     ):
         if token not in source_body:
             errors.append(f"source impl carrier misses {token!r}")
-    delegate_body = _trait_method_function_body(
-        sources, "decl", "expand_delegate_impls", errors)
-    for token in (
-        "let selected_delegate_owner = match delegate_impl",
-        "selected_delegate_owner.provider_ref",
-        "provider_ref: selected_delegate_provider",
-        "trait_ref: selected_delegate_owner.trait_ref",
-    ):
-        if token not in delegate_body:
-            errors.append(f"delegate impl carrier misses {token!r}")
-
     checker = sources["checker"]
     carrier_body = _trait_method_function_body(
         sources, "checker", "validate_impl_carriers", errors)
@@ -11445,7 +11150,6 @@ def impl_provider_u1c2_contract_errors(
         sources, "core", "assemble_decls", errors)
     for token in (
             "HDecl::Impl {",
-            "owner_ref, delegate_plan, default_specializations,",
             "assembly.impls.push(make_core_impl_metadata(",
             "owner_ref, method_refs, bindings"):
         if token not in core_assembly:
@@ -11479,11 +11183,6 @@ def impl_provider_u1c2_mutation_errors(
          "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
         ("source trait", "decl", "check_impl_decl_canonical",
          "trait_ref: impl_owner.trait_ref", "trait_ref: none"),
-        ("delegate provider", "decl", "expand_delegate_impls",
-         "provider_ref: selected_delegate_provider",
-         "provider_ref: wrong_provider_ref"),
-        ("delegate trait", "decl", "expand_delegate_impls",
-         "trait_ref: selected_delegate_owner.trait_ref", "trait_ref: none"),
         ("checker provider lookup", "checker", "validate_impl_carriers",
          "find_impl_by_provider(", "find_impl_by_origin("),
         ("collector provider", "checker", "collect_module_impl_facts",
@@ -11908,263 +11607,6 @@ def derived_impl_carrier_u1c4_source_errors() -> List[str]:
     return errors
 
 
-F2_DELEGATE_PROVIDER_PLAN_PATHS = {
-    "env": REPO / "compiler" / "env.ring",
-    "register": REPO / "compiler" / "infer_register.ring",
-    "decl": REPO / "compiler" / "infer_decl.ring",
-    "builtins": REPO / "compiler" / "builtins.ring",
-    "derive": REPO / "compiler" / "derive.ring",
-    "checker": REPO / "compiler" / "checker.ring",
-}
-F2_DELEGATE_PROVIDER_PLAN_MUTATION_COUNT = 33
-
-
-def delegate_provider_plan_u1c3_contract_errors(
-    sources: Mapping[str, str],
-) -> List[str]:
-    errors: List[str] = []
-    env = sources["env"]
-    register = sources["register"]
-    decl = sources["decl"]
-
-    child_fields, child_error = _f0_struct_fields(
-        env, "DelegateChildProviderPlan")
-    if child_error:
-        errors.append(child_error)
-    elif child_fields is not None and [
-            name for _, name in child_fields] != [
-                "source_member_index", "provider_ref",
-                "produced_owner_count", "had_semantic_error"]:
-        errors.append("delegate child provider plan inventory drifted")
-    elif child_fields is not None and any(
-            is_public for is_public, _ in child_fields):
-        errors.append("delegate child provider plan exposes forgeable fields")
-    state_fields, state_error = _f0_struct_fields(env, "DelegatePlanState")
-    if state_error:
-        errors.append(state_error)
-    elif state_fields is not None:
-        if [name for _, name in state_fields] != ["value"]:
-            errors.append("delegate plan state inventory drifted")
-        if any(is_public for is_public, _ in state_fields):
-            errors.append("delegate plan state exposes forgeable fields")
-    for token in (
-            "DelegateNotApplicable", "DelegatePending",
-            "DelegateFinal(List<DelegateChildProviderPlan>)"):
-        if token not in env:
-            errors.append(f"delegate plan state misses {token!r}")
-    child_constructor = _trait_method_function_body(
-        sources, "env", "make_delegate_child_provider_plan", errors)
-    for token in (
-        "source_member_index < 0", "produced_owner_count < 0",
-        "produced_owner_count == 0 && !had_semantic_error",
-        "impl_provider_kind_delegate()",
-        "produced_owner_count: produced_owner_count",
-        "had_semantic_error: had_semantic_error",
-    ):
-        if token not in child_constructor:
-            errors.append(f"delegate child constructor misses {token!r}")
-    final_constructor = _trait_method_function_body(
-        sources, "env", "delegate_plan_final", errors)
-    final_accessor = _trait_method_function_body(
-        sources, "env", "delegate_plan_children", errors)
-    if "copy_delegate_child_provider_plans(children)" not in final_constructor:
-        errors.append("delegate Final constructor aliases caller list")
-    if "copy_delegate_child_provider_plans(children)" not in final_accessor:
-        errors.append("delegate Final accessor exposes mutable list")
-
-    state_same = _trait_method_function_body(
-        sources, "env", "delegate_plan_state_same", errors)
-    for token in (
-        "DelegateNotApplicable", "DelegatePending", "DelegateFinal(a)",
-        "(DelegatePlanStateValue::DelegatePending,\n"
-        "         DelegatePlanStateValue::DelegatePending) => true",
-        "delegate_child_provider_plan_same(", "_ => false",
-    ):
-        if token not in state_same:
-            errors.append(f"delegate plan equality misses {token!r}")
-    child_same = _trait_method_function_body(
-        sources, "env", "delegate_child_provider_plan_same", errors)
-    for token in (
-        "left.source_member_index == right.source_member_index",
-        "impl_provider_ref_same(left.provider_ref, right.provider_ref)",
-        "left.produced_owner_count == right.produced_owner_count",
-        "left.had_semantic_error == right.had_semantic_error",
-    ):
-        if token not in child_same:
-            errors.append(f"delegate child equality misses {token!r}")
-    final_same = _trait_method_function_body(
-        sources, "env", "impl_entry_final_same", errors)
-    if "delegate_plan_state_same(left.delegate_plan, right.delegate_plan)" not in final_same:
-        errors.append("full ImplEntry equality loses delegate plan state")
-
-    validate = _trait_method_function_body(
-        sources, "env", "validate_impl_entry", errors)
-    for token in (
-        "match (entry.provider_ref, entry.delegate_plan.value)",
-        "DelegatePlanStateValue::DelegatePending",
-        "impl_provider_kind_source()",
-        "pending delegate plan parent is not Source",
-        "DelegatePlanStateValue::DelegateFinal(children)",
-        "child.produced_owner_count < 0",
-        "child.produced_owner_count == 0 &&",
-        "!child.had_semantic_error",
-        "child.source_member_index <= previous_delegate_index",
-        "impl_provider_kind_delegate()",
-        "impl_provider_ref_same(",
-        "seen_provider, child.provider_ref",
-        "duplicate delegate child provider",
-        "Source provider has no final delegate plan",
-        "provider/delegate plan state mismatch",
-    ):
-        if token not in validate:
-            errors.append(f"delegate plan validator misses {token!r}")
-    finalize = _trait_method_function_body(
-        sources, "env", "finalize_delegate_provider_plan", errors)
-    for token in (
-        "provider, parent_provider_ref",
-        "entry.trait_ref, trait_ref",
-        "!delegate_plan_is_pending(entry.delegate_plan)",
-        "updated.delegate_plan = delegate_plan_final(children)",
-        "validate_impl_entry(reg, updated)", "if matches != 1",
-    ):
-        if token not in finalize:
-            errors.append(f"delegate plan finalizer misses {token!r}")
-    close = _trait_method_function_body(
-        sources, "env", "assert_no_pending_delegate_plans", errors)
-    if ("delegate_plan_is_pending(owner.delegate_plan)" not in close or
-            "pending delegate plan reached close" not in close):
-        errors.append("delegate plan close does not reject Pending")
-    query = _trait_method_function_body(
-        sources, "env", "find_impls_by_provider", errors)
-    for token in (
-        "reg.trait_impls.get(type_name)",
-        "candidate, provider_ref",
-        "found.push(entry)",
-    ):
-        if token not in query:
-            errors.append(f"delegate actual-owner query misses {token!r}")
-
-    source_register = _trait_method_function_body(
-        sources, "register", "register_impl", errors)
-    for token in (
-        "let mut has_delegate = false",
-        "some(Decl::Delegate { .. }) => { has_delegate = true }",
-        "delegate_plan_pending()", "delegate_plan_final([])",
-    ):
-        if token not in source_register:
-            errors.append(f"source delegate plan freeze misses {token!r}")
-    for forbidden in (
-            "peek_delegate_provider_fact", "commit_delegate_provider_fact"):
-        if forbidden in source_register:
-            errors.append(f"source phase consumed delegate fact early: {forbidden}")
-    phase3 = _trait_method_function_body(
-        sources, "register", "register_phase3_delegate", errors)
-    for token in (
-        "peek_delegate_provider_fact(",
-        "commit_delegate_provider_fact(ctx, fact)",
-        "fact.parent_provider_ref, parent_provider_ref",
-        "find_impl_by_provider(",
-        "let outcome = some(register_delegate(",
-        "let had_semantic_error = outcome.unwrap_or(true)",
-        "let produced_owner_count = find_impls_by_provider(",
-        "make_delegate_child_provider_plan(",
-        "produced_owner_count,",
-        "had_semantic_error",
-        "finalize_delegate_provider_plan(",
-        "ctx.env.trait_reg, canonical_target,",
-        "canonical_trait_ref, parent_provider_ref, child_plans",
-        "catch { _ => none }",
-    ):
-        if token not in phase3:
-            errors.append(f"phase3 delegate finalization misses {token!r}")
-    finalize_at = phase3.find("finalize_delegate_provider_plan(")
-    register_at = phase3.find("some(register_delegate(")
-    count_at = phase3.find("find_impls_by_provider(")
-    if min(finalize_at, register_at, count_at) < 0 or not (
-            register_at < count_at < finalize_at):
-        errors.append("phase3 delegate outcome/finalization order drifted")
-    register_delegate = _trait_method_function_body(
-        sources, "register", "register_delegate", errors)
-    register_traits = _trait_method_function_body(
-        sources, "register", "register_delegate_traits", errors)
-    if register_delegate.count("had_semantic_error = true") < 3:
-        errors.append("register_delegate does not return local error outcome")
-    if register_traits.count("had_semantic_error = true") < 5:
-        errors.append("register_delegate_traits loses report-only errors")
-    if ("had_semantic_error = true\n"
-            "                        let _ = type_error(ctx.sink, E0509," not in
-            register_traits):
-        errors.append("manual delegate conflict loses local error outcome")
-    if register.count("assert_no_pending_delegate_plans(ctx.env.trait_reg)") != 3:
-        errors.append("registration close pending-plan census drifted")
-
-    for source_name in ("builtins", "derive"):
-        if "delegate_plan: delegate_plan_not_applicable()" not in sources[source_name]:
-            errors.append(f"{source_name} owner can publish delegate plan")
-    if "delegate_plan: delegate_plan_not_applicable()" not in register_traits:
-        errors.append("generated delegate owner is not NotApplicable")
-
-    expand = _trait_method_function_body(
-        sources, "decl", "expand_delegate_impls", errors)
-    for token in (
-        "match outer_impl",
-        "find_impl_by_provider(",
-        "outer_trait_ref, outer_provider_ref",
-        "find_delegate_child_provider_plan(",
-        "find_impls_by_provider(",
-        "delegate_child_provider_ref(child_plan)",
-        "delegate_child_provider_produced_owner_count(child_plan)",
-        "delegate_child_provider_had_semantic_error(child_plan)",
-        "produced_owners.len() != produced_owner_count",
-        "child provider owner count drifted",
-        "if produced_owner_count == 0",
-        "if had_semantic_error { return result }",
-        "clean child provider produced no owners",
-        "for produced_owner in produced_owners",
-        "produced_owner.trait_ref", "child trait identity changed",
-        "field trait identity changed",
-    ):
-        if token not in expand:
-            errors.append(f"delegate HIR actual-owner query misses {token!r}")
-    for forbidden in (
-            "trait_names", "let delegate_impl = find_impl(",
-            "impl_decl_origin(", "impl_provider_kind_delegate()",
-            "ctx.sink.has_errors()"):
-        if forbidden in expand:
-            errors.append(f"delegate HIR retained fallback {forbidden!r}")
-    for function_name in (
-            "check_mod_decl_body", "check_one_decl",
-            "check_one_decl_with_rebind"):
-        body = _trait_method_function_body(
-            sources, "decl", function_name, errors)
-        for token in (
-            "for source_member_index in 0..methods.len()",
-            "ctx, hd, source_member_index"):
-            if token not in body:
-                errors.append(f"{function_name} loses raw delegate index")
-
-    checker_validate = _trait_method_function_body(
-        sources, "checker", "validate_impl_carriers", errors)
-    if "allow_incomplete" in checker_validate or (
-            "none => panic(\"impl HIR: typed owner is missing\")" not in checker_validate):
-        errors.append("checker allows typed HDecl owner miss under unrelated errors")
-    checker_collect = _trait_method_function_body(
-        sources, "checker", "collect_module_impl_facts", errors)
-    if "allow_incomplete" in checker_collect or (
-            "none => panic(" not in checker_collect):
-        errors.append("ModuleImplFact collector allows typed owner miss")
-    for function_name in ("check", "check_module"):
-        body = _trait_method_function_body(
-            sources, "checker", function_name, errors)
-        collect_start = body.find("collect_module_impl_facts(")
-        if collect_start >= 0:
-            collect_slice = body[collect_start:collect_start + 180]
-            if "sink.has_errors()" in collect_slice:
-                errors.append(
-                    f"{function_name} routes global error state into fact collection")
-    return errors
-
-
 F2_U1C0_PATHS = {
     "hir": REPO / "compiler" / "hir.ring",
     "env": REPO / "compiler" / "env.ring",
@@ -12383,7 +11825,6 @@ def impl_export_closure_contract_errors(
                 "method_core_map_same(left.method_schemes, right.method_schemes)",
                 "method_ref_map_same(left.method_refs, right.method_refs)",
                 "method_intrinsic_map_same(",
-                "delegate_plan_state_same(left.delegate_plan, right.delegate_plan)",
             )):
         errors.append("impl export closure: shared final-owner equality is incomplete")
 
@@ -12801,7 +12242,6 @@ def impl_predicate_u1c0_contract_errors(
         "BoundShapeContext::ProtocolImplBound",
         "fn collect_supertraits_dfs",
         "impl_owner_fn_bounds",
-        "merge_delegate_owner_predicates",
     ):
         if token not in register_source:
             errors.append(f"U1c0 registration missing {token!r}")
@@ -12813,8 +12253,6 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 supertrait closure still uses LIFO authority")
     if "ctx, mtps, BoundShapeContext::ImplMethodBound, method_span" not in register_source:
         errors.append("U1c0 impl method bound gate is not attached to method registration")
-    if "some(found) => merge_delegate_owner_predicates(" not in register_source:
-        errors.append("U1c0 delegate does not merge the selected field owner")
     canonical_body, canonical_error = extract_ring_function_body(
         register_source, "register_impl_canonical")
     if canonical_error:
@@ -12963,11 +12401,10 @@ F2_U1C0_SOURCE_CONTRACT_MUTATIONS = (
     ("register", "BoundShapeContext::ProtocolImplBound", "BoundShapeContext::ImplOwnerBound"),
     ("register", "provider_ref: some(provider_ref),\n            trait_ref: resolved_trait_ref,\n            owner_ref: some(owner_ref)", "provider_ref: none,\n            trait_ref: resolved_trait_ref,\n            owner_ref: some(owner_ref)"),
     ("decl", "let impl_bounds = impl_owner_fn_bounds(impl_owner)", "let impl_bounds: List<FnBoundsEntry> = []"),
-    ("register", "some(found) => merge_delegate_owner_predicates(", "some(found) => freeze_impl_predicate_set("),
     ("env", "entry.method_refs.len() != entry.method_schemes.len()", "false"),
     ("env", "impl_owner_ref_provider(owner), provider", "provider, provider"),
     ("builtins", "method_intrinsics: map_clone(method_intrinsics),\n        provider_ref: some(provider_ref)", "method_intrinsics: map_clone(method_intrinsics),\n        provider_ref: none"),
-    ("builtins", "trait_ref: trait_ref,\n        owner_ref: some(owner_ref),\n        delegate_plan", "trait_ref: trait_ref,\n        owner_ref: none,\n        delegate_plan"),
+    ("builtins", "trait_ref: trait_ref,\n        owner_ref: some(owner_ref)", "trait_ref: trait_ref,\n        owner_ref: none"),
     ("builtins", "method_schemes: map_clone(cores),\n        method_refs: method_refs,\n        method_intrinsics: map_clone(method_intrinsics)", "method_schemes: map_clone(cores),\n        method_refs: map_new(),\n        method_intrinsics: map_clone(method_intrinsics)"),
     ("builtins", "pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {", "pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {\n    register_list_hof(env, sink)"),
     ("builtins", "register_option_hof(env, sink)", "register_list_hof(env, sink)"),
@@ -13286,9 +12723,6 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("bound method evidence tag", "infer",
          "bound_evidence = some(DictRef::Simple(",
          "bound_evidence = some(DictRef::Static("),
-        ("delegated bound evidence tag", "infer_decl",
-         "DictRef::Static(dict_name), tm.ty",
-         "DictRef::Simple(dict_name), tm.ty"),
         ("FieldAction bound base tag", "derive",
          "base_dict: DictRef::Simple(\n"
          "                    trait_bound_param_name(param_name, trait_name))",
@@ -13421,10 +12855,8 @@ def identity_checkpoint_source_errors() -> List[str]:
          "candidate not evaluated\""),
         ("or-pattern shared slot", "cexpr", "bind_c_root_pattern_after_success(",
          "bind_c_nested_pattern("),
-        ("trait default HParam identity", "infer_decl", "def_id: some(trait_param_def_id)",
+        ("trait method HParam identity", "infer_decl", "def_id: some(trait_param_def_id)",
          "def_id: none"),
-        ("trait default body identity", "infer_decl", "def_id: some(exact_trait_def_id)",
-         "def_id: some(ctx.env.fresh_def_id())"),
         ("function registration DefId authority", "infer_decl",
          "let fn_def_id = match registration_scheme {\n"
          "        some(scheme) => scheme.def_id,\n"
@@ -13760,24 +13192,6 @@ def ownership_cutover_source_errors() -> List[str]:
             sources["cli"] + sources["project"]):
         errors.append("ownership cutover: unsupported mutation did not fail loud")
 
-    default_fields, default_fields_error = _f0_struct_fields(
-        sources["hir_exact"], "HDefaultSpecializationPlan")
-    if default_fields_error:
-        errors.append(default_fields_error)
-    elif default_fields is not None and [name for _, name in default_fields] != [
-            "owner", "generated_method", "generated_executable",
-            "source_method", "default_executable", "source_bound_traits",
-            "generated_type_var_ids", "generated_type_formals",
-            "dictionary_constructions", "parameter_types",
-            "parameter_mutabilities", "binders", "result_type", "effects",
-            "effect_ctx", "forward_call"]:
-        errors.append("default specialization exact carrier drifted")
-    if "trait_method.param_mutabilities, binders" not in sources["infer_decl"]:
-        errors.append("default specialization lost registered mutabilities")
-    if "h_default_specialization_parameter_mutabilities(plan)" not in (
-            sources["core"]):
-        errors.append("Core default elaboration guessed parameter mutability")
-
     guard_errors = preacceptance_source_contract_errors(sources)
     errors.extend(guard_errors)
     if not guard_errors:
@@ -13922,7 +13336,7 @@ def identity_checkpoint_errors() -> Tuple[List[str], str]:
             f"{IDENTITY_EVIDENCE_ROOT_ENV}=invalid")
     assert evidence_root is not None
     evidence_log: List[str] = []
-    errors.extend(default_body_identity_generated_c_errors(
+    errors.extend(callable_identity_generated_c_errors(
         candidate, evidence_root, evidence_log))
     post_candidate, post_digest, post_error = (
         identity_checkpoint_candidate_identity())
@@ -13956,7 +13370,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         provider_identity_errors = impl_provider_u1c1_source_errors()
         detail = (
             f"isolated_mutations={F2_IMPL_PROVIDER_MUTATION_COUNT}; "
-            "provider_kinds=4; candidate_behavior=not_evaluated; "
+            "provider_kinds=3; candidate_behavior=not_evaluated; "
             "behavior_gate=aggregate_source_built_packet")
         collector.add(TestResult(
             TestResult.PASS if not provider_identity_errors else TestResult.FAIL,
@@ -13990,20 +13404,6 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             TestResult.PASS if not derived_carrier_errors else TestResult.FAIL,
             suite, derived_carrier_label,
             "; ".join([detail, *derived_carrier_errors])))
-
-    delegate_plan_label = "compiler.delegate_provider_plan_u1c3_source_contract"
-    if matches_filter(delegate_plan_label, name_filter):
-        delegate_plan_errors = delegate_provider_plan_u1c3_source_errors()
-        if not delegate_plan_errors:
-            delegate_plan_errors.extend(
-                delegate_provider_plan_u1c3_fixture_errors(ring_exe))
-        detail = (
-            f"isolated_mutations={F2_DELEGATE_PROVIDER_PLAN_MUTATION_COUNT}; "
-            "proper_fixtures=5; candidate_behavior=deferred_to_aggregate")
-        collector.add(TestResult(
-            TestResult.PASS if not delegate_plan_errors else TestResult.FAIL,
-            suite, delegate_plan_label,
-            "; ".join([detail, *delegate_plan_errors])))
 
     trait_identity_label = "compiler.trait_method_identity_u1c_source_contract"
     if matches_filter(trait_identity_label, name_filter):

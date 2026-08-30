@@ -343,7 +343,7 @@
     },
     {
       "feature_id": "HDecl.Impl",
-      "evidence": ["tests/cases/golden/trait_default_method.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step5.ring"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -367,11 +367,11 @@
     },
     {
       "feature_id": "HDecl.Trait",
-      "evidence": ["tests/cases/golden/trait_default_method.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step5.ring"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Trait declarations, defaults, and dispatch execute."
+      "reason": "Signature-only trait declarations and explicit implementation dispatch execute."
     },
     {
       "feature_id": "HDecl.ExternFn",
@@ -558,10 +558,6 @@
         "tests/cases/iterator.ring",
         "tests/cases/iterator_lowering_control.ring",
         "tests/cases/iterator_lowering_conditional_bound.ring",
-        "tests/cases/iterator_lowering_delegate.ring",
-        "tests/cases/iterator_lowering_delegate_concrete_bound.ring",
-        "tests/cases/iterator_lowering_delegate_generic_instances.ring",
-        "tests/cases/iterator_lowering_delegate_nested_bound.ring",
         "tests/cases/iterator_lowering_effect.ring",
         "tests/cases/iterator_lowering_effect_source_order.ring",
         "tests/cases/iterator_lowering_generic_instances.ring",
@@ -571,7 +567,7 @@
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
-      "reason": "Non-Range for-in lowers through authoritative typed Iterable/Iterator calls before RC and executes with control-flow, effect, owned-item, Drop-source, enum-shadow, protocol-selection, concrete static-bound discharge, nested wrapped evidence from wrapper bounds, generic delegated instance mapping, and C-native executable evidence."
+      "reason": "Non-Range for-in lowers through authoritative typed Iterable/Iterator calls before RC and executes with control-flow, effect, owned-item, Drop-source, enum-shadow, protocol-selection, concrete static-bound discharge, nested wrapped evidence, and C-native executable evidence."
     },
     {
       "feature_id": "checker.pending_trait_obligation_owner",
@@ -580,15 +576,13 @@
         "tests/cases/golden/pending_trait_obligations.ring",
         "tests/cases/golden/pending_trait_test_owner.ring",
         "tests/cases/golden/pending_trait_effect_annotation.ring",
-        "tests/cases/golden/pending_trait_trait_default_effect_annotation.ring",
-        "tests/cases/golden/pending_trait_trait_defaults.ring",
         "tests/cases/golden/pending_trait_callable_assoc_fixed_point.ring",
         "tests/cases/golden/pending_trait_multi_bound_fixed_point.ring"
       ],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Declaration-owned call obligations retain one monomorphic instantiation through later annotations, tail and explicit returns, branches, lambdas, declared-effect payloads (including trait-default methods), map indexing, methods, consts, trait defaults, effects, and tests before atomically publishing dictionaries; exact DefId/live-scheme callable-value shadows contribute associated-type constraints without publishing evidence, and a single reverse-ordered five-bound chain exercises the finite evidence-site fixed point under the C-native backend."
+      "reason": "Declaration-owned call obligations retain one monomorphic instantiation through later annotations, tail and explicit returns, branches, lambdas, declared-effect payloads, map indexing, methods, consts, effects, and tests before atomically publishing dictionaries; exact DefId/live-scheme callable-value shadows contribute associated-type constraints without publishing evidence, and a single reverse-ordered five-bound chain exercises the finite evidence-site fixed point under the C-native backend."
     },
     {
       "feature_id": "backend.frontend_pending_trait_obligation_fail_closed",
@@ -597,7 +591,6 @@
         "tests/cases/errors/pending_trait_concrete_missing.ring",
         "tests/cases/errors/pending_trait_monomorphic_barrier.ring",
         "tests/cases/errors/pending_trait_multi_bound_atomic.ring",
-        "tests/cases/errors/pending_trait_failure_rollback.ring",
         "tests/cases/errors/pending_trait_extern_validation.ring",
         "tests/cases/errors/pending_trait_extern_late_success.ring",
         "tests/cases/errors/pending_trait_callable_value_no_source.ring"
@@ -605,7 +598,7 @@
       "oracle": "diagnostic-substring",
       "lane": ["check"],
       "status": "covered",
-      "reason": "The checker rejects no-source and concrete missing call evidence, conflicting later uses, partial multi-bound resolution, and invalid extern callers; ordinary callable-value shadows stay diagnostic-silent so final zonk remains the no-source authority, a localized trait-default recovery exercises the hard owner-exit pending-suffix invariant, and a check-only extern case proves late successful validation without requiring a foreign link target."
+      "reason": "The checker rejects no-source and concrete missing call evidence, conflicting later uses, partial multi-bound resolution, and invalid extern callers; ordinary callable-value shadows stay diagnostic-silent so final zonk remains the no-source authority, and a check-only extern case proves late successful validation without requiring a foreign link target."
     },
     {
       "feature_id": "collections.set_struct_eq",
@@ -708,7 +701,7 @@
       "oracle": "handwritten-golden+c-native+project-c",
       "lane": ["e2e-c", "module-c"],
       "status": "covered",
-      "reason": "Single and project compilation share the structured Core to Flow ownership pipeline before materialized HIR reaches the C backend, including generated default, derive, delegate, and handled-effect bodies."
+      "reason": "Single and project compilation share the structured Core to Flow ownership pipeline before materialized HIR reaches the C backend, including explicit impl, derive, and handled-effect bodies."
     },
     {
       "feature_id": "backend.effect_abort_handler_arm",

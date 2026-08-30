@@ -24,9 +24,7 @@ use ir_identity::{SymbolRef, TraitMethodRef, ImplProviderRef, IntrinsicRef,
     handled_effect_ref_same, origin_ref_same,
     symbol_ref_namespace_kind, namespace_kind_same,
     namespace_member, namespace_trait,
-    impl_provider_ref_same, intrinsic_ref_same,
-    impl_provider_ref_kind, impl_provider_kind_same,
-    impl_provider_kind_source, impl_provider_kind_delegate}
+    impl_provider_ref_same, intrinsic_ref_same}
 use ir_inventory::{EffectOperationRef, ExecutableRef, executable_ref_same,
     CallableResourceContractFact,
     callable_resource_contract_parameter_roles,
@@ -53,10 +51,7 @@ use effect_contract::{
     typed_effect_formal_raw_tail, typed_effect_formal_parameter
 }
 use core_type_source::{FlowGenericParamFact,
-    make_flow_generic_param_fact,
-    flow_generic_param_owner, flow_generic_param_index,
-    flow_generic_param_arity, flow_generic_param_bounds,
-    flow_generic_param_fact_same}
+    make_flow_generic_param_fact}
 
 // ============================================================
 // Type Scheme (for let-polymorphism)
@@ -279,7 +274,6 @@ pub struct TraitMethodDef {
     pub method_ref: TraitMethodRef,
     pub ty: Type,
     pub effect_schema: TypedEffectHeaderSchema,
-    pub has_default: Bool,
     pub param_mutabilities: List<Bool>,
     pub method_type_params: List<TypeParam>
 }
@@ -316,13 +310,12 @@ pub struct ImplAssocPredicate {
 pub struct RegisteredTraitMethodContract {
     method_ref: TraitMethodRef,
     signature: Type,
-    has_default: Bool,
     param_mutabilities: List<Bool>
 }
 
 pub fn make_registered_trait_method_contract(
     method_ref: TraitMethodRef, signature: Type,
-    has_default: Bool, param_mutabilities: List<Bool>
+    param_mutabilities: List<Bool>
 ) -> RegisteredTraitMethodContract {
     match signature {
         Type::FnType { params, .. } => if
@@ -333,7 +326,6 @@ pub fn make_registered_trait_method_contract(
     }
     RegisteredTraitMethodContract {
         method_ref: method_ref, signature: signature,
-        has_default: has_default,
         param_mutabilities: param_mutabilities.map(fn(value) { value })
     }
 }
@@ -343,9 +335,6 @@ pub fn registered_trait_method_ref(
 pub fn registered_trait_method_signature(
     value: RegisteredTraitMethodContract
 ) -> Type { value.signature }
-pub fn registered_trait_method_has_default(
-    value: RegisteredTraitMethodContract
-) -> Bool { value.has_default }
 pub fn registered_trait_method_mutabilities(
     value: RegisteredTraitMethodContract
 ) -> List<Bool> { value.param_mutabilities.map(fn(item) { item }) }
@@ -489,7 +478,7 @@ pub fn registered_trait_contract_dict_obligations(
 // One source trait method has two owner-local generic groups in 0.1. Trait
 // parameters, Self, and associated types retain the exact trait owner;
 // method-declared parameters retain the exact member owner. The ordered list
-// is the single producer for HIR callable formals and specialization actuals.
+// is the single producer for HIR callable formals.
 pub struct TraitMethodCallableFormal {
     type_var_id: Int,
     name: Str,
@@ -854,119 +843,25 @@ pub fn frozen_impl_predicate_set_same(
     true
 }
 
-// Method schemes intentionally cannot carry impl-owner predicates.  Every
+// Method schemes intentionally cannot carry impl-owner predicates. Every
 // consumer resolves those predicates through the owning ImplEntry.
-pub struct ImplMethodSpecializationActual {
-    formal: FlowGenericParamFact,
-    actual: Type
-}
-
-pub fn make_impl_method_specialization_actual(
-    formal: FlowGenericParamFact, actual: Type
-) -> ImplMethodSpecializationActual {
-    ImplMethodSpecializationActual { formal: formal, actual: actual }
-}
-pub fn impl_method_specialization_actual_formal(
-    value: ImplMethodSpecializationActual
-) -> FlowGenericParamFact { value.formal }
-pub fn impl_method_specialization_actual_type(
-    value: ImplMethodSpecializationActual
-) -> Type { value.actual }
-
-fn copy_impl_method_specialization_actuals(
-    values: List<ImplMethodSpecializationActual>
-) -> List<ImplMethodSpecializationActual> {
-    values.map(fn(value) {
-        make_impl_method_specialization_actual(
-            make_flow_generic_param_fact(
-                flow_generic_param_owner(value.formal),
-                flow_generic_param_index(value.formal),
-                flow_generic_param_arity(value.formal),
-                flow_generic_param_bounds(value.formal)),
-            value.actual)
-    })
-}
-
-fn validate_impl_method_specialization_actuals(
-    values: List<ImplMethodSpecializationActual>
-) {
-    let mut group_owner: SymbolRef? = none
-    let mut group_arity = 0
-    let mut next_ordinal = 0
-    let mut closed_owners: List<SymbolRef> = []
-    for value in values {
-        let formal = value.formal
-        let owner = flow_generic_param_owner(formal)
-        let ordinal = flow_generic_param_index(formal)
-        let arity = flow_generic_param_arity(formal)
-        let same_group = match group_owner {
-            some(existing) => symbol_ref_same(existing, owner),
-            none => false
-        }
-        if !same_group {
-            if group_owner.is_some() && next_ordinal != group_arity {
-                panic("impl method specialization: formal group is partial")
-            }
-            if closed_owners.any(fn(existing) {
-                    symbol_ref_same(existing, owner)
-                }) || ordinal != 0 {
-                panic("impl method specialization: formal group order differs")
-            }
-            closed_owners.push(owner)
-            group_owner = some(owner)
-            group_arity = arity
-            next_ordinal = 0
-        }
-        if arity != group_arity || ordinal != next_ordinal {
-            panic("impl method specialization: owner-local ordinal differs")
-        }
-        next_ordinal = next_ordinal + 1
-    }
-    if group_owner.is_some() && next_ordinal != group_arity {
-        panic("impl method specialization: final formal group is partial")
-    }
-}
-
 pub struct ImplMethodSchemeCore {
     ty: Type,
     type_vars: List<Int>,
     effect_schema: TypedEffectHeaderSchema,
-    def_id: Int?,
-    specialization_actuals: List<ImplMethodSpecializationActual>
-}
-
-fn make_impl_method_scheme_core_with_actuals(
-    ty: Type, type_vars: List<Int>, effect_schema: TypedEffectHeaderSchema,
-    def_id: Int?, actuals: List<ImplMethodSpecializationActual>
-) -> ImplMethodSchemeCore {
-    validate_impl_method_specialization_actuals(actuals)
-    ImplMethodSchemeCore {
-        ty: ty, type_vars: list_clone(type_vars),
-        effect_schema: make_typed_effect_header_schema(
-            typed_effect_header_schema_bindings(effect_schema)),
-        def_id: def_id,
-        specialization_actuals:
-            copy_impl_method_specialization_actuals(actuals)
-    }
+    def_id: Int?
 }
 
 pub fn make_impl_method_scheme_core(
     ty: Type, type_vars: List<Int>, effect_schema: TypedEffectHeaderSchema,
     def_id: Int?
 ) -> ImplMethodSchemeCore {
-    make_impl_method_scheme_core_with_actuals(
-        ty, type_vars, effect_schema, def_id, [])
-}
-
-pub fn make_specialized_impl_method_scheme_core(
-    ty: Type, type_vars: List<Int>, effect_schema: TypedEffectHeaderSchema,
-    def_id: Int?, actuals: List<ImplMethodSpecializationActual>
-) -> ImplMethodSchemeCore {
-    if actuals.len() == 0 {
-        panic("impl method specialization: ordered actual receipt is empty")
+    ImplMethodSchemeCore {
+        ty: ty, type_vars: list_clone(type_vars),
+        effect_schema: make_typed_effect_header_schema(
+            typed_effect_header_schema_bindings(effect_schema)),
+        def_id: def_id
     }
-    make_impl_method_scheme_core_with_actuals(
-        ty, type_vars, effect_schema, def_id, actuals)
 }
 
 pub fn impl_method_core_from_scheme(scheme: TypeScheme) -> ImplMethodSchemeCore {
@@ -996,12 +891,6 @@ pub fn impl_method_core_def_id(value: ImplMethodSchemeCore) -> Int? {
     value.def_id
 }
 
-pub fn impl_method_core_specialization_actuals(
-    value: ImplMethodSchemeCore
-) -> List<ImplMethodSpecializationActual> {
-    copy_impl_method_specialization_actuals(value.specialization_actuals)
-}
-
 pub fn impl_method_core_as_scheme(value: ImplMethodSchemeCore) -> TypeScheme {
     TypeScheme {
         ty: value.ty, type_vars: list_clone(value.type_vars),
@@ -1016,20 +905,10 @@ fn impl_method_core_same(
     if !types_equal(left.ty, right.ty) || left.type_vars.len() != right.type_vars.len() ||
        !typed_effect_header_schema_same(
             left.effect_schema, right.effect_schema) ||
-       left.def_id != right.def_id ||
-       left.specialization_actuals.len() !=
-            right.specialization_actuals.len() { return false }
+       left.def_id != right.def_id { return false }
     for index in 0..left.type_vars.len() {
         if left.type_vars.get(index).unwrap_or(-1) !=
            right.type_vars.get(index).unwrap_or(-1) { return false }
-    }
-    for index in 0..left.specialization_actuals.len() {
-        let a = left.specialization_actuals.get(index).unwrap()
-        let b = right.specialization_actuals.get(index).unwrap()
-        if !flow_generic_param_fact_same(a.formal, b.formal) ||
-           !types_equal(a.actual, b.actual) {
-            return false
-        }
     }
     true
 }
@@ -1040,108 +919,6 @@ pub struct ImplRuntimeRequirement {
     pub subject_type: Type,
     pub canonical_trait_name: Str,
     pub assoc_constraints: List<ImplAssocPredicate>
-}
-
-pub struct DelegateChildProviderPlan {
-    source_member_index: Int,
-    provider_ref: ImplProviderRef,
-    produced_owner_count: Int,
-    had_semantic_error: Bool
-}
-
-pub fn make_delegate_child_provider_plan(
-    source_member_index: Int, provider_ref: ImplProviderRef,
-    produced_owner_count: Int, had_semantic_error: Bool
-) -> DelegateChildProviderPlan {
-    if source_member_index < 0 || produced_owner_count < 0 ||
-       (produced_owner_count == 0 && !had_semantic_error) ||
-       !impl_provider_kind_same(
-            impl_provider_ref_kind(provider_ref),
-            impl_provider_kind_delegate()) {
-        panic("impl owner: invalid delegate child provider")
-    }
-    DelegateChildProviderPlan {
-        source_member_index: source_member_index,
-        provider_ref: provider_ref,
-        produced_owner_count: produced_owner_count,
-        had_semantic_error: had_semantic_error
-    }
-}
-
-pub fn delegate_child_provider_source_member_index(
-    value: DelegateChildProviderPlan
-) -> Int {
-    value.source_member_index
-}
-
-pub fn delegate_child_provider_ref(
-    value: DelegateChildProviderPlan
-) -> ImplProviderRef {
-    value.provider_ref
-}
-
-pub fn delegate_child_provider_produced_owner_count(
-    value: DelegateChildProviderPlan
-) -> Int {
-    value.produced_owner_count
-}
-
-pub fn delegate_child_provider_had_semantic_error(
-    value: DelegateChildProviderPlan
-) -> Bool {
-    value.had_semantic_error
-}
-
-enum DelegatePlanStateValue {
-    DelegateNotApplicable,
-    DelegatePending,
-    DelegateFinal(List<DelegateChildProviderPlan>)
-}
-
-pub struct DelegatePlanState {
-    value: DelegatePlanStateValue
-}
-
-pub fn delegate_plan_not_applicable() -> DelegatePlanState {
-    DelegatePlanState { value: DelegatePlanStateValue::DelegateNotApplicable }
-}
-
-pub fn delegate_plan_pending() -> DelegatePlanState {
-    DelegatePlanState { value: DelegatePlanStateValue::DelegatePending }
-}
-
-fn copy_delegate_child_provider_plans(
-    values: List<DelegateChildProviderPlan>
-) -> List<DelegateChildProviderPlan> {
-    let mut copied: List<DelegateChildProviderPlan> = []
-    for value in values { copied.push(value) }
-    copied
-}
-
-pub fn delegate_plan_final(
-    children: List<DelegateChildProviderPlan>
-) -> DelegatePlanState {
-    DelegatePlanState { value: DelegatePlanStateValue::DelegateFinal(
-        copy_delegate_child_provider_plans(children)) }
-}
-
-pub fn delegate_plan_is_pending(value: DelegatePlanState) -> Bool {
-    match value.value {
-        DelegatePlanStateValue::DelegatePending => true,
-        _ => false
-    }
-}
-
-pub fn delegate_plan_children(
-    value: DelegatePlanState
-) -> List<DelegateChildProviderPlan> {
-    match value.value {
-        DelegatePlanStateValue::DelegateFinal(children) =>
-            copy_delegate_child_provider_plans(children),
-        DelegatePlanStateValue::DelegateNotApplicable => [],
-        DelegatePlanStateValue::DelegatePending =>
-            panic("impl owner: pending delegate plan was observed")
-    }
 }
 
 pub struct ImplEntry {
@@ -1169,7 +946,6 @@ pub struct ImplEntry {
     pub provider_ref: ImplProviderRef?,
     pub trait_ref: SymbolRef?,
     pub owner_ref: ImplOwnerRef?,
-    pub delegate_plan: DelegatePlanState,
     pub span: Span
 }
 
@@ -1696,40 +1472,6 @@ fn method_resource_contract_map_same(
     true
 }
 
-fn delegate_child_provider_plan_same(
-    left: DelegateChildProviderPlan, right: DelegateChildProviderPlan
-) -> Bool {
-    left.source_member_index == right.source_member_index &&
-        impl_provider_ref_same(left.provider_ref, right.provider_ref) &&
-        left.produced_owner_count == right.produced_owner_count &&
-        left.had_semantic_error == right.had_semantic_error
-}
-
-fn delegate_plan_state_same(
-    left: DelegatePlanState, right: DelegatePlanState
-) -> Bool {
-    match (left.value, right.value) {
-        (DelegatePlanStateValue::DelegateNotApplicable,
-         DelegatePlanStateValue::DelegateNotApplicable) => true,
-        (DelegatePlanStateValue::DelegatePending,
-         DelegatePlanStateValue::DelegatePending) => true,
-        (DelegatePlanStateValue::DelegateFinal(a),
-         DelegatePlanStateValue::DelegateFinal(b)) => {
-            if a.len() != b.len() { return false }
-            for index in 0..a.len() {
-                match (a.get(index), b.get(index)) {
-                    (some(left_child), some(right_child)) =>
-                        if !delegate_child_provider_plan_same(
-                                left_child, right_child) { return false },
-                    _ => return false
-                }
-            }
-            true
-        }
-        _ => false
-    }
-}
-
 fn impl_entry_owner_shape_same(left: ImplEntry, right: ImplEntry) -> Bool {
     left.target_type_name == right.target_type_name &&
         optional_string_same(left.trait_name, right.trait_name) &&
@@ -1758,8 +1500,7 @@ pub fn impl_entry_final_same(left: ImplEntry, right: ImplEntry) -> Bool {
             left.method_intrinsics, right.method_intrinsics) &&
         method_resource_contract_map_same(
             left.method_resource_contracts,
-            right.method_resource_contracts) &&
-        delegate_plan_state_same(left.delegate_plan, right.delegate_plan)
+            right.method_resource_contracts)
 }
 
 pub fn impl_entry_exact_key_same(left: ImplEntry, right: ImplEntry) -> Bool {
@@ -1870,53 +1611,6 @@ fn validate_impl_entry(reg: TraitRegistry, entry: ImplEntry) {
                 panic("impl owner: method core does not quantify predicate subject")
             }
         }
-    }
-    match (entry.provider_ref, entry.delegate_plan.value) {
-        (none, DelegatePlanStateValue::DelegateNotApplicable) => {},
-        (some(provider), DelegatePlanStateValue::DelegatePending) => {
-            if !impl_provider_kind_same(
-                    impl_provider_ref_kind(provider),
-                    impl_provider_kind_source()) {
-                panic("impl owner: pending delegate plan parent is not Source")
-            }
-        },
-        (some(provider), DelegatePlanStateValue::DelegateFinal(children)) => {
-            if !impl_provider_kind_same(
-                    impl_provider_ref_kind(provider),
-                    impl_provider_kind_source()) {
-                panic("impl owner: final delegate plan parent is not Source")
-            }
-            let mut previous_delegate_index = -1
-            let mut seen_delegate_providers: List<ImplProviderRef> = []
-            for child in children {
-                if child.source_member_index < 0 ||
-                   child.produced_owner_count < 0 ||
-                   (child.produced_owner_count == 0 &&
-                    !child.had_semantic_error) ||
-                   child.source_member_index <= previous_delegate_index ||
-                   !impl_provider_kind_same(
-                        impl_provider_ref_kind(child.provider_ref),
-                        impl_provider_kind_delegate()) {
-                    panic("impl owner: invalid ordered delegate child plan")
-                }
-                for seen_provider in seen_delegate_providers {
-                    if impl_provider_ref_same(
-                            seen_provider, child.provider_ref) {
-                        panic("impl owner: duplicate delegate child provider")
-                    }
-                }
-                seen_delegate_providers.push(child.provider_ref)
-                previous_delegate_index = child.source_member_index
-            }
-        },
-        (some(provider), DelegatePlanStateValue::DelegateNotApplicable) => {
-            if impl_provider_kind_same(
-                    impl_provider_ref_kind(provider),
-                    impl_provider_kind_source()) {
-                panic("impl owner: Source provider has no final delegate plan")
-            }
-        },
-        _ => panic("impl owner: provider/delegate plan state mismatch")
     }
     match (entry.provider_ref, entry.owner_ref) {
         (some(provider), some(owner)) => {
@@ -2097,71 +1791,6 @@ pub fn find_impls_by_provider(
         none => {}
     }
     found
-}
-
-pub fn find_delegate_child_provider_plan(
-    owner: ImplEntry, source_member_index: Int
-) -> DelegateChildProviderPlan? {
-    let mut found: DelegateChildProviderPlan? = none
-    for child in delegate_plan_children(owner.delegate_plan) {
-        if child.source_member_index == source_member_index {
-            if found.is_some() {
-                panic("impl owner: duplicate delegate child source index")
-            }
-            found = some(child)
-        }
-    }
-    found
-}
-
-pub fn finalize_delegate_provider_plan(
-    mut reg: TraitRegistry, type_name: Str, trait_ref: SymbolRef?,
-    parent_provider_ref: ImplProviderRef,
-    children: List<DelegateChildProviderPlan>
-) {
-    let mut matches = 0
-    match reg.trait_impls.get(type_name) {
-        some(impls) => {
-            for index in 0..impls.len() {
-                match impls.get(index) {
-                    some(entry) => {
-                        let provider_matches = match entry.provider_ref {
-                            some(provider) => impl_provider_ref_same(
-                                provider, parent_provider_ref),
-                            none => false
-                        }
-                        if provider_matches && optional_symbol_ref_same(
-                                entry.trait_ref, trait_ref) {
-                            matches = matches + 1
-                            if !delegate_plan_is_pending(entry.delegate_plan) {
-                                panic("impl owner: delegate plan finalization replay")
-                            }
-                            let mut updated = entry
-                            updated.delegate_plan = delegate_plan_final(children)
-                            validate_impl_entry(reg, updated)
-                            impls.set(index, updated)
-                        }
-                    },
-                    none => {}
-                }
-            }
-        },
-        none => {}
-    }
-    if matches != 1 {
-        panic("impl owner: delegate plan parent is not unique")
-    }
-}
-
-pub fn assert_no_pending_delegate_plans(reg: TraitRegistry) {
-    for map_entry in reg.trait_impls.entries() {
-        let (_, owners) = map_entry
-        for owner in owners {
-            if delegate_plan_is_pending(owner.delegate_plan) {
-                panic("impl owner: pending delegate plan reached close")
-            }
-        }
-    }
 }
 
 pub fn instantiate_impl_runtime_requirements(
@@ -3782,13 +3411,11 @@ pub fn localize_imported_trait_def(
             ty: localized,
             effect_schema: remap_effect_header_schema(
                 mapping, method.effect_schema),
-            has_default: method.has_default,
             param_mutabilities: method.param_mutabilities,
             method_type_params: method.method_type_params
         })
         method_contracts.push(make_registered_trait_method_contract(
-            method.method_ref, localized, method.has_default,
-            method.param_mutabilities))
+            method.method_ref, localized, method.param_mutabilities))
     }
 
     let mut assoc_types: List<AssocTypeDef> = []
@@ -3908,19 +3535,12 @@ pub fn localize_imported_impl_entry(
             impl_method_core_effect_schema(core))
         fresh_mapping_for_ids(
             env, impl_method_core_type_vars(core), mapping)
-        method_schemes.insert(name, make_impl_method_scheme_core_with_actuals(
+        method_schemes.insert(name, make_impl_method_scheme_core(
             apply_subst_map(mapping, impl_method_core_type(core)),
             mapped_var_ids(mapping, impl_method_core_type_vars(core)),
             remap_effect_header_schema(
                 mapping, impl_method_core_effect_schema(core)),
-            impl_method_core_def_id(core),
-            impl_method_core_specialization_actuals(core).map(fn(value) {
-                make_impl_method_specialization_actual(
-                    impl_method_specialization_actual_formal(value),
-                    apply_subst_map(
-                        mapping,
-                        impl_method_specialization_actual_type(value)))
-            })))
+            impl_method_core_def_id(core)))
     }
     for entry in assoc_schemas.entries() {
         publish_effect_header_schema(env, entry.1)
@@ -3947,7 +3567,6 @@ pub fn localize_imported_impl_entry(
         provider_ref: value.provider_ref,
         trait_ref: value.trait_ref,
         owner_ref: value.owner_ref,
-        delegate_plan: value.delegate_plan,
         span: value.span
     }
 }
@@ -4041,7 +3660,7 @@ pub fn instantiate_type_alias_schema(
 }
 
 // Specialize a trait declaration method for one concrete/generic impl owner.
-// Default methods and built-in impl entries share this exact construction.
+// Built-in impl entries use this exact construction.
 pub fn specialize_trait_method_scheme(
     trait_def: TraitDef, method: TraitMethodDef,
     self_type: Type, trait_type_args: List<Type>,
@@ -4097,18 +3716,10 @@ pub fn specialize_trait_method_scheme(
     for id in remaining_ids {
         if !quantified.contains(id) { quantified.push(id) }
     }
-    let actuals = trait_method_callable_formals(
-        trait_def, method).map(fn(formal) {
-        make_impl_method_specialization_actual(
-            formal.fact,
-            apply_subst_map(mapping, Type::TypeVar {
-                id: formal.type_var_id, name: some(formal.name)
-            }))
-    })
-    make_specialized_impl_method_scheme_core(
+    make_impl_method_scheme_core(
         specialized_type, quantified,
         apply_effect_header_schema_subst(
-            mapping, method.effect_schema), none, actuals)
+            mapping, method.effect_schema), none)
 }
 
 // ============================================================

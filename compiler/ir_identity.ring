@@ -1184,14 +1184,13 @@ pub fn builtin_value_symbol(value: BuiltinValueSite) -> SymbolRef {
 const IMPL_PROVIDER_SOURCE: Int = 0
 const IMPL_PROVIDER_BUILTIN: Int = 1
 const IMPL_PROVIDER_DERIVED: Int = 2
-const IMPL_PROVIDER_DELEGATE: Int = 3
 
 pub struct ImplProviderKind {
     tag: Int
 }
 
 pub fn impl_provider_kind_from_tag(tag: Int) -> ImplProviderKind {
-    if tag < IMPL_PROVIDER_SOURCE || tag > IMPL_PROVIDER_DELEGATE {
+    if tag < IMPL_PROVIDER_SOURCE || tag > IMPL_PROVIDER_DERIVED {
         panic("IR identity: invalid impl provider kind")
     }
     ImplProviderKind { tag: tag }
@@ -1211,10 +1210,6 @@ pub fn impl_provider_kind_builtin() -> ImplProviderKind {
 
 pub fn impl_provider_kind_derived() -> ImplProviderKind {
     impl_provider_kind_from_tag(IMPL_PROVIDER_DERIVED)
-}
-
-pub fn impl_provider_kind_delegate() -> ImplProviderKind {
-    impl_provider_kind_from_tag(IMPL_PROVIDER_DELEGATE)
 }
 
 pub fn impl_provider_kind_same(
@@ -1317,7 +1312,7 @@ pub fn impl_owner_ref_same(left: ImplOwnerRef, right: ImplOwnerRef) -> Bool {
 }
 
 // One exact executable member produced by an ImplOwnerRef.  The raw source
-// index includes associated/delegate members; callable_slot_index counts only
+// index includes associated members; callable_slot_index counts only
 // executable members.  This preserves source order without a name scan.
 pub struct ImplMethodRef {
     owner: ImplOwnerRef,

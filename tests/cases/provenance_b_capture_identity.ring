@@ -20,7 +20,13 @@ fn nested_trait_collision<T: Ord>(left: T, right: T) -> Bool {
 
 trait ProvenanceTrait {
     fn base(self) -> Int
+    fn combined(self) -> Int
+}
 
+struct ProvenanceCarrier {}
+
+impl ProvenanceTrait for ProvenanceCarrier {
+    fn base(self) -> Int { 4 }
     fn combined(self) -> Int {
         let __ring_self_ProvenanceTrait = fn() -> Int { 3 }
         let outer = fn() -> Int {
@@ -31,12 +37,6 @@ trait ProvenanceTrait {
         }
         outer()
     }
-}
-
-struct ProvenanceCarrier {}
-
-impl ProvenanceTrait for ProvenanceCarrier {
-    fn base(self) -> Int { 4 }
 }
 
 effect E {

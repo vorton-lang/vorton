@@ -56,7 +56,7 @@ use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
     StructIdentityFact, TraitIdentityFact, EnumVariantFactGroup,
     EffectIdentityFact,
     SourceImplProviderFact,
-    DelegateProviderFact, NominalDerivedProviderPlanFact, NamespaceKind}
+    NominalDerivedProviderPlanFact, NamespaceKind}
 use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
     OriginRef,
     symbol_ref_canonical_payload,
@@ -384,7 +384,6 @@ pub struct InferCtx {
     enum_identity_unconsumed: List<EnumVariantFactGroup>,
     effect_identity_unconsumed: List<EffectIdentityFact>,
     source_impl_provider_unconsumed: List<SourceImplProviderFact>,
-    delegate_provider_unconsumed: List<DelegateProviderFact>,
     nominal_derived_provider_unconsumed:
         List<NominalDerivedProviderPlanFact>,
     // Registration-issued AST-site index for the repeated effect/main HIR
@@ -455,7 +454,6 @@ pub fn new_infer_ctx(
         enum_identity_unconsumed: [],
         effect_identity_unconsumed: [],
         source_impl_provider_unconsumed: [],
-        delegate_provider_unconsumed: [],
         nominal_derived_provider_unconsumed: [],
         impl_check_root_frames: map_new(),
         impl_check_child_frames: map_new(),
@@ -5712,7 +5710,6 @@ pub fn install_struct_identity_ledger(
        ctx.effect_identity_unconsumed.len() != 0 ||
        ctx.enum_identity_unconsumed.len() != 0 ||
        ctx.source_impl_provider_unconsumed.len() != 0 ||
-       ctx.delegate_provider_unconsumed.len() != 0 ||
        ctx.nominal_derived_provider_unconsumed.len() != 0 ||
        ctx.impl_check_frame_stack.len() != 0 {
         panic("struct identity ledger: prior ledger is still active")
@@ -5838,18 +5835,6 @@ pub fn install_struct_identity_ledger(
                 }
             }
             ctx.source_impl_provider_unconsumed.push(fact)
-        }
-    }
-    for fact in plan.delegate_providers {
-        if fact.file_key == file_key {
-            for existing in ctx.delegate_provider_unconsumed {
-                if existing.frame_index == fact.frame_index &&
-                   existing.parent_decl_index == fact.parent_decl_index &&
-                   existing.source_member_index == fact.source_member_index {
-                    panic("impl provider ledger: duplicate delegate declaration site")
-                }
-            }
-            ctx.delegate_provider_unconsumed.push(fact)
         }
     }
     for fact in plan.nominal_derived_providers {
@@ -6402,58 +6387,6 @@ pub fn commit_source_impl_provider_fact(
     ctx.source_impl_provider_unconsumed = remaining
 }
 
-fn delegate_provider_fact_same(
-    left: DelegateProviderFact, right: DelegateProviderFact
-) -> Bool {
-    left.file_key == right.file_key &&
-        left.frame_index == right.frame_index &&
-        left.parent_decl_index == right.parent_decl_index &&
-        left.source_member_index == right.source_member_index &&
-        impl_provider_ref_same(
-            left.parent_provider_ref, right.parent_provider_ref) &&
-        impl_provider_ref_same(left.provider_ref, right.provider_ref)
-}
-
-pub fn peek_delegate_provider_fact(
-    ctx: InferCtx, parent_decl_index: Int, source_member_index: Int
-) -> DelegateProviderFact {
-    let frame_index = current_provider_identity_frame(ctx)
-    let file_key = ctx.struct_identity_file_key.unwrap_or("")
-    let mut found: DelegateProviderFact? = none
-    for fact in ctx.delegate_provider_unconsumed {
-        if fact.file_key == file_key && fact.frame_index == frame_index &&
-           fact.parent_decl_index == parent_decl_index &&
-           fact.source_member_index == source_member_index {
-            if found.is_some() {
-                panic("impl provider ledger: duplicate delegate consume match")
-            }
-            found = some(fact)
-        }
-    }
-    match found {
-        some(fact) => fact,
-        none => panic("impl provider ledger: missing delegate fact")
-    }
-}
-
-pub fn commit_delegate_provider_fact(
-    mut ctx: InferCtx, fact: DelegateProviderFact
-) {
-    let mut matches = 0
-    let mut remaining: List<DelegateProviderFact> = []
-    for existing in ctx.delegate_provider_unconsumed {
-        if delegate_provider_fact_same(existing, fact) {
-            matches = matches + 1
-        } else {
-            remaining.push(existing)
-        }
-    }
-    if matches != 1 {
-        panic("impl provider ledger: delegate commit mismatch")
-    }
-    ctx.delegate_provider_unconsumed = remaining
-}
-
 fn nominal_derived_provider_fact_same(
     left: NominalDerivedProviderPlanFact,
     right: NominalDerivedProviderPlanFact
@@ -6538,7 +6471,6 @@ pub fn close_struct_identity_ledger(mut ctx: InferCtx) {
        ctx.struct_identity_pending.len() != 0 ||
        ctx.trait_identity_unconsumed.len() != 0 ||
        ctx.source_impl_provider_unconsumed.len() != 0 ||
-       ctx.delegate_provider_unconsumed.len() != 0 ||
        ctx.nominal_derived_provider_unconsumed.len() != 0 {
         panic("struct identity ledger: registration did not close")
     }
@@ -6552,7 +6484,6 @@ pub fn close_struct_identity_ledger(mut ctx: InferCtx) {
     ctx.enum_identity_unconsumed = []
     ctx.effect_identity_unconsumed = []
     ctx.source_impl_provider_unconsumed = []
-    ctx.delegate_provider_unconsumed = []
     ctx.nominal_derived_provider_unconsumed = []
 }
 

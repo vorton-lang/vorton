@@ -89,40 +89,8 @@ pub use hir_exact::{
     h_list_literal_push, remap_h_list_literal_effect_ctx,
     HDictConstructPlan, make_h_dict_construct_plan,
     h_dict_construct_executable, h_dict_construct_trait,
-    h_dict_construct_effect_ctx, HDelegateMethodPlan, make_h_delegate_method_plan,
-    h_delegate_method_required, h_delegate_method_generated, h_delegate_method_executable, h_delegate_method_origin,
-    h_delegate_method_child_call, h_delegate_method_child_callee, h_delegate_method_binders, h_delegate_method_parameter_types,
-    h_delegate_method_result_type, h_delegate_method_effects,
-    h_delegate_method_evidence, h_delegate_method_effect_ctx,
-    h_delegate_method_child_effect_ctx, HDelegateAssocPlan,
-    make_h_delegate_assoc_plan, h_delegate_assoc_member, h_delegate_assoc_type, HDelegateTypedPlan,
-    make_h_delegate_typed_plan, h_delegate_contract,
-    h_delegate_outer_owner, h_delegate_child_owner, h_delegate_child_provider,
-    h_delegate_field_owner, h_delegate_field_provider, h_delegate_field_target, h_delegate_field,
-    h_delegate_trait, h_delegate_source_member_index, h_delegate_methods,
-    h_delegate_assoc_bindings, h_delegate_dict_evidence,
+    h_dict_construct_effect_ctx,
     HPatternPlan, HPatternFieldPlan,
-    HDefaultDictConstruction, make_h_default_dict_construction,
-    h_default_dict_construction_dictionary,
-    h_default_dict_construction_result,
-    h_default_dict_construction_result_name,
-    HDefaultSpecializationPlan, make_h_default_specialization_plan,
-    h_default_specialization_owner,
-    h_default_specialization_generated_method,
-    h_default_specialization_generated_executable,
-    h_default_specialization_source_method,
-    h_default_specialization_default_executable,
-    h_default_specialization_source_bound_traits,
-    h_default_specialization_generated_type_var_ids,
-    h_default_specialization_generated_type_formals,
-    h_default_specialization_dictionary_constructions,
-    h_default_specialization_parameter_types,
-    h_default_specialization_parameter_mutabilities,
-    h_default_specialization_binders,
-    h_default_specialization_result_type,
-    h_default_specialization_effects,
-    h_default_specialization_effect_ctx,
-    h_default_specialization_forward_call,
     make_h_pattern_field_plan, h_pattern_field_projection, h_pattern_field_pattern, h_pattern_wildcard,
     h_pattern_binding, h_pattern_literal, h_pattern_tuple, h_pattern_struct,
     h_pattern_variant, h_pattern_or, h_pattern_kind, h_pattern_plan_binding,
@@ -759,11 +727,8 @@ pub struct HTraitMethod {
     pub params: List<HParam>,
     pub return_type: Type,
     pub effects: EffectRow,
-    pub has_default: Bool,
     pub executable_ref: ExecutableRef,
-    pub effect_ctx: TypedCallableEffectCtx,
-    pub trait_bounds: List<TraitBound>,
-    pub body: HExpr?
+    pub effect_ctx: TypedCallableEffectCtx
 }
 
 pub struct TraitBound {
@@ -803,8 +768,6 @@ pub enum HDecl {
     Enum { name: Str, owner_ref: RegisteredNominalRef, type_params: List<HTypeParam>, variants: List<HEnumVariant>, is_pub: Bool, span: Span },
     Impl { target_type: Str, target_ty: Type, owner_ref: ImplOwnerRef,
            provider_ref: ImplProviderRef, trait_ref: SymbolRef?,
-           delegate_plan: HDelegateTypedPlan?,
-           default_specializations: List<HDefaultSpecializationPlan>,
            type_params: List<HTypeParam>, trait_name: Str?,
            methods: List<HDecl>, assoc_types: List<HAssocType>, span: Span },
     Effect { name: Str, owner_ref: SymbolRef?, handled_ref: HandledEffectRef?, type_params: List<HTypeParam>, ops: List<HEffectOp>, is_pub: Bool, span: Span },
@@ -2367,7 +2330,6 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     body, typed_callable_effect_ctx_layout(effect_ctx), [])
             },
             HDecl::Impl { owner_ref, provider_ref, trait_name, trait_ref,
-                          delegate_plan, default_specializations,
                           methods, .. } => {
                 let _ = impl_provider_kind_tag(
                     impl_provider_ref_kind(provider_ref))
@@ -2384,39 +2346,6 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                     },
                     (none, none) => {},
                     _ => panic("HIR identity: impl owner trait presence drifted")
-                }
-                match delegate_plan {
-                    some(plan) => {
-                        if !impl_owner_ref_same(
-                                h_delegate_child_owner(plan), owner_ref) ||
-                           !impl_provider_ref_same(
-                                h_delegate_child_provider(plan), provider_ref) {
-                            panic("HIR delegate plan: HDecl owner/provider differs")
-                        }
-                        match trait_ref {
-                            some(exact_trait) => if !symbol_ref_same(
-                                    h_delegate_trait(plan), exact_trait) {
-                                panic("HIR delegate plan: HDecl trait differs")
-                            },
-                            none => panic("HIR delegate plan: inherent HDecl")
-                        }
-                    },
-                    none => {}
-                }
-                for index in 0..default_specializations.len() {
-                    let plan = default_specializations.get(index).unwrap()
-                    if !impl_owner_ref_same(
-                            h_default_specialization_owner(plan), owner_ref) {
-                        panic("HIR default specialization: HDecl owner differs")
-                    }
-                    for right in index + 1..default_specializations.len() {
-                        if impl_method_ref_same(
-                                h_default_specialization_generated_method(plan),
-                                h_default_specialization_generated_method(
-                                    default_specializations.get(right).unwrap())) {
-                            panic("HIR default specialization: method repeats")
-                        }
-                    }
                 }
                 validate_hir_decls(methods, seen)
             },
@@ -2497,26 +2426,14 @@ fn validate_hir_decls(decls: List<HDecl>, mut seen: Set<Int>) {
                         panic("HIR identity: trait method executable drifted")
                     }
                     validate_trait_method_type_formals(method)
-                    if method.has_default != method.body.is_some() {
-                        panic("HIR identity: trait default/body relation drifted")
-                    }
                     validate_callable_effect_ctx(
                         method.effects, method.effect_ctx,
                         method.executable_ref,
                         "trait method '${name}.${method.name}'")
-                    match method.body {
-                        some(body) => {
-                            let mut scope = new_hir_validation_scope()
-                            validate_hir_params(method.params, seen, scope,
-                                "trait default '${name}.${method.name}'")
-                            validate_hir_expr(body, seen, scope)
-                            validate_effect_ctx_lookup_expr(
-                                body,
-                                typed_callable_effect_ctx_layout(
-                                    method.effect_ctx), [])
-                        },
-                        none => {}
-                    }
+                    let mut scope = new_hir_validation_scope()
+                    validate_hir_params(
+                        method.params, seen, scope,
+                        "trait method '${name}.${method.name}'")
                 }
             },
             HDecl::Const { name, def_id, executable_ref,

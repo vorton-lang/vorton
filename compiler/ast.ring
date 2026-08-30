@@ -275,7 +275,7 @@ pub struct EffectOpDecl {
 }
 
 pub enum Decl {
-    Fn { name: Str, type_params: List<TypeParam>, params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?, body: Expr, is_pub: Bool, is_abstract: Bool, span: Span },
+    Fn { name: Str, type_params: List<TypeParam>, params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?, body: Expr, is_pub: Bool, span: Span },
     Struct { name: Str, type_params: List<TypeParam>, fields: List<StructFieldDecl>, derive_attrs: List<DeriveAttribute>, is_pub: Bool, span: Span },
     Enum { name: Str, type_params: List<TypeParam>, variants: List<EnumVariantDecl>, derive_attrs: List<DeriveAttribute>, is_pub: Bool, span: Span },
     Impl { target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span },
@@ -288,7 +288,6 @@ pub enum Decl {
     Const { name: Str, type_annotation: TypeExpr?, init: Expr, is_pub: Bool, span: Span },
     ModBlock { name: Str, uses: List<UseDecl>, decls: List<Decl>, required_effects: List<EffectExpr>?, is_pub: Bool, span: Span },
     EffectAlias { name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, is_pub: Bool, span: Span },
-    Delegate { field: Str, trait_names: List<Str>, span: Span },
     AssocType { name: Str, bounds: List<TypeBound>, value: TypeExpr?, is_pub: Bool, span: Span }
 }
 

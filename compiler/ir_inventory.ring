@@ -636,24 +636,22 @@ fn executable_ref_contains_path(
 
 const EXECUTABLE_FN: Int = 0
 const EXECUTABLE_IMPL_METHOD: Int = 1
-const EXECUTABLE_TRAIT_DEFAULT: Int = 2
-const EXECUTABLE_TEST: Int = 3
-const EXECUTABLE_CONST_INITIALIZER: Int = 4
-const EXECUTABLE_MODULE_BODY: Int = 5
-const EXECUTABLE_LAMBDA: Int = 6
-const EXECUTABLE_HANDLER: Int = 7
-const EXECUTABLE_DEFAULT_SPECIALIZATION: Int = 8
-const EXECUTABLE_DERIVED_IMPL: Int = 9
-const EXECUTABLE_DICT_HELPER: Int = 10
-const EXECUTABLE_CONST_GETTER: Int = 11
-const EXECUTABLE_DROP_GLUE: Int = 12
-const EXECUTABLE_BODYLESS_TRAIT_MEMBER: Int = 13
-const EXECUTABLE_BODYLESS_EFFECT_OPERATION: Int = 14
-const EXECUTABLE_BODYLESS_INTERFACE_MEMBER: Int = 15
-const EXECUTABLE_EXTERN_FN: Int = 16
-const EXECUTABLE_EXTERN_BRIDGE: Int = 17
-const EXECUTABLE_BUILTIN_INTRINSIC: Int = 18
-const EXECUTABLE_KIND_COUNT: Int = 19
+const EXECUTABLE_TEST: Int = 2
+const EXECUTABLE_CONST_INITIALIZER: Int = 3
+const EXECUTABLE_MODULE_BODY: Int = 4
+const EXECUTABLE_LAMBDA: Int = 5
+const EXECUTABLE_HANDLER: Int = 6
+const EXECUTABLE_DERIVED_IMPL: Int = 7
+const EXECUTABLE_DICT_HELPER: Int = 8
+const EXECUTABLE_CONST_GETTER: Int = 9
+const EXECUTABLE_DROP_GLUE: Int = 10
+const EXECUTABLE_BODYLESS_TRAIT_MEMBER: Int = 11
+const EXECUTABLE_BODYLESS_EFFECT_OPERATION: Int = 12
+const EXECUTABLE_BODYLESS_INTERFACE_MEMBER: Int = 13
+const EXECUTABLE_EXTERN_FN: Int = 14
+const EXECUTABLE_EXTERN_BRIDGE: Int = 15
+const EXECUTABLE_BUILTIN_INTRINSIC: Int = 16
+const EXECUTABLE_KIND_COUNT: Int = 17
 
 const CONTRACT_CONCRETE_BODY: Int = 0
 const CONTRACT_ONLY: Int = 1
@@ -662,40 +660,35 @@ const CONTRACT_MODE_COUNT: Int = 2
 // 0 permits ConcreteBody, 1 permits ContractOnly, and 2 permits both.
 // Generated origins permit both because CoreHIR may elaborate a real body.
 const EXECUTABLE_KIND_ALLOWED_MODE_TAGS: List<Int> = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0,
     2, 0, 2, 2,
-    1, 1, 1, 1,
-    2, 2
+    1, 1, 1, 1, 2, 2
 ]
 
 const REF_FORM_NAMED: Int = 0
 const REF_FORM_ANONYMOUS: Int = 1
 const EXECUTABLE_KIND_REF_FORM_TAGS: List<Int> = [
-    0, 0, 0, 1, 0, 1, 1, 1, 0,
+    0, 0, 1, 0, 1, 1, 1,
     0, 1, 0, 0,
-    0, 0, 0, 0,
-    0, 0
+    0, 0, 0, 0, 0, 0
 ]
 
 // Namespace tag 5 and path-role tag 7 are table-local sentinels for the
 // opposite ref form; they are never converted to a typed identity tag.
 const EXECUTABLE_KIND_NAMESPACE_TAGS: List<Int> = [
-    0, 4, 4, 5, 0, 5, 5, 5, 4,
+    0, 4, 5, 0, 5, 5, 5,
     4, 5, 0, 4,
-    4, 4, 4, 0,
-    0, 0
+    4, 4, 4, 0, 0, 0
 ]
 const EXECUTABLE_KIND_PATH_ROLE_TAGS: List<Int> = [
-    7, 7, 7, 0, 7, 0, 1, 5, 7,
+    7, 7, 0, 7, 0, 1, 5,
     7, 6, 7, 7,
-    7, 7, 7, 7,
-    7, 7
+    7, 7, 7, 7, 7, 7
 ]
 const EXECUTABLE_KIND_PARENT_FORM_TAGS: List<Int> = [
-    0, 0, 0, 0, 0, 0, 1, 1, 0,
+    0, 0, 0, 0, 0, 1, 1,
     0, 2, 0, 0,
-    0, 0, 0, 0,
-    0, 0
+    0, 0, 0, 0, 0, 0
 ]
 
 pub struct ExecutableKind { tag: Int }
@@ -719,13 +712,11 @@ pub fn executable_kind_same(
 
 pub fn executable_kind_fn() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_FN) }
 pub fn executable_kind_impl_method() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_IMPL_METHOD) }
-pub fn executable_kind_trait_default() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_TRAIT_DEFAULT) }
 pub fn executable_kind_test() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_TEST) }
 pub fn executable_kind_const_initializer() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_CONST_INITIALIZER) }
 pub fn executable_kind_module_body() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_MODULE_BODY) }
 pub fn executable_kind_lambda() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_LAMBDA) }
 pub fn executable_kind_handler() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_HANDLER) }
-pub fn executable_kind_default_specialization() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_DEFAULT_SPECIALIZATION) }
 pub fn executable_kind_derived_impl() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_DERIVED_IMPL) }
 pub fn executable_kind_dict_helper() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_DICT_HELPER) }
 pub fn executable_kind_const_getter() -> ExecutableKind { executable_kind_from_tag(EXECUTABLE_CONST_GETTER) }

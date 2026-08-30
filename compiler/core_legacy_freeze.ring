@@ -4,36 +4,19 @@
 // and no downstream consumer may replay resolver/type/effect selection.
 
 use types::{Type, EffectRow, types_equal, effects_equal, type_to_string}
-use ast::{TypeParam, span_zero}
 use env::{
     TypeEnv, PhysicalNominalFact, registered_trait_contract_methods,
     registered_trait_method_ref, registered_trait_method_signature
 }
 use hir::{
     HProgram, HDecl, HExpr, HStmt, HParam, HMatchArm, HEffectHandler,
-    HTypeParam, TraitBound, HDefaultSpecializationPlan, HDelegateTypedPlan,
+    HTypeParam, TraitBound,
     DictRef, MethodCallRef, HOperatorPlan, FieldAction,
     method_call_ref_is_bound, method_call_ref_bound_evidence,
     h_operator_is_tuple, h_operator_elements, h_operator_method_ref,
     h_type_param_name,
     DerivedImpl, DerivedMethod, DerivedField, TypeKind,
-    h_default_specialization_generated_method,
-    h_default_specialization_generated_executable,
-    h_default_specialization_generated_type_var_ids,
-    h_default_specialization_generated_type_formals,
-    h_default_specialization_dictionary_constructions,
-    h_default_dict_construction_dictionary,
-    h_default_dict_construction_result,
-    h_default_dict_construction_result_name,
-    h_default_specialization_parameter_types,
-    h_default_specialization_parameter_mutabilities,
-    h_default_specialization_binders,
-    h_default_specialization_result_type,
-    h_default_specialization_effects,
-    h_default_specialization_forward_call, h_exact_call_evidence,
     h_exact_call_signature,
-    h_delegate_methods, h_delegate_method_evidence,
-    h_delegate_dict_evidence,
     derived_semantic_kind_tag, compare_by_first,
     module_item_identity, hexpr_type, hexpr_effects
 }
@@ -63,19 +46,17 @@ use ir_identity::{
 }
 use ir_inventory::{
     ExecutableRef, ExecutableKind, EffectOperationRef, dict_ref_same,
-    dict_ref_is_local, dict_ref_local,
     make_named_executable_ref, make_exact_wrapped_dict_ref,
     executable_ref_is_named, executable_ref_named_symbol,
     executable_ref_anonymous_path, executable_ref_same,
     executable_ref_origin_module_key,
     executable_kind_fn, executable_kind_impl_method,
     executable_kind_test, executable_kind_const_getter,
-    executable_kind_extern_fn, executable_kind_trait_default,
+    executable_kind_extern_fn,
     executable_kind_bodyless_trait_member,
     executable_kind_bodyless_effect_operation,
     executable_kind_lambda, executable_kind_handler,
     executable_kind_builtin_intrinsic,
-    executable_kind_default_specialization,
     executable_kind_derived_impl,
     BinderEntry, make_source_binder_entry,
     binder_entry_slot, binder_entry_owner, binder_entry_kind,
@@ -98,7 +79,6 @@ use typed_effect_freeze::{
 }
 use core_type_source::{
     CoreTypeSourceFact, CoreEffectCtxTypeSource,
-    flow_generic_param_bounds,
     core_type_source_type, core_type_source_fact,
     core_effect_ctx_source_aggregate_fact
 }
@@ -409,25 +389,6 @@ fn merge_callable_type_parameters(
     result
 }
 
-fn trait_bounds_from_type_parameters(
-    values: List<HTypeParam>
-) -> List<TraitBound> {
-    let mut result: List<TraitBound> = []
-    let mut ordinal = 0
-    for value in values {
-        for trait_ref in value.bound_refs {
-            result.push(TraitBound {
-                type_param: h_type_param_name(value),
-                type_var_id: value.type_var_id,
-                trait_name: symbol_ref_canonical_payload(trait_ref),
-                trait_ref: trait_ref, dict_ordinal: ordinal
-            })
-            ordinal = ordinal + 1
-        }
-    }
-    result
-}
-
 fn callable_trait_bounds(
     parameters: List<LegacyTypeParameterProjection>,
     bounds: List<TraitBound>
@@ -656,19 +617,6 @@ fn add_derived_field_action_facts(
         },
         FieldAction::Identity | FieldAction::FloatIdentity |
         FieldAction::BoolIdentity | FieldAction::FnLiteral => {}
-    }
-}
-
-fn add_delegate_dictionaries(
-    mut builder: LegacyFactBuilder, value: HDelegateTypedPlan
-) {
-    for item in h_delegate_dict_evidence(value) {
-        add_dictionary_fact(builder, item)
-    }
-    for method in h_delegate_methods(value) {
-        for item in h_delegate_method_evidence(method) {
-            add_dictionary_fact(builder, item)
-        }
     }
 }
 
@@ -932,71 +880,6 @@ fn add_generated_callable_fact(
     add_physical_identity(builder, reference, some(method), none)
 }
 
-fn add_default_specialization_facts(
-    mut builder: LegacyFactBuilder,
-    values: List<HDefaultSpecializationPlan>,
-    mut methods: List<ImplMethodRef>, type_params: List<HTypeParam>
-) {
-    for value in values {
-        let method = h_default_specialization_generated_method(value)
-        for construction in
-                h_default_specialization_dictionary_constructions(value) {
-            let result = h_default_dict_construction_result(construction)
-            if !dict_ref_is_local(result) {
-                panic("Core/legacy freeze: default dictionary result is not local")
-            }
-            let slot = dict_ref_local(result)
-            let def_id = slot_ref_source_def_id(slot)
-            let _ = add_binder_fact(
-                builder, slot,
-                h_default_dict_construction_result_name(construction), def_id,
-                Type::TupleType { elements: [] }, false)
-            add_dictionary_fact(
-                builder,
-                h_default_dict_construction_dictionary(construction))
-        }
-        let generated_ids =
-            h_default_specialization_generated_type_var_ids(value)
-        let generated_formals =
-            h_default_specialization_generated_type_formals(value)
-        if generated_ids.len() != generated_formals.len() {
-            panic("Core/legacy freeze: default formal census differs")
-        }
-        let mut generated_type_params: List<HTypeParam> = []
-        let mut formal_index = 0
-        while formal_index < generated_ids.len() {
-            generated_type_params.push(HTypeParam {
-                source: TypeParam {
-                    name: "__default_type_${formal_index}",
-                    bounds: [], span: span_zero()
-                },
-                type_var_id: generated_ids.get(formal_index).unwrap(),
-                bound_refs: flow_generic_param_bounds(
-                    generated_formals.get(formal_index).unwrap())
-            })
-            formal_index = formal_index + 1
-        }
-        add_generated_callable_fact(
-            builder,
-            h_default_specialization_generated_executable(value),
-            method,
-            executable_kind_default_specialization(),
-            merge_callable_type_parameters(
-                type_params, generated_type_params),
-            trait_bounds_from_type_parameters(type_params),
-            h_default_specialization_binders(value),
-            h_default_specialization_parameter_types(value),
-            h_default_specialization_parameter_mutabilities(value),
-            h_default_specialization_result_type(value),
-            h_default_specialization_effects(value))
-        methods.push(method)
-        let exact = h_default_specialization_forward_call(value)
-        for item in h_exact_call_evidence(exact) {
-            add_dictionary_fact(builder, item)
-        }
-    }
-}
-
 fn add_derived_field_binders(
     mut builder: LegacyFactBuilder, fields: List<DerivedField>,
     ord_owner: ExecutableRef?, mut ord_seen: List<BinderEntry>
@@ -1177,26 +1060,14 @@ fn scan_decls(
             },
             HDecl::Trait { name, methods, .. } => {
                 for method in methods {
-                    if method.body.is_none() &&
-                       method.trait_bounds.len() != 0 {
-                        panic("Core/legacy freeze: bodyless trait method carries bounds")
-                    }
                     add_callable_fact(
                         builder, method.executable_ref,
-                        if method.body.is_some() {
-                            executable_kind_trait_default()
-                        } else { executable_kind_bodyless_trait_member() },
+                        executable_kind_bodyless_trait_member(),
                         module_container, method.type_params,
-                        method.trait_bounds, method.params,
+                        [], method.params,
                         method.return_type, method.effects,
-                        method.body.is_some(), false,
+                        false, false,
                         none, some("__${name}_${method.name}"))
-                    match method.body {
-                        some(body) => scan_expr(
-                            builder, method.executable_ref, body,
-                            method.type_params, method.trait_bounds),
-                        none => {}
-                    }
                 }
             },
             HDecl::Effect { name, type_params, ops, .. } => {
@@ -1217,20 +1088,12 @@ fn scan_decls(
             },
             HDecl::Impl {
                 target_ty, owner_ref, trait_ref, type_params,
-                delegate_plan, methods, default_specializations,
-                assoc_types, ..
+                methods, assoc_types, ..
             } => {
-                match delegate_plan {
-                    some(plan) => add_delegate_dictionaries(builder, plan),
-                    none => {}
-                }
                 let impl_type_params = merge_callable_type_parameters(
                     inherited_type_params, type_params)
                 scan_decls(builder, methods, impl_type_params)
                 let mut method_refs = impl_method_refs(methods)
-                add_default_specialization_facts(
-                    builder, default_specializations, method_refs,
-                    impl_type_params)
                 method_refs.sort_by(fn(left, right) {
                     impl_method_ref_callable_slot_index(left) -
                         impl_method_ref_callable_slot_index(right)

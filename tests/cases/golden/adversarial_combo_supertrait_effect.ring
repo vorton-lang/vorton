@@ -8,7 +8,7 @@
 //
 // Exercises:
 //   * Supertrait method with io effect — called through subtrait bound
-//   * Supertrait default method with io effect — called through subtrait
+//   * Subtrait method forwarding to an effectful supertrait method
 //   * Multi-level supertrait chain with fail effect
 //   * Generic fn with subtrait bound calling effectful supertrait method
 

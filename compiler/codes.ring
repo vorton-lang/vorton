@@ -46,10 +46,7 @@ pub const E0408: Str = "E0408"
 pub const E0504: Str = "E0504"
 pub const E0505: Str = "E0505"
 pub const E0506: Str = "E0506"
-pub const E0507: Str = "E0507"
-pub const E0508: Str = "E0508"
 pub const E0411: Str = "E0411"
-pub const E0509: Str = "E0509"
 pub const E0510: Str = "E0510"
 pub const E0511: Str = "E0511"
 pub const E0512: Str = "E0512"
@@ -109,9 +106,6 @@ pub fn error_description(code: Str) -> Str {
     if code == "E0504" { return "Ambiguous trait method" }
     if code == "E0505" { return "Missing supertrait implementation" }
     if code == "E0506" { return "Cyclic supertrait inheritance" }
-    if code == "E0507" { return "Delegate field not found" }
-    if code == "E0508" { return "Delegate field type does not implement trait" }
-    if code == "E0509" { return "Delegate conflicts with existing impl" }
     if code == "E0510" { return "Missing associated type implementation" }
     if code == "E0511" { return "Unknown associated type" }
     if code == "E0512" { return "Ambiguous associated type" }

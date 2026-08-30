@@ -1,4 +1,0 @@
-E0509
-trait 'Eq' is already implemented for 'Outer'; cannot delegate the same trait
-delegate conflicts with existing impl
-!internal compiler error
