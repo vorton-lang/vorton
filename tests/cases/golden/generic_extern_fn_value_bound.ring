@@ -1,17 +1,17 @@
 // A bounded extern function value validates its trait constraint statically,
 // but the bound is not a runtime dictionary parameter of the foreign ABI.
-// Re-declaring the exact builtin identity gives this test a real runtime target:
-// an accidental dictionary capture/argument would corrupt the print call.
+// The raw ABI leaf is explicit and accepts Str; an accidental dictionary
+// capture/argument would corrupt the foreign call.
 
-extern fn print<T: Hash>(value: T) -> Unit with {console}
+extern fn ring_print<T: Hash>(value: T) -> Unit with {console}
 
 fn call_bounded(
-    f: fn(Int) -> Unit with {console},
-    value: Int
+    f: fn(Str) -> Unit with {console},
+    value: Str
 ) -> Unit with {console} {
     f(value)
 }
 
 fn main() {
-    call_bounded(print, 107)
+    call_bounded(ring_print, "107")
 }
