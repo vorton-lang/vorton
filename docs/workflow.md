@@ -58,6 +58,15 @@ Issue #N → 一个active PR → PR head branch → merge → Issue自动关闭
 - 只有`blocked`需要额外label；它只冻结该Issue。
 - 如果使用GitHub Project，只启用auto-add与closed/merged→Done内建自动化，Project不成为第二状态真值。
 
+## 最小标签
+
+- Issue恰好一个type：`type:bug|feature|design|maintenance|audit`。
+- Issue恰好一个priority：`priority:p0|p1|p2|p3`。
+- Issue可有多个area：`area:frontend|types-effects|ir-ownership|backend-runtime|tooling|docs`。
+- 只有异常状态使用`blocked`。
+- 不创建status、wip、owner、phase、has-pr、passed/failed或手工编号标签。
+- PR不复制Issue标签；area标签若需要，只按changed paths机械生成。
+
 ## 用户保留决定
 
 以下事项由用户拍板：

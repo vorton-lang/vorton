@@ -58,3 +58,9 @@ description: Apply user-established execution-process decisions inside the Ring-
 - Branch优先从Issue的Development入口创建，使GitHub自动关联；PR面向默认branch并写`Closes #N`。仓库启用Automatically delete head branches。
 - Project若使用，只作GitHub对象的自动视图，启用auto-add和closed/merged→Done；不得成为第二状态真值。
 - 批量Issue导入只消费用户确认过的固定manifest；创建脚本逐项保存GitHub返回的Issue URL并核对输入/输出数量。中断后先按已返回URL对账再继续，禁止盲目重跑制造重复。
+
+## 最小标签
+
+- Issue只使用：恰好一个`type:bug|feature|design|maintenance|audit`，恰好一个`priority:p0|p1|p2|p3`，零到多个`area:frontend|types-effects|ir-ownership|backend-runtime|tooling|docs`，以及例外`blocked`。
+- 不创建status、wip、owner、phase、has-pr、passed/failed或手工编号标签；这些由Issue/PR/assignee/milestone/Checks表达。
+- PR不手工复制Issue的type/priority/blocked标签；如需PR area标签，只允许根据changed paths机械生成。
