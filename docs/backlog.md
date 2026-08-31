@@ -9,27 +9,27 @@
 
 ## 当前排序
 
-当前主线目标是形成 **v0.1 internal compiler / repository-migration checkpoint**：固定最后一个已有source-build成功证据的`5d576f7c`源码，要求该cut连续自编译到可复现fixed point，并足以把完整历史与活动治理原子迁移到`vorton-lang/vorton`。`5d57`之后的compiler提交保留为post-0.1 WIP，不倒灌进本cut。它不是developer preview、release、语言bug清零或ownership/safety产品保证；不命中该cut/fixed-point/迁仓路径的缺陷可保留为Known Issues，迁仓后进入GitHub Issue继续处理。实际公开preview/release、许可证、正确性与最终支持平台仍由用户在后续候选产物和证据齐备后拍板。
+当前主线目标是 **把latest compiler蓝本与完整历史直接迁入`vorton-lang/vorton`，并以稳定外部宿主语言建立v0.1 compiler**。固定实现蓝本为ownership authority `04b3ba53`的`compiler/std/ring_runtime.cpp/tests`；稳定design/lang-spec取与04b3逐blob一致的当前main版本，workflow/backlog/audit取本规划commit后的main。完整Git历史与两条ref共同迁移，不把跨branch composite伪装成单一Git tree。不再要求任何旧Ring compiler理解current source；现有Ring compiler、tracked C anchor与历史candidate只作语义/回归oracle。它不是developer preview、release、语言bug清零或ownership/safety产品保证；已知缺陷与未完成#268/#269原样进入新仓GitHub Issue。实际公开preview/release、许可证、正确性与最终支持平台仍由用户在后续候选产物和证据齐备后拍板。
 
 **未发布期 clean-break 原则（2026-08-07 用户拍板；2026-08-30 checkpoint澄清）**：首次公开 preview/release 之前，一项公开语法、API、ABI 或语义变更一旦按授权边界拍板，就采用最简单的原子切换；兼容性本身不是增加 deprecated alias、双实现路径、旧 ABI fallback 或迁移 shim 的理由。仓内调用点、规范和测试在同一变更中整体迁移，并明确记录 break。该原则不替代新语义本身的用户保留决定。0.1 internal checkpoint允许把不命中self-host/迁仓路径的已知缺陷原样后移，而不是假称correctness/safety门已通过；首次公开preview前再按产品治理建立相称质量门，首次公开发布后的版本兼容政策另行建立。
 
 **近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值、B-167 调用点 evidence、0.1 no-index-assignment 与 B-193~B-196 surface/effect边界均采用一次性切换；旧 ownership、default evidence、宽泛`io`/host fallback、effectful Drop、index-assignment carrier与refinement placeholder必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 等潜在用户面变化在进入实现前仍显式核对 break 边界。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并用负例证明旧形式不会经 alias、fallback 或旧 ABI 继续生效。
 
-Canonical dependency chain：`#268/#269 5d57 fixed-point checkpoint -> B-183 repository/GitHub migration -> external-host compiler foundation -> B-176/B-180 -> B-190 -> remaining correctness/ABI + imported Known Issues -> later self-host milestone`。
+Canonical dependency chain：`B-183 repository/GitHub migration + B-205 external-host compiler foundation -> B-176/B-180 -> #268/#269 ownership on the external host -> B-190 -> remaining correctness/ABI + imported Known Issues -> later self-host milestone`。
 
 历史validator索引`#268/#269 -> B-176/B-180；B-176/B-180 -> B-190 -> remaining correctness/ABI -> B-183 -> B-174/B-177/B-175`已被上述2026-08-30迁仓优先路线supersede，只用于验证旧路线文本被显式识别，不再授权性能或correctness backlog先于B-183。
 
 B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（check/test/bootstrap 全绿）完成；worktree/ref/WIP、authority、paired-session、push/CI 与 health 约束已转为 `docs/workflow.md` / `docs/repository-health.json` 的持续门，活动历史只留 Git。
-`B-176` 保持 queued；B-180 只保留 runner anchor-object cache，compiler optimization继续冻结到#268/#269最小fixed point与B-183迁移闭环。
+`B-176` 保持 queued；B-180只保留runner anchor-object cache，compiler optimization冻结到B-183+B-205迁仓、host-selection spike与selected-host workspace闭环。
 
 处理顺序固定为六道门：
 
 1. **B-186 Repository convergence recovery（已完成）**：worktree/ref/WIP、单一 authority、main/branch 看板、repository-health 与 push/CI 已恢复；这些约束转为持续门。
-2. **#268/#269 5d57 fixed-point检查点**：固定source=`5d576f7c`/tree=`a7741f91`及其已有source-built seed，只允许同一clean source连续生成gen2/gen3并要求`main.c`文本fixed point；固定artifact通过compiler/hello最小smoke，且证据足以在B-183后从clean clone重建。`5d57`之后的六个effect/wildcard提交与其它current WIP不进入本交易，保留为迁仓后工作。固定 archive 只能重建精确 `DBC154…` C，无法重建 `5E862…` / `9DFD…` native-object pins，且没有另存的权威 object/recipe；因此22 GiB crossing 路线已永久关闭，latest main也不得恢复S-prime、current-tip carrier backport、direct-edge/publicization/SCU/generated-C或同类资源加码。FlowIR/ONE ResourcePlanner/RcIR仍是后续唯一终态，但不命中5d57 fixed-point路径的未闭合语义、完整矩阵与RC/ASan门转为迁仓后的GitHub Known Issues，不再阻止本检查点。
+2. **B-183+B-205 latest-blueprint迁仓与外部宿主compiler**：固定latest authority、完整Git历史/refs/notes、design/lang-spec/tests和全部WIP manifest，直接迁入目标仓库；在目标仓库用稳定宿主语言实现当前pipeline，不再把self-host或旧generated C兼容性作为0.1进入门。固定 archive 只能重建精确历史C而不能重建current Ring source，5d57同源gen2也已在84.171秒以`PreCore closure: open effect row crossed TypedHIR`失败；因此22 GiB crossing 路线已永久关闭，latest main也不得恢复S-prime、carrier backport、direct-edge/publicization/SCU/generated-C或同类代际加码。FlowIR/ONE ResourcePlanner/RcIR仍是目标compiler的唯一ownership终态，#268/#269在外部宿主上继续，不冒充已完成。
 
-> **2026-08-30 Known Issues demotion（用户决定；final census）**：0.1检查点允许compiler继续接受已知有缺陷的外部程序而不新增诊断，只要exact census证明当前compiler/std self-host与迁仓路径不命中。必须保留现有最小复现、已知后果和workaround，B-183导入为GitHub Issue；不得删除证据后声称支持。owning或type-parameter-dependent struct spread已确认compiler/std/examples owning consumer为零，直接后移，保留8处shareable compiler spread；B-170 self-host零命中后移；B-160/B-162不跑独立验收，随唯一self-host/fixed-point交易验证。B-165唯一self-host命中已由`d364853e`局部闭合，一般外部bug后移。
+> **2026-08-31 Known Issues迁仓处置（用户决定，supersede self-host census gate）**：必须保留现有最小复现、已知后果和workaround，由B-183导入GitHub Issue；不得删除证据后声称支持。owning/type-parameter-dependent struct spread、B-170、B-160/B-162、一般B-165及此前所有demotion不再因旧compiler是否命中而决定优先级；B-205移植相应pipeline纵切时建立parity/负例，#268/#269在新host继续。
 
-> **Generic callable correction**：factory/aggregate instance-sensitive子形态strict self-host为零，可作Known Issues；leaf instance isolation不能降级。Compiler真实通过`List.map/filter/any/all/find/sort_by`以不同callback actual命中同一generic body；18e lexer-masked源码census为751处（只作规模下界，不作typed oracle），安全改写至少15–100 active hours且会复制stdlib RC authority。故禁止以lambda wrapper、批量显式loop或per-type helper冒充加速；leaf instance正确性继续阻塞self-host，完整实现只须服务该内部真实consumer，不因零命中子形态扩大。
+> **Generic callable correction**：factory/aggregate与leaf instance的历史census、fixtures和反证全部迁入#268/#269/B-205；不再作为旧self-host门。Selected-host ResourcePlanner纵切必须建模BodyInstance×leaf×CallableInstance，禁止以lambda wrapper、批量显式loop、per-type helper或复制stdlib RC authority冒充1:1翻译。
 
 > **I′ final-emission H+T acceptance boundary（2026-08-20 用户批准）**：I′ 可增加一个永久但 internal-only 的 bounded acceptance TCB。Exact/NameOnly map 保存不可混用的 typed refs；所有 capture/dict/effect/closure critical leaf helper 必须从同一个 typed operand 原子生成实际 C line 与 ledger event，ledger 记录唯一 parent closure edge，并逐 edge 校验 store/extract、receiver load/call、domain、slot、index 与顺序。隐藏 flag 不进入公开 CLI/支持面；off/on 的 C、object 与诊断必须字节一致，相同输入 ledger hash 必须稳定，mutation 必须杀死缺失/交换的 tag、key、slot、index、edge 与 event。B-188 是首次 H+T one-shot 验收的硬前置；sealed artifact 一律不复用，fresh candidate 仍须原 runtime/RC/ASan/self-host/12 GiB fixed-point 完整门。任何 raw critical emitter 未接入、caller 可独立拼 C/event、closure edge 不唯一、ledger 不稳定、off-mode 漂移、需扩到 HIR/Perceus/runtime 或 12 GiB 失败都立即停止并重新 routing。T-alone 因不能证明 event 对应真实 raw slot而拒绝；提前 A′ 因重排路线并重新汇合资源风险而拒绝。
 
@@ -71,7 +71,7 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > Canonical chain改为`d06 -> 524d1d00 checkpoint -> 最少的0fab/18e/606附近checkpoint -> clean-current -> gen2/gen3 literal fixed point -> compiler/hello smoke`。d06以后只有16个compiler-tree transition；按当前seed可接受的最远语义checkpoint跳跃，不逐commit replay。首个524d overlay必须由该tree重算exact84 private physical roots（census `4D2274FD…`）、补8 pure headers与适用606拆臂，且不得提前带入`PhysicalNominalFact` carrier；中间publicization/compatibility只存在temp crossing，最终clean-current保持规范privacy/identity。每个选中native checkpoint按candidate machine/review同启与PASS review gate执行。
 
-> **2026-08-31 0.1 cut纠偏（用户决定，supersede上述live chain）**：语言/IR/runtime特性尚未稳定时把current-tip self-host作为开发前提，已实证产生超过功能修复本身的代际兼容成本。分阶段构建保留的最后成功source-built rung为`5d576f7c`；0.1不再追求`04b3` current-tip自举，而直接以clean 5d57做同源gen2/gen3文本fixed point与compiler/hello smoke。其后提交和所有失败bridge证据完整保留，不rewrite/drop，但不再进入#268/#269关键路径。B-183迁仓后优先建立外部宿主语言compiler基础；只有公开语义、IR和runtime契约稳定后再设新的self-host里程碑。
+> **2026-08-31 external-host纠偏（用户决定，supersede 5d57 cut）**：clean 5d57同源gen2已由全pin transaction在84.171秒terminal失败，唯一stderr为`PreCore closure: open effect row crossed TypedHIR`，无artifact；这证明“被旧代编译成功”不等于自身可自举。0.1不再选择任何历史Ring compiler cut，而以latest `04b3`为功能蓝本、B-183+B-205为唯一live route。dc91 fixed-point与current相同tracked C anchor只作旧功能oracle，不作为新compiler语义基线。只有外部宿主compiler稳定、公开语义/IR/runtime契约收口后再设self-host里程碑。
 
 > **Struct move-spread Known Issue（2026-08-30 用户批准demotion，supersede partial/open-drop gate）**：#268/#269只依赖当前compiler中的8处全shareable spread；它们保持base单次求值、override LTR与现有physical RC语义。Owning或type-parameter-dependent字段需要exact Take时，0.1 compiler仍可接受源码但可能产生leak、double-drop、UAF或错误Drop顺序；不要求新增source diagnostic，也不实现`Live`/`Moved` partial/open-drop、`ReleaseMovedAggregate`、storage reuse或专用shell路径。compiler/std/examples当前owning consumer为零；外部程序应显式destructure并重建全部字段。现有反例与workaround随B-183导入GitHub，不阻塞internal self-host/migration checkpoint，也不得据此宣传owning spread正确。
 
@@ -115,12 +115,26 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 
 > **0.1 no-index-assignment clean break（2026-08-26 用户批准）**：`x[i]` 只作读取；`x[i] = value`及compound index assignment稳定hard-fail并建议具名mutator，绝不按receiver类型隐式改写setter。List使用`set(mut self, index, value)`，Map使用既有`insert(mut self, key, value)`；0.1删除assignment-only Core/Flow/Planner/bridge `IndexPlace` carrier，不保留fallback或未来hook。完整`IndexMut`/嵌套index place由B-202仅在首次0.1后、存在真实consumer时重新设计，当前实现/review/验收视其为不存在。
 
-3. **B-183 repository identity / GitHub workflow**：最小self-host fixed point后立即进入planning与用户批准的外部cutover；活动backlog、review与用户决策迁到GitHub Issue/PR，稳定spec/verdict继续入库，不建立两套手工真值。
-4. **B-176/B-180 反馈速度**：在迁移后的Vorton仓库对self-host基线重做测量；runner与compiler分checkpoint，原2x量化验收不变，compiler只允许一个profile-guided wave。
+3. **B-183+B-205迁仓 / external host**：立即进入planning与用户批准的外部cutover，在目标仓建立host-selection spike，并在硬门裁决后建立selected-host compiler workspace；活动backlog、review与用户决策迁到GitHub Issue/PR，稳定spec/verdict继续入库，不建立两套手工真值。
+4. **B-176/B-180 反馈速度**：对selected-host compiler建立clean/incremental check、unit/parity和profile基线；runner与compiler分checkpoint，原量化目标需按新host重测，compiler只允许一个profile-guided wave。随后在该反馈回路上继续#268/#269。
 5. **B-190 + Remaining correctness / ABI**：性能反馈改善后做一次有界减法复核，再由GitHub backlog处理B-193/B-194/B-195/B-196、B-162/B-164、现存issues及B-168/B-169/B-167/B-152/B-002；Known Issues按影响与真实consumer重新排序，不因0.1检查点关闭而冒充完成。
 6. **Public preview candidate**：B-191 → B-174 → B-177 → B-175；随后B-204优先恢复proper callable-occurrence ResolvedAST，再由B-181、B-178/B-016、B-111等证据与工具面推进。B-072/B-197/B-198/B-202只在迁仓后按真实consumer与既有优先级重启。
 
-B-180不得绕过#268/#269最小fixed point或B-183迁仓闭环；其已证明的runner anchor-object cache可保留。B-176只有在Vorton clean clone可重放同一self-host基线后才算完成。
+B-176/B-180不得绕过B-183+B-205的迁仓、selected-host workspace与translation spike；其已证明的runner anchor-object cache可保留，但必须对选定宿主compiler重新测量。#268/#269在反馈基线建立后继续，不再等待或制造Ring self-host fixed point。
+
+### B-205 Latest-blueprint外部宿主compiler [refactor] [P0] [XL] [judgment] [planning] [with: B-183] [before: B-176+B-180+#268+#269]
+
+> **2026-08-31 用户决定，最高优先级**：语言surface、类型/效果系统、Core/Flow ownership IR与runtime尚未稳定时，不再要求旧Ring compiler理解current source。B-205与Vorton迁移作为同一个最高优先级program直接在目标仓库启动：实现蓝本固定为`04b3ba53`的`compiler/std/ring_runtime.cpp/tests`，治理真值取本规划commit后的main，完整Git历史与两ref均迁移；dc91 tracked C fixed point、5d57 source-built artifact及其他历史candidate只作限定oracle，不作为实现基线或self-host门。#268/#269保持未完成并迁入新仓，在外部宿主compiler上继续。
+
+**宿主语言 / 翻译原则**：首选候选为Rust，但不在spike前永久锁定。初始结构映射上，Ring的`struct/enum/match/fn/impl`、`Option/Result`、泛型与`List/Map/Set`可分别对应Rust ADT、pattern match、function/impl、`Option/Result`、`Vec/IndexMap/IndexSet`；TypeScript需要tagged-union/switch，C++通常需要variant/visitor。Rust同时提供native性能、内存安全、Cargo增量构建/测试/profiling和成熟Windows/Linux工具链。参考TypeScript compiler的原则是“compiler实现使用成熟宿主生态、源码module与compiler stage保持直接映射、先机械保真再重构”，不是预设必须使用TypeScript。
+
+**选型硬门**：对同一三个固定切片分别统计source declaration/function总数、能保持一对一module/type/function映射的数量、host-only adapter LOC、因borrow/GC/object model而重排的函数数、check/build wall和peak RSS。Rust只有在一对一映射覆盖率`>=80%`、需要控制流/数据结构重写的函数`<=20%`，且非机械差异可集中在`host_support`/arena边界时锁定；否则用完全相同的fixtures、统计脚本与验收比较TypeScript和C++，按“映射保真优先，其次开发反馈，再其次runtime性能”一次裁决。任何候选要求双IR、双resolver、旧compiler RPC或按模块混合宿主即淘汰。
+
+**Phase 0 — 固定蓝本与1:1 spike**：B-183迁仓manifest分别固定04b3实现ref和main治理ref的SHA/tree、每个compiler/std/runtime/test/spec文件hash、公开surface清单、pipeline/IR variant census、diagnostic codes与Known Issues。先在目标仓库翻译三个代表性切片：`lexer+parser+AST`、`types+env+unify`、`TypedHIR→Core`。记录原/宿主LOC、非机械改写点、clone/arena/interior-mutation适配、compile/check wall与peak RSS；宿主锁定严格只由上一段`>=80%`/`<=20%`硬门和同样本Rust/TypeScript/C++比较决定，不在本段建立第二selection authority。不得做Ring→host通用transpiler、混合调用旧compiler、双parser/checker authority或边迁边重设计公开语义。
+
+**Phase 1 — compiler纵切**：按`Lexer/Parser → AST/diagnostics → resolver/modules → type/effect checker → TypedHIR/CoreHIR → FlowIR/ResourcePlanner/RcIR/certificate → C11 backend`移植；初期继续复用现有`ring_runtime.cpp`与C ABI。建立internal `host_support`层只映射确定容器、字符串/intern、Span、arena和稳定迭代顺序，不模拟Ring ownership/effect runtime，也不把host语言的内存模型当Ring语义。每个Ring源文件与selected-host module保留可追踪映射；先达到行为parity，再以独立commit做host-native重构。
+
+**验收**：clean clone只依赖选型硬门产出的固定host toolchain/lockfile即可构建；三个spike与全量移植manifest无silent omissions；现有parser/type/effect/HIR/Core/ownership fixtures逐批转为host compiler parity测试；C输出继续链接现有runtime并通过compiler/hello与代表性single/project程序。#268/#269必须在单一FlowIR/ResourcePlanner/RcIR authority中闭合后才能标完成。self-host不属于B-205完成条件；只有外部compiler、规范和runtime稳定后另立用户决策里程碑。
 
 ---
 
@@ -593,33 +607,32 @@ G1 inline relative import、G2 single-file plan 按 staged NOTES 激活；Param.
 - **合法性边界（2026-06-12 D-1 拍板）**：last-use drop / 重用仅限「无用户 Drop impl 且非 `Weak<T>` 目标」的类型（as-if 条款，公理⑥ / design.md §7.11）；Weak 目标与带 Drop 类型钉死 scope-end，不得重用
 - **验收**：典型 FBIP 模式（list map/filter、tree insert）生成就地改写而非新分配；基准显示分配数下降；完整 C/native、RC/verifier 与自举回归通过；Weak/Drop 用例在 reuse 启用前后输出一致（D-1 锚点）
 
-### B-176 `check` / 验证反馈基线与 regression budget [infra] [P0] [M] [judgment] [queued] [after: #268+#269+B-183] [before: B-180]
+### B-176 `check` / 验证反馈基线与 regression budget [infra] [P0] [M] [judgment] [queued] [after: B-183+B-205] [before: B-180+#268+#269]
 
-此前 `95e12437` snapshot 的 directional measurements 与 replay index 不能在最新 main
-重放，且 Codex 管理的 ignored raw directory 已被宿主回收，因此不构成 B-176 完成证据。
-post-ownership 必须从最新 main、tracked anchor、runtime、toolchain 与固定 manifest 重新采集。
+此前Ring compiler的directional measurements与replay index只作历史证据，不构成B-176完成证据。
+B-205锁定selected host并完成三个translation spike后，必须从其clean clone、固定toolchain/lockfile、host compiler source、runtime与parity manifest重新采集。
 
-**范围**：tiny/大单文件/module/`compiler/main.ring` 普通 check、`--verify-rc`、失败诊断；
-tracked compiler construction、单个 focused case、e2e/golden/RC/structural/self-compile 与完整门。
+**范围**：selected-host compiler的tiny/大单文件/module check、失败诊断与已移植`verify-rc`等效入口；
+host compiler clean/incremental build、单个focused case、unit/parity/e2e/golden/RC/structural与C emission门。
 记录 wall/CPU、peak RSS、进程数、case 数、cold/warm cache 和完整工具链指纹；短 lane >=5 次，
 预计 >=5min 的长 lane >=3 次，保留全部样本/invalid，不挑最好值。
 
-**验收**：在 clean 最新 main 形成可重放 baseline、top-3 wall-time 构成与 B-180 预算，明确区分
-compiler 内部、每进程初始化/重复 parse-check、runner/clang 调度。默认测量关闭时近零开销；
+**验收**：在selected-host clean clone形成可重放baseline、top-3 wall-time构成与B-180预算，明确区分
+compiler内部、每进程初始化/重复parse-check、runner/C-toolchain调度。默认测量关闭时近零开销；
 一个 bounded wave 收口，不扩为通用 telemetry。
 
-### B-180 开发反馈回路吞吐专项 [refactor] [P0] [XL] [judgment] [queued] [after: B-176+#268+#269+B-183] [before: B-190]
+### B-180 开发反馈回路吞吐专项 [refactor] [P0] [XL] [judgment] [queued] [after: B-176+B-183+B-205] [before: #268+#269+B-190]
 
-**进入门（2026-08-19 用户重置）**：#268/#269 fixed point 与 B-176 最新-main baseline 必须先完成。此前 developer-unblock checkpoint 只保留为历史证据，不再授权 compiler lane 与 ownership critical 并行。
+**进入门（2026-08-31 external-host supersession）**：B-183迁仓、B-205宿主硬门与三个translation spike、B-176 selected-host baseline必须先完成；随后B-180位于#268/#269 external-host实现之前。此前Ring developer-unblock/self-host checkpoint只保留为历史证据，不授权恢复旧compiler lane。
 
-**冻结边界**：只保留已证明 fail-closed 的 runner anchor-object cache；其他 compiler candidates 全部 rejected/frozen。post-ownership 从最新 main 重新建立 B-176 baseline 后，runner 与 compiler 分 checkpoint，compiler 只允许一个 profile-guided wave。不得恢复历史 probe tree、拼接 rejected candidates 或用缓存掩盖 nondeterminism/panic/false-green。
+**冻结边界**：只保留已证明fail-closed的runner anchor-object cache；其他Ring compiler candidates全部rejected/frozen。selected-host translation spike完成后由B-176建立新baseline，runner与compiler分checkpoint，compiler只允许一个profile-guided wave。不得恢复历史probe tree、拼接rejected candidates或用缓存掩盖nondeterminism/panic/false-green。
 
 **实现范围 / 顺序**：
 
-1. 先按 B-176 的真实端到端等待选择第一刀；若 compiler construction、runner/clang 调度占主导，再改 `tests/run_tests.py` 与 `compiler/scripts/`：compiler artifact 使用由 `dist-c`/runtime/flags/toolchain 全指纹控制的内容寻址缓存，但每轮仍在隔离目录执行，禁止信任裸 root `ring.exe`；增加有界 `--jobs`、per-case 独立 out-dir、确定性汇总与 fail-fast 可选显示，原始失败永不自动重试或吞掉；
-2. compiler lane 只允许一次由最新 main profile 直接支持的 bounded wave；预先固定假设、文件边界、正确性门、端到端淘汰门与停止条件，未达到原 2x 总目标不得用多轮 speculative knives 补足；
+1. 先按B-176真实端到端等待选择第一刀；若host compiler construction、runner/C-toolchain调度占主导，再改selected-host build/test入口：compiler artifact使用source/runtime/flags/toolchain/lockfile全指纹控制的内容寻址缓存，但每轮仍在隔离目录执行，禁止信任裸root artifact；增加有界jobs、per-case独立out-dir、确定性汇总与fail-fast可选显示，原始失败永不自动重试或吞掉；
+2. compiler lane只允许一次由selected-host profile直接支持的bounded wave；预先固定假设、文件边界、正确性门、端到端淘汰门与停止条件，不得用多轮speculative knives拼凑收益；
 3. 若进程启动/重复初始化主导，比较 bounded worker-process/batch-check 与普通进程池；任何复用方案必须以随机 case 顺序、重复运行和进程隔离对照证明无 global state 泄漏。daemon、常驻服务和新公共协议不作为首轮默认；
-4. 只有 profile 证明 unchanged module 的重复 parse/check 仍主导，才重写并激活 B-105，把 HIR/module cache 纳入其 per-module 增量范围；cache key 必须覆盖 compiler/std/source/import/effect-signature 指纹并 fail closed。
+4. 只有profile证明unchanged module的重复parse/check仍主导，才重写并激活B-105，把HIR/module cache纳入其per-module增量范围；cache key必须覆盖host compiler/stdlib/source/import/effect-signature/toolchain指纹并fail closed。
 
 > **2026-08-14 第一项 retained candidate。** Windows runner 只缓存 controlled recipe 下 tracked `main.c` 的 ThinLTO anchor object；key 绑定 source snapshot、实际 header/macro closure、三段 recipe、target、sanitized environment 与 clang/clang++/lld 内容身份。每轮仍 fresh runtime compile/link 与隔离 run dir；dependency closure 前后各扫一次。artifact/receipt 采用 immutable CAS，同 key divergence 先转为有界 durable poison tombstone，畸形 receipt、大小谎报、hardlink/flush/closure 漂移均 fail loud。focused `bool_ops` e2e 在同一 12 GiB/5-process 门下 fresh miss 与 warm hit 均 1 pass/0 fail，warm whole loop 约 3.2 s；原始 trace 见 replay index。该结果只关闭 runner construction 第一刀，不代表 B-180 或 release acceptance 完成。
 
@@ -653,7 +666,7 @@ compiler 内部、每进程初始化/重复 parse-check、runner/clang 调度。
 
 > **2026-08-19 ownership-cleanup crossing 最终裁决。** 新的 direct fixture 把 Map/Option allocation 信号提升为通用 correctness 根因：`var Option = none` 后装入 owned payload 时缺 W4/exit cleanup。bounded safe-tail 候选与独立 verifier 已通过 source-built gen1 的 runtime 1/1、RC/mutation 8/8、structural 1/1 和 parity 1/1；但该 gen1 自身仍由旧 Perceus lowering 生成，完整 gen2 在 2371.12 s 触及固定 12 GiB/typeid 8。唯一额外 construction 只把临时 mirror 的 3016-line verifier替换为同 API、调用即 panic 的 30-line fail-closed stub，仍在 2347.24 s 触及同一资源墙。两条收据都无产物，证据见 `bench/check/results/ownership-option-cleanup-20260819/s-prime-acceptance/`。不得继续删模块、提高 cap、patch generated C/runtime/typeid、重跑旧 profile或按 `unify.ring` 热点写 workaround；candidate 保留 correctness evidence，但 B-180/self-host acceptance 仍 blocked，tracked bootstrap 不更新。任何后续 crossing 必须先有新的直接 peak authority 与独立 Argument，不能把同类 size-cut 猜测当成下一刀。
 
-**整体验收**：恢复原 2x 量化门，不降级。以 post-ownership B-176 同机同 manifest 为基线，`compiler/main.ring check` median、`check --verify-rc compiler/main.ring` 与完整本地标准门 wall time 均以基线的 `<=50%` 为目标；tiny/大单文件/module check p95 不得回退 >10%。runner/compiler checkpoint 可分别验收正确性，但只有合计达到 2x 且完整 C/RC/ASan/self-host/double-bootstrap 全绿才完成 B-180。串行 oracle 与并行 runner 的 pass/fail/skip、诊断、生成 C/fixed point 必须一致，覆盖数不减少；任何原始失败必须 fail loud。
+**整体验收**：B-205 translation spike完成后由B-176在同机同manifest上为selected-host compiler重建基线，再固定量化目标；旧Ring self-host wall、2x目标和probe只作历史输入，不直接约束新host。至少覆盖clean/incremental check、tiny/大单文件/module project、parity suite与C emission，先证明瓶颈分布再允许一个profile-guided wave；p95与peak RSS budget必须基于新基线。runner/compiler checkpoint可分别验收，但B-180不要求Ring self-host/double-bootstrap；串行oracle与并行runner的pass/fail/skip、诊断和已移植C输出必须一致，覆盖数不减少，任何原始失败必须fail loud。
 
 ### B-190 Repository overengineering audit and simplification [refactor] [P1] [XL] [judgment] [queued] [after: B-180+B-187+B-183] [before: B-174]
 
@@ -661,18 +674,18 @@ compiler 内部、每进程初始化/重复 parse-check、runner/clang 调度。
 
 **盘点与执行**：每项只允许 `保留（当前必要）/ 删除 / 简化合并 / 延后到具体未来需求 / 用户决定`。重点核对重复真值、失效后端/probe、无消费者的 extensibility/config/plugin 层、为友善内部工具构造的恶意攻击防线、重复 parser/visitor/oracle、过度 mutation/harness、可由现有 authority直接推出的中间抽象和完成历史残留。先形成有证据的 inventory并独立反驳，再按文件冲突切成 bounded refactor waves；优先净删除、合并 authority和缩短调用链，不以 LOC 指标驱动。
 
-**约束 / 验收**：不改变公开语义、ownership/safety保证、ABI或 release门，不把“清理”变成新架构项目；当前可用、近期无已知bug而仅不够漂亮的代码允许继续保留。每个变更必须说明删除了哪个维护负担及为何不影响当前/已登记近程消费者；完整 C/RC/ASan/self-host/fixed point与workflow/health通过，独立 reviewer主动寻找误删和新重复层。一次盘点后收口，禁止 audit-until-dry或为了填满波次制造工作。
+**约束 / 验收**：不改变公开语义、ownership/safety保证、ABI或release门，不把“清理”变成新架构项目；当前可用、近期无已知bug而仅不够漂亮的代码允许继续保留。每个变更必须说明删除了哪个维护负担及为何不影响当前/已登记近程消费者；selected-host clean build、unit/parity、相称C/RC/ASan、workflow/health通过，独立reviewer主动寻找误删和新重复层。self-host/fixed point只在后续独立里程碑重新批准后才成为验收门。一次盘点后收口，禁止audit-until-dry或为了填满波次制造工作。
 
-### B-183 Vorton 仓库身份与 GitHub 工作流原子迁移 [infra] [P0] [XL] [judgment] [queued] [after: #268+#269] [before: B-176+B-180+B-174+B-177+B-175]
+### B-183 Vorton 仓库身份与 GitHub 工作流原子迁移 [infra] [P0] [XL] [judgment] [queued] [with: B-205] [before: B-176+B-180+#268+#269+B-174+B-177+B-175]
 
-> **2026-08-30 用户方向（supersede原性能优先顺序）**：#268/#269最小self-host/migration checkpoint完成后立即迁移到`vorton-lang`，并把用户—Steward的活动协作切到GitHub Issue/PR；B-176/B-180与Known Issues修复在新仓库继续。进入本项时仍必须先展开执行规范和外部变更清单，再由用户批准transfer、凭据/App、组织权限与批量导入等具体动作；本顺序变化本身不授权任何仓库外写入。
+> **2026-08-31 用户方向（supersede等待self-host顺序）**：立即把latest蓝本、完整历史/WIP与治理迁入`vorton-lang`，并在目标仓库与B-205一起建立外部宿主compiler；#268/#269、B-176/B-180与Known Issues在新仓继续，不再等待任何Ring self-host checkpoint。进入本项时仍必须先展开执行规范和外部变更清单，再由用户批准transfer、凭据/App、组织权限与批量导入等具体动作；本顺序变化本身不授权任何仓库外写入。
 
 **范围 / 文件与外部面**：GitHub organization/repository settings、`.github/` Issue/PR 模板与 ruleset、`docs/workflow.md`、`docs/backlog.md`、`docs/audit-report.md`、`.agents/` / `.claude/` provider adapter 与验证器、Git notes audit ledger、repo-wide public identity/CLI/source extension/editor package/cache path、`.gitattributes`、tracked bootstrap、README/规范/测试/CI。
 
 **已固定边界**：
 
 1. 核心仓库目标为 `vorton-lang/vorton`；使用 GitHub transfer + rename，保留完整 commit/tag/ref provenance，不新建空仓导入、不 squash 或重写历史，也不得复用旧 `YYF233333/Ring-lang` slug 破坏重定向。
-2. `compiler/dist-c/main.c` 继续作为核心仓库内唯一 tracked C bootstrap anchor，不拆仓、不转 Git LFS；以 `linguist-generated` 排除语言统计并默认折叠 diff，其他生成 C 仍不入库或只作为 release artifact。
+2. `compiler/dist-c/main.c`继续随完整历史迁移、不拆仓、不转Git LFS，以`linguist-generated`排除语言统计并默认折叠diff；它是dc91旧功能oracle，不再是latest compiler的bootstrap authority。B-205选型硬门产出的selected-host compiler及lockfile成为clean-clone可构建入口，其他生成C仍不入库或只作test/release artifact。
 3. 公共身份按未发布期 clean break 原子改为 Vorton，不建立 Ring alias/双 CLI/双 ABI；`.v` 因与 V、Verilog、Rocq Prover 冲突而排除，最终源码扩展名及 CLI/package/editor namespace 在本项 planning 固定。
 4. GitHub 成为活动工作与用户决策的异步入口，稳定设计/治理结论仍落仓库；Issue 与旧 Markdown 看板不得长期并存为两份手工真值。初期使用当前人类账号下限定到 Vorton 仓库的最小权限凭据，长期无人值守身份优先组织拥有的 GitHub App，machine user 只作工具能力不足时的 fallback；bot/App 不取得 organization owner。
 
@@ -681,9 +694,9 @@ compiler 内部、每进程初始化/重复 parse-check、runner/clang 调度。
 - 固定 cutover snapshot，盘点并处置全部 worktree/local branch、未推送 main、tag、自定义 ref 与 `refs/notes/*`；生成可恢复 backup/bundle、迁移 manifest 和逐项 rollback/stop 条件。
 - 定义 B/A/D 到 Issue 的 title/body/label/state/dependency 映射、幂等 marker、两阶段建链、dry-run、断点续传、数量/内容校验，以及 cutover 后 Markdown 看板的归档或生成视图方案；完成历史不批量制造 Issue。
 - 定义 Steward 的 GitHub 读写授权矩阵、同账号署名/机器标记、用户保留决定门、Issue/PR 生命周期、merge 策略、review/CI/thread gate、回访频率、离线补扫和未来 webhook 切换；不读取或改变用户个人 notification read-state。
-- 把 repo transfer、公共标识 clean break、bootstrap 重生、workflow/ruleset/template 上线和活动账本导入排成一个有界维护窗口；任何需要组织管理、凭据、App 安装或公开状态变化的步骤在执行前逐项取得用户批准。
+- 把repo transfer、公共标识clean break、B-205 selected-host workspace/spike、workflow/ruleset/template上线和活动账本导入排成一个有界维护窗口；任何需要组织管理、凭据、App安装或公开状态变化的步骤在执行前逐项取得用户批准。
 
-**验收**：迁移前 manifest 能从备份恢复全部 durable ref/notes，main 与远端 exact SHA、活动工作处置和 CI 状态可复核；迁移后 `vorton-lang/vorton` 保留完整 ancestry/tag/notes 与旧 URL/Git 重定向，仓内公共标识、最终扩展名、CLI/editor/runtime/test/文档一次切换且无遗留 alias；tracked C anchor 可从 clean clone 构建并达到同一 self-compile fixed point，compiler/hello最小smoke与迁移后远端bootstrap CI通过；Issue/PR schema、ruleset、最小权限访问和定时/离线扫描均有 dry-run 与负面测试，导入计数、Known Issues和依赖映射可重放且不存在双重手工真值。完整C/RC/structural/parity/ASan等语言质量矩阵作为导入后的GitHub工作继续，不冒充本项已绿。本项不创建 release/tag，也不授权公开 preview。
+**验收**：迁移前manifest能从备份恢复全部durable ref/notes，main与远端exact SHA、活动工作处置和CI状态可复核；迁移后`vorton-lang/vorton`保留完整ancestry/tag/notes与旧URL/Git重定向，仓内公共标识、最终扩展名、CLI/editor/runtime/test/文档一次切换且无遗留alias；clean clone可用selected-host固定toolchain/lockfile构建B-205 workspace并运行translation spike/parity CI，旧tracked C oracle仍可独立构建但不要求current self-compile；Issue/PR schema、ruleset、最小权限访问和定时/离线扫描均有dry-run与负面测试，导入计数、#268/#269、Known Issues和依赖映射可重放且不存在双重手工真值。完整C/RC/structural/parity/ASan等语言质量矩阵作为导入后的GitHub工作继续，不冒充本项已绿。本项不创建release/tag，也不授权公开preview。
 
 ### B-184 Ownership checker workaround retirement / 语义人体工学收口 [refactor] [P1] [L] [judgment] [queued] [after: B-183]
 
