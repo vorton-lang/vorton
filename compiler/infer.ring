@@ -1,49 +1,477 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
     INT, FLOAT, STR, BOOL, UNIT, NEVER, ANY, EMPTY_ROW,
-    type_to_string, make_option_type, is_option_type, option_inner,
+    type_to_string, types_equal, make_option_type, is_option_type, option_inner,
     type_to_builtin_name, effect_row, nominal_display_name}
 use ast::{Program, Decl, Expr, Stmt, Param, MatchArm, StructFieldInit,
     EffectHandler, StringInterpPart, Pattern, BinOp, UnaryOp, TypeExpr,
     TypeParam, TypeBound, Span, UseDecl, DestructureBinding, span_zero,
     EffectOpDecl}
 use hir::{HExpr, HStmt, HDecl, HParam, HMatchArm, HEffectHandler,
-    HPatternBinding,
-    HStructFieldInit, HStringInterpPart, HProgram, DerivedImpl,
-    TraitDispatch, DictDispatchInfo, DictRef, TraitBound,
+    HPatternBinding, HLambdaCapture,
+    HCallableTypeActual, HCallableEffectInstantiation,
+    HCallableValueInstantiation,
+    HPatternPlan, HOperatorPlan,
+    HProjectionRef, h_nominal_projection, h_structural_projection,
+    h_tuple_projection,
+    make_h_variant_constructor_plan, make_h_tuple_constructor_plan,
+    make_h_record_constructor_plan, h_variant_projection,
+    HExactCallPlan, HStringInterpPlan, HListLiteralPlan,
+    make_h_exact_call_plan, make_h_exact_call_plan_with_type_args,
+    make_h_string_interp_plan, make_h_list_literal_plan,
+    method_call_ref_callee_identity,
+    make_h_range_for_in_plan,
+    h_fail_raise_ref,
+    HStructFieldInit, HNominalStructFieldInit, HFieldAccessKind,
+    HStringInterpPart, HProgram, DerivedImpl,
+    TraitDispatch, DictRef, TraitBound,
+    MethodCallRef, make_intrinsic_method_call_ref,
+    make_concrete_method_call_ref, make_bound_method_call_ref,
+    method_call_ref_is_bound, method_call_ref_bound_evidence,
+    method_call_ref_signature,
+    h_operator_is_tuple, h_operator_elements, h_operator_method_ref,
     HStructField, HEnumVariant, HEffectOp, HTraitMethod,
     HForInDestructure, HLetDestructureBinding, ValueBindingKind,
     trait_bound_param_name,
     BUILTIN_RANGE, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET, BUILTIN_OPTION,
     hexpr_type, hexpr_effects, hexpr_span, map_index_helper_identity}
-use diagnostics::{DiagnosticContext, DiagnosticNote, CollectingSink, Severity, make_diag}
-use codes::{E0201, E0203, E0206, E0301, E0303, E0304, E0305, E0306,
+use hir_exact::{dict_ref_exact}
+use diagnostics::{CompileError, DiagnosticContext, DiagnosticNote,
+    CollectingSink, Severity, make_diag}
+use codes::{E0201, E0203, E0205, E0206, E0301, E0303, E0304, E0305, E0306,
     E0307, E0308, E0309, E0402, E0411, E0503, E0601, E0705, W0001}
 use union_find::{UnionFind}
 use env::{TypeEnv, TypeScheme, StructDef, EnumDef, EffectDef,
-    EffectOpDef, TraitDef, TraitMethodDef, ImplEntry, TypeAliasDef,
+    EffectOpDef, TraitDef, TraitMethodDef, ImplEntry,
+    ImplMethodSchemeCore, TypeAliasDef,
     BuiltInKind, mono, apply_subst, apply_subst_row, apply_subst_map,
-    build_scheme_var_map, find_impl, lookup_variant}
+    instantiate_effect_header_schema,
+    instantiate_trait_method_signature,
+    find_impl, lookup_variant, compiler_owned_extern_manifest_entry}
+use extern_manifest::{
+    compiler_extern_manifest_entry_executable,
+    compiler_extern_manifest_entry_normalized_signature,
+    compiler_extern_manifest_entry_generic_arity}
 use unify::{unify, empty_subst}
-use infer_ctx::{InferCtx, InferResult, FnBoundsEntry, CompileError,
+use infer_ctx::{InferCtx, InferResult, FnBoundsEntry,
+    fn_bound_dict_ref,
     PendingDictPurpose,
     type_error, type_error_with_notes, merge_effects, unify_at, unify_at_noted, update_fn_effects,
     resolve_type_expr, resolve_self_type, resolve_named_type,
     bind_pattern, resolve_dict_ref_for_type,
+    exact_pattern_plan,
     resolve_or_defer_dicts_from_scheme,
-    register_callable_value_shadow,
+    resolve_or_defer_dicts_from_impl_owner,
+    CallableInstantiationReceipt,
+    callable_receipt_type, callable_receipt_type_args,
+    callable_receipt_effects,
+    instantiate_callable_scheme, instantiate_callable_impl_method,
+    instantiate_assoc_type_from_callable_receipt,
+    pending_anonymous_callable_checkpoint,
+    record_pending_anonymous_callable_header,
+    rollback_pending_anonymous_callable_headers,
+    drain_representable_pending_anonymous,
     pending_dict_checkpoint, has_pending_dicts_since,
     remove_fail_effect,
-    generalize, free_type_vars, resolve_relative_qualifier}
+    generalize, free_type_vars, resolve_relative_qualifier,
+    value_binding_kind, value_symbol_ref, current_identity_file_key,
+    fresh_child_executable,
+    enter_executable_owner, enter_handler_executable_owner,
+    exit_executable_owner,
+    current_executable_owner, current_dictionary_evidence_owner,
+    local_effect_header_origin,
+    define_exact_effect_header,
+    inherit_dictionary_evidence_owner,
+    current_effect_ctx, current_effect_ctx_parent_capture,
+    current_draft_callable_effect_ctx,
+    effect_ctx_source_for_callable, effect_ctx_lookup_for_instance,
+    begin_effect_ctx_install, finish_effect_ctx_install,
+    uninstall_effect_ctx,
+    executable_capture_slot, fresh_semantic_path,
+    fresh_semantic_let_binder, fresh_semantic_var_binder,
+    semantic_for_binder,
+    journal_boxed_var_insert, journal_var_lambda_depth_set,
+    journal_record_def_span, journal_mutable_var_insert,
+    journal_let_def_insert, journal_mut_param_def_insert}
 use exhaustive::{check_exhaustive}
-use infer_helpers::{MethodLookupResult, StmtResult,
+use infer_helpers::{MethodLookupResult, StmtResult, CalleeMetadata,
+    ExactVariantConstructorTarget, exact_variant_constructor_target,
     is_value_type, cancel_local_mut_effects, resolve_var_id,
     check_assign_target_mutable, find_root_expr, get_assign_target_root_def_id, get_hexpr_root_type,
-    infer_ident, infer_numeric_op, is_primitive_ord,
+    infer_ident, infer_ident_with_receipt,
+    infer_numeric_op, is_primitive_ord,
     resolve_trait_dispatch, resolve_eq_dispatch,
+    exact_operator_plan,
+    exact_nominal_method_call,
     is_bounded_direct_callable_ident, resolve_callee_metadata,
     check_expr_is_let_def, get_expr_def_id, is_mut_method_call, check_receiver_mutability,
     lookup_impl_method, lookup_trait_method,
     rewrite_bare_enum_bindings}
+use ir_identity::{IntrinsicRef, ImplMethodRef, TraitMethodRef, CalleeRef,
+    SlotRef,
+    HandledEffectRef, SystemEffectRef, handled_effect_ref_same,
+    make_named_callee_ref, make_local_callee_ref, make_source_slot_ref,
+    builtin_str_identity_symbol, builtin_bool_to_str_symbol,
+    builtin_list_index_symbol, builtin_str_index_symbol,
+    compiler_extern_site_from_tag, compiler_extern_ref_for_site,
+    compiler_extern_ref_symbol, COMPILER_EXTERN_SLOT_ALLOC,
+    callee_ref_is_named, callee_ref_named_symbol,
+    slot_domain_lexical, slot_ref_same,
+    slot_ref_is_source, slot_ref_source_def_id,
+    slot_ref_source_domain_is_lexical, slot_ref_synthetic_path,
+    path_owner_for_symbol, make_path_ref, path_role_synthetic,
+    path_role_handler, path_role_child, path_role_parameter,
+    path_ref_same, path_ref_owner, path_ref_role,
+    path_ref_normalized_child_path, path_role_same,
+    variant_ref_member}
+use ir_inventory::{ExecutableRef, SystemHostCallableRef, BinderEntry,
+    EffectOperationRef, effect_operation_ref_same,
+    effect_operation_ref_source_index,
+    ExactDictRef, dict_ref_is_local, dict_ref_is_wrapped,
+    dict_ref_local, dict_ref_wrapped_inner,
+    make_named_executable_ref, make_system_host_callable_ref,
+    executable_ref_is_named, executable_ref_named_symbol,
+    executable_ref_anonymous_path, executable_ref_same}
+use effect_contract::{TypedHandledEffectInstance,
+    typed_effect_header_schema_bindings,
+    empty_typed_effect_header_schema,
+    make_typed_handled_effect_instance, typed_handled_effect_instance_same,
+    typed_handled_effect_instance_reference,
+    typed_handled_effect_instance_type_arguments,
+    make_empty_effect_ctx_source}
+
+fn exact_ident_variant_constructor_target(
+    ctx: InferCtx, value: HExpr
+) -> ExactVariantConstructorTarget? {
+    match value {
+        HExpr::Ident { def_id, .. } =>
+            exact_variant_constructor_target(ctx, def_id),
+        _ => none
+    }
+}
+
+fn exact_variant_construct(
+    target: ExactVariantConstructorTarget, fields: List<HStructFieldInit>,
+    ty: Type, effects: EffectRow, span: Span
+) -> HExpr {
+    HExpr::NamedVariantConstruct {
+        enum_name: target.enum_def.name,
+        variant_name: target.variant_name,
+        variant_ref: target.variant_ref,
+        fields: fields, spread: none,
+        constructor: some(make_h_variant_constructor_plan(
+            fields.map(fn(field) {
+                h_variant_projection(field.field_ref)
+            }))),
+        ty: ty, effects: effects, span: span
+    }
+}
+
+fn exact_variant_type_instantiation(
+    target: ExactVariantConstructorTarget, result_type: Type
+) -> Map<Int, Type> {
+    let type_params = match result_type {
+        Type::EnumType { type_params, .. } => type_params,
+        _ => panic("variant constructor target: result is not an enum")
+    }
+    if target.enum_def.type_param_vars.len() != type_params.len() {
+        panic("variant constructor target: type parameter census differs")
+    }
+    let mut mapping: Map<Int, Type> = map_new()
+    let mut index = 0
+    while index < type_params.len() {
+        mapping.insert(
+            target.enum_def.type_param_vars.get(index).unwrap(),
+            type_params.get(index).unwrap())
+        index = index + 1
+    }
+    mapping
+}
+
+fn infer_positional_variant_call(
+    mut ctx: InferCtx, callee: InferResult, args: List<Expr>,
+    target: ExactVariantConstructorTarget, span: Span
+) -> InferResult {
+    if callee.effects.effects.len() != 0 || callee.effects.tail.is_some() {
+        panic("variant constructor target: identifier has effects")
+    }
+    let raw_result_type = hexpr_type(callee.hexpr)
+    let inst_map = exact_variant_type_instantiation(
+        target, raw_result_type)
+    let variant = target.enum_def.variants.get(
+        target.variant_index).unwrap()
+    let schemas = target.enum_def.variant_field_effect_schemas.get(
+        target.variant_index).unwrap()
+    if variant.fields.len() != target.field_refs.len() ||
+       variant.fields.len() != schemas.len() {
+        panic("variant constructor target: payload census differs")
+    }
+
+    let mut expected_fields: List<Type> = []
+    let mut field_index = 0
+    while field_index < variant.fields.len() {
+        let raw_field = variant.fields.get(field_index).unwrap()
+        let localized = instantiate_effect_header_schema(
+            ctx.env, [raw_field], schemas.get(field_index).unwrap())
+        expected_fields.push(apply_subst_map(
+            inst_map, localized.0.get(0).unwrap()))
+        field_index = field_index + 1
+    }
+
+    let mut s = callee.subst
+    let mut effects: EffectRow = EMPTY_ROW
+    let mut hargs: List<HExpr> = []
+    let mut arg_index = 0
+    for arg in args {
+        let expected = expected_fields.get(arg_index)
+        let ar = match arg {
+            Expr::Lambda {
+                params: lambda_params, body, span: lambda_span, ..
+            } => match expected {
+                some(raw_expected) => match apply_subst(s, raw_expected) {
+                    Type::FnType { params, .. } => infer_lambda(
+                        ctx, lambda_params, body, lambda_span, s,
+                        some(params)),
+                    _ => infer_expr(ctx, arg, s)
+                },
+                none => infer_expr(ctx, arg, s)
+            },
+            _ => infer_expr(ctx, arg, s)
+        }
+        s = ar.subst
+        let merged = merge_effects(
+            ctx.sink, ctx.env, effects, ar.effects, s, span)
+        effects = merged.0
+        s = merged.1
+        match expected {
+            some(field_type) => {
+                s = unify_at(
+                    ctx.sink, ctx.env, hexpr_type(ar.hexpr),
+                    field_type, s, span)
+            },
+            none => {}
+        }
+        hargs.push(ar.hexpr)
+        arg_index = arg_index + 1
+    }
+
+    if hargs.len() != expected_fields.len() {
+        let display = nominal_display_name(target.enum_def.name)
+        let _ = type_error(ctx.sink, E0301,
+            "Enum constructor '${display}::${target.variant_name}' expects ${expected_fields.len().to_str()} argument(s), got ${hargs.len().to_str()}",
+            span, DiagnosticContext::TypeMismatch {
+                expected: "${expected_fields.len().to_str()} args",
+                actual: "${hargs.len().to_str()} args",
+                expression: none
+            })
+    }
+
+    let mut fields: List<HStructFieldInit> = []
+    field_index = 0
+    while field_index < target.field_refs.len() &&
+          field_index < hargs.len() {
+        fields.push(HStructFieldInit {
+            name: field_index.to_str(),
+            field_ref: target.field_refs.get(field_index).unwrap(),
+            value: hargs.get(field_index).unwrap()
+        })
+        field_index = field_index + 1
+    }
+    let result_type = apply_subst(s, raw_result_type)
+    InferResult {
+        hexpr: exact_variant_construct(
+            target, fields, result_type, effects, span),
+        subst: s, effects: effects
+    }
+}
+
+fn infer_value_ident(
+    ctx: InferCtx, name: Str, span: Span, subst: UnionFind,
+    qualifier: Str?
+) -> InferResult {
+    let result = infer_ident(ctx, name, span, subst, qualifier)
+    match exact_ident_variant_constructor_target(ctx, result.hexpr) {
+        some(target) => if target.field_refs.len() == 0 {
+            InferResult {
+                hexpr: exact_variant_construct(
+                    target, [], hexpr_type(result.hexpr),
+                    result.effects, span),
+                subst: result.subst, effects: result.effects
+            }
+        } else {
+            // instantiate_named_value_scheme already emitted the stable
+            // value-position diagnostic and returned ErrorType.
+            result
+        },
+        none => result
+    }
+}
+
+fn exact_call_callee_ref(ctx: InferCtx, callee: HExpr) -> CalleeRef? {
+    let _ = ctx
+    match callee {
+        HExpr::Ident { callee_identity, .. } => callee_identity,
+        _ => none
+    }
+}
+
+fn exact_call_actuals(
+    callee: HExpr
+) -> (List<HCallableTypeActual>, HCallableEffectInstantiation?) {
+    match callee {
+        HExpr::Ident { callee_identity: some(identity),
+                       callable_instantiation: some(actual), .. } => {
+            if callee_ref_is_named(identity) {
+                (actual.type_args, actual.effects)
+            } else { ([], none) }
+        },
+        _ => ([], none)
+    }
+}
+
+fn exact_range_def(ctx: InferCtx) -> StructDef {
+    let def = ctx.env.types.structs.get(BUILTIN_RANGE).unwrap_or_else(fn() {
+        panic("Range inference: exact builtin StructDef is absent")
+    })
+    let formal_id = def.type_param_vars.get(0).unwrap_or(-1)
+    let formal = Type::TypeVar { id: formal_id, name: some("T") }
+    if def.type_param_vars.len() != 1 || def.fields.len() != 3 ||
+       !types_equal(def.fields.get(0).unwrap().ty, formal) ||
+       !types_equal(def.fields.get(1).unwrap().ty, formal) ||
+       !types_equal(def.fields.get(2).unwrap().ty, BOOL) {
+        panic("Range inference: builtin field contract differs")
+    }
+    def
+}
+
+fn exact_list_literal_plan(
+    mut ctx: InferCtx, element_type: Type, subst: UnionFind, span: Span
+) -> (HListLiteralPlan, UnionFind) {
+    let def = ctx.env.types.structs.get(BUILTIN_LIST).unwrap_or_else(fn() {
+        panic("List literal: exact nominal StructDef is absent")
+    })
+    if def.type_param_vars.len() != 1 || def.fields.len() != 3 {
+        panic("List literal: nominal field census differs")
+    }
+    let list_type = Type::StructType {
+        name: BUILTIN_LIST, type_params: [element_type]
+    }
+    let allocator_ref = compiler_extern_ref_for_site(
+        compiler_extern_site_from_tag(COMPILER_EXTERN_SLOT_ALLOC))
+    let allocator_entry = compiler_owned_extern_manifest_entry(
+        ctx.env, compiler_extern_ref_symbol(allocator_ref)).unwrap_or_else(fn() {
+            panic("List literal: exact slot allocator manifest entry is absent")
+        })
+    let allocator_executable =
+        compiler_extern_manifest_entry_executable(allocator_entry)
+    let normalized_allocator =
+        compiler_extern_manifest_entry_normalized_signature(allocator_entry)
+    if compiler_extern_manifest_entry_generic_arity(allocator_entry) != 1 ||
+       !executable_ref_is_named(allocator_executable) {
+        panic("List literal: slot allocator manifest identity differs")
+    }
+    let allocator_formal = match normalized_allocator {
+        Type::FnType { params, return_type, effects } => {
+            if params.len() != 1 || !types_equal(params.get(0).unwrap(), INT) ||
+               effects.effects.len() != 0 || effects.tail.is_some() {
+                panic("List literal: slot allocator manifest signature differs")
+            }
+            match return_type {
+                Type::PtrType { pointee } => match pointee {
+                    Type::TypeVar { id, .. } => id,
+                    _ => panic("List literal: slot allocator result is not formal")
+                },
+                _ => panic("List literal: slot allocator result is not Ptr")
+            }
+        },
+        _ => panic("List literal: slot allocator manifest is not callable")
+    }
+    let mut allocator_subst: Map<Int, Type> = map_new()
+    allocator_subst.insert(allocator_formal, element_type)
+    let allocator_signature = apply_subst_map(
+        allocator_subst, normalized_allocator)
+    let allocator = make_h_exact_call_plan(
+        make_named_callee_ref(
+            executable_ref_named_symbol(allocator_executable)),
+        allocator_signature, none, [], make_empty_effect_ctx_source())
+
+    let lookup = lookup_impl_method(ctx, BUILTIN_LIST, "push")
+    let raw_signature = lookup.method_type.unwrap_or_else(fn() {
+        panic("List literal: exact List.push signature is absent")
+    })
+    let exact_method = lookup.impl_method_ref.unwrap_or_else(fn() {
+        panic("List literal: exact List.push member is absent")
+    })
+    if lookup.intrinsic_ref.is_some() {
+        panic("List literal: List.push unexpectedly became intrinsic")
+    }
+    let mut s = subst
+    match raw_signature {
+        Type::FnType { params, .. } => {
+            if params.len() != 2 {
+                panic("List literal: List.push arity differs")
+            }
+            s = unify_at(ctx.sink, ctx.env,
+                params.get(0).unwrap(), list_type, s, span)
+            s = unify_at(ctx.sink, ctx.env,
+                params.get(1).unwrap(), element_type, s, span)
+        },
+        _ => panic("List literal: List.push is not callable")
+    }
+    let push_signature = apply_subst(s, raw_signature)
+    let push_method = make_concrete_method_call_ref(
+        exact_method, push_signature, true)
+    let push = make_h_exact_call_plan(
+        method_call_ref_callee_identity(push_method),
+        push_signature, some(push_method), [], make_empty_effect_ctx_source())
+    let constructor = make_h_record_constructor_plan(
+        def.fields.map(fn(field) {
+            h_nominal_projection(field.field_ref)
+        }))
+    (make_h_list_literal_plan(
+        fresh_semantic_let_binder(ctx, "list-literal-builder"),
+        def.owner_ref, constructor, allocator, push), s)
+}
+
+fn exact_system_host_callable(
+    ctx: InferCtx, callee: HExpr, callee_type: Type,
+    exact_callee: CalleeRef?
+) -> SystemHostCallableRef? {
+    let def_id = match callee {
+        HExpr::Ident { def_id: some(id), .. } => id,
+        _ => return none
+    }
+    match value_binding_kind(ctx, some(def_id)) {
+        ValueBindingKind::ExternCallable => {},
+        _ => return none
+    }
+    let mut system_effects: List<SystemEffectRef> = []
+    match callee_type {
+        Type::FnType { effects, .. } => {
+            for atom in effects.effects {
+                match atom {
+                    Effect::SystemEffect { reference } =>
+                        system_effects.push(reference),
+                    _ => {}
+                }
+            }
+        },
+        _ => return none
+    }
+    if system_effects.len() == 0 { return none }
+    if system_effects.len() != 1 {
+        panic("system host callable: extern has multiple system capabilities")
+    }
+    let callee_ref = match exact_callee {
+        some(reference) => reference,
+        none => panic("system host callable: exact CalleeRef is absent")
+    }
+    if !callee_ref_is_named(callee_ref) {
+        panic("system host callable: extern CalleeRef is not named")
+    }
+    some(make_system_host_callable_ref(
+        system_effects.get(0).unwrap(),
+        make_named_executable_ref(callee_ref_named_symbol(callee_ref))))
+}
 
 // ============================================================
 // Block inference (from infer-stmt.ts)
@@ -264,10 +692,6 @@ fn collect_bounded_callable_values(
                 collect_bounded_callable_values(ctx, arg, found)
             }
         },
-        HExpr::RangeExpr { start, end, .. } => {
-            collect_bounded_callable_values(ctx, start, found)
-            collect_bounded_callable_values(ctx, end, found)
-        },
         HExpr::ListLit { elements, .. } => {
             for element in elements {
                 collect_bounded_callable_values(ctx, element, found)
@@ -286,6 +710,8 @@ fn collect_bounded_callable_values(
         },
         HExpr::Clone { inner, .. } =>
             collect_bounded_callable_values(ctx, inner, found),
+        HExpr::Take { source, .. } =>
+            collect_bounded_callable_values(ctx, source, found),
         HExpr::ReturnExpr { value, .. } => match value {
             some(inner) =>
                 collect_bounded_callable_values(ctx, inner, found),
@@ -305,47 +731,6 @@ fn hexpr_contains_bounded_callable_value(ctx: InferCtx, expr: HExpr) -> Bool {
     let found: List<HExpr> = []
     collect_bounded_callable_values(ctx, expr, found)
     found.len() > 0
-}
-
-// Register each exact DefId/live-scheme callable value once for its owner.
-// The shadow shares the canonical evidence/assoc resolver with calls but never
-// attaches DictRefs; resolve_value_ident remains the final-zonk authority.
-fn register_bounded_callable_value_shadows_inner(
-    mut ctx: InferCtx, expr: HExpr, s: UnionFind, is_default: Bool
-) {
-    let found: List<HExpr> = []
-    collect_bounded_callable_values(ctx, expr, found)
-    for callable in found {
-        match resolve_callee_metadata(ctx, callable) {
-            some(metadata) => match metadata.kind {
-                ValueBindingKind::DirectCallable |
-                ValueBindingKind::ExternCallable => {
-                    if metadata.live_scheme.bounds.len() > 0 {
-                        register_callable_value_shadow(
-                            ctx, metadata.live_scheme,
-                            hexpr_type(callable), s,
-                            hexpr_span(callable), is_default)
-                    }
-                },
-                ValueBindingKind::ConstGetter |
-                ValueBindingKind::LocalBorrow => {
-                }
-            },
-            none => {}
-        }
-    }
-}
-
-pub fn register_bounded_callable_value_shadows(
-    ctx: InferCtx, expr: HExpr, s: UnionFind
-) {
-    register_bounded_callable_value_shadows_inner(ctx, expr, s, false)
-}
-
-pub fn register_default_bounded_callable_value_shadows(
-    ctx: InferCtx, expr: HExpr, s: UnionFind
-) {
-    register_bounded_callable_value_shadows_inner(ctx, expr, s, true)
 }
 
 // B-163 C': non-Range for-in is lowered while inference still owns the
@@ -391,7 +776,9 @@ fn require_for_protocol_impl(
     // Resolve the actual impl evidence now. This catches missing nested bounds
     // before lowering and never lets a later backend guess a dictionary.
     match resolve_dict_ref_for_type(
-        ctx.env, ctx.current_fn_bounds, concrete, subst, trait_name
+        current_dictionary_evidence_owner(ctx),
+        ctx.env, ctx.current_fn_bounds,
+        concrete, subst, trait_name
     ) {
         some(_) => impl_entry,
         none => {
@@ -405,12 +792,12 @@ fn require_for_protocol_impl(
 
 fn for_protocol_method_scheme(
     mut ctx: InferCtx, impl_entry: ImplEntry, method: Str, span: Span
-) -> TypeScheme {
+) -> ImplMethodSchemeCore {
     match impl_entry.method_schemes.get(method) {
         some(scheme) => scheme,
         none => {
             let _ = type_error(ctx.sink, E0305,
-                "Iteration protocol implementation '${nominal_display_name(impl_entry.target_type_name)}' has no exact '${nominal_display_name(impl_entry.trait_name)}::${method}' method scheme",
+                "Iteration protocol implementation '${nominal_display_name(impl_entry.target_type_name)}' has no exact method '${method}'",
                 span, DiagnosticContext::TraitError {
                     detail: "protocol lowering does not fall back to default or flat method tables"
                 })
@@ -421,8 +808,13 @@ fn for_protocol_method_scheme(
 
 struct MethodCallSelection {
     method_type: Type?,
-    method_scheme: TypeScheme?,
-    dict_dispatch: DictDispatchInfo?
+    type_args: List<HCallableTypeActual>,
+    effect_instantiation: HCallableEffectInstantiation?,
+    receipt: CallableInstantiationReceipt?,
+    method_core: ImplMethodSchemeCore?,
+    impl_owner: ImplEntry?,
+    impl_method_ref: ImplMethodRef?,
+    intrinsic_ref: IntrinsicRef?
 }
 
 // Resolve an already-authoritative protocol impl into the same input consumed
@@ -432,63 +824,69 @@ struct MethodCallSelection {
 fn select_for_protocol_method(
     mut ctx: InferCtx, impl_entry: ImplEntry, method: Str, span: Span
 ) -> MethodCallSelection {
-    let impl_scheme = for_protocol_method_scheme(ctx, impl_entry, method, span)
-    let registered_method = ctx.env.instantiate(impl_scheme)
+    let impl_core = for_protocol_method_scheme(ctx, impl_entry, method, span)
+    let method_ref = match impl_entry.method_refs.get(method) {
+        some(value) => value,
+        none => panic("iteration protocol: method has no exact ImplMethodRef")
+    }
+    let receipt = instantiate_callable_impl_method(
+        ctx, impl_entry, impl_core, method_ref)
     MethodCallSelection {
-        method_type: some(registered_method),
-        method_scheme: some(impl_scheme),
-        dict_dispatch: none
+        method_type: some(callable_receipt_type(receipt)),
+        type_args: callable_receipt_type_args(receipt),
+        effect_instantiation: callable_receipt_effects(receipt),
+        receipt: some(receipt),
+        method_core: some(impl_core),
+        impl_owner: some(impl_entry),
+        impl_method_ref: some(method_ref),
+        intrinsic_ref: impl_entry.method_intrinsics.get(method)
     }
 }
 
-fn for_protocol_call_method_type(mut ctx: InferCtx, call: HExpr, span: Span) -> Type {
-    match call {
-        HExpr::Call { callee, .. } => match callee {
-            HExpr::FieldAccess { ty, .. } => ty,
-            _ => {
-                let _ = type_error(ctx.sink, E0305,
-                    "Internal iteration lowering expected a method call",
-                    span, DiagnosticContext::OtherContext { detail: some("protocol call lost method provenance") })
-                fail.raise(CompileError {})
-            }
-        },
-        _ => {
-            let _ = type_error(ctx.sink, E0305,
-                "Internal iteration lowering expected a call expression",
-                span, DiagnosticContext::OtherContext { detail: some("protocol call was not lowered as an ordinary call") })
-            fail.raise(CompileError {})
-        }
-    }
-}
-
-// Instantiate an impl-associated type through the exact method scheme that
-// ordinary call inference instantiated. build_scheme_var_map follows scheme
-// variable identity through the receiver/return structure; there is no
-// positional associated-type substitution here.
+// Instantiate an impl-associated type through the exact receipt produced by
+// the same method instantiation. No type-shape reconstruction is permitted.
 fn for_protocol_assoc_type(
-    mut ctx: InferCtx, impl_entry: ImplEntry, method: Str,
-    assoc_name: Str, call: HExpr, subst: UnionFind, span: Span
+    mut ctx: InferCtx, impl_entry: ImplEntry,
+    assoc_name: Str, receipt: CallableInstantiationReceipt,
+    subst: UnionFind, span: Span
 ) -> Type {
     let raw_assoc = match impl_entry.assoc_types.get(assoc_name) {
         some(ty) => ty,
         none => {
             let _ = type_error(ctx.sink, E0301,
-                "Iteration protocol '${nominal_display_name(impl_entry.trait_name)}' implementation for '${nominal_display_name(impl_entry.target_type_name)}' is missing associated type '${assoc_name}'",
+                "Iteration protocol implementation for '${nominal_display_name(impl_entry.target_type_name)}' is missing associated type '${assoc_name}'",
                 span, DiagnosticContext::TraitError { detail: "protocol associated type is missing" })
             fail.raise(CompileError {})
         }
     }
-    let scheme = for_protocol_method_scheme(ctx, impl_entry, method, span)
-    let instantiated_method = for_protocol_call_method_type(ctx, call, span)
-    let var_map = build_scheme_var_map(scheme, instantiated_method)
-    apply_subst(subst, apply_subst_map(var_map, raw_assoc))
+    let assoc_schema = match
+            impl_entry.assoc_type_effect_schemas.get(assoc_name) {
+        some(value) => value,
+        none => panic("iteration protocol: assoc effect schema is absent")
+    }
+    let localized_assoc = instantiate_effect_header_schema(
+        ctx.env, [raw_assoc], assoc_schema).0.get(0).unwrap()
+    instantiate_assoc_type_from_callable_receipt(
+        receipt, localized_assoc, subst)
 }
 
 pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult {
     match stmt {
         Stmt::Let { name, name_span, type_annotation, init, span } => {
             let obligation_checkpoint = pending_dict_checkpoint(ctx)
-            let init_r = infer_expr(ctx, init, subst)
+            let anonymous_checkpoint =
+                pending_anonymous_callable_checkpoint(ctx)
+            let init_result = some(infer_expr(ctx, init, subst)) catch {
+                _ => none
+            }
+            let init_r = match init_result {
+                some(value) => value,
+                none => {
+                    rollback_pending_anonymous_callable_headers(
+                        ctx, anonymous_checkpoint)
+                    fail.raise(CompileError {})
+                }
+            }
             let mut s = init_r.subst
             let mut var_type = hexpr_type(init_r.hexpr)
             match type_annotation {
@@ -530,9 +928,16 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 some(bs) => {
                     match bs.def_id {
                         some(did) => {
-                            ctx.env.record_def_span(did, name_span)
-                            ctx.env.scope.let_defs.insert(did)
-                            ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                            journal_record_def_span(ctx, did, name_span)
+                            journal_let_def_insert(ctx, did)
+                            journal_var_lambda_depth_set(
+                                ctx, did, ctx.lambda_depth)
+                            let schema = define_exact_effect_header(
+                                ctx, local_effect_header_origin(ctx, did),
+                                [bs.ty], bs.type_vars)
+                            ctx.env.rebind(name, TypeScheme {
+                                ..bs, effect_schema: schema
+                            })
                             some(did)
                         },
                         none => none
@@ -540,6 +945,12 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 },
                 none => none
             }
+            let final_scheme = ctx.env.lookup(name).unwrap_or_else(fn() {
+                panic("let anonymous header: final scheme is absent")
+            })
+            drain_representable_pending_anonymous(
+                ctx, anonymous_checkpoint,
+                final_scheme.effect_schema, s)
             StmtResult {
                 hstmt: HStmt::Let { name: name, name_span: name_span, def_id: bound_def_id, ty: resolved, init: init_r.hexpr, span: span },
                 subst: s,
@@ -547,7 +958,19 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             }
         },
         Stmt::Var { name, name_span, type_annotation, init, span } => {
-            let init_r = infer_expr(ctx, init, subst)
+            let anonymous_checkpoint =
+                pending_anonymous_callable_checkpoint(ctx)
+            let init_result = some(infer_expr(ctx, init, subst)) catch {
+                _ => none
+            }
+            let init_r = match init_result {
+                some(value) => value,
+                none => {
+                    rollback_pending_anonymous_callable_headers(
+                        ctx, anonymous_checkpoint)
+                    fail.raise(CompileError {})
+                }
+            }
             let mut s = init_r.subst
             let mut var_type = hexpr_type(init_r.hexpr)
             match type_annotation {
@@ -568,12 +991,16 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                 some(vs) => {
                     match vs.def_id {
                         some(did) => {
-                            ctx.env.record_def_span(did, name_span)
-                            ctx.env.scope.mutable_vars.insert(did)
-                            ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                            journal_record_def_span(ctx, did, name_span)
+                            journal_mutable_var_insert(ctx, did)
+                            journal_var_lambda_depth_set(
+                                ctx, did, ctx.lambda_depth)
                         },
                         none => {}
                     }
+                    drain_representable_pending_anonymous(
+                        ctx, anonymous_checkpoint,
+                        empty_typed_effect_header_schema(), s)
                     StmtResult {
                         hstmt: HStmt::Var { name: name, name_span: name_span, def_id: vs.def_id, ty: apply_subst(s, var_type), init: init_r.hexpr, span: span },
                         subst: s,
@@ -584,6 +1011,20 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             }
         },
         Stmt::Assign { target, value, span } => {
+            match target {
+                Expr::IndexExpr { span: target_span, .. } => {
+                    let _ = type_error(
+                        ctx.sink, E0205,
+                        "Index assignment is not part of Ring 0.1; use List.set(...) or Map.insert(...)",
+                        target_span,
+                        DiagnosticContext::OtherContext {
+                            detail: some(
+                                "indexed values are readable but not assignment places")
+                        })
+                    fail.raise(CompileError {})
+                },
+                _ => {}
+            }
             check_assign_target_mutable(ctx, target)
             let target_r = infer_expr(ctx, target, subst)
             let value_r = infer_expr(ctx, value, target_r.subst)
@@ -689,10 +1130,12 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
             let iter_r = infer_expr(ctx, iterable, subst)
             let mut s = iter_r.subst
             let iter_type = apply_subst(s, hexpr_type(iter_r.hexpr))
-            let mut element_type: Type = ctx.env.fresh_var()
-            // Check for Range (builtin, keep special path)
+            let element_type = INT
+            // Range has one exact zero-generic nominal shape.
             let is_range = match iter_type {
-                Type::EnumType { name, .. } => name == BUILTIN_RANGE,
+                Type::StructType { name, type_params } =>
+                    name == BUILTIN_RANGE && type_params.len() == 1 &&
+                    types_equal(type_params.get(0).unwrap(), INT),
                 _ => false
             }
             if !is_range {
@@ -701,13 +1144,6 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                     iter_r, body, span
                 )
             }
-            match iter_type {
-                Type::EnumType { type_params, .. } => {
-                    element_type = match type_params.first() { some(t) => t, none => INT }
-                },
-                _ => {}
-            }
-
             ctx.env.push_scope()
             let mut hdestructure: List<HForInDestructure>? = none
             match destructure {
@@ -738,20 +1174,37 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                     },
                                     _ => ctx.env.fresh_var()
                                 }
-                                ctx.env.bind_mono(dname, elem_t)
-                                let dscheme = ctx.env.lookup(dname)
-                                match dscheme {
-                                    some(ds) => {
-                                        match (ds.def_id, destr.spans.get(di)) {
-                                            (some(did), some(dspan)) => {
-                                                ctx.env.record_def_span(did, dspan)
-                                                ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
-                                            },
-                                            _ => {}
-                                        }
-                                        hd.push(HForInDestructure { name: dname, def_id: ds.def_id })
-                                    },
-                                    none => { hd.push(HForInDestructure { name: dname, def_id: none }) }
+                                if dname == "_" {
+                                    hd.push(HForInDestructure {
+                                        name: dname, def_id: none, slot: none,
+                                        projection: some(h_tuple_projection(di))
+                                    })
+                                } else {
+                                    ctx.env.bind_mono(dname, elem_t)
+                                    let dscheme = ctx.env.lookup(dname)
+                                    match dscheme {
+                                        some(ds) => {
+                                            match (ds.def_id, destr.spans.get(di)) {
+                                                (some(did), some(dspan)) => {
+                                                    journal_record_def_span(
+                                                        ctx, did, dspan)
+                                                    journal_var_lambda_depth_set(
+                                                        ctx, did, ctx.lambda_depth)
+                                                },
+                                                _ => {}
+                                            }
+                                            hd.push(HForInDestructure { name: dname,
+                                                def_id: ds.def_id,
+                                                slot: ds.def_id.map(fn(id) {
+                                                    make_source_slot_ref(
+                                                        current_identity_file_key(ctx),
+                                                        slot_domain_lexical(), id) }),
+                                                projection: some(h_tuple_projection(di)) })
+                                        },
+                                        none => { hd.push(HForInDestructure {
+                                            name: dname, def_id: none, slot: none,
+                                            projection: some(h_tuple_projection(di)) }) }
+                                    }
                                 }
                             },
                             none => {}
@@ -761,20 +1214,55 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                     hdestructure = some(hd)
                 },
                 none => {
-                    ctx.env.bind_mono(binding, element_type)
+                    if binding != "_" {
+                        ctx.env.bind_mono(binding, element_type)
+                    }
                 }
             }
-            let binding_scheme = ctx.env.lookup(binding)
+            let binding_scheme = if binding == "_" {
+                none
+            } else {
+                ctx.env.lookup(binding)
+            }
             match binding_scheme {
                 some(bs) => match bs.def_id {
                     some(did) => {
-                        ctx.env.record_def_span(did, binding_span)
-                        ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                        journal_record_def_span(ctx, did, binding_span)
+                        journal_var_lambda_depth_set(
+                            ctx, did, ctx.lambda_depth)
                     },
                     none => {}
                 },
                 none => {}
             }
+            let binding_binder = match binding_scheme {
+                some(bs) => match bs.def_id {
+                    some(id) => semantic_for_binder(
+                        ctx, id, "for-binding"),
+                    none => fresh_semantic_let_binder(
+                        ctx, "for-payload")
+                },
+                none => fresh_semantic_let_binder(ctx, "for-payload")
+            }
+            let range_def = exact_range_def(ctx)
+            let order = exact_operator_plan(
+                ctx, INT, "Ord", "cmp", s, span).unwrap_or_else(fn() {
+                    panic("Range for-in: exact Int ordering plan is absent")
+                })
+            let equality = exact_operator_plan(
+                ctx, INT, "Eq", "eq", s, span).unwrap_or_else(fn() {
+                    panic("Range for-in: exact Int equality plan is absent")
+                })
+            let range_plan = make_h_range_for_in_plan(
+                range_def.owner_ref,
+                range_def.fields.get(0).unwrap().field_ref,
+                range_def.fields.get(1).unwrap().field_ref,
+                range_def.fields.get(2).unwrap().field_ref,
+                order, equality,
+                fresh_semantic_let_binder(ctx, "range-value"),
+                fresh_semantic_var_binder(ctx, "range-counter"),
+                fresh_semantic_var_binder(ctx, "range-finished"),
+                binding_binder)
             ctx.loop_depth = ctx.loop_depth + 1
             let body_result = some(infer_block(ctx, body, some(s))) catch { _ => none }
             ctx.loop_depth = ctx.loop_depth - 1
@@ -787,7 +1275,7 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                         hstmt: HStmt::ForIn {
                             binding: binding, binding_span: binding_span,
                             def_id: match binding_scheme { some(bs) => bs.def_id, none => none },
-                            destructure: hdestructure,
+                            destructure: hdestructure, plan: some(range_plan),
                             iterable: iter_r.hexpr, body: body_r.hexpr,
                             iterable_type_name: none,
                             iter_type_name: none,
@@ -849,20 +1337,36 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                             some(bs) => {
                                                 match bs.def_id {
                                                     some(did) => {
-                                                        ctx.env.record_def_span(did, pspan)
-                                                        ctx.env.scope.let_defs.insert(did)
+                                                        journal_record_def_span(
+                                                            ctx, did, pspan)
+                                                        journal_let_def_insert(
+                                                            ctx, did)
                                                     },
                                                     none => {}
                                                 }
-                                                bindings.push(HLetDestructureBinding { name: name, def_id: bs.def_id, ty: elem_type })
+                                                bindings.push(HLetDestructureBinding {
+                                                    name: name, def_id: bs.def_id,
+                                                    slot: bs.def_id.map(fn(id) {
+                                                        make_source_slot_ref(
+                                                            current_identity_file_key(ctx),
+                                                            slot_domain_lexical(), id) }),
+                                                    projection: some(h_tuple_projection(bi)),
+                                                    ty: elem_type })
                                             },
                                             none => {
-                                                bindings.push(HLetDestructureBinding { name: name, def_id: none, ty: elem_type })
+                                                bindings.push(HLetDestructureBinding {
+                                                    name: name, def_id: none,
+                                                    slot: none,
+                                                    projection: some(h_tuple_projection(bi)),
+                                                    ty: elem_type })
                                             }
                                         }
                                     },
                                     Pattern::Wildcard { .. } => {
-                                        bindings.push(HLetDestructureBinding { name: "_", def_id: none, ty: elem_type })
+                                        bindings.push(HLetDestructureBinding {
+                                            name: "_", def_id: none, slot: none,
+                                            projection: some(h_tuple_projection(bi)),
+                                            ty: elem_type })
                                     },
                                     _ => {
                                         let _ = type_error(ctx.sink, E0301,
@@ -876,7 +1380,11 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                         bi = bi + 1
                     }
                     StmtResult {
-                        hstmt: HStmt::LetDestructure { pattern: pattern, bindings: bindings, init: init_r.hexpr, span: span },
+                        hstmt: HStmt::LetDestructure { pattern: pattern,
+                            pattern_plan: exact_pattern_plan(
+                                ctx, pattern, init_type, s),
+                            bindings: bindings,
+                            init: init_r.hexpr, span: span },
                         subst: s,
                         effects: init_r.effects
                     }
@@ -910,11 +1418,13 @@ fn infer_if_let_from_result(
     let iflet_pattern = rewrite_bare_enum_bindings(ctx.env, pattern)
 
     let mut pattern_bindings: List<HPatternBinding> = []
+    let mut pattern_plan: HPatternPlan? = none
     ctx.env.push_scope()
     let then_result = some({
         s = bind_pattern(ctx, iflet_pattern, expr_type, s)
-        pattern_bindings = exact_pattern_bindings(
-            ctx.env, iflet_pattern)
+        pattern_bindings = exact_pattern_bindings(ctx, iflet_pattern)
+        pattern_plan = exact_pattern_plan(
+            ctx, iflet_pattern, expr_type, s)
         infer_block(ctx, then_block, some(s))
     }) catch { _ => none }
     ctx.env.pop_scope()
@@ -953,7 +1463,8 @@ fn infer_if_let_from_result(
 
             StmtResult {
                 hstmt: HStmt::IfLet {
-                    pattern: iflet_pattern, bindings: pattern_bindings,
+                    pattern: iflet_pattern, pattern_plan: pattern_plan,
+                    bindings: pattern_bindings,
                     expr: expr_r.hexpr,
                     then_block: then_r.hexpr,
                     else_block: else_hblock, span: span
@@ -963,6 +1474,14 @@ fn infer_if_let_from_result(
             }
         },
         none => fail.raise(CompileError {})
+    }
+}
+
+fn for_binding_pattern(name: Str, span: Span) -> Pattern {
+    if name == "_" {
+        Pattern::Wildcard { span: span }
+    } else {
+        Pattern::Binding { name: name, span: span }
     }
 }
 
@@ -984,17 +1503,18 @@ fn lower_protocol_for_in(
 
         let iterable_selection = select_for_protocol_method(
             ctx, iterable_impl, "iter", span)
+        let iterable_receipt = iterable_selection.receipt.unwrap_or_else(fn() {
+            panic("iteration protocol: iter receipt is absent")
+        })
         let iter_call_result = infer_method_call_from_receiver(
             ctx, none, iterable_result, "iter", [], span,
             some(iterable_selection))
         s = iter_call_result.subst
 
         let associated_iter_type = for_protocol_assoc_type(
-            ctx, iterable_impl, "iter", "Iter",
-            iter_call_result.hexpr, s, span)
+            ctx, iterable_impl, "Iter", iterable_receipt, s, span)
         let associated_item_type = for_protocol_assoc_type(
-            ctx, iterable_impl, "iter", "Item",
-            iter_call_result.hexpr, s, span)
+            ctx, iterable_impl, "Item", iterable_receipt, s, span)
         let iter_notes: List<DiagnosticNote> = [
             DiagnosticNote {
                 message: "Iterable::Iter is '${type_to_string(associated_iter_type)}'",
@@ -1021,9 +1541,10 @@ fn lower_protocol_for_in(
         }
         match iterator_scheme.def_id {
             some(did) => {
-                ctx.env.record_def_span(did, span)
-                ctx.env.scope.mutable_vars.insert(did)
-                ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
+                journal_record_def_span(ctx, did, span)
+                journal_mutable_var_insert(ctx, did)
+                journal_var_lambda_depth_set(
+                    ctx, did, ctx.lambda_depth)
             },
             none => {}
         }
@@ -1033,9 +1554,7 @@ fn lower_protocol_for_in(
             init: iter_call_result.hexpr, span: span
         }
 
-        let mut payload_pattern = Pattern::Binding {
-            name: binding, span: binding_span
-        }
+        let mut payload_pattern = for_binding_pattern(binding, binding_span)
         let mut then_block = body
         match destructure {
             some(destr) => {
@@ -1047,14 +1566,12 @@ fn lower_protocol_for_in(
                 while di < destr.names.len() {
                     match (destr.names.get(di), destr.spans.get(di)) {
                         (some(name), some(name_span)) => {
-                            tuple_patterns.push(Pattern::Binding {
-                                name: name, span: name_span
-                            })
+                            tuple_patterns.push(for_binding_pattern(
+                                name, name_span))
                         },
                         (some(name), none) => {
-                            tuple_patterns.push(Pattern::Binding {
-                                name: name, span: binding_span
-                            })
+                            tuple_patterns.push(for_binding_pattern(
+                                name, binding_span))
                         },
                         _ => {}
                     }
@@ -1102,14 +1619,16 @@ fn lower_protocol_for_in(
             let next_receiver = infer_expr(ctx, iterator_expr, s)
             let next_selection = select_for_protocol_method(
                 ctx, iterator_impl, "next", span)
+            let next_receipt = next_selection.receipt.unwrap_or_else(fn() {
+                panic("iteration protocol: next receipt is absent")
+            })
             let next_call_result = infer_method_call_from_receiver(
                 ctx, some(iterator_expr), next_receiver,
                 "next", [], span, some(next_selection))
             s = next_call_result.subst
 
             let iterator_item_type = for_protocol_assoc_type(
-                ctx, iterator_impl, "next", "Item",
-                next_call_result.hexpr, s, span)
+                ctx, iterator_impl, "Item", next_receipt, s, span)
             let next_expected = make_option_type(iterator_item_type)
             let next_notes: List<DiagnosticNote> = [
                 DiagnosticNote {
@@ -1221,7 +1740,7 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
                 subst: subst, effects: EMPTY_ROW
             },
         Expr::Ident { name, qualifier, span } =>
-            infer_ident(ctx, name, span, subst, qualifier),
+            infer_value_ident(ctx, name, span, subst, qualifier),
         Expr::BinOp { op, left, right, span } =>
             infer_bin_op(ctx, op, left, right, span, subst),
         Expr::UnaryOp { op, operand, span } =>
@@ -1254,7 +1773,9 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
             // () — unit literal: 0-element tuple is Unit
             if elements.len() == 0 {
                 return InferResult {
-                    hexpr: HExpr::TupleLit { elements: [], ty: UNIT, effects: EMPTY_ROW, span: span },
+                    hexpr: HExpr::TupleLit { elements: [],
+                        constructor: some(make_h_tuple_constructor_plan(0)),
+                        ty: UNIT, effects: EMPTY_ROW, span: span },
                     subst: subst, effects: EMPTY_ROW
                 }
             }
@@ -1273,7 +1794,10 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
             for he in helements { elem_types.push(apply_subst(s, hexpr_type(he))) }
             let tuple_type = Type::TupleType { elements: elem_types }
             InferResult {
-                hexpr: HExpr::TupleLit { elements: helements, ty: tuple_type, effects: combined_effects, span: span },
+                hexpr: HExpr::TupleLit { elements: helements,
+                    constructor: some(make_h_tuple_constructor_plan(
+                        helements.len())),
+                    ty: tuple_type, effects: combined_effects, span: span },
                 subst: s, effects: combined_effects
             }
         },
@@ -1285,10 +1809,36 @@ pub fn infer_expr(mut ctx: InferCtx, expr: Expr, subst: UnionFind) -> InferResul
             let me = merge_effects(ctx.sink, ctx.env, start_r.effects, end_r.effects, s, span)
             let mut range_effects = me.0
             s = me.1
-            let range_type = Type::EnumType { name: BUILTIN_RANGE, type_params: [INT] }
+            let range_def = exact_range_def(ctx)
+            let range_type = Type::StructType {
+                name: BUILTIN_RANGE, type_params: [INT]
+            }
+            let inclusive_expr = HExpr::BoolLit {
+                value: inclusive, ty: BOOL,
+                effects: EMPTY_ROW, span: span
+            }
+            let range_fields = [
+                HNominalStructFieldInit {
+                    name: range_def.fields.get(0).unwrap().name,
+                    field_ref: range_def.fields.get(0).unwrap().field_ref,
+                    field_index: 0, value: start_r.hexpr },
+                HNominalStructFieldInit {
+                    name: range_def.fields.get(1).unwrap().name,
+                    field_ref: range_def.fields.get(1).unwrap().field_ref,
+                    field_index: 1, value: end_r.hexpr },
+                HNominalStructFieldInit {
+                    name: range_def.fields.get(2).unwrap().name,
+                    field_ref: range_def.fields.get(2).unwrap().field_ref,
+                    field_index: 2, value: inclusive_expr }
+            ]
             InferResult {
-                hexpr: HExpr::RangeExpr {
-                    start: start_r.hexpr, end: end_r.hexpr, inclusive: inclusive,
+                hexpr: HExpr::StructLit {
+                    name: BUILTIN_RANGE, owner_ref: range_def.owner_ref,
+                    type_args: [], fields: range_fields, spread: none,
+                    constructor: some(make_h_record_constructor_plan(
+                        range_fields.map(fn(field) {
+                            h_nominal_projection(field.field_ref)
+                        }))),
                     ty: range_type, effects: range_effects, span: span
                 },
                 subst: s, effects: range_effects
@@ -1382,6 +1932,8 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
 
     let mut result_ty: Type = Type::ErrorType
     let mut map_key_type: Type? = none
+    let mut index_call_plan: HExactCallPlan? = none
+    let mut index_projection: HProjectionRef? = none
 
     match recv_type {
         Type::StructType { name, type_params, .. } => {
@@ -1389,6 +1941,20 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 // list[i]: index must be Int, result is element type T
                 s = unify_at(ctx.sink, ctx.env, idx_type, INT, s, span)
                 result_ty = if type_params.len() > 0 { type_params.get(0).unwrap() } else { Type::ErrorType }
+                let symbol = builtin_list_index_symbol()
+                let actual_element = apply_subst(s, result_ty)
+                index_call_plan = some(make_h_exact_call_plan_with_type_args(
+                    make_named_callee_ref(symbol), Type::FnType {
+                        params: [recv_type, INT],
+                        return_type: actual_element,
+                        effects: EMPTY_ROW
+                    }, [HCallableTypeActual {
+                        owner: symbol,
+                        ordinal: 0, arity: 1, actual: actual_element
+                    }], none, [], make_empty_effect_ctx_source()))
+                index_projection = some(h_structural_projection(make_path_ref(
+                    path_owner_for_symbol(symbol), ["result"],
+                    path_role_synthetic()), "result"))
             } else if name == BUILTIN_MAP {
                 // map[key]: index must be key type K, result is value type V
                 if type_params.len() >= 2 {
@@ -1410,6 +1976,15 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
             // str[i]: index must be Int, result is Str
             s = unify_at(ctx.sink, ctx.env, idx_type, INT, s, span)
             result_ty = STR
+            let symbol = builtin_str_index_symbol()
+            index_call_plan = some(make_h_exact_call_plan(
+                make_named_callee_ref(symbol), Type::FnType {
+                    params: [STR, INT], return_type: STR,
+                    effects: EMPTY_ROW
+                }, none, [], make_empty_effect_ctx_source()))
+            index_projection = some(h_structural_projection(make_path_ref(
+                path_owner_for_symbol(symbol), ["result"],
+                path_role_synthetic()), "result"))
         },
         Type::ErrorType => {
             result_ty = Type::ErrorType
@@ -1434,10 +2009,23 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
                 some(scheme) => scheme,
                 none => panic("unreachable: canonical prelude map_get_panic is missing")
             }
-            let callee_ty = ctx.env.instantiate(callee_scheme)
+            let callee_receipt = instantiate_callable_scheme(
+                ctx, callee_scheme)
+            let callee_ty = callable_receipt_type(callee_receipt)
             let callee = HExpr::Ident {
                 name: callee_name, resolved_name: none,
-                def_id: callee_scheme.def_id, dict_closure_dicts: none,
+                def_id: callee_scheme.def_id, source_slot: none,
+                callee_identity: match callee_scheme.def_id {
+                    some(id) => some(make_named_callee_ref(
+                        value_symbol_ref(ctx, id))),
+                    none => panic("map index helper: exact DefId is absent")
+                },
+                dict_closure_dicts: none,
+                callable_instantiation: some(
+                    HCallableValueInstantiation {
+                        type_args: callable_receipt_type_args(callee_receipt),
+                        effects: callable_receipt_effects(callee_receipt)
+                    }),
                 ty: callee_ty, effects: EMPTY_ROW, span: span
             }
             let effect_tail = ctx.env.fresh_var_id()
@@ -1459,19 +2047,25 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
 
             let resolved_dicts: List<DictRef> = []
             resolve_or_defer_dicts_from_scheme(
-                ctx, callee_scheme, hexpr_type(callee), s, span,
+                ctx, callee_scheme, callee_receipt, s, span,
                 PendingDictPurpose::DirectCallPublish {
                     output_slot: resolved_dicts
                 })
 
             let final_result_ty = apply_subst(s, result_ty)
+            let exact_callee = exact_call_callee_ref(ctx, callee)
+            let exact_actuals = exact_call_actuals(callee)
             InferResult {
                 hexpr: HExpr::Call {
                     callee: callee,
                     args: [recv_r.hexpr, idx_r.hexpr],
-                    type_args: [],
-                    resolved_dicts: resolved_dicts,
-                    dict_dispatch: none,
+                    type_args: exact_actuals.0,
+                    effect_instantiation: exact_actuals.1,
+                    resolved_dicts: resolved_dicts, method_ref: none,
+                    effect_ctx: effect_ctx_source_for_callable(
+                        ctx, apply_subst(s, hexpr_type(callee))),
+                    callee_ref: exact_callee,
+                    system_host: none,
                     ty: final_result_ty,
                     effects: combined_effects,
                     span: span
@@ -1482,6 +2076,7 @@ fn infer_index_expr(mut ctx: InferCtx, receiver: Expr, index: Expr, span: Span, 
         none => InferResult {
             hexpr: HExpr::IndexExpr {
                 receiver: recv_r.hexpr, index: idx_r.hexpr,
+                call_plan: index_call_plan, projection: index_projection,
                 ty: result_ty, effects: combined_effects, span: span
             },
             subst: s, effects: combined_effects
@@ -1500,6 +2095,8 @@ fn infer_bin_op(mut ctx: InferCtx, op: BinOp, left: Expr, right: Expr, span: Spa
     let mut result_type: Type = UNIT
     let mut eq_dispatch: TraitDispatch? = none
     let mut ord_dispatch: TraitDispatch? = none
+    let mut eq_plan: HOperatorPlan? = none
+    let mut ord_plan: HOperatorPlan? = none
 
     match op {
         BinOp::Add => { result_type = infer_numeric_op(ctx, lr.hexpr, rr.hexpr, s, span, "+"); s = unify_at(ctx.sink, ctx.env, hexpr_type(lr.hexpr), hexpr_type(rr.hexpr), s, span) },
@@ -1513,6 +2110,8 @@ fn infer_bin_op(mut ctx: InferCtx, op: BinOp, left: Expr, right: Expr, span: Spa
             let resolved = apply_subst(s, hexpr_type(lr.hexpr))
             let op_sym = match op { BinOp::Eq => "==", _ => "!=" }
             eq_dispatch = some(resolve_eq_dispatch(ctx, resolved, s, span, op_sym))
+            eq_plan = exact_operator_plan(
+                ctx, resolved, "Eq", "eq", s, span)
         },
         BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte => {
             s = unify_at(ctx.sink, ctx.env, hexpr_type(lr.hexpr), hexpr_type(rr.hexpr), s, span)
@@ -1520,6 +2119,8 @@ fn infer_bin_op(mut ctx: InferCtx, op: BinOp, left: Expr, right: Expr, span: Spa
             let resolved = apply_subst(s, hexpr_type(lr.hexpr))
             let op_sym = match op { BinOp::Lt => "<", BinOp::Lte => "<=", BinOp::Gt => ">", _ => ">=" }
             ord_dispatch = some(resolve_trait_dispatch(ctx, resolved, "Ord", E0308, s, span, op_sym, is_primitive_ord(resolved)))
+            ord_plan = exact_operator_plan(
+                ctx, resolved, "Ord", "cmp", s, span)
         },
         BinOp::And => {
             s = unify_at(ctx.sink, ctx.env, hexpr_type(lr.hexpr), BOOL, s, span)
@@ -1537,7 +2138,10 @@ fn infer_bin_op(mut ctx: InferCtx, op: BinOp, left: Expr, right: Expr, span: Spa
     let mut effects = me.0
     s = me.1
     InferResult {
-        hexpr: HExpr::BinOp { op: op, left: lr.hexpr, right: rr.hexpr, eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch, ty: result_type, effects: effects, span: span },
+        hexpr: HExpr::BinOp { op: op, left: lr.hexpr, right: rr.hexpr,
+            eq_dispatch: eq_dispatch, ord_dispatch: ord_dispatch,
+            eq_plan: eq_plan, ord_plan: ord_plan,
+            ty: result_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -1577,535 +2181,38 @@ fn infer_unary_op(mut ctx: InferCtx, op: UnaryOp, operand: Expr, span: Span, sub
 // infer_call
 // ============================================================
 
-// Default arguments are retained HIR templates.  Each expansion is a fresh
-// evaluation, so every binder and every reference to it needs a new exact
-// identity.  Declaration references outside the template remain unchanged.
-fn register_default_binder(
-    mut ctx: InferCtx, def_id: Int?, mut remap: Map<Int, Int>, label: Str
-) {
-    match def_id {
-        some(old_id) => {
-            if remap.contains_key(old_id) {
-                panic("default HIR repeats binder DefId ${old_id} at ${label}")
-            }
-            remap.insert(old_id, ctx.env.fresh_def_id())
-        },
-        none => panic("default HIR ${label} has no exact DefId")
-    }
-}
-
-fn collect_default_param_binder(
-    mut ctx: InferCtx, param: HParam, mut remap: Map<Int, Int>, label: Str
-) {
-    register_default_binder(
-        ctx, param.def_id, remap, "${label} '${param.name}'")
-}
-
-fn collect_default_pattern_binders(
-    mut ctx: InferCtx, bindings: List<HPatternBinding>,
-    mut remap: Map<Int, Int>, label: Str
-) {
-    for binding in bindings {
-        register_default_binder(ctx, some(binding.def_id), remap,
-            "${label} '${binding.name}'")
-    }
-}
-
-fn collect_default_arm_binders(
-    mut ctx: InferCtx, arm: HMatchArm, mut remap: Map<Int, Int>
-) {
-    collect_default_pattern_binders(
-        ctx, arm.bindings, remap, "pattern binding")
-    match arm.guard {
-        some(guard) => collect_default_expr_binders(ctx, guard, remap),
-        none => {}
-    }
-    collect_default_expr_binders(ctx, arm.body, remap)
-}
-
-fn collect_default_local_binder(
-    mut ctx: InferCtx, name: Str, def_id: Int?, init: HExpr,
-    mut remap: Map<Int, Int>
-) {
-    if name != "_" {
-        register_default_binder(
-            ctx, def_id, remap, "local '${name}'")
-    }
-    collect_default_expr_binders(ctx, init, remap)
-}
-
-fn collect_default_stmt_binders(
-    mut ctx: InferCtx, stmt: HStmt, mut remap: Map<Int, Int>
-) {
-    match stmt {
-        HStmt::Let { name, def_id, init, .. } =>
-            collect_default_local_binder(ctx, name, def_id, init, remap),
-        HStmt::Var { name, def_id, init, .. } =>
-            collect_default_local_binder(ctx, name, def_id, init, remap),
-        HStmt::Assign { target, value, .. } => {
-            collect_default_expr_binders(ctx, target, remap)
-            collect_default_expr_binders(ctx, value, remap)
-        },
-        HStmt::ExprStmt { expr, .. } =>
-            collect_default_expr_binders(ctx, expr, remap),
-        HStmt::Return { value, .. } => match value {
-            some(expr) => collect_default_expr_binders(ctx, expr, remap),
-            none => {}
-        },
-        HStmt::While { condition, body, .. } => {
-            collect_default_expr_binders(ctx, condition, remap)
-            collect_default_expr_binders(ctx, body, remap)
-        },
-        HStmt::ForIn { binding, def_id, destructure,
-                       iterable, body, .. } => {
-            if binding != "_" {
-                register_default_binder(
-                    ctx, def_id, remap, "for binding '${binding}'")
-            }
-            match destructure {
-                some(bindings) => {
-                    for binding_ in bindings {
-                        if binding_.name != "_" {
-                            register_default_binder(ctx, binding_.def_id, remap,
-                                "for destructure '${binding_.name}'")
-                        }
-                    }
-                },
-                none => {}
-            }
-            collect_default_expr_binders(ctx, iterable, remap)
-            collect_default_expr_binders(ctx, body, remap)
-        },
-        HStmt::LetDestructure { bindings, init, .. } => {
-            for binding in bindings {
-                if binding.name != "_" {
-                    register_default_binder(ctx, binding.def_id, remap,
-                        "destructure '${binding.name}'")
-                }
-            }
-            collect_default_expr_binders(ctx, init, remap)
-        },
-        HStmt::IfLet { bindings, expr, then_block, else_block, .. } => {
-            collect_default_pattern_binders(
-                ctx, bindings, remap, "if-let binding")
-            collect_default_expr_binders(ctx, expr, remap)
-            collect_default_expr_binders(ctx, then_block, remap)
-            match else_block {
-                some(block) => collect_default_expr_binders(ctx, block, remap),
-                none => {}
-            }
-        },
-        HStmt::Break { .. } | HStmt::Continue { .. } |
-        HStmt::Drop { .. } => {}
-    }
-}
-
-fn collect_default_field_binders(
-    mut ctx: InferCtx, fields: List<HStructFieldInit>, spread: HExpr?,
-    mut remap: Map<Int, Int>
-) {
-    for field in fields {
-        collect_default_expr_binders(ctx, field.value, remap)
-    }
-    match spread {
-        some(value) => collect_default_expr_binders(ctx, value, remap),
-        none => {}
-    }
-}
-
-fn collect_default_expr_value_binders(
-    mut ctx: InferCtx, values: List<HExpr>, mut remap: Map<Int, Int>
-) {
-    for value in values {
-        collect_default_expr_binders(ctx, value, remap)
-    }
-}
-
-fn collect_default_expr_binders(
-    mut ctx: InferCtx, expr: HExpr, mut remap: Map<Int, Int>
-) {
-    match expr {
-        HExpr::BinOp { left, right, .. } => {
-            collect_default_expr_binders(ctx, left, remap)
-            collect_default_expr_binders(ctx, right, remap)
-        },
-        HExpr::UnaryOp { operand, .. } =>
-            collect_default_expr_binders(ctx, operand, remap),
-        HExpr::Call { callee, args, .. } => {
-            collect_default_expr_binders(ctx, callee, remap)
-            for arg in args { collect_default_expr_binders(ctx, arg, remap) }
-        },
-        HExpr::FieldAccess { receiver, .. } =>
-            collect_default_expr_binders(ctx, receiver, remap),
-        HExpr::StructLit { fields, spread, .. } =>
-            collect_default_field_binders(ctx, fields, spread, remap),
-        HExpr::NamedVariantConstruct { fields, spread, .. } =>
-            collect_default_field_binders(ctx, fields, spread, remap),
-        HExpr::MatchExpr { scrutinee, arms, .. } => {
-            collect_default_expr_binders(ctx, scrutinee, remap)
-            for arm in arms { collect_default_arm_binders(ctx, arm, remap) }
-        },
-        HExpr::Block { stmts, tail, .. } => {
-            for stmt in stmts {
-                collect_default_stmt_binders(ctx, stmt, remap)
-            }
-            match tail {
-                some(value) => collect_default_expr_binders(ctx, value, remap),
-                none => {}
-            }
-        },
-        HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
-            collect_default_expr_binders(ctx, condition, remap)
-            collect_default_expr_binders(ctx, then_branch, remap)
-            match else_branch {
-                some(value) => collect_default_expr_binders(ctx, value, remap),
-                none => {}
-            }
-        },
-        HExpr::StringInterp { parts, .. } => {
-            for part in parts {
-                match part {
-                    HStringInterpPart::Literal(_) => {},
-                    HStringInterpPart::Expression(value) =>
-                        collect_default_expr_binders(ctx, value, remap)
-                }
-            }
-        },
-        HExpr::TryCatch { body, arms, .. } => {
-            collect_default_expr_binders(ctx, body, remap)
-            for arm in arms { collect_default_arm_binders(ctx, arm, remap) }
-        },
-        HExpr::HandleExpr { body, handlers, .. } => {
-            collect_default_expr_binders(ctx, body, remap)
-            for handler in handlers {
-                for param in handler.params {
-                    collect_default_param_binder(
-                        ctx, param, remap, "handler parameter")
-                }
-                match handler.resume_binding {
-                    some(binding) => register_default_binder(
-                        ctx, some(binding.def_id), remap,
-                        "handler resume '${binding.name}'"),
-                    none => {}
-                }
-                collect_default_expr_binders(ctx, handler.body, remap)
-            }
-        },
-        HExpr::Lambda { params, body, .. } => {
-            for param in params {
-                collect_default_param_binder(
-                    ctx, param, remap, "lambda parameter")
-            }
-            collect_default_expr_binders(ctx, body, remap)
-        },
-        HExpr::EffectOp { args, .. } => {
-            for arg in args {
-                collect_default_expr_binders(ctx, arg, remap)
-            }
-        },
-        HExpr::RangeExpr { start, end, .. } => {
-            collect_default_expr_binders(ctx, start, remap)
-            collect_default_expr_binders(ctx, end, remap)
-        },
-        HExpr::ListLit { elements, .. } =>
-            collect_default_expr_value_binders(ctx, elements, remap),
-        HExpr::TupleLit { elements, .. } =>
-            collect_default_expr_value_binders(ctx, elements, remap),
-        HExpr::IndexExpr { receiver, index, .. } => {
-            collect_default_expr_binders(ctx, receiver, remap)
-            collect_default_expr_binders(ctx, index, remap)
-        },
-        HExpr::Clone { inner, .. } =>
-            collect_default_expr_binders(ctx, inner, remap),
-        HExpr::ReturnExpr { value, .. } => match value {
-            some(inner) => collect_default_expr_binders(ctx, inner, remap),
-            none => {}
-        },
-        HExpr::UnsafeBlock { body, .. } =>
-            collect_default_expr_binders(ctx, body, remap),
-        HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
-        HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
-        HExpr::Ident { .. } | HExpr::DictConstruct { .. } => {}
-    }
-}
-
-fn remap_default_def_id(def_id: Int, remap: Map<Int, Int>) -> Int {
-    match remap.get(def_id) {
-        some(fresh) => fresh,
-        none => def_id
-    }
-}
-
-fn remap_default_optional_def_id(
-    def_id: Int?, remap: Map<Int, Int>
-) -> Int? {
-    match def_id {
-        some(id) => some(remap_default_def_id(id, remap)),
-        none => none
-    }
-}
-
-fn remap_default_param(param: HParam, remap: Map<Int, Int>) -> HParam {
-    HParam { ..param,
-        def_id: remap_default_optional_def_id(param.def_id, remap) }
-}
-
-fn remap_default_pattern_binding(
-    binding: HPatternBinding, remap: Map<Int, Int>
-) -> HPatternBinding {
-    HPatternBinding { ..binding,
-        def_id: remap_default_def_id(binding.def_id, remap) }
-}
-
-fn remap_default_arm(arm: HMatchArm, remap: Map<Int, Int>) -> HMatchArm {
-    let mut bindings: List<HPatternBinding> = []
-    for binding in arm.bindings {
-        bindings.push(remap_default_pattern_binding(binding, remap))
-    }
-    let guard = match arm.guard {
-        some(value) => some(remap_default_expr(value, remap)),
-        none => none
-    }
-    HMatchArm { ..arm, bindings: bindings, guard: guard,
-        body: remap_default_expr(arm.body, remap) }
-}
-
-fn remap_default_stmt(stmt: HStmt, remap: Map<Int, Int>) -> HStmt {
-    match stmt {
-        HStmt::Let { def_id, init, .. } => HStmt::Let { ..stmt,
-            def_id: remap_default_optional_def_id(def_id, remap),
-            init: remap_default_expr(init, remap) },
-        HStmt::Var { def_id, init, .. } => HStmt::Var { ..stmt,
-            def_id: remap_default_optional_def_id(def_id, remap),
-            init: remap_default_expr(init, remap) },
-        HStmt::Assign { target, value, .. } => HStmt::Assign { ..stmt,
-            target: remap_default_expr(target, remap),
-            value: remap_default_expr(value, remap) },
-        HStmt::ExprStmt { expr, .. } => HStmt::ExprStmt { ..stmt,
-            expr: remap_default_expr(expr, remap) },
-        HStmt::Return { value, .. } => HStmt::Return { ..stmt,
-            value: match value {
-                some(expr) => some(remap_default_expr(expr, remap)),
-                none => none
-            } },
-        HStmt::While { condition, body, .. } => HStmt::While { ..stmt,
-            condition: remap_default_expr(condition, remap),
-            body: remap_default_expr(body, remap) },
-        HStmt::ForIn { def_id, destructure, iterable, body, .. } => {
-            let new_destructure = match destructure {
-                some(bindings) => {
-                    let mut result: List<HForInDestructure> = []
-                    for binding in bindings {
-                        result.push(HForInDestructure { ..binding,
-                            def_id: remap_default_optional_def_id(
-                                binding.def_id, remap) })
-                    }
-                    some(result)
-                },
-                none => none
-            }
-            HStmt::ForIn { ..stmt,
-                def_id: remap_default_optional_def_id(def_id, remap),
-                destructure: new_destructure,
-                iterable: remap_default_expr(iterable, remap),
-                body: remap_default_expr(body, remap) }
-        },
-        HStmt::LetDestructure { bindings, init, .. } => {
-            let mut new_bindings: List<HLetDestructureBinding> = []
-            for binding in bindings {
-                new_bindings.push(HLetDestructureBinding { ..binding,
-                    def_id: remap_default_optional_def_id(
-                        binding.def_id, remap) })
-            }
-            HStmt::LetDestructure { ..stmt, bindings: new_bindings,
-                init: remap_default_expr(init, remap) }
-        },
-        HStmt::IfLet { bindings, expr, then_block, else_block, .. } => {
-            let mut new_bindings: List<HPatternBinding> = []
-            for binding in bindings {
-                new_bindings.push(
-                    remap_default_pattern_binding(binding, remap))
-            }
-            HStmt::IfLet { ..stmt, bindings: new_bindings,
-                expr: remap_default_expr(expr, remap),
-                then_block: remap_default_expr(then_block, remap),
-                else_block: match else_block {
-                    some(block) => some(remap_default_expr(block, remap)),
-                    none => none
-                } }
-        },
-        HStmt::Drop { def_id, .. } => HStmt::Drop { ..stmt,
-            def_id: remap_default_def_id(def_id, remap) },
-        HStmt::Break { .. } | HStmt::Continue { .. } => stmt
-    }
-}
-
-fn remap_default_expr(expr: HExpr, remap: Map<Int, Int>) -> HExpr {
-    match expr {
-        HExpr::Ident { def_id, .. } => HExpr::Ident { ..expr,
-            def_id: remap_default_optional_def_id(def_id, remap) },
-        HExpr::BinOp { left, right, .. } => HExpr::BinOp { ..expr,
-            left: remap_default_expr(left, remap),
-            right: remap_default_expr(right, remap) },
-        HExpr::UnaryOp { operand, .. } => HExpr::UnaryOp { ..expr,
-            operand: remap_default_expr(operand, remap) },
-        HExpr::Call { callee, args, .. } => {
-            let mut new_args: List<HExpr> = []
-            for arg in args { new_args.push(remap_default_expr(arg, remap)) }
-            HExpr::Call { ..expr,
-                callee: remap_default_expr(callee, remap), args: new_args }
-        },
-        HExpr::FieldAccess { receiver, .. } => HExpr::FieldAccess { ..expr,
-            receiver: remap_default_expr(receiver, remap) },
-        HExpr::StructLit { fields, spread, .. } => {
-            let mut new_fields: List<HStructFieldInit> = []
-            for field in fields { new_fields.push(HStructFieldInit { ..field,
-                value: remap_default_expr(field.value, remap) }) }
-            HExpr::StructLit { ..expr, fields: new_fields,
-                spread: match spread {
-                    some(value) => some(remap_default_expr(value, remap)),
-                    none => none
-                } }
-        },
-        HExpr::NamedVariantConstruct { fields, spread, .. } => {
-            let mut new_fields: List<HStructFieldInit> = []
-            for field in fields { new_fields.push(HStructFieldInit { ..field,
-                value: remap_default_expr(field.value, remap) }) }
-            HExpr::NamedVariantConstruct { ..expr, fields: new_fields,
-                spread: match spread {
-                    some(value) => some(remap_default_expr(value, remap)),
-                    none => none
-                } }
-        },
-        HExpr::MatchExpr { scrutinee, arms, .. } => {
-            let mut new_arms: List<HMatchArm> = []
-            for arm in arms { new_arms.push(remap_default_arm(arm, remap)) }
-            HExpr::MatchExpr { ..expr,
-                scrutinee: remap_default_expr(scrutinee, remap),
-                arms: new_arms }
-        },
-        HExpr::Block { stmts, tail, .. } => {
-            let mut new_stmts: List<HStmt> = []
-            for stmt in stmts {
-                new_stmts.push(remap_default_stmt(stmt, remap))
-            }
-            HExpr::Block { ..expr, stmts: new_stmts,
-                tail: match tail {
-                    some(value) => some(remap_default_expr(value, remap)),
-                    none => none
-                } }
-        },
-        HExpr::IfExpr { condition, then_branch, else_branch, .. } =>
-            HExpr::IfExpr { ..expr,
-                condition: remap_default_expr(condition, remap),
-                then_branch: remap_default_expr(then_branch, remap),
-                else_branch: match else_branch {
-                    some(value) => some(remap_default_expr(value, remap)),
-                    none => none
-                } },
-        HExpr::StringInterp { parts, .. } => {
-            let mut new_parts: List<HStringInterpPart> = []
-            for part in parts {
-                match part {
-                    HStringInterpPart::Literal(value) =>
-                        new_parts.push(HStringInterpPart::Literal(value)),
-                    HStringInterpPart::Expression(value) =>
-                        new_parts.push(HStringInterpPart::Expression(
-                            remap_default_expr(value, remap)))
-                }
-            }
-            HExpr::StringInterp { ..expr, parts: new_parts }
-        },
-        HExpr::TryCatch { body, arms, .. } => {
-            let mut new_arms: List<HMatchArm> = []
-            for arm in arms { new_arms.push(remap_default_arm(arm, remap)) }
-            HExpr::TryCatch { ..expr,
-                body: remap_default_expr(body, remap), arms: new_arms }
-        },
-        HExpr::HandleExpr { body, handlers, .. } => {
-            let mut new_handlers: List<HEffectHandler> = []
-            for handler in handlers {
-                let mut new_params: List<HParam> = []
-                for param in handler.params {
-                    new_params.push(remap_default_param(param, remap))
-                }
-                new_handlers.push(HEffectHandler { ..handler,
-                    params: new_params,
-                    resume_binding: match handler.resume_binding {
-                        some(binding) => some(
-                            remap_default_pattern_binding(binding, remap)),
-                        none => none
-                    },
-                    body: remap_default_expr(handler.body, remap) })
-            }
-            HExpr::HandleExpr { ..expr,
-                body: remap_default_expr(body, remap),
-                handlers: new_handlers }
-        },
-        HExpr::Lambda { params, body, .. } => {
-            let mut new_params: List<HParam> = []
-            for param in params {
-                new_params.push(remap_default_param(param, remap))
-            }
-            HExpr::Lambda { ..expr, params: new_params,
-                body: remap_default_expr(body, remap) }
-        },
-        HExpr::EffectOp { args, .. } => {
-            let mut new_args: List<HExpr> = []
-            for arg in args { new_args.push(remap_default_expr(arg, remap)) }
-            HExpr::EffectOp { ..expr, args: new_args }
-        },
-        HExpr::RangeExpr { start, end, .. } => HExpr::RangeExpr { ..expr,
-            start: remap_default_expr(start, remap),
-            end: remap_default_expr(end, remap) },
-        HExpr::ListLit { elements, .. } => {
-            let mut result: List<HExpr> = []
-            for element in elements {
-                result.push(remap_default_expr(element, remap))
-            }
-            HExpr::ListLit { ..expr, elements: result }
-        },
-        HExpr::TupleLit { elements, .. } => {
-            let mut result: List<HExpr> = []
-            for element in elements {
-                result.push(remap_default_expr(element, remap))
-            }
-            HExpr::TupleLit { ..expr, elements: result }
-        },
-        HExpr::IndexExpr { receiver, index, .. } => HExpr::IndexExpr { ..expr,
-            receiver: remap_default_expr(receiver, remap),
-            index: remap_default_expr(index, remap) },
-        HExpr::Clone { inner, .. } => HExpr::Clone { ..expr,
-            inner: remap_default_expr(inner, remap) },
-        HExpr::ReturnExpr { value, .. } => HExpr::ReturnExpr { ..expr,
-            value: match value {
-                some(inner) => some(remap_default_expr(inner, remap)),
-                none => none
-            } },
-        HExpr::UnsafeBlock { body, .. } => HExpr::UnsafeBlock { ..expr,
-            body: remap_default_expr(body, remap) },
-        HExpr::IntLit { .. } | HExpr::FloatLit { .. } |
-        HExpr::StrLit { .. } | HExpr::BoolLit { .. } |
-        HExpr::DictConstruct { .. } => expr
-    }
-}
-
-fn freshen_default_argument_hir(
-    mut ctx: InferCtx, template: HExpr
-) -> HExpr {
-    let mut remap: Map<Int, Int> = map_new()
-    collect_default_expr_binders(ctx, template, remap)
-    for entry in remap.entries() {
-        let (old_id, fresh_id) = entry
-        if ctx.boxed_vars.contains(old_id) {
-            ctx.boxed_vars.insert(fresh_id)
-        }
-    }
-    remap_default_expr(template, remap)
-}
-
 fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, subst: UnionFind) -> InferResult {
-    let callee_r = infer_expr(ctx, callee, subst)
+    let callee_receipts: List<CallableInstantiationReceipt> = []
+    let callee_r = match callee {
+        Expr::Ident { name, qualifier, span: ident_span } =>
+            infer_ident_with_receipt(
+                ctx, name, ident_span, subst, qualifier,
+                false, callee_receipts),
+        _ => infer_expr(ctx, callee, subst)
+    }
+    let variant_target = exact_ident_variant_constructor_target(
+        ctx, callee_r.hexpr)
+    match variant_target {
+        some(target) => if target.positional &&
+                target.field_refs.len() > 0 {
+            if callee_receipts.len() != 1 {
+                panic("direct constructor: exact instantiation receipt is absent")
+            }
+            return infer_positional_variant_call(
+                ctx, callee_r, args, target, span)
+        },
+        none => {}
+    }
+    let callee_receipt: CallableInstantiationReceipt? = match
+            callee_receipts.first() {
+        some(value) => {
+            if callee_receipts.len() != 1 {
+                panic("direct call: callee produced multiple receipts")
+            }
+            some(value)
+        },
+        none => none
+    }
     let callee_metadata = resolve_callee_metadata(ctx, callee_r.hexpr)
     let mut s = callee_r.subst
     let mut effects = callee_r.effects
@@ -2157,35 +2264,6 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         ai = ai + 1
     }
 
-    // B-069: Fill in default arguments only from exact DirectCallable
-    // metadata. The resolver requires min/default maps as one atomic pair.
-    match callee_metadata {
-        some(metadata) => match metadata.defaults {
-            some(defaults) => {
-                let total_arity = defaults.min_arity + defaults.values.len()
-                if args.len() < total_arity && args.len() >= defaults.min_arity {
-                    let defaults_start = args.len() - defaults.min_arity
-                    let mut di = defaults_start
-                    while di < defaults.values.len() {
-                        match defaults.values.get(di) {
-                            some(dh) => {
-                                let default_arg =
-                                    freshen_default_argument_hir(ctx, dh)
-                                let default_arg_type = hexpr_type(default_arg)
-                                hargs.push(default_arg)
-                                arg_types.push(default_arg_type)
-                            },
-                            none => {}
-                        }
-                        di = di + 1
-                    }
-                }
-            },
-            none => {}
-        },
-        none => {}
-    }
-
     let ret_var = ctx.env.fresh_var()
     let effect_tail = ctx.env.fresh_var_id()
     let expected_fn = Type::FnType {
@@ -2217,9 +2295,11 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         some(metadata) => match metadata.kind {
             ValueBindingKind::DirectCallable => {
                 if metadata.live_scheme.bounds.len() > 0 {
+                    let receipt = callee_receipt.unwrap_or_else(fn() {
+                        panic("direct call: bounded callee receipt is absent")
+                    })
                     resolve_or_defer_dicts_from_scheme(
-                        ctx, metadata.live_scheme,
-                        hexpr_type(callee_r.hexpr), s, span,
+                        ctx, metadata.live_scheme, receipt, s, span,
                         PendingDictPurpose::DirectCallPublish {
                             output_slot: resolved_dicts
                         })
@@ -2227,11 +2307,13 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
             },
             ValueBindingKind::ExternCallable => {
                 if metadata.live_scheme.bounds.len() > 0 {
+                    let receipt = callee_receipt.unwrap_or_else(fn() {
+                        panic("extern call: bounded callee receipt is absent")
+                    })
                     // Extern ABI never receives Ring dictionaries. Resolution
                     // remains mandatory for static bound validation.
                     resolve_or_defer_dicts_from_scheme(
-                        ctx, metadata.live_scheme,
-                        hexpr_type(callee_r.hexpr), s, span,
+                        ctx, metadata.live_scheme, receipt, s, span,
                         PendingDictPurpose::ExternCallValidate)
                 }
             },
@@ -2263,7 +2345,8 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
                                                         some(pt) => {
                                                             let resolved_pt = apply_subst(s, pt)
                                                             if is_value_type(resolved_pt) {
-                                                                ctx.boxed_vars.insert(arg_did)
+                                                                journal_boxed_var_insert(
+                                                                    ctx, arg_did)
                                                             }
                                                         },
                                                         none => {}
@@ -2287,10 +2370,21 @@ fn infer_call(mut ctx: InferCtx, callee: Expr, args: List<Expr>, span: Span, sub
         none => {}
     }
 
+    let exact_callee = exact_call_callee_ref(ctx, callee_r.hexpr)
+    let exact_actuals = exact_call_actuals(callee_r.hexpr)
+    let system_host = exact_system_host_callable(
+        ctx, callee_r.hexpr, resolved_callee_type, exact_callee)
     InferResult {
         hexpr: HExpr::Call {
-            callee: callee_r.hexpr, args: hargs, type_args: [],
-            resolved_dicts: resolved_dicts, dict_dispatch: none,
+            callee: callee_r.hexpr, args: hargs,
+            type_args: exact_actuals.0,
+            effect_instantiation: exact_actuals.1,
+            resolved_dicts: resolved_dicts,
+            effect_ctx: effect_ctx_source_for_callable(
+                ctx, resolved_callee_type),
+            callee_ref: exact_callee,
+            method_ref: none,
+            system_host: system_host,
             ty: result_type, effects: effects, span: span
         },
         subst: s, effects: effects
@@ -2361,14 +2455,27 @@ fn infer_method_call_from_receiver(
     }
 
     let mut method_type: Type? = none
-    let mut method_scheme: TypeScheme? = none
-    let mut dict_dispatch: DictDispatchInfo? = none
+    let mut method_type_args: List<HCallableTypeActual> = []
+    let mut method_effect_instantiation: HCallableEffectInstantiation? = none
+    let mut method_receipt: CallableInstantiationReceipt? = none
+    let mut method_core: ImplMethodSchemeCore? = none
+    let mut impl_owner: ImplEntry? = none
+    let mut impl_method_ref: ImplMethodRef? = none
+    let mut intrinsic_ref: IntrinsicRef? = none
+    let mut bound_method_ref: TraitMethodRef? = none
+    let mut bound_evidence: DictRef? = none
+    let mut bound_receiver_mutable = false
 
     match selection {
         some(selected) => {
             method_type = selected.method_type
-            method_scheme = selected.method_scheme
-            dict_dispatch = selected.dict_dispatch
+            method_type_args = selected.type_args
+            method_effect_instantiation = selected.effect_instantiation
+            method_receipt = selected.receipt
+            method_core = selected.method_core
+            impl_owner = selected.impl_owner
+            impl_method_ref = selected.impl_method_ref
+            intrinsic_ref = selected.intrinsic_ref
         },
         none => {}
     }
@@ -2379,12 +2486,24 @@ fn infer_method_call_from_receiver(
             Type::StructType { name, .. } => {
                 let r = lookup_impl_method(ctx, name, method)
                 method_type = r.method_type
-                method_scheme = r.method_scheme
+                method_type_args = r.type_args
+                method_effect_instantiation = r.effect_instantiation
+                method_receipt = r.receipt
+                method_core = r.method_core
+                impl_owner = r.impl_owner
+                impl_method_ref = r.impl_method_ref
+                intrinsic_ref = r.intrinsic_ref
             },
             Type::EnumType { name, .. } => {
                 let r = lookup_impl_method(ctx, name, method)
                 method_type = r.method_type
-                method_scheme = r.method_scheme
+                method_type_args = r.type_args
+                method_effect_instantiation = r.effect_instantiation
+                method_receipt = r.receipt
+                method_core = r.method_core
+                impl_owner = r.impl_owner
+                impl_method_ref = r.impl_method_ref
+                intrinsic_ref = r.intrinsic_ref
             },
             _ => {}
         }
@@ -2396,7 +2515,13 @@ fn infer_method_call_from_receiver(
             some(prim_name) => {
                 let r = lookup_impl_method(ctx, prim_name, method)
                 method_type = r.method_type
-                method_scheme = r.method_scheme
+                method_type_args = r.type_args
+                method_effect_instantiation = r.effect_instantiation
+                method_receipt = r.receipt
+                method_core = r.method_core
+                impl_owner = r.impl_owner
+                impl_method_ref = r.impl_method_ref
+                intrinsic_ref = r.intrinsic_ref
             },
             none => {}
         }
@@ -2406,7 +2531,15 @@ fn infer_method_call_from_receiver(
     if method_type.is_none() {
         match type_to_builtin_name(recv_type) {
             some(type_name) => {
-                method_type = lookup_trait_method(ctx, type_name, method, span)
+                let r = lookup_trait_method(ctx, type_name, method, span)
+                method_type = r.method_type
+                method_type_args = r.type_args
+                method_effect_instantiation = r.effect_instantiation
+                method_receipt = r.receipt
+                method_core = r.method_core
+                impl_owner = r.impl_owner
+                impl_method_ref = r.impl_method_ref
+                intrinsic_ref = r.intrinsic_ref
             },
             none => {}
         }
@@ -2428,12 +2561,21 @@ fn infer_method_call_from_receiver(
                                 let tm = trait_def.methods.find(fn(m) { m.name == method })
                                 match tm {
                                     some(found_method) => {
-                                        method_type = some(ctx.env.instantiate(TypeScheme { ty: found_method.ty, type_vars: trait_def.type_param_vars, bounds: [], def_id: none }))
-                                        dict_dispatch = some(DictDispatchInfo {
-                                            dict_ref: DictRef::Simple(trait_bound_param_name(
-                                                fb.type_param_name, fb.trait_name)),
-                                            method: method
-                                        })
+                                        if typed_effect_header_schema_bindings(
+                                                found_method.effect_schema).len() != 0 {
+                                            panic("bound method call: open effect formal has no 0.1 receipt consumer")
+                                        }
+                                        method_type = some(
+                                            instantiate_trait_method_signature(
+                                                ctx.env, found_method))
+                                        bound_method_ref = some(found_method.method_ref)
+                                        bound_receiver_mutable = match
+                                                found_method.param_mutabilities.first() {
+                                            some(value) => value,
+                                            none => false
+                                        }
+                                        bound_evidence = some(fn_bound_dict_ref(
+                                            current_dictionary_evidence_owner(ctx), fb))
                                     },
                                     none => {}
                                 }
@@ -2570,22 +2712,18 @@ fn infer_method_call_from_receiver(
     }
 
     let resolved_dicts: List<DictRef> = []
-    match method_scheme {
-        some(ms) => {
-            if ms.bounds.len() > 0 {
-                match method_type {
-                    some(mt) => {
-                        resolve_or_defer_dicts_from_scheme(
-                            ctx, ms, mt, s, span,
-                            PendingDictPurpose::DirectCallPublish {
-                                output_slot: resolved_dicts
-                            })
-                    },
-                    none => {}
-                }
-            }
+    match (impl_owner, method_core, method_type) {
+        (some(owner), some(core), some(mt)) => {
+            let receipt = method_receipt.unwrap_or_else(fn() {
+                panic("method call: exact instantiation receipt is absent")
+            })
+            resolve_or_defer_dicts_from_impl_owner(
+                ctx, owner, core, receipt, s, span,
+                PendingDictPurpose::DirectCallPublish {
+                    output_slot: resolved_dicts
+                })
         },
-        none => {}
+        _ => {}
     }
 
     // B-100 Fix 3: recompute result_type after dict resolution so
@@ -2593,11 +2731,42 @@ fn infer_method_call_from_receiver(
     result_type = apply_subst(s, result_type)
 
     let callee_type = match method_type { some(mt) => mt, none => ctx.env.fresh_var() }
+    let exact_method_ref: MethodCallRef? = match intrinsic_ref {
+        some(intrinsic) => some(make_intrinsic_method_call_ref(
+            intrinsic, callee_type)),
+        none => match impl_method_ref {
+            some(concrete) => some(make_concrete_method_call_ref(
+                concrete, callee_type,
+                is_mut_method_call(ctx, recv_type, method))),
+            none => match (bound_method_ref, bound_evidence) {
+                (some(bound), some(evidence)) => some(
+                    make_bound_method_call_ref(
+                        bound, evidence, callee_type,
+                        bound_receiver_mutable)),
+                (some(_), none) => panic(
+                    "method inference: bound member has no exact evidence"),
+                (none, some(_)) => panic(
+                    "method inference: evidence has no bound member"),
+                (none, none) => none
+            }
+        }
+    }
     InferResult {
         hexpr: HExpr::Call {
-            callee: HExpr::FieldAccess { receiver: recv_r.hexpr, field: method, ty: callee_type, effects: EMPTY_ROW, span: span },
-            args: hargs, type_args: [], resolved_dicts: resolved_dicts,
-            dict_dispatch: dict_dispatch, ty: result_type, effects: effects, span: span
+            callee: HExpr::FieldAccess {
+                receiver: recv_r.hexpr, field: method,
+                access_kind: HFieldAccessKind::Method,
+                projection: none,
+                ty: callee_type, effects: EMPTY_ROW, span: span },
+            args: hargs, type_args: method_type_args,
+            effect_instantiation: method_effect_instantiation,
+            resolved_dicts: resolved_dicts,
+            effect_ctx: effect_ctx_source_for_callable(
+                ctx, callee_type),
+            callee_ref: none,
+            method_ref: exact_method_ref,
+            system_host: none,
+            ty: result_type, effects: effects, span: span
         },
         subst: s, effects: effects
     }
@@ -2616,7 +2785,11 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 "Unknown effect: ${effect_display}",
                 span, DiagnosticContext::OtherContext { detail: some("effect '${effect_display}' not found") })
             return InferResult {
-                hexpr: HExpr::EffectOp { effect_name: effect_name, op_name: op_name, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::EffectOp { effect_name: effect_name,
+                    op_name: op_name, operation_ref: none, fail_ref: none,
+                    effect_ctx_lookup: none,
+                    args: [], ty: Type::ErrorType,
+                    effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2634,7 +2807,11 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
                 "Effect ${effect_display} has no operation ${op_name}",
                 span, DiagnosticContext::OtherContext { detail: some("no operation '${op_name}' on effect '${effect_display}'") })
             return InferResult {
-                hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, args: [], ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::EffectOp { effect_name: canonical_effect_name,
+                    op_name: op_name, operation_ref: none, fail_ref: none,
+                    effect_ctx_lookup: none,
+                    args: [], ty: Type::ErrorType,
+                    effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2653,12 +2830,25 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
         tpi = tpi + 1
     }
 
-    // Apply instantiation to op param types and return type
+    // Apply one shared schema instantiation to the complete operation
+    // signature. Repeated row tails inside params/result remain related, while
+    // two operation uses never share inference identities.
+    let mut raw_signature: List<Type> = []
+    for pt in op.params { raw_signature.push(pt) }
+    raw_signature.push(op.return_type)
+    let localized_header = instantiate_effect_header_schema(
+        ctx.env, raw_signature, op.effect_schema)
+    let instantiated_signature = localized_header.0.map(fn(value) {
+        apply_subst_map(inst_map, value)
+    })
     let mut inst_params: List<Type> = []
-    for pt in op.params {
-        inst_params.push(apply_subst_map(inst_map, pt))
+    let mut signature_index = 0
+    while signature_index + 1 < instantiated_signature.len() {
+        inst_params.push(instantiated_signature.get(signature_index).unwrap())
+        signature_index = signature_index + 1
     }
-    let inst_ret = apply_subst_map(inst_map, op.return_type)
+    let inst_ret = instantiated_signature.get(
+        instantiated_signature.len() - 1).unwrap()
 
     if args.len() != inst_params.len() {
         let effect_display = nominal_display_name(effect_name)
@@ -2686,17 +2876,20 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
         i = i + 1
     }
 
-    let mut eff: Effect = Effect::CustomEffect { name: canonical_effect_name, type_args: inst_type_args }
-    match effect_def.built_in_kind {
+    let eff: Effect = match effect_def.built_in_kind {
         some(bik) => match bik {
-            BuiltInKind::BkIo => { eff = Effect::IoEffect },
             BuiltInKind::BkFail => {
                 let error_type = if hargs.len() > 0 { apply_subst(s, hexpr_type(match hargs.first() { some(h) => h, none => panic("unreachable: hargs.first() after len > 0 check") })) } else { UNIT }
-                eff = Effect::FailEffect { error_type: error_type }
-            },
-            BuiltInKind::BkMut => { eff = Effect::MutEffect { state_type: ctx.env.fresh_var() } }
+                Effect::FailEffect { error_type: error_type }
+            }
         },
-        none => {}
+        none => match effect_def.handled_ref {
+            some(reference) => Effect::CustomEffect {
+                reference: reference, name: canonical_effect_name,
+                type_args: inst_type_args },
+            none => panic(
+                "effect inference: custom effect has no HandledEffectRef")
+        }
     }
 
     let me = merge_effects(ctx.sink, ctx.env, effects, effect_row([eff]), s, span)
@@ -2704,7 +2897,21 @@ fn infer_effect_op(mut ctx: InferCtx, effect_name: Str, op_name: Str, args: List
     s = me.1
 
     InferResult {
-        hexpr: HExpr::EffectOp { effect_name: canonical_effect_name, op_name: op_name, args: hargs, ty: inst_ret, effects: effects, span: span },
+        hexpr: HExpr::EffectOp { effect_name: canonical_effect_name,
+            op_name: op_name, operation_ref: op.operation_ref,
+            fail_ref: match effect_def.built_in_kind {
+                some(BuiltInKind::BkFail) => some(h_fail_raise_ref()),
+                _ => none
+            },
+            effect_ctx_lookup: match effect_def.handled_ref {
+                some(requirement) => some(effect_ctx_lookup_for_instance(
+                    ctx, make_typed_handled_effect_instance(
+                        requirement, inst_type_args.map(fn(ty) {
+                            apply_subst(s, ty)
+                        })))),
+                none => none
+            },
+            args: hargs, ty: inst_ret, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -2719,6 +2926,8 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
     let recv_type = apply_subst(s, hexpr_type(recv_r.hexpr))
 
     let mut field_type: Type = ctx.env.fresh_var()
+    let mut access_kind = HFieldAccessKind::ErrorRecovery
+    let mut projection: HProjectionRef? = none
     match recv_type {
         Type::StructType { name, type_params, .. } => {
             match ctx.env.types.structs.get(name) {
@@ -2726,6 +2935,13 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                     let f = struct_def.fields.find(fn(f_) { f_.name == field })
                     match f {
                         some(found_field) => {
+                            access_kind = HFieldAccessKind::NominalField {
+                                owner_ref: struct_def.owner_ref,
+                                field_ref: found_field.field_ref,
+                                field_index: found_field.field_index
+                            }
+                            projection = some(h_nominal_projection(
+                                found_field.field_ref))
                             let mut inst_map: Map<Int, Type> = map_new()
                             let mut fi = 0
                             while fi < struct_def.type_param_vars.len() && fi < type_params.len() {
@@ -2735,7 +2951,12 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                                 }
                                 fi = fi + 1
                             }
-                            field_type = apply_subst_map(inst_map, found_field.ty)
+                            let field_schema = struct_def.field_effect_schemas.get(
+                                found_field.field_index).unwrap()
+                            let localized = instantiate_effect_header_schema(
+                                ctx.env, [found_field.ty], field_schema)
+                            field_type = apply_subst_map(
+                                inst_map, localized.0.get(0).unwrap())
                         },
                         none => { let _ = type_error(ctx.sink, E0304,
                             "Struct ${name} has no field ${field}",
@@ -2748,6 +2969,9 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
             }
         },
         Type::RecordType { fields: rec_fields, tail, .. } => {
+            access_kind = HFieldAccessKind::RecordField
+            projection = some(h_structural_projection(
+                fresh_semantic_path(ctx, "record-field"), field))
             let f = rec_fields.find(fn(f_) { f_.name == field })
             match f {
                 some(found_field) => { field_type = found_field.ty },
@@ -2760,6 +2984,7 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
             }
         },
         Type::TupleType { elements } => {
+            access_kind = HFieldAccessKind::TupleField
             match parse_int(field) {
                 none => { let _ = type_error(ctx.sink, E0304,
                     "Cannot access named field '${field}' on tuple type; use .0, .1, etc.",
@@ -2771,6 +2996,7 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
                             span, DiagnosticContext::MissingField { field: field, ty: "tuple", available: none })
                         field_type = Type::ErrorType
                     } else {
+                        projection = some(h_tuple_projection(i))
                         match elements.get(i) {
                             some(t) => { field_type = t },
                             none => { field_type = Type::ErrorType }
@@ -2786,7 +3012,11 @@ fn infer_field_access(mut ctx: InferCtx, receiver: Expr, field: Str, span: Span,
     }
 
     InferResult {
-        hexpr: HExpr::FieldAccess { receiver: recv_r.hexpr, field: field, ty: field_type, effects: recv_r.effects, span: span },
+        hexpr: HExpr::FieldAccess {
+            receiver: recv_r.hexpr, field: field,
+            access_kind: access_kind, projection: projection,
+            ty: field_type,
+            effects: recv_r.effects, span: span },
         subst: s, effects: recv_r.effects
     }
 }
@@ -2814,7 +3044,9 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
                             "Cannot use '${q}' — relative path exceeds module nesting depth",
                             span, DiagnosticContext::OtherContext { detail: some("relative path out of scope") })
                         return InferResult {
-                            hexpr: HExpr::StructLit { name: name, type_args: [], fields: [], spread: none, ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                            hexpr: HExpr::IntLit {
+                                value: 0, ty: Type::ErrorType,
+                                effects: EMPTY_ROW, span: span },
                             subst: subst, effects: EMPTY_ROW
                         }
                     }
@@ -2910,7 +3142,9 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
             let _ = type_error(ctx.sink, E0203, "Unknown struct: ${name}", span,
                 DiagnosticContext::OtherContext { detail: some("unknown struct '${name}'") })
             return InferResult {
-                hexpr: HExpr::StructLit { name: name, type_args: [], fields: [], spread: none, ty: Type::ErrorType, effects: EMPTY_ROW, span: span },
+                hexpr: HExpr::IntLit {
+                    value: 0, ty: Type::ErrorType,
+                    effects: EMPTY_ROW, span: span },
                 subst: subst, effects: EMPTY_ROW
             }
         },
@@ -2935,7 +3169,7 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
 
     let mut s = subst
     let mut effects: EffectRow = EMPTY_ROW
-    let mut hfields: List<HStructFieldInit> = []
+    let mut hfields: List<HNominalStructFieldInit> = []
 
     let mut hspread: HExpr? = none
     match spread {
@@ -2961,18 +3195,28 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
         let def_field = struct_def.fields.find(fn(f) { f.name == field.name })
         match def_field {
             some(df) => {
-                let ft = apply_subst_map(inst_map, df.ty)
+                let field_schema = struct_def.field_effect_schemas.get(
+                    df.field_index).unwrap()
+                let localized = instantiate_effect_header_schema(
+                    ctx.env, [df.ty], field_schema)
+                let ft = apply_subst_map(
+                    inst_map, localized.0.get(0).unwrap())
                 let field_notes: List<DiagnosticNote> = [
                     DiagnosticNote { message: "field '${field.name}' of struct '${name}' expects type '${type_to_string(ft)}'", span: some(field.span) },
                     DiagnosticNote { message: "provided value has type '${type_to_string(apply_subst(s, hexpr_type(fr.hexpr)))}'", span: some(hexpr_span(fr.hexpr)) }
                 ]
                 s = unify_at_noted(ctx.sink, ctx.env, hexpr_type(fr.hexpr), ft, s, span, field_notes)
+                hfields.push(HNominalStructFieldInit {
+                    name: field.name,
+                    field_ref: df.field_ref,
+                    field_index: df.field_index,
+                    value: fr.hexpr
+                })
             },
             none => { let _ = type_error(ctx.sink, E0203,
                 "Struct '${name}' has no field '${field.name}'",
                 field.span, DiagnosticContext::MissingField { field: field.name, ty: name, available: none }) }
         }
-        hfields.push(HStructFieldInit { name: field.name, value: fr.hexpr })
     }
 
     if spread.is_none() {
@@ -2992,7 +3236,14 @@ fn infer_struct_lit(mut ctx: InferCtx, name: Str, fields: List<StructFieldInit>,
     }
 
     InferResult {
-        hexpr: HExpr::StructLit { name: struct_def.name, type_args: [], fields: hfields, spread: hspread, ty: struct_type, effects: effects, span: span },
+        hexpr: HExpr::StructLit {
+            name: struct_def.name, owner_ref: struct_def.owner_ref,
+            type_args: [], fields: hfields, spread: hspread,
+            constructor: some(make_h_record_constructor_plan(
+                hfields.map(fn(field) {
+                    h_nominal_projection(field.field_ref)
+                }))),
+            ty: struct_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -3018,6 +3269,13 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
     let mut s = subst
     let mut effects: EffectRow = EMPTY_ROW
     let mut hfields: List<HStructFieldInit> = []
+    let variant_index = enum_def.variant_index.get(variant_name).unwrap_or(-1)
+    if variant_index < 0 {
+        panic("variant identity: registered variant index is missing")
+    }
+    let exact_variant_ref = enum_def.variant_refs.get(variant_index).unwrap()
+    let exact_field_refs = enum_def.variant_field_refs.get(
+        variant_index).unwrap()
 
     let mut hspread: HExpr? = none
     match spread {
@@ -3042,18 +3300,30 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
         s = me.1
         let field_idx = field_names.index_of(field.name)
         match field_idx {
-            some(idx) => match variant.fields.get(idx) {
-                some(ftype) => {
-                    let ft = apply_subst_map(inst_map, ftype)
+            some(idx) => match (variant.fields.get(idx),
+                                exact_field_refs.get(idx)) {
+                (some(ftype), some(field_ref)) => {
+                    let variant_index = enum_def.variant_index.get(
+                        variant_name).unwrap()
+                    let field_schema = enum_def.variant_field_effect_schemas.get(
+                        variant_index).unwrap().get(idx).unwrap()
+                    let localized = instantiate_effect_header_schema(
+                        ctx.env, [ftype], field_schema)
+                    let ft = apply_subst_map(
+                        inst_map, localized.0.get(0).unwrap())
                     s = unify_at(ctx.sink, ctx.env, hexpr_type(fr.hexpr), ft, s, span)
+                    hfields.push(HStructFieldInit {
+                        name: field.name, field_ref: field_ref,
+                        value: fr.hexpr
+                    })
                 },
-                none => {}
+                _ => panic(
+                    "variant identity: registered field inventory drifted")
             },
             none => { let _ = type_error(ctx.sink, E0203,
                 "Variant '${variant_name}' has no field '${field.name}'",
                 field.span, DiagnosticContext::MissingField { field: field.name, ty: variant_name, available: none }) }
         }
-        hfields.push(HStructFieldInit { name: field.name, value: fr.hexpr })
     }
 
     if spread.is_none() {
@@ -3073,7 +3343,13 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
     InferResult {
         hexpr: HExpr::NamedVariantConstruct {
             enum_name: enum_name, variant_name: variant_name,
-            fields: hfields, spread: hspread, ty: enum_type, effects: effects, span: span
+            variant_ref: exact_variant_ref,
+            fields: hfields, spread: hspread,
+            constructor: some(make_h_variant_constructor_plan(
+                hfields.map(fn(field) {
+                    h_variant_projection(field.field_ref)
+                }))),
+            ty: enum_type, effects: effects, span: span
         },
         subst: s, effects: effects
     }
@@ -3084,7 +3360,7 @@ fn infer_named_variant_construct(mut ctx: InferCtx, enum_name: Str, variant_name
 // ============================================================
 
 fn collect_exact_pattern_bindings(
-    env: TypeEnv, pattern: Pattern, mut seen: Set<Str>,
+    ctx: InferCtx, pattern: Pattern, mut seen: Set<Str>,
     mut out: List<HPatternBinding>
 ) {
     match pattern {
@@ -3092,51 +3368,56 @@ fn collect_exact_pattern_bindings(
         Pattern::Binding { name, .. } => {
             if name != "_" && !seen.contains(name) {
                 seen.insert(name)
-                let scheme = match env.lookup(name) {
+                let scheme = match ctx.env.lookup(name) {
                     some(value) => value,
-                    none => panic(
-                        "unreachable: inferred pattern binding is absent from its lexical scope")
+                    // Pattern binding already emitted the source diagnostic.
+                    // Error recovery must not invent a SlotRef or turn that
+                    // diagnostic into an internal failure.
+                    none => return
                 }
                 let def_id = match scheme.def_id {
                     some(id) => id,
-                    none => panic(
-                        "unreachable: inferred pattern binding has no exact DefId")
+                    none => return
                 }
                 out.push(HPatternBinding {
-                    name: name, def_id: def_id, ty: scheme.ty
+                    name: name, def_id: def_id,
+                    slot: make_source_slot_ref(
+                        current_identity_file_key(ctx),
+                        slot_domain_lexical(), def_id),
+                    ty: scheme.ty
                 })
             }
         },
         Pattern::Constructor { fields, .. } => {
             for field in fields {
-                collect_exact_pattern_bindings(env, field, seen, out)
+                collect_exact_pattern_bindings(ctx, field, seen, out)
             }
         },
         Pattern::NamedConstructor { fields, .. } => {
             for field in fields {
                 collect_exact_pattern_bindings(
-                    env, field.pattern, seen, out)
+                    ctx, field.pattern, seen, out)
             }
         },
         Pattern::TuplePattern { elements, .. } => {
             for element in elements {
-                collect_exact_pattern_bindings(env, element, seen, out)
+                collect_exact_pattern_bindings(ctx, element, seen, out)
             }
         },
         Pattern::OrPattern { patterns, .. } => {
             for alternative in patterns {
-                collect_exact_pattern_bindings(env, alternative, seen, out)
+                collect_exact_pattern_bindings(ctx, alternative, seen, out)
             }
         }
     }
 }
 
 fn exact_pattern_bindings(
-    env: TypeEnv, pattern: Pattern
+    ctx: InferCtx, pattern: Pattern
 ) -> List<HPatternBinding> {
     let mut result: List<HPatternBinding> = []
     let mut seen: Set<Str> = set_new()
-    collect_exact_pattern_bindings(env, pattern, seen, result)
+    collect_exact_pattern_bindings(ctx, pattern, seen, result)
     result
 }
 
@@ -3144,11 +3425,11 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
     let scrut_r = infer_expr(ctx, scrutinee, subst)
     let mut s = scrut_r.subst
     let mut effects = scrut_r.effects
-    let result_type = ctx.env.fresh_var()
+    let mut result_type: Type = NEVER
     let mut harms: List<HMatchArm> = []
-    // #180: track whether a non-Never arm has contributed to result_type.
-    // When true, subsequent Never arms skip unification to avoid poisoning
-    // the result type variable (which may chain to a polymorphic type param T).
+    // Never is bottom and never selects the value type of a match.  Keep the
+    // first live arm type as the join authority; if later constraints resolve
+    // it to Never, the next live arm replaces it rather than inheriting poison.
     let mut has_non_never_arm = false
 
     for arm in arms {
@@ -3156,8 +3437,9 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
         let arm_result = some({
             let match_pattern = rewrite_bare_enum_bindings(ctx.env, arm.pattern)
             s = bind_pattern(ctx, match_pattern, hexpr_type(scrut_r.hexpr), s)
-            let pattern_bindings = exact_pattern_bindings(
-                ctx.env, match_pattern)
+            let pattern_bindings = exact_pattern_bindings(ctx, match_pattern)
+            let pattern_plan = exact_pattern_plan(
+                ctx, match_pattern, hexpr_type(scrut_r.hexpr), s)
 
             let mut guard_hexpr: HExpr? = none
             match arm.guard {
@@ -3178,31 +3460,29 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
             let me = merge_effects(ctx.sink, ctx.env, effects, body_r.effects, s, arm.span)
             effects = me.0
             s = me.1
-            // #180: skip arm-vs-result unification when the arm body is Never
-            // AND a non-Never arm has already been unified.  Never is the bottom
-            // type — compatible with any result type, but unifying it with a
-            // result_type that chains to a polymorphic type param T would bind
-            // T = Never, causing all callers to see the function as diverging.
-            // When no non-Never arm has run yet (all arms so far are Never), we
-            // allow the binding so all-diverging matches correctly have type Never.
             let arm_body_resolved = apply_subst(s, hexpr_type(body_r.hexpr))
             let arm_is_never = match arm_body_resolved { Type::NeverType => true, _ => false }
-            if arm_is_never && has_non_never_arm {
-                // A non-Never arm already determined the result type;
-                // skip to avoid poisoning the type chain.
-            } else {
-                let match_notes: List<DiagnosticNote> = [
-                    DiagnosticNote { message: "match arms must all have the same type", span: some(arm.span) },
-                    DiagnosticNote { message: "this arm has type '${type_to_string(apply_subst(s, hexpr_type(body_r.hexpr)))}'", span: some(hexpr_span(body_r.hexpr)) }
-                ]
-                s = unify_at_noted(ctx.sink, ctx.env, hexpr_type(body_r.hexpr), result_type, s, arm.span, match_notes)
-                if !arm_is_never {
+            if !arm_is_never {
+                let selected_is_never = match apply_subst(s, result_type) {
+                    Type::NeverType => true, _ => false
+                }
+                if !has_non_never_arm || selected_is_never {
+                    result_type = hexpr_type(body_r.hexpr)
                     has_non_never_arm = true
+                } else {
+                    let match_notes: List<DiagnosticNote> = [
+                        DiagnosticNote { message: "match arms must all have the same type", span: some(arm.span) },
+                        DiagnosticNote { message: "this arm has type '${type_to_string(arm_body_resolved)}'", span: some(hexpr_span(body_r.hexpr)) }
+                    ]
+                    s = unify_at_noted(
+                        ctx.sink, ctx.env, hexpr_type(body_r.hexpr),
+                        result_type, s, arm.span, match_notes)
                 }
             }
 
             harms.push(HMatchArm { pattern: match_pattern,
-                bindings: pattern_bindings, guard: guard_hexpr,
+                pattern_plan: pattern_plan, bindings: pattern_bindings,
+                guard: guard_hexpr,
                 body: body_r.hexpr, span: arm.span })
             true
         }) catch { _ => none }
@@ -3229,9 +3509,13 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
         none => {}
     }
 
-    let final_type = apply_subst(s, result_type)
+    let final_type = if has_non_never_arm {
+        apply_subst(s, result_type)
+    } else { NEVER }
     InferResult {
-        hexpr: HExpr::MatchExpr { scrutinee: scrut_r.hexpr, arms: harms, ty: final_type, effects: effects, span: span },
+        hexpr: HExpr::MatchExpr {
+            scrutinee: scrut_r.hexpr, arms: harms, physical: none,
+            ty: final_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -3239,6 +3523,25 @@ fn infer_match(mut ctx: InferCtx, scrutinee: Expr, arms: List<MatchArm>, span: S
 // ============================================================
 // infer_if
 // ============================================================
+
+fn join_branch_result_types(
+    ctx: InferCtx, left: Type, right: Type, subst: UnionFind,
+    span: Span, notes: List<DiagnosticNote>
+) -> (UnionFind, Type) {
+    let resolved_left = apply_subst(subst, left)
+    let resolved_right = apply_subst(subst, right)
+    let left_is_never = match resolved_left {
+        Type::NeverType => true, _ => false
+    }
+    let right_is_never = match resolved_right {
+        Type::NeverType => true, _ => false
+    }
+    if left_is_never { return (subst, resolved_right) }
+    if right_is_never { return (subst, resolved_left) }
+    let joined = unify_at_noted(
+        ctx.sink, ctx.env, left, right, subst, span, notes)
+    (joined, apply_subst(joined, left))
+}
 
 fn infer_if(mut ctx: InferCtx, condition: Expr, then_branch: Expr, else_branch: Expr?, span: Span, subst: UnionFind) -> InferResult {
     let cond_r = infer_expr(ctx, condition, subst)
@@ -3267,8 +3570,11 @@ fn infer_if(mut ctx: InferCtx, condition: Expr, then_branch: Expr, else_branch: 
                     DiagnosticNote { message: "then branch has type '${type_to_string(apply_subst(s, hexpr_type(then_r.hexpr)))}'", span: some(hexpr_span(then_r.hexpr)) },
                     DiagnosticNote { message: "else branch has type '${type_to_string(apply_subst(s, hexpr_type(else_r.hexpr)))}'", span: some(hexpr_span(else_r.hexpr)) }
                 ]
-                s = unify_at_noted(ctx.sink, ctx.env, hexpr_type(then_r.hexpr), hexpr_type(else_r.hexpr), s, span, if_notes)
-                result_type = apply_subst(s, hexpr_type(then_r.hexpr))
+                let joined = join_branch_result_types(
+                    ctx, hexpr_type(then_r.hexpr), hexpr_type(else_r.hexpr),
+                    s, span, if_notes)
+                s = joined.0
+                result_type = joined.1
                 else_hexpr = some(else_r.hexpr)
             },
             Expr::IfExpr { condition: ec, then_branch: etb, else_branch: eeb, span: espan } => {
@@ -3281,8 +3587,11 @@ fn infer_if(mut ctx: InferCtx, condition: Expr, then_branch: Expr, else_branch: 
                     DiagnosticNote { message: "then branch has type '${type_to_string(apply_subst(s, hexpr_type(then_r.hexpr)))}'", span: some(hexpr_span(then_r.hexpr)) },
                     DiagnosticNote { message: "else branch has type '${type_to_string(apply_subst(s, hexpr_type(else_if_r.hexpr)))}'", span: some(hexpr_span(else_if_r.hexpr)) }
                 ]
-                s = unify_at_noted(ctx.sink, ctx.env, hexpr_type(then_r.hexpr), hexpr_type(else_if_r.hexpr), s, span, elif_notes)
-                result_type = apply_subst(s, hexpr_type(then_r.hexpr))
+                let joined = join_branch_result_types(
+                    ctx, hexpr_type(then_r.hexpr),
+                    hexpr_type(else_if_r.hexpr), s, span, elif_notes)
+                s = joined.0
+                result_type = joined.1
                 else_hexpr = some(HExpr::Block {
                     stmts: [], tail: some(else_if_r.hexpr),
                     ty: hexpr_type(else_if_r.hexpr), effects: else_if_r.effects, span: espan
@@ -3312,18 +3621,79 @@ fn is_interpolatable_type(t: Type) -> Bool {
         Type::FloatType => true,
         Type::StrType => true,
         Type::BoolType => true,
-        // TypeVar means the type is not yet resolved — allow it (may resolve later)
-        Type::TypeVar { .. } => true,
+        // An unconstrained generic value has no exact 0.1 conversion
+        // authority.  It must be rejected here instead of reaching Core or
+        // codegen for a name/type fallback.
+        Type::TypeVar { .. } => false,
         // ErrorType — already has an error, don't cascade
         Type::ErrorType => true,
         _ => false,
     }
 }
 
+fn exact_method_plan(method: MethodCallRef) -> HExactCallPlan {
+    make_h_exact_call_plan(
+        method_call_ref_callee_identity(method),
+        method_call_ref_signature(method), some(method), [],
+        make_empty_effect_ctx_source())
+}
+
+fn exact_string_conversion_plan(
+    ctx: InferCtx, ty: Type
+) -> HExactCallPlan? {
+    match ty {
+        Type::StrType => some(make_h_exact_call_plan(
+            make_named_callee_ref(builtin_str_identity_symbol()),
+            Type::FnType {
+                params: [STR], return_type: STR, effects: EMPTY_ROW
+            }, none, [], make_empty_effect_ctx_source())),
+        Type::BoolType => some(make_h_exact_call_plan(
+            make_named_callee_ref(builtin_bool_to_str_symbol()),
+            Type::FnType {
+                params: [BOOL], return_type: STR, effects: EMPTY_ROW
+            }, none, [], make_empty_effect_ctx_source())),
+        Type::IntType => some(exact_method_plan(
+            exact_nominal_method_call(ctx, "Int", "to_str"))),
+        Type::FloatType => some(exact_method_plan(
+            exact_nominal_method_call(ctx, "Float", "to_str"))),
+        _ => none
+    }
+}
+
+fn exact_string_interp_plan(
+    mut ctx: InferCtx, value_types: List<Type>
+) -> HStringInterpPlan? {
+    let mut conversions: List<HExactCallPlan> = []
+    for ty in value_types {
+        match exact_string_conversion_plan(ctx, ty) {
+            some(plan) => conversions.push(plan),
+            none => return none
+        }
+    }
+    let builder_scheme = ctx.env.lookup("string_builder").unwrap_or_else(fn() {
+        panic("string interpolation plan: builder function is absent")
+    })
+    let builder_def_id = match builder_scheme.def_id {
+        some(id) => id,
+        none => panic("string interpolation plan: builder has no DefId")
+    }
+    let builder = make_h_exact_call_plan(
+        make_named_callee_ref(value_symbol_ref(ctx, builder_def_id)),
+        builder_scheme.ty, none, [], make_empty_effect_ctx_source())
+    let add = exact_method_plan(
+        exact_nominal_method_call(ctx, "StringBuilder", "add"))
+    let finish = exact_method_plan(
+        exact_nominal_method_call(ctx, "StringBuilder", "to_str"))
+    some(make_h_string_interp_plan(
+        fresh_semantic_let_binder(ctx, "string-interp-builder"),
+        builder, add, add, finish, conversions))
+}
+
 fn infer_string_interp(mut ctx: InferCtx, parts: List<StringInterpPart>, span: Span, subst: UnionFind) -> InferResult {
     let mut s = subst
     let mut effects: EffectRow = EMPTY_ROW
     let mut hparts: List<HStringInterpPart> = []
+    let mut value_types: List<Type> = []
 
     for part in parts {
         match part {
@@ -3346,13 +3716,16 @@ fn infer_string_interp(mut ctx: InferCtx, parts: List<StringInterpPart>, span: S
                             expression: none
                         })
                 }
+                value_types.push(resolved)
                 hparts.push(HStringInterpPart::Expression(r.hexpr))
             }
         }
     }
 
     InferResult {
-        hexpr: HExpr::StringInterp { parts: hparts, ty: STR, effects: effects, span: span },
+        hexpr: HExpr::StringInterp { parts: hparts,
+            plan: exact_string_interp_plan(ctx, value_types),
+            ty: STR, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -3407,8 +3780,9 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
         let arm_result = some({
             let catch_pattern = rewrite_bare_enum_bindings(ctx.env, arm.pattern)
             s = bind_pattern(ctx, catch_pattern, error_type, s)
-            let pattern_bindings = exact_pattern_bindings(
-                ctx.env, catch_pattern)
+            let pattern_bindings = exact_pattern_bindings(ctx, catch_pattern)
+            let pattern_plan = exact_pattern_plan(
+                ctx, catch_pattern, error_type, s)
 
             let mut guard_hexpr: HExpr? = none
             match arm.guard {
@@ -3432,7 +3806,8 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
             s = unify_at(ctx.sink, ctx.env, hexpr_type(body_r.hexpr), result_type, s, arm.span)
 
             harms.push(HMatchArm { pattern: catch_pattern,
-                bindings: pattern_bindings, guard: guard_hexpr,
+                pattern_plan: pattern_plan, bindings: pattern_bindings,
+                guard: guard_hexpr,
                 body: body_r.hexpr, span: arm.span })
             true
         }) catch { _ => none }
@@ -3440,6 +3815,15 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
         match arm_result {
             none => fail.raise(CompileError {}),
             _ => {}
+        }
+    }
+
+    // A closed body with no fail atom cannot reach any catch arm. The arms
+    // above are still fully checked for diagnostics, but no error payload type
+    // exists to freeze. Elide the dead catch before TypedHIR publication.
+    if !found_fail && !has_open_tail {
+        return InferResult {
+            hexpr: expr_r.hexpr, subst: s, effects: expr_r.effects
         }
     }
 
@@ -3465,7 +3849,10 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
 
     let final_type = apply_subst(s, result_type)
     InferResult {
-        hexpr: HExpr::TryCatch { body: expr_r.hexpr, arms: harms, ty: final_type, effects: effects, span: span },
+        hexpr: HExpr::TryCatch {
+            body: expr_r.hexpr, error_type: error_type_resolved,
+            arms: harms, physical: none,
+            ty: final_type, effects: effects, span: span },
         subst: s, effects: effects
     }
 }
@@ -3474,8 +3861,266 @@ fn infer_catch(mut ctx: InferCtx, expr: Expr, arms: List<MatchArm>, span: Span, 
 // infer_handle
 // ============================================================
 
+fn exact_handler_operation(
+    effect_def: EffectDef, operation_name: Str
+) -> EffectOperationRef? {
+    match effect_def.ops.find(fn(operation) {
+            operation.name == operation_name
+        }) {
+        some(operation) => match operation.operation_ref {
+            some(reference) => some(reference),
+            none => if effect_def.handled_ref.is_some() {
+                panic("handler census: custom operation lacks exact identity")
+            } else { none }
+        },
+        none => none
+    }
+}
+
+fn validate_complete_custom_handler_census(
+    mut ctx: InferCtx, handlers: List<EffectHandler>
+) {
+    let mut valid = true
+    let mut handler_index = 0
+    while handler_index < handlers.len() {
+        let handler = handlers.get(handler_index).unwrap()
+        match ctx.env.types.effects.get(handler.effect_name) {
+            none => {
+                let display = nominal_display_name(handler.effect_name)
+                let _ = type_error(ctx.sink, E0402,
+                    "Effect '${display}' cannot be handled",
+                    handler.span, DiagnosticContext::OtherContext {
+                        detail: some("handler names an undeclared effect")
+                    })
+                valid = false
+            },
+            some(effect_def) => {
+                let is_abort = effect_def.name == "fail" &&
+                    handler.op_name == "raise"
+                if !is_abort {
+                    match effect_def.handled_ref {
+                        none => {
+                            let display = nominal_display_name(effect_def.name)
+                            let _ = type_error(ctx.sink, E0402,
+                                "Effect '${display}' is not a handled custom effect",
+                                handler.span, DiagnosticContext::OtherContext {
+                                    detail: some(
+                                        "system, mutation, and unsafe effects cannot be handled")
+                                })
+                            valid = false
+                        },
+                        some(effect_ref) => match exact_handler_operation(
+                                effect_def, handler.op_name) {
+                            none => {
+                                let display = nominal_display_name(effect_def.name)
+                                let _ = type_error(ctx.sink, E0402,
+                                    "Operation '${handler.op_name}' is not declared by handled effect '${display}'",
+                                    handler.span,
+                                    DiagnosticContext::OtherContext {
+                                        detail: some(
+                                            "handler operation has an unknown or cross-owner source identity")
+                                    })
+                                valid = false
+                            },
+                            some(operation) => {
+                                let mut prior = 0
+                                while prior < handler_index {
+                                    let earlier = handlers.get(prior).unwrap()
+                                    match ctx.env.types.effects.get(
+                                            earlier.effect_name) {
+                                        some(earlier_def) => match (
+                                                earlier_def.handled_ref,
+                                                exact_handler_operation(
+                                                    earlier_def,
+                                                    earlier.op_name)) {
+                                            (some(earlier_ref), some(earlier_op)) =>
+                                                if handled_effect_ref_same(
+                                                        earlier_ref, effect_ref) &&
+                                                   effect_operation_ref_same(
+                                                        earlier_op, operation) {
+                                                    let display = nominal_display_name(
+                                                        effect_def.name)
+                                                    let _ = type_error(
+                                                        ctx.sink, E0402,
+                                                        "Duplicate handler arm for effect operation '${display}.${handler.op_name}'",
+                                                        handler.span,
+                                                        DiagnosticContext::OtherContext {
+                                                            detail: some(
+                                                                "each declared operation requires exactly one arm")
+                                                        })
+                                                    valid = false
+                                                },
+                                            _ => {}
+                                        },
+                                        none => {}
+                                    }
+                                    prior = prior + 1
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        handler_index = handler_index + 1
+    }
+
+    let mut group_index = 0
+    while group_index < handlers.len() {
+        let first = handlers.get(group_index).unwrap()
+        match ctx.env.types.effects.get(first.effect_name) {
+            some(effect_def) => match effect_def.handled_ref {
+                some(effect_ref) => {
+                    let mut prior_group = false
+                    let mut prior = 0
+                    while prior < group_index {
+                        let earlier = handlers.get(prior).unwrap()
+                        match ctx.env.types.effects.get(earlier.effect_name) {
+                            some(earlier_def) => match earlier_def.handled_ref {
+                                some(earlier_ref) => if handled_effect_ref_same(
+                                        earlier_ref, effect_ref) {
+                                    prior_group = true
+                                },
+                                none => {}
+                            },
+                            none => {}
+                        }
+                        prior = prior + 1
+                    }
+                    if !prior_group {
+                        let mut missing: List<Str> = []
+                        for operation in effect_def.ops {
+                            let expected = match operation.operation_ref {
+                                some(reference) => reference,
+                                none => panic(
+                                    "handler census: custom operation lacks exact identity")
+                            }
+                            let mut count = 0
+                            for candidate in handlers {
+                                match ctx.env.types.effects.get(
+                                        candidate.effect_name) {
+                                    some(candidate_def) => match (
+                                            candidate_def.handled_ref,
+                                            exact_handler_operation(
+                                                candidate_def,
+                                                candidate.op_name)) {
+                                        (some(candidate_ref), some(candidate_op)) =>
+                                            if handled_effect_ref_same(
+                                                    candidate_ref, effect_ref) &&
+                                               effect_operation_ref_same(
+                                                    candidate_op, expected) {
+                                                count = count + 1
+                                            },
+                                        _ => {}
+                                    },
+                                    none => {}
+                                }
+                            }
+                            if count == 0 { missing.push(operation.name) }
+                        }
+                        if missing.len() != 0 {
+                            let display = nominal_display_name(effect_def.name)
+                            let _ = type_error(ctx.sink, E0402,
+                                "Incomplete handler for effect '${display}': missing operation(s) ${missing.join(", ")}",
+                                first.span, DiagnosticContext::OtherContext {
+                                    detail: some(
+                                        "a handled custom effect requires every declared operation exactly once")
+                                })
+                            valid = false
+                        }
+                    }
+                },
+                none => {}
+            },
+            none => {}
+        }
+        group_index = group_index + 1
+    }
+    if !valid { fail.raise(CompileError {}) }
+}
+
+fn canonical_complete_handlers(
+    values: List<HEffectHandler>
+) -> List<HEffectHandler> {
+    let mut result: List<HEffectHandler> = []
+    let mut emitted: List<HandledEffectRef> = []
+    for handler in values {
+        match handler.handled_instance {
+            none => result.push(handler),
+            some(instance) => if !emitted.any(fn(existing) {
+                    handled_effect_ref_same(
+                        existing,
+                        typed_handled_effect_instance_reference(instance))
+                }) {
+                let reference =
+                    typed_handled_effect_instance_reference(instance)
+                let expected = handler.declared_operation_count
+                if expected <= 0 {
+                    panic("handler census: custom operation count is invalid")
+                }
+                let mut ordinal = 0
+                while ordinal < expected {
+                    let mut found: HEffectHandler? = none
+                    for candidate in values {
+                        match (candidate.handled_instance,
+                               candidate.operation_ref) {
+                            (some(candidate_instance), some(operation)) =>
+                                if handled_effect_ref_same(
+                                        typed_handled_effect_instance_reference(
+                                            candidate_instance), reference) &&
+                                   effect_operation_ref_source_index(operation) ==
+                                        ordinal {
+                                    if candidate.declared_operation_count !=
+                                           expected || found.is_some() {
+                                        panic("handler census: canonical operation repeats")
+                                    }
+                                    found = some(candidate)
+                                },
+                            _ => {}
+                        }
+                    }
+                    result.push(found.unwrap_or_else(fn() {
+                        panic("handler census: canonical operation is absent")
+                    }))
+                    ordinal = ordinal + 1
+                }
+                emitted.push(reference)
+            }
+        }
+    }
+    result
+}
+
 fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, span: Span, subst: UnionFind) -> InferResult {
-    let body_r = infer_expr(ctx, body, subst)
+    validate_complete_custom_handler_census(ctx, handlers)
+    let mut installed_requirements: List<HandledEffectRef> = []
+    for handler in handlers {
+        match ctx.env.types.effects.get(handler.effect_name) {
+            some(def) => match def.handled_ref {
+                some(requirement) => if !installed_requirements.any(
+                        fn(existing) { handled_effect_ref_same(
+                            existing, requirement) }) {
+                    installed_requirements.push(requirement)
+                },
+                none => {}
+            },
+            none => {}
+        }
+    }
+    let effect_ctx_seed = if installed_requirements.len() == 0 {
+        none
+    } else {
+        some(begin_effect_ctx_install(ctx))
+    }
+    let body_result = some(infer_expr(ctx, body, subst)) catch { _ => none }
+    match effect_ctx_seed {
+        some(_) => uninstall_effect_ctx(ctx),
+        none => {}
+    }
+    let body_r = match body_result {
+        some(value) => value,
+        none => fail.raise(CompileError {})
+    }
     let mut s = body_r.subst
     let mut effects = body_r.effects
     // #251: an abort arm is an alternate exit from the handled body, so its
@@ -3491,6 +4136,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
 
     let mut hhandlers: List<HEffectHandler> = []
     let mut handled_effects: Set<Str> = set_new()
+    let mut handled_custom_effects: List<HandledEffectRef> = []
     // Tail-resumptive arm closures capture the OUTER evidence for
     // their handled effect, while abort arms run after the current handler has
     // been deactivated. Both kinds of arm effects therefore escape unchanged
@@ -3502,9 +4148,15 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
     // One runtime evidence value backs every operation arm for a canonical
     // effect in this handle. Share its type arguments even when the body is
     // pure or contains only an unknown open tail.
-    let mut handler_inst_type_args_by_effect: Map<Str, List<Type>> = map_new()
+    let mut handler_instances_by_effect:
+        List<TypedHandledEffectInstance> = []
+    let mut dedicated_handler_inst_type_args: Map<Str, List<Type>> = map_new()
 
     for handler in handlers {
+        let handler_executable = fresh_child_executable(
+            ctx, "handler", path_role_handler())
+        enter_handler_executable_owner(
+            ctx, handler_executable, current_effect_ctx(ctx))
         ctx.env.push_scope()
         // Tail-resumptive arms are lowered to closures; #251 abort arms execute
         // inline after the current handler is inactive. Infer both at one deeper
@@ -3516,11 +4168,35 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
         ctx.lambda_depth = enclosing_lambda_depth + 1
         let handler_result = some({
             let effect_def = ctx.env.types.effects.get(handler.effect_name)
+            match effect_def {
+                some(_) => {},
+                none => {
+                    let effect_display = nominal_display_name(handler.effect_name)
+                    let _ = type_error(ctx.sink, E0402,
+                        "Effect '${effect_display}' cannot be handled",
+                        handler.span, DiagnosticContext::OtherContext {
+                            detail: some(
+                                "only declared custom handled effects and fail can appear in handle") })
+                    fail.raise(CompileError {})
+                }
+            }
             let canonical_effect_name = match effect_def {
                 some(ed) => ed.name,
                 none => handler.effect_name
             }
             let is_abort_handler = canonical_effect_name == "fail" && handler.op_name == "raise"
+            let handler_handled_ref = match effect_def {
+                some(ed) => ed.handled_ref,
+                none => none
+            }
+            if !is_abort_handler && handler_handled_ref.is_none() {
+                let effect_display = nominal_display_name(canonical_effect_name)
+                let _ = type_error(ctx.sink, E0402,
+                    "Effect '${effect_display}' is not a handled custom effect",
+                    handler.span, DiagnosticContext::OtherContext {
+                        detail: some("system, mutation, and unsafe effects cannot be handled") })
+                fail.raise(CompileError {})
+            }
 
             // fail.raise receives the error payload raised by the handled body.
             // Extract concrete fail label(s) exactly as infer_catch does and
@@ -3546,24 +4222,67 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 body_fail_types_extracted = true
             }
 
-            // Instantiate effect type params once per canonical effect for this
-            // handle. Every operation arm rebuilds its declaration-variable map
-            // from the shared instance.
+            // Instantiate type params once per exact custom effect for this
+            // handle. Dedicated fail retains its existing builtin-key path.
+            // Every operation arm rebuilds its declaration-variable map from
+            // the shared instance.
             let mut handler_inst_map: Map<Int, Type> = map_new()
             let mut handler_inst_type_args: List<Type> = []
+            let mut handler_instance: TypedHandledEffectInstance? = none
             match effect_def {
                 some(ed) => {
-                    match handler_inst_type_args_by_effect.get(canonical_effect_name) {
-                        some(shared_type_args) => {
-                            handler_inst_type_args = shared_type_args
-                        },
-                        none => {
-                            for _tpv in ed.type_param_vars {
-                                handler_inst_type_args.push(ctx.env.fresh_var())
+                    match handler_handled_ref {
+                        some(reference) => {
+                            let mut shared: TypedHandledEffectInstance? = none
+                            for instance in handler_instances_by_effect {
+                                if handled_effect_ref_same(
+                                        typed_handled_effect_instance_reference(
+                                            instance), reference) {
+                                    if shared.is_some() {
+                                        panic("handler census: exact instance repeats")
+                                    }
+                                    shared = some(instance)
+                                }
                             }
-                            handler_inst_type_args_by_effect.insert(
-                                canonical_effect_name, handler_inst_type_args
-                            )
+                            match shared {
+                                some(instance) => {
+                                    handler_inst_type_args =
+                                        typed_handled_effect_instance_type_arguments(
+                                            instance)
+                                    handler_instance = some(instance)
+                                },
+                                none => {
+                                    for _tpv in ed.type_param_vars {
+                                        handler_inst_type_args.push(
+                                            ctx.env.fresh_var())
+                                    }
+                                    let instance =
+                                        make_typed_handled_effect_instance(
+                                            reference,
+                                            handler_inst_type_args)
+                                    handler_instances_by_effect.push(instance)
+                                    handler_instance = some(instance)
+                                }
+                            }
+                            if handler_inst_type_args.len() !=
+                                   ed.type_param_vars.len() {
+                                panic("handler census: exact instance arity differs")
+                            }
+                        },
+                        none => match dedicated_handler_inst_type_args.get(
+                                canonical_effect_name) {
+                            some(shared_type_args) => {
+                                handler_inst_type_args = shared_type_args
+                            },
+                            none => {
+                                for _tpv in ed.type_param_vars {
+                                    handler_inst_type_args.push(
+                                        ctx.env.fresh_var())
+                                }
+                                dedicated_handler_inst_type_args.insert(
+                                    canonical_effect_name,
+                                    handler_inst_type_args)
+                            }
                         }
                     }
                     let mut shared_type_arg_index = 0
@@ -3590,8 +4309,13 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     let resolved_body_effects_for_handler = apply_subst_row(s, effects)
                     for body_effect in resolved_body_effects_for_handler.effects {
                         match body_effect {
-                            Effect::CustomEffect { name, type_args } => {
-                                if name == canonical_effect_name {
+                            Effect::CustomEffect { reference, type_args, .. } => {
+                                let same_handler = match handler_handled_ref {
+                                    some(expected) => handled_effect_ref_same(
+                                        reference, expected),
+                                    none => false
+                                }
+                                if same_handler {
                                     let mut type_arg_index = 0
                                     for handler_type_arg in handler_inst_type_args {
                                         match type_args.get(type_arg_index) {
@@ -3674,6 +4398,25 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                 }
             }
 
+            match op_def {
+                some(operation) => if
+                        handler.params.len() != operation.params.len() {
+                    let effect_display = nominal_display_name(
+                        canonical_effect_name)
+                    let _ = type_error(
+                        ctx.sink, E0301,
+                        "Handler operation '${effect_display}.${handler.op_name}' expects ${operation.params.len().to_str()} parameter(s), got ${handler.params.len().to_str()}",
+                        handler.span,
+                        DiagnosticContext::TypeMismatch {
+                            expected: "${operation.params.len().to_str()} parameters",
+                            actual: "${handler.params.len().to_str()} parameters",
+                            expression: none
+                        })
+                    fail.raise(CompileError {})
+                },
+                none => {}
+            }
+
             let mut hparams: List<HParam> = []
             let mut hi = 0
             for p in handler.params {
@@ -3686,6 +4429,20 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                         },
                         none => ctx.env.fresh_var()
                     }
+                }
+                match op_def {
+                    some(operation) => match operation.params.get(hi) {
+                        some(operation_param) => {
+                            let expected = apply_subst_map(
+                                handler_inst_map, operation_param)
+                            s = unify_at(
+                                ctx.sink, ctx.env, pt, expected, s, p.span)
+                            pt = apply_subst(s, expected)
+                        },
+                        none => panic(
+                            "handler parameter census differs after preflight")
+                    },
+                    none => {}
                 }
                 if is_abort_handler && hi == 0 {
                     match abort_payload_type {
@@ -3726,7 +4483,7 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     none => panic(
                         "unreachable: handler parameter has no exact DefId")
                 }
-                ctx.env.record_def_span(param_def_id, p.span)
+                journal_record_def_span(ctx, param_def_id, p.span)
                 hparams.push(HParam { name: p.name, ty: pt,
                     def_id: some(param_def_id), is_mutable: false })
                 hi = hi + 1
@@ -3755,9 +4512,14 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                         none => panic(
                             "unreachable: handler resume binding has no exact DefId")
                     }
-                    ctx.env.record_def_span(resume_def_id, handler.span)
+                    journal_record_def_span(
+                        ctx, resume_def_id, handler.span)
                     resume_binding = some(HPatternBinding {
-                        name: rn, def_id: resume_def_id, ty: resume_type
+                        name: rn, def_id: resume_def_id,
+                        slot: make_source_slot_ref(
+                            current_identity_file_key(ctx),
+                            slot_domain_lexical(), resume_def_id),
+                        ty: resume_type
                     })
                 },
                 none => {}
@@ -3843,16 +4605,54 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
                     none => {}
                 }
             }
+            let handler_effects = apply_subst_row(s, hbr.effects)
+            let handler_body = hbr.hexpr
+            let mut handler_captures: List<HLambdaCapture> = []
+            collect_lambda_capture_expr(
+                ctx, handler_body, ctx.lambda_depth,
+                handler_executable, handler_captures)
             hhandlers.push(HEffectHandler {
-                effect_name: canonical_effect_name, op_name: handler.op_name,
+                effect_name: canonical_effect_name,
+                declared_operation_count: match handler_handled_ref {
+                    some(_) => match effect_def {
+                        some(definition) => definition.ops.len(),
+                        none => panic(
+                            "handler census: custom effect definition is absent")
+                    },
+                    none => 0
+                },
+                handled_instance: handler_instance,
+                operation_ref: match op_def {
+                    some(operation) => operation.operation_ref,
+                    none => none
+                },
+                fail_ref: if is_abort_handler {
+                    some(h_fail_raise_ref())
+                } else { none },
+                executable_ref: handler_executable,
+                captures: handler_captures,
+                effect_ctx: current_draft_callable_effect_ctx(
+                    ctx, handler_effects),
+                parent_ctx: current_effect_ctx_parent_capture(ctx),
+                op_name: handler.op_name,
                 params: hparams, resume_binding: resume_binding,
-                body: hbr.hexpr
+                body: handler_body
             })
             handled_effects.insert(canonical_effect_name)
+            match handler_handled_ref {
+                some(reference) => if !handled_custom_effects.any(
+                        fn(existing) {
+                            handled_effect_ref_same(existing, reference)
+                        }) {
+                    handled_custom_effects.push(reference)
+                },
+                none => {}
+            }
             true
         }) catch { _ => none }
         ctx.lambda_depth = enclosing_lambda_depth
         ctx.env.pop_scope()
+        exit_executable_owner(ctx)
 
         match handler_result {
             some(_) => {},
@@ -3860,12 +4660,17 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
         }
     }
 
+    hhandlers = canonical_complete_handlers(hhandlers)
+
     let resolved_effects = apply_subst_row(s, effects)
     let mut filtered_effects: List<Effect> = []
     for e in resolved_effects.effects {
         let should_keep = match e {
-            Effect::IoEffect => !handled_effects.contains("io"),
-            Effect::CustomEffect { name, .. } => !handled_effects.contains(name),
+            Effect::SystemEffect { .. } => true,
+            Effect::CustomEffect { reference, .. } =>
+                !handled_custom_effects.any(fn(handled) {
+                    handled_effect_ref_same(handled, reference)
+                }),
             Effect::FailEffect { .. } => !handled_effects.contains("fail"),
             Effect::MutEffect { .. } => !handled_effects.contains("mut"),
             // UnsafeEffect cannot be handled — only discharged by unsafe {}
@@ -3894,9 +4699,52 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
     }
     effects = apply_subst_row(s, effects)
 
+    // All handler arms can share effect type arguments and row constraints.
+    // Publish only after the complete handle has reached its final subst.
+    for handler in hhandlers {
+        let mut handler_param_types = handler.params.map(fn(param) {
+            apply_subst(s, param.ty)
+        })
+        match handler.resume_binding {
+            some(binding) => handler_param_types.push(
+                apply_subst(s, binding.ty)),
+            none => {}
+        }
+        record_pending_anonymous_callable_header(
+            ctx, handler.executable_ref, Type::FnType {
+                params: handler_param_types,
+                return_type: apply_subst(s, hexpr_type(handler.body)),
+                effects: apply_subst_row(s, hexpr_effects(handler.body))
+            }, "handler ${handler.effect_name}.${handler.op_name}",
+            hexpr_span(handler.body))
+    }
+
+    let mut installed_instances = []
+    for handler in hhandlers {
+        match handler.handled_instance {
+            some(instance) => if !installed_instances.any(fn(existing) {
+                    typed_handled_effect_instance_same(existing, instance)
+                }) {
+                installed_instances.push(instance)
+            },
+            none => {}
+        }
+    }
+    let effect_ctx_install = match effect_ctx_seed {
+        some(seed) => some(finish_effect_ctx_install(
+            seed, installed_instances)),
+        none => {
+            if installed_instances.len() != 0 {
+                panic("handle EffectCtx: entries exist without child install")
+            }
+            none
+        }
+    }
+
     InferResult {
         hexpr: HExpr::HandleExpr {
             body: body_r.hexpr, handlers: hhandlers,
+            effect_ctx_install: effect_ctx_install,
             ty: apply_subst(s, result_type), effects: effects, span: span
         },
         subst: s, effects: effects
@@ -3907,83 +4755,484 @@ fn infer_handle(mut ctx: InferCtx, body: Expr, handlers: List<EffectHandler>, sp
 // infer_lambda
 // ============================================================
 
-fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, subst: UnionFind, expected_param_types: List<Type>?) -> InferResult {
-    ctx.env.push_scope()
-    ctx.lambda_depth = ctx.lambda_depth + 1
-    let mut s = subst
-    let mut hparams: List<HParam> = []
-    let mut param_types: List<Type> = []
+fn append_lambda_capture(
+    ctx: InferCtx, def_id: Int, source_type: Type,
+    lambda_depth: Int,
+    executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    let binding_depth = match ctx.var_lambda_depth.get(def_id) {
+        some(depth) => depth,
+        none => return
+    }
+    if binding_depth >= lambda_depth { return }
+    let source = make_source_slot_ref(
+        current_identity_file_key(ctx), slot_domain_lexical(), def_id)
+    for capture in captures {
+        if slot_ref_same(capture.source, source) { return }
+    }
+    captures.push(HLambdaCapture {
+        source: source,
+        target: executable_capture_slot(executable, captures.len()),
+        ty: source_type,
+        value: none, resource_site: none
+    })
+}
 
-    let mut pi = 0
-    for p in params {
-        let pt = match p.type_annotation {
-            some(ta) => resolve_type_expr(ctx, ta),
-            none => ctx.env.fresh_var()
+fn append_exact_dictionary_capture(
+    source: SlotRef, source_type: Type, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    for capture in captures {
+        if slot_ref_same(capture.source, source) { return }
+    }
+    captures.push(HLambdaCapture {
+        source: source,
+        target: executable_capture_slot(executable, captures.len()),
+        ty: source_type,
+        value: none, resource_site: none
+    })
+}
+
+fn dictionary_capture_type() -> Type {
+    Type::TupleType { elements: [] }
+}
+
+fn append_dictionary_capture(
+    value: ExactDictRef, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    if dict_ref_is_local(value) {
+        append_exact_dictionary_capture(
+            dict_ref_local(value), dictionary_capture_type(),
+            executable, captures)
+    } else if dict_ref_is_wrapped(value) {
+        for inner in dict_ref_wrapped_inner(value) {
+            append_dictionary_capture(inner, executable, captures)
         }
-        match expected_param_types {
-            some(epts) => {
-                if p.type_annotation.is_none() {
-                    match epts.get(pi) {
-                        some(expected_t) => { s = unify_at(ctx.sink, ctx.env, pt, expected_t, s, span) },
+    }
+}
+
+fn is_synthetic_dictionary_parameter(
+    value: SlotRef, source_type: Type
+) -> Bool {
+    if slot_ref_is_source(value) { return false }
+    let site = slot_ref_synthetic_path(value)
+    path_role_same(path_ref_role(site), path_role_parameter()) &&
+        types_equal(source_type, dictionary_capture_type())
+}
+
+fn dictionary_parameter_belongs_to(
+    value: SlotRef, source_type: Type, executable: ExecutableRef
+) -> Bool {
+    if !is_synthetic_dictionary_parameter(value, source_type) {
+        return false
+    }
+    let site = slot_ref_synthetic_path(value)
+    let component = path_ref_normalized_child_path(site).last().unwrap()
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut expected_path = prefix
+    expected_path.push(component)
+    path_ref_same(site, make_path_ref(
+        owner, expected_path, path_role_parameter()))
+}
+
+fn collect_dict_capture(
+    value: DictRef, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    append_dictionary_capture(dict_ref_exact(value), executable, captures)
+}
+
+fn collect_method_dict_capture(
+    value: MethodCallRef, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    if method_call_ref_is_bound(value) {
+        collect_dict_capture(
+            method_call_ref_bound_evidence(value), executable, captures)
+    }
+}
+
+fn collect_operator_dict_captures(
+    value: HOperatorPlan, executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    if h_operator_is_tuple(value) {
+        for child in h_operator_elements(value) {
+            collect_operator_dict_captures(child, executable, captures)
+        }
+    } else {
+        collect_method_dict_capture(
+            h_operator_method_ref(value), executable, captures)
+    }
+}
+
+fn collect_lambda_capture_stmt(
+    ctx: InferCtx, stmt: HStmt, lambda_depth: Int,
+    executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    match stmt {
+        HStmt::Let { init, .. } =>
+            collect_lambda_capture_expr(
+                ctx, init, lambda_depth, executable, captures),
+        HStmt::Var { init, .. } =>
+            collect_lambda_capture_expr(
+                ctx, init, lambda_depth, executable, captures),
+        HStmt::Assign { target, value, .. } => {
+            collect_lambda_capture_expr(
+                ctx, target, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures)
+        },
+        HStmt::ExprStmt { expr, .. } => collect_lambda_capture_expr(
+            ctx, expr, lambda_depth, executable, captures),
+        HStmt::Return { value, .. } => match value {
+            some(expr) => collect_lambda_capture_expr(
+                ctx, expr, lambda_depth, executable, captures),
+            none => {}
+        },
+        HStmt::While { condition, body, .. } => {
+            collect_lambda_capture_expr(
+                ctx, condition, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, body, lambda_depth, executable, captures)
+        },
+        HStmt::ForIn { iterable, body, .. } => {
+            collect_lambda_capture_expr(
+                ctx, iterable, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, body, lambda_depth, executable, captures)
+        },
+        HStmt::LetDestructure { init, .. } => collect_lambda_capture_expr(
+            ctx, init, lambda_depth, executable, captures),
+        HStmt::IfLet { expr, then_block, else_block, .. } => {
+            collect_lambda_capture_expr(
+                ctx, expr, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, then_block, lambda_depth, executable, captures)
+            match else_block {
+                some(block) => collect_lambda_capture_expr(
+                    ctx, block, lambda_depth, executable, captures),
+                none => {}
+            }
+        },
+        HStmt::Drop { .. } | HStmt::Break { .. } |
+        HStmt::Continue { .. } => {}
+    }
+}
+
+fn collect_lambda_capture_expr(
+    ctx: InferCtx, expr: HExpr, lambda_depth: Int,
+    executable: ExecutableRef,
+    mut captures: List<HLambdaCapture>
+) {
+    match expr {
+        HExpr::Ident { def_id, dict_closure_dicts, ty, .. } => {
+            match def_id {
+                some(id) => append_lambda_capture(
+                    ctx, id, ty,
+                    lambda_depth, executable, captures),
+                none => {}
+            }
+            match dict_closure_dicts {
+                some(values) => {
+                    for value in values {
+                        collect_dict_capture(value, executable, captures)
+                    }
+                },
+                none => {}
+            }
+        },
+        HExpr::BinOp { left, right, eq_plan, ord_plan, .. } => {
+            collect_lambda_capture_expr(
+                ctx, left, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, right, lambda_depth, executable, captures)
+            match eq_plan {
+                some(value) => collect_operator_dict_captures(
+                    value, executable, captures), none => {}
+            }
+            match ord_plan {
+                some(value) => collect_operator_dict_captures(
+                    value, executable, captures), none => {}
+            }
+        },
+        HExpr::UnaryOp { operand, .. } => collect_lambda_capture_expr(
+            ctx, operand, lambda_depth, executable, captures),
+        HExpr::Call {
+            callee, args, resolved_dicts, method_ref, ..
+        } => {
+            collect_lambda_capture_expr(
+                ctx, callee, lambda_depth, executable, captures)
+            for arg in args { collect_lambda_capture_expr(
+                ctx, arg, lambda_depth, executable, captures) }
+            for value in resolved_dicts {
+                collect_dict_capture(value, executable, captures)
+            }
+            match method_ref {
+                some(value) => collect_method_dict_capture(
+                    value, executable, captures), none => {}
+            }
+        },
+        HExpr::FieldAccess { receiver, .. } => collect_lambda_capture_expr(
+            ctx, receiver, lambda_depth, executable, captures),
+        HExpr::StructLit { fields, spread, .. } => {
+            for field in fields { collect_lambda_capture_expr(
+                ctx, field.value, lambda_depth, executable, captures) }
+            match spread { some(value) => collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures), none => {} }
+        },
+        HExpr::NamedVariantConstruct { fields, spread, .. } => {
+            for field in fields { collect_lambda_capture_expr(
+                ctx, field.value, lambda_depth, executable, captures) }
+            match spread { some(value) => collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures), none => {} }
+        },
+        HExpr::MatchExpr { scrutinee, arms, .. } => {
+            collect_lambda_capture_expr(
+                ctx, scrutinee, lambda_depth, executable, captures)
+            for arm in arms {
+                match arm.guard { some(guard) => collect_lambda_capture_expr(
+                    ctx, guard, lambda_depth, executable, captures), none => {} }
+                collect_lambda_capture_expr(
+                    ctx, arm.body, lambda_depth, executable, captures)
+            }
+        },
+        HExpr::TryCatch { body: scrutinee, arms, .. } => {
+            collect_lambda_capture_expr(
+                ctx, scrutinee, lambda_depth, executable, captures)
+            for arm in arms {
+                match arm.guard { some(guard) => collect_lambda_capture_expr(
+                    ctx, guard, lambda_depth, executable, captures), none => {} }
+                collect_lambda_capture_expr(
+                    ctx, arm.body, lambda_depth, executable, captures)
+            }
+        },
+        HExpr::Block { stmts, tail, .. } => {
+            for stmt in stmts { collect_lambda_capture_stmt(
+                ctx, stmt, lambda_depth, executable, captures) }
+            match tail { some(value) => collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures), none => {} }
+        },
+        HExpr::IfExpr { condition, then_branch, else_branch, .. } => {
+            collect_lambda_capture_expr(
+                ctx, condition, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, then_branch, lambda_depth, executable, captures)
+            match else_branch { some(value) => collect_lambda_capture_expr(
+                ctx, value, lambda_depth, executable, captures), none => {} }
+        },
+        HExpr::StringInterp { parts, .. } => {
+            for part in parts {
+                match part { HStringInterpPart::Expression(value) =>
+                    collect_lambda_capture_expr(
+                        ctx, value, lambda_depth, executable, captures), _ => {} }
+            }
+        },
+        HExpr::HandleExpr { body, handlers, .. } => {
+            collect_lambda_capture_expr(
+                ctx, body, lambda_depth, executable, captures)
+            for handler in handlers { collect_lambda_capture_expr(
+                ctx, handler.body, lambda_depth, executable, captures) }
+        },
+        HExpr::Lambda { captures: nested, .. } => {
+            for capture in nested {
+                if slot_ref_is_source(capture.source) &&
+                   slot_ref_source_domain_is_lexical(capture.source) &&
+                   slot_ref_source_def_id(capture.source) >= 0 {
+                    append_lambda_capture(
+                        ctx, slot_ref_source_def_id(capture.source),
+                        capture.ty, lambda_depth, executable, captures)
+                } else if is_synthetic_dictionary_parameter(
+                        capture.source, capture.ty) &&
+                        !dictionary_parameter_belongs_to(
+                            capture.source, capture.ty, executable) {
+                    append_exact_dictionary_capture(
+                        capture.source, capture.ty, executable, captures)
+                }
+                match capture.value { some(value) => collect_lambda_capture_expr(
+                    ctx, value, lambda_depth, executable, captures), none => {} }
+            }
+        },
+        HExpr::EffectOp { args, .. } => {
+            for arg in args {
+                collect_lambda_capture_expr(
+                    ctx, arg, lambda_depth, executable, captures)
+            }
+        },
+        HExpr::IndexExpr { receiver: start, index: end, .. } => {
+            collect_lambda_capture_expr(
+                ctx, start, lambda_depth, executable, captures)
+            collect_lambda_capture_expr(
+                ctx, end, lambda_depth, executable, captures)
+        },
+        HExpr::ListLit { elements, .. } => {
+            for value in elements {
+                collect_lambda_capture_expr(
+                    ctx, value, lambda_depth, executable, captures)
+            }
+        },
+        HExpr::TupleLit { elements, .. } => {
+            for value in elements {
+                collect_lambda_capture_expr(
+                    ctx, value, lambda_depth, executable, captures)
+            }
+        },
+        HExpr::Clone { inner, .. } => collect_lambda_capture_expr(
+            ctx, inner, lambda_depth, executable, captures),
+        HExpr::Take { source, .. } => collect_lambda_capture_expr(
+            ctx, source, lambda_depth, executable, captures),
+        HExpr::ReturnExpr { value, .. } => match value {
+            some(inner) => collect_lambda_capture_expr(
+                ctx, inner, lambda_depth, executable, captures), none => {} },
+        HExpr::UnsafeBlock { body, .. } => collect_lambda_capture_expr(
+            ctx, body, lambda_depth, executable, captures),
+        _ => {}
+    }
+}
+
+fn infer_lambda(mut ctx: InferCtx, params: List<Param>, body: Expr, span: Span, subst: UnionFind, expected_param_types: List<Type>?) -> InferResult {
+    let saved_scope_depth = ctx.env.scope.scopes.len()
+    let saved_lambda_depth = ctx.lambda_depth
+    let saved_executable_depth = ctx.executable_stack.len()
+    let saved_executable = current_executable_owner(ctx)
+    let dictionary_owner = current_dictionary_evidence_owner(ctx)
+    let lambda_executable = fresh_child_executable(
+        ctx, "lambda", path_role_child())
+    enter_executable_owner(ctx, lambda_executable)
+    let lambda_result: InferResult? = some({
+        inherit_dictionary_evidence_owner(ctx, dictionary_owner)
+        ctx.env.push_scope()
+        ctx.lambda_depth = saved_lambda_depth + 1
+        let exact_lambda_depth = ctx.lambda_depth
+        let mut s = subst
+        let mut hparams: List<HParam> = []
+        let mut param_types: List<Type> = []
+
+        let mut pi = 0
+        for p in params {
+            let pt = match p.type_annotation {
+                some(ta) => resolve_type_expr(ctx, ta),
+                none => ctx.env.fresh_var()
+            }
+            match expected_param_types {
+                some(epts) => {
+                    if p.type_annotation.is_none() {
+                        match epts.get(pi) {
+                            some(expected_t) => { s = unify_at(ctx.sink, ctx.env, pt, expected_t, s, span) },
+                            none => {}
+                        }
+                    }
+                },
+                none => {}
+            }
+            ctx.env.bind_mono(p.name, pt)
+            let lam_scheme = ctx.env.lookup(p.name)
+            match lam_scheme {
+                some(ls) => {
+                    match ls.def_id {
+                        some(did) => {
+                            journal_record_def_span(ctx, did, p.span)
+                            journal_var_lambda_depth_set(
+                                ctx, did, ctx.lambda_depth)
+                            if p.is_mutable {
+                                journal_mutable_var_insert(ctx, did)
+                                journal_mut_param_def_insert(ctx, did)
+                            } else {
+                                journal_let_def_insert(ctx, did)
+                            }
+                        },
                         none => {}
                     }
+                    hparams.push(HParam { name: p.name, ty: pt, def_id: ls.def_id, is_mutable: p.is_mutable })
+                },
+                none => {
+                    hparams.push(HParam { name: p.name, ty: pt, def_id: none, is_mutable: p.is_mutable })
                 }
-            },
-            none => {}
-        }
-        ctx.env.bind_mono(p.name, pt)
-        let lam_scheme = ctx.env.lookup(p.name)
-        match lam_scheme {
-            some(ls) => {
-                match ls.def_id {
-                    some(did) => {
-                        ctx.env.record_def_span(did, p.span)
-                        ctx.var_lambda_depth.insert(did, ctx.lambda_depth)
-                        if p.is_mutable {
-                            ctx.env.scope.mutable_vars.insert(did)
-                            ctx.env.scope.mut_param_defs.insert(did)
-                        } else {
-                            ctx.env.scope.let_defs.insert(did)
-                        }
-                    },
-                    none => {}
-                }
-                hparams.push(HParam { name: p.name, ty: pt, def_id: ls.def_id, is_mutable: p.is_mutable })
-            },
-            none => {
-                hparams.push(HParam { name: p.name, ty: pt, def_id: none, is_mutable: p.is_mutable })
             }
+            param_types.push(pt)
+            pi = pi + 1
         }
-        param_types.push(pt)
-        pi = pi + 1
-    }
 
-    let body_result = some(infer_expr(ctx, body, s)) catch { _ => none }
-    ctx.lambda_depth = ctx.lambda_depth - 1
-    ctx.env.pop_scope()
+        let body_r = infer_expr(ctx, body, s)
+        ctx.lambda_depth = saved_lambda_depth
+        if ctx.env.scope.scopes.len() != saved_scope_depth + 1 {
+            panic("lambda lifecycle: body leaked lexical scope")
+        }
+        ctx.env.pop_scope()
 
-    match body_result {
-        some(body_r) => {
             s = body_r.subst
             let mut applied_params: List<Type> = []
             for pt in param_types { applied_params.push(apply_subst(s, pt)) }
             let applied_ret = apply_subst(s, hexpr_type(body_r.hexpr))
 
-            let fn_type = Type::FnType { params: applied_params, return_type: applied_ret, effects: body_r.effects }
+            let applied_effects = apply_subst_row(s, body_r.effects)
+            let fn_type = Type::FnType {
+                params: applied_params, return_type: applied_ret,
+                effects: applied_effects
+            }
 
             let mut final_hparams: List<HParam> = []
             for hp in hparams {
                 final_hparams.push(HParam { name: hp.name, ty: apply_subst(s, hp.ty), def_id: hp.def_id, is_mutable: hp.is_mutable })
             }
 
+            let lambda_body = body_r.hexpr
+            let mut captures: List<HLambdaCapture> = []
+            collect_lambda_capture_expr(
+                ctx, lambda_body, exact_lambda_depth,
+                lambda_executable, captures)
+            record_pending_anonymous_callable_header(
+                ctx, lambda_executable, fn_type, "lambda", span)
             InferResult {
                 hexpr: HExpr::Lambda {
-                    params: final_hparams, return_type: applied_ret,
-                    body: body_r.hexpr, ty: fn_type, effects: EMPTY_ROW, span: span
+                    executable_ref: lambda_executable,
+                    params: final_hparams, captures: captures,
+                    effect_ctx: current_draft_callable_effect_ctx(
+                        ctx, applied_effects),
+                    return_type: applied_ret,
+                    body: lambda_body, ty: fn_type,
+                    effects: EMPTY_ROW, span: span
                 },
                 subst: s, effects: EMPTY_ROW
             }
-        },
+    }) catch { _ => none }
+
+    ctx.lambda_depth = saved_lambda_depth
+    if ctx.env.scope.scopes.len() < saved_scope_depth {
+        panic("lambda lifecycle: lexical scope underflow")
+    }
+    while ctx.env.scope.scopes.len() > saved_scope_depth {
+        ctx.env.pop_scope()
+    }
+    if ctx.executable_stack.len() < saved_executable_depth + 1 {
+        panic("lambda lifecycle: executable stack underflow")
+    }
+    while ctx.executable_stack.len() > saved_executable_depth + 1 {
+        exit_executable_owner(ctx)
+    }
+    if !executable_ref_same(
+            current_executable_owner(ctx), lambda_executable) {
+        panic("lambda lifecycle: active executable differs")
+    }
+    exit_executable_owner(ctx)
+    if ctx.executable_stack.len() != saved_executable_depth ||
+       !executable_ref_same(
+            current_executable_owner(ctx), saved_executable) ||
+       !executable_ref_same(
+            current_dictionary_evidence_owner(ctx), dictionary_owner) {
+        panic("lambda lifecycle: enclosing executable context changed")
+    }
+
+    match lambda_result {
+        some(value) => value,
         none => fail.raise(CompileError {})
     }
 }
@@ -3996,9 +5245,13 @@ fn infer_list_literal(mut ctx: InferCtx, elements: List<Expr>, span: Span, subst
     if elements.len() == 0 {
         let elem_type = ctx.env.fresh_var()
         let list_type = Type::StructType { name: BUILTIN_LIST, type_params: [elem_type] }
+        let planned = exact_list_literal_plan(
+            ctx, elem_type, subst, span)
         return InferResult {
-            hexpr: HExpr::ListLit { elements: [], ty: list_type, effects: EMPTY_ROW, span: span },
-            subst: subst, effects: EMPTY_ROW
+            hexpr: HExpr::ListLit { elements: [],
+                plan: some(planned.0),
+                ty: list_type, effects: EMPTY_ROW, span: span },
+            subst: planned.1, effects: EMPTY_ROW
         }
     }
     let mut s = subst
@@ -4015,9 +5268,16 @@ fn infer_list_literal(mut ctx: InferCtx, elements: List<Expr>, span: Span, subst
         combined_effects = me.0
         s = me.1
     }
-    let list_type = Type::StructType { name: BUILTIN_LIST, type_params: [apply_subst(s, elem_type)] }
+    let resolved_element = apply_subst(s, elem_type)
+    let list_type = Type::StructType {
+        name: BUILTIN_LIST, type_params: [resolved_element]
+    }
+    let planned = exact_list_literal_plan(
+        ctx, resolved_element, s, span)
     InferResult {
-        hexpr: HExpr::ListLit { elements: helements, ty: list_type, effects: combined_effects, span: span },
-        subst: s, effects: combined_effects
+        hexpr: HExpr::ListLit { elements: helements,
+            plan: some(planned.0),
+            ty: list_type, effects: combined_effects, span: span },
+        subst: planned.1, effects: combined_effects
     }
 }

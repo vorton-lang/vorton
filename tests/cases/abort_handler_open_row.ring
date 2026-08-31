@@ -69,7 +69,7 @@ fn raise_number() -> Int with {fail<Int>} {
     fail.raise(7)
 }
 
-fn raise_text_with_io() -> Int with {fail<Str>, io} {
+fn raise_text_with_io() -> Int with {fail<Str>, console} {
     print("residual-io")
     fail.raise("open-row")
 }

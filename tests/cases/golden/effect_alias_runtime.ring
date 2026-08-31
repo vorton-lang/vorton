@@ -7,7 +7,7 @@ effect Logger {
 }
 
 effect alias Logging = {Logger}
-effect alias WithIO = {io, Logger}
+effect alias WithIO = {console, Logger}
 
 fn greet(name: Str) with {Logging} {
     Logger.log("Hello, ${name}")

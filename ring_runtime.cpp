@@ -73,6 +73,27 @@ static inline int64_t list_cap(RingList* l) { return (int64_t)((uintptr_t)l->cap
 static inline void list_set_len(RingList* l, int64_t n) { l->len_tagged = (void*)(((uintptr_t)n << 1) | 1); }
 static inline void list_set_cap(RingList* l, int64_t n) { l->cap_tagged = (void*)(((uintptr_t)n << 1) | 1); }
 
+// P2: an explicit typed handled-effect context is borrowed by every ordinary
+// Ring call. The runtime never creates or interprets typed instance identity;
+// it only compares opaque tokens supplied by the typed IR/Core producer.
+struct EffectCtxEntry {
+    const void* token;
+    void* evidence;
+};
+
+struct EffectCtx {
+    EffectCtx* parent;
+    int64_t entry_count;
+};
+
+static inline EffectCtxEntry* effect_ctx_entries(EffectCtx* ctx) {
+    return (EffectCtxEntry*)((char*)ctx + sizeof(EffectCtx));
+}
+
+static inline const EffectCtxEntry* effect_ctx_entries(const EffectCtx* ctx) {
+    return (const EffectCtxEntry*)((const char*)ctx + sizeof(EffectCtx));
+}
+
 // Helper: byte-level substring search (no memmem on Windows)
 static inline const char* ring_memmem(const char* hay, size_t hlen,
                                        const char* needle, size_t nlen) {
@@ -145,6 +166,8 @@ static inline const char* ring_memmem(const char* hay, size_t hlen,
 // diagnostics; the immortal Type-scalar consts have no payload to free anyway).
 #define RING_TYPEID_CONST_HEAP_STATIC 20
 #define RING_TYPEID_EVIDENCE 21   // B-096: evidence struct { i64 count, ptr slot0, ... } — each slot is a closure
+#define RING_TYPEID_EFFECT_CTX_EMPTY 22 // P2: immortal process-wide empty context
+#define RING_TYPEID_EFFECT_CTX 23  // P2: owned typed handled-effect overlay
 #define RING_TYPEID_USER_BASE 64  // user-defined types start here
 
 // ============================================================================
@@ -229,6 +252,8 @@ static const char* ring_tid_name(uint32_t tid) {
         case 7:  return "CLOSURE"; case 8: return "OPTION"; case 10: return "TUPLE";
         case 13: return "SB";     // B-104 D8: StringBuilder
         case 21: return "EVIDENCE"; // B-096: evidence struct
+        case 22: return "EFFECT_CTX_EMPTY";
+        case 23: return "EFFECT_CTX";
         default: return (tid >= RING_TYPEID_USER_BASE) ? "USER" : "?"; // D8: user types (Type≈tid103)
     }
 }
@@ -607,6 +632,7 @@ static void drop_tuple(void* data);
 static void drop_sb(void* data);
 static void drop_dict(void* data);
 static void drop_evidence(void* data);
+static void drop_effect_ctx(void* data);
 
 // ============================================================================
 // RingClosure — closure representation for higher-order functions
@@ -663,6 +689,10 @@ extern "C" void ring_runtime_init(int argc, char** argv) {
     drop_table[RING_TYPEID_CLOSURE_ENV] = drop_closure_env;
     // B-096: evidence struct { count, closure0, closure1, ... }.
     drop_table[RING_TYPEID_EVIDENCE] = drop_evidence;
+    // P2: the empty context is immortal. Each non-empty overlay owns its
+    // evidence values and one reference to its parent overlay.
+    never_drop_table[RING_TYPEID_EFFECT_CTX_EMPTY] = true;
+    drop_table[RING_TYPEID_EFFECT_CTX] = drop_effect_ctx;
     // B-104 D4 (#151): first-class trait dicts.  Static singletons never drop
     // (immortal, bounded); dynamic wrapped dicts release their method closures.
     never_drop_table[RING_TYPEID_DICT_STATIC] = true;
@@ -674,6 +704,77 @@ extern "C" void ring_runtime_init(int argc, char** argv) {
     // B-104 D9 Part 2: heap-valued non-Str const singletons (Type/EffectRow
     // consts) — immortal module-level values (bounded: one per such const decl).
     never_drop_table[RING_TYPEID_CONST_HEAP_STATIC] = true;
+}
+
+static EffectCtx* g_ring_effect_ctx_empty = nullptr;
+
+extern "C" EffectCtx* ring_effect_ctx_empty() {
+    if (!g_ring_effect_ctx_empty) {
+        // Embedders may request the empty context before runtime_init; install
+        // its explicit never-drop rule here as well as in runtime_init.
+        never_drop_table[RING_TYPEID_EFFECT_CTX_EMPTY] = true;
+        EffectCtx* empty = (EffectCtx*)ring_alloc(
+            (int64_t)sizeof(EffectCtx), RING_TYPEID_EFFECT_CTX_EMPTY);
+        empty->parent = nullptr;
+        empty->entry_count = 0;
+        g_ring_effect_ctx_empty = empty;
+    }
+    return g_ring_effect_ctx_empty;
+}
+
+// The token/evidence arrays are borrowed only while this function runs. Each
+// evidence value is transferred into the returned owned overlay; `parent`
+// remains borrowed by the caller and is duplicated once for the child edge.
+extern "C" EffectCtx* ring_effect_ctx_overlay(
+    EffectCtx* parent, int64_t entry_count,
+    const void* const* tokens, void* const* evidence_values
+) {
+    if (!parent || entry_count < 0 ||
+        (entry_count > 0 && (!tokens || !evidence_values))) {
+        fprintf(stderr, "ring panic: invalid effect context overlay\n");
+        exit(1);
+    }
+    for (int64_t i = 0; i < entry_count; i++) {
+        if (!tokens[i]) {
+            fprintf(stderr, "ring panic: null typed effect token\n");
+            exit(1);
+        }
+    }
+
+    const size_t payload_size = sizeof(EffectCtx) +
+        (size_t)entry_count * sizeof(EffectCtxEntry);
+    EffectCtx* child = (EffectCtx*)ring_alloc(
+        (int64_t)payload_size, RING_TYPEID_EFFECT_CTX);
+    child->parent = parent;
+    child->entry_count = entry_count;
+    ring_dup(parent);
+
+    EffectCtxEntry* entries = effect_ctx_entries(child);
+    for (int64_t i = 0; i < entry_count; i++) {
+        entries[i].token = tokens[i];
+        entries[i].evidence = evidence_values[i];
+    }
+    return child;
+}
+
+// Search inner-to-outer and compare only producer-issued opaque token identity.
+// The returned evidence pointer is borrowed from the matching overlay.
+extern "C" void* ring_effect_ctx_lookup(
+    const EffectCtx* ctx, const void* token
+) {
+    if (!token) return nullptr;
+    for (const EffectCtx* current = ctx; current; current = current->parent) {
+        const EffectCtxEntry* entries = effect_ctx_entries(current);
+        for (int64_t i = 0; i < current->entry_count; i++) {
+            if (entries[i].token == token) return entries[i].evidence;
+        }
+    }
+    return nullptr;
+}
+
+// Borrowed parent view for the handler-arm/re-perform internal callable path.
+extern "C" EffectCtx* ring_effect_ctx_parent(EffectCtx* ctx) {
+    return ctx ? ctx->parent : nullptr;
 }
 
 // ============================================================================
@@ -1212,13 +1313,21 @@ extern "C" void* ring_list_reverse(void* list) {
     return list;
 }
 
-extern "C" void* ring_list_sort(void* list, void* closure) {
+// P2's sole 0.1 C-to-Ring callback crossing. The borrowed context is forwarded
+// synchronously to the comparator and is never retained by the runtime.
+typedef void* (*ring_sort_compare_fn)(
+    void* env, void* a, void* b, EffectCtx* effect_ctx);
+
+extern "C" void* ring_list_sort(
+    void* list, void* closure, EffectCtx* effect_ctx
+) {
     RingList* l = as_list(list);
     int64_t ln = list_len(l);
     RingClosure* cmp = (RingClosure*)closure;
-    ring_fn_2 fn = (ring_fn_2)(cmp->fn_ptr);
-    std::sort(l->buf, l->buf + ln, [fn, cmp](void* a, void* b) -> bool {
-        void* r = fn(cmp->env_ptr, a, b);
+    ring_sort_compare_fn fn = (ring_sort_compare_fn)(cmp->fn_ptr);
+    std::sort(l->buf, l->buf + ln,
+              [fn, cmp, effect_ctx](void* a, void* b) -> bool {
+        void* r = fn(cmp->env_ptr, a, b, effect_ctx);
         int64_t result = ring_unbox_int(r);
         ring_drop(r);              // #170: drop comparator's boxed return value
         return result < 0;
@@ -1227,8 +1336,10 @@ extern "C" void* ring_list_sort(void* list, void* closure) {
 }
 
 // B-152 P2: bridge for Ring sort_by method — same as ring_list_sort.
-extern "C" void* ring_list_sort_bridge(void* list, void* closure) {
-    return ring_list_sort(list, closure);
+extern "C" void* ring_list_sort_bridge(
+    void* list, void* closure, EffectCtx* effect_ctx
+) {
+    return ring_list_sort(list, closure, effect_ctx);
 }
 
 static void* ring_enum_some(void* val) {
@@ -1276,13 +1387,22 @@ extern "C" void* ring_Option_none() {
 
 extern "C" void* ring_Option_unwrap_or(void* opt, void* default_val) {
     int64_t tag = *(int64_t*)opt;
-    if (tag == 0) return *((void**)((int64_t*)opt + 1));
+    if (tag == 0) {
+        void* value = *((void**)((int64_t*)opt + 1));
+        ring_dup(value);
+        return value;
+    }
+    ring_dup(default_val);
     return default_val;
 }
 
 extern "C" void* ring_Option_unwrap(void* opt) {
     int64_t tag = *(int64_t*)opt;
-    if (tag == 0) return *((void**)((int64_t*)opt + 1));
+    if (tag == 0) {
+        void* value = *((void**)((int64_t*)opt + 1));
+        ring_dup(value);
+        return value;
+    }
     fprintf(stderr, "ring panic: unwrap() called on None\n");
     exit(1);
     return nullptr;
@@ -1296,25 +1416,33 @@ extern "C" int64_t ring_Option_is_none(void* opt) {
     return *(int64_t*)opt == 1 ? 1 : 0;
 }
 
-extern "C" void* ring_Option_map(void* opt, void* closure) {
+typedef void* (*ring_option_fn_1)(
+    void* env, void* arg, EffectCtx* effect_ctx);
+typedef void* (*ring_option_fn_0)(void* env, EffectCtx* effect_ctx);
+
+extern "C" void* ring_Option_map(
+    void* opt, void* closure, EffectCtx* effect_ctx
+) {
     int64_t tag = *(int64_t*)opt;
     if (tag == 0) {
         void* val = *((void**)((int64_t*)opt + 1));
         RingClosure* cl = (RingClosure*)closure;
-        ring_fn_1 fn = (ring_fn_1)cl->fn_ptr;
-        void* result = fn(cl->env_ptr, val);
+        ring_option_fn_1 fn = (ring_option_fn_1)cl->fn_ptr;
+        void* result = fn(cl->env_ptr, val, effect_ctx);
         return ring_enum_some(result);
     }
     return ring_enum_none();
 }
 
-extern "C" void* ring_Option_and_then(void* opt, void* closure) {
+extern "C" void* ring_Option_and_then(
+    void* opt, void* closure, EffectCtx* effect_ctx
+) {
     int64_t tag = *(int64_t*)opt;
     if (tag == 0) {
         void* val = *((void**)((int64_t*)opt + 1));
         RingClosure* cl = (RingClosure*)closure;
-        ring_fn_1 fn = (ring_fn_1)cl->fn_ptr;
-        return fn(cl->env_ptr, val);  // closure returns Option<U> directly
+        ring_option_fn_1 fn = (ring_option_fn_1)cl->fn_ptr;
+        return fn(cl->env_ptr, val, effect_ctx);
     }
     return ring_enum_none();
 }
@@ -1326,18 +1454,28 @@ extern "C" void* ring_Option_and_then(void* opt, void* closure) {
 // for type-correctness; ring_raise never returns.
 extern "C" void* ring_Option_to_fail(void* opt, void* err) {
     int64_t tag = *(int64_t*)opt;
-    if (tag == 0) return *((void**)((int64_t*)opt + 1));
+    if (tag == 0) {
+        void* value = *((void**)((int64_t*)opt + 1));
+        ring_dup(value);
+        return value;
+    }
+    ring_dup(err);
     ring_raise(err);
     return nullptr;
 }
 
-extern "C" void* ring_Option_unwrap_or_else(void* opt, void* closure) {
+extern "C" void* ring_Option_unwrap_or_else(
+    void* opt, void* closure, EffectCtx* effect_ctx
+) {
     int64_t tag = *(int64_t*)opt;
-    if (tag == 0) return *((void**)((int64_t*)opt + 1));
+    if (tag == 0) {
+        void* value = *((void**)((int64_t*)opt + 1));
+        ring_dup(value);
+        return value;
+    }
     RingClosure* cl = (RingClosure*)closure;
-    typedef void* (*ring_fn_0)(void* env);
-    ring_fn_0 fn = (ring_fn_0)cl->fn_ptr;
-    return fn(cl->env_ptr);
+    ring_option_fn_0 fn = (ring_option_fn_0)cl->fn_ptr;
+    return fn(cl->env_ptr, effect_ctx);
 }
 
 extern "C" int64_t ring_list_any(void* list, void* closure) {
@@ -1790,7 +1928,12 @@ extern "C" void* ring_Cell_set(void* cell, void* new_val) {
     return cell;                 // return receiver (Unit-typed call site discards this)
 }
 
-extern "C" void* ring_Cell_update(void* cell, void* closure) {
+typedef void* (*ring_cell_update_fn)(
+    void* env, void* arg, EffectCtx* effect_ctx);
+
+extern "C" void* ring_Cell_update(
+    void* cell, void* closure, EffectCtx* effect_ctx
+) {
     // #165: Reentrant-safe Cell.update. If the callback captures the same Cell
     // and calls .set(new_value), ring_Cell_set would drop old_val (the value we
     // passed to the callback). Setting the cell to nullptr before the call
@@ -1800,10 +1943,17 @@ extern "C" void* ring_Cell_update(void* cell, void* closure) {
     *(void**)cell = nullptr;       // prevent callback's .set() from dropping old_val
     ring_dup(old_val);             // callback consumes one ref, we drop the other
     RingClosure* cl = (RingClosure*)closure;
-    ring_fn_1 fn = (ring_fn_1)cl->fn_ptr;
-    void* new_val = fn(cl->env_ptr, old_val);
-    ring_drop(old_val);            // drop our held reference
+    ring_cell_update_fn fn = (ring_cell_update_fn)cl->fn_ptr;
+    (void)effect_ctx;
+    void* new_val = fn(
+        cl->env_ptr, old_val, ring_effect_ctx_empty());
+    // A reentrant callback may have installed an interim value through
+    // Cell.set. Install the callback result before releasing that separate
+    // owned sink, matching ring_Cell_set's store-before-drop discipline.
+    void* interim = *(void**)cell;
     *(void**)cell = new_val;
+    if (interim) ring_drop(interim);
+    ring_drop(old_val);            // drop our retained reference exactly once
     return cell;
 }
 
@@ -2328,25 +2478,26 @@ extern "C" void* ring_assert(int64_t cond, void* msg) {
 // The bootstrap LLVM backend does not emit Ring impls for primitive Eq, so a
 // generic `x == item` (which dispatches through an Eq dict) needs a real dict.
 // Each dict is { eq_closure, ne_closure, null, null }; each closure is
-// { fn_ptr, null_env }; the closure ABI is fn(env, a, b) -> boxed value.
+// { fn_ptr, null_env }; the closure ABI is
+// fn(env, a, b, effect_ctx) -> boxed value.
 // ============================================================================
 
-extern "C" void* ring_cl_eq_str(void* env, void* a, void* b) { return ring_box_bool(ring_str_eq(a, b)); }
-extern "C" void* ring_cl_ne_str(void* env, void* a, void* b) { return ring_box_bool(ring_str_eq(a, b) ? 0 : 1); }
-extern "C" void* ring_cl_eq_int(void* env, void* a, void* b) { return ring_box_bool((ring_unbox_int(a) == ring_unbox_int(b)) ? 1 : 0); }
-extern "C" void* ring_cl_ne_int(void* env, void* a, void* b) { return ring_box_bool((ring_unbox_int(a) == ring_unbox_int(b)) ? 0 : 1); }
-extern "C" void* ring_cl_eq_float(void* env, void* a, void* b) { return ring_box_bool((*(double*)a == *(double*)b) ? 1 : 0); }
-extern "C" void* ring_cl_ne_float(void* env, void* a, void* b) { return ring_box_bool((*(double*)a == *(double*)b) ? 0 : 1); }
-extern "C" void* ring_cl_eq_bool(void* env, void* a, void* b) { return ring_box_bool((ring_unbox_bool(a) == ring_unbox_bool(b)) ? 1 : 0); }
-extern "C" void* ring_cl_ne_bool(void* env, void* a, void* b) { return ring_box_bool((ring_unbox_bool(a) == ring_unbox_bool(b)) ? 0 : 1); }
+extern "C" void* ring_cl_eq_str(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) { return ring_box_bool(ring_str_eq(a, b)); }
+extern "C" void* ring_cl_ne_str(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) { return ring_box_bool(ring_str_eq(a, b) ? 0 : 1); }
+extern "C" void* ring_cl_eq_int(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) { return ring_box_bool((ring_unbox_int(a) == ring_unbox_int(b)) ? 1 : 0); }
+extern "C" void* ring_cl_ne_int(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) { return ring_box_bool((ring_unbox_int(a) == ring_unbox_int(b)) ? 0 : 1); }
+extern "C" void* ring_cl_eq_float(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) { return ring_box_bool((*(double*)a == *(double*)b) ? 1 : 0); }
+extern "C" void* ring_cl_ne_float(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) { return ring_box_bool((*(double*)a == *(double*)b) ? 0 : 1); }
+extern "C" void* ring_cl_eq_bool(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) { return ring_box_bool((ring_unbox_bool(a) == ring_unbox_bool(b)) ? 1 : 0); }
+extern "C" void* ring_cl_ne_bool(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) { return ring_box_bool((ring_unbox_bool(a) == ring_unbox_bool(b)) ? 0 : 1); }
 // Tag comparison for enum Eq dicts (correct for field-less enum variants, which
 // is what the bootstrap compiler compares with `==`). Reads the leading i64 tag.
-extern "C" void* ring_cl_eq_tag(void* env, void* a, void* b) {
+extern "C" void* ring_cl_eq_tag(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) {
     if (!a || !b || ((uintptr_t)a & 1) || ((uintptr_t)b & 1))
         return ring_box_bool((a == b) ? 1 : 0);
     return ring_box_bool((*(int64_t*)a == *(int64_t*)b) ? 1 : 0);
 }
-extern "C" void* ring_cl_ne_tag(void* env, void* a, void* b) {
+extern "C" void* ring_cl_ne_tag(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) {
     if (!a || !b || ((uintptr_t)a & 1) || ((uintptr_t)b & 1))
         return ring_box_bool((a == b) ? 0 : 1);
     return ring_box_bool((*(int64_t*)a == *(int64_t*)b) ? 0 : 1);
@@ -2355,16 +2506,16 @@ extern "C" void* ring_cl_ne_tag(void* env, void* a, void* b) {
 // Ord cmp closures: return a boxed Int in {-1, 0, 1}. The Ord trait has a single
 // method `cmp` at dict slot 0; the LLVM backend lowers a generic `a < b` / `a > b`
 // to load_dict_method(dict, 0) + compare the unboxed result against 0. The same
-// closure ABI as Eq: fn(env, a, b) -> boxed value.
-extern "C" void* ring_cl_cmp_int(void* env, void* a, void* b) {
+// closure ABI as Eq: fn(env, a, b, effect_ctx) -> boxed value.
+extern "C" void* ring_cl_cmp_int(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) {
     int64_t x = ring_unbox_int(a), y = ring_unbox_int(b);
     return ring_box_int(x < y ? -1 : (x > y ? 1 : 0));
 }
-extern "C" void* ring_cl_cmp_float(void* env, void* a, void* b) {
+extern "C" void* ring_cl_cmp_float(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) {
     double x = *(double*)a, y = *(double*)b;
     return ring_box_int(x < y ? -1 : (x > y ? 1 : 0));
 }
-extern "C" void* ring_cl_cmp_str(void* env, void* a, void* b) {
+extern "C" void* ring_cl_cmp_str(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) {
     RingStr* x = as_str(a);
     RingStr* y = as_str(b);
     int64_t min_len = x->len < y->len ? x->len : y->len;
@@ -2372,7 +2523,7 @@ extern "C" void* ring_cl_cmp_str(void* env, void* a, void* b) {
     if (cmp != 0) return ring_box_int(cmp < 0 ? -1 : 1);
     return ring_box_int(x->len < y->len ? -1 : (x->len > y->len ? 1 : 0));
 }
-extern "C" void* ring_cl_cmp_bool(void* env, void* a, void* b) {
+extern "C" void* ring_cl_cmp_bool(void* env, void* a, void* b, EffectCtx* /*effect_ctx*/) {
     int64_t x = ring_unbox_bool(a), y = ring_unbox_bool(b);
     return ring_box_int(x < y ? -1 : (x > y ? 1 : 0));
 }
@@ -2407,17 +2558,18 @@ static void* ring_make_ord_dict(void* cmpfn) {
 }
 
 // #179: Debug trait closure functions — Debug has a single method `debug(val) -> Str`.
-// Each closure takes (env, val) where val is a boxed Ring value, returns a boxed Str.
-static void* ring_Int_debug(void* /*env*/, void* val) {
+// Each closure takes (env, val, effect_ctx) where val is a boxed Ring value,
+// returns a boxed Str, and ignores the context because Debug is pure.
+static void* ring_Int_debug(void* /*env*/, void* val, EffectCtx* /*effect_ctx*/) {
     return ring_int_to_str(ring_unbox_int(val));
 }
-static void* ring_Bool_debug(void* /*env*/, void* val) {
+static void* ring_Bool_debug(void* /*env*/, void* val, EffectCtx* /*effect_ctx*/) {
     return ring_bool_to_str(ring_unbox_bool(val));
 }
-static void* ring_Float_debug(void* /*env*/, void* val) {
+static void* ring_Float_debug(void* /*env*/, void* val, EffectCtx* /*effect_ctx*/) {
     return ring_float_to_str(*(double*)val);
 }
-static void* ring_Str_debug(void* /*env*/, void* val) {
+static void* ring_Str_debug(void* /*env*/, void* val, EffectCtx* /*effect_ctx*/) {
     // Debug for Str: wrap in quotes and escape special characters
     RingStr* s = as_str(val);
     std::string result = "\"";
@@ -2435,6 +2587,18 @@ static void* ring_Str_debug(void* /*env*/, void* val) {
     result += "\"";
     return make_ring_str(result.c_str(), (int64_t)result.size());
 }
+extern "C" void* ring_cl_debug_int(void* env, void* val, EffectCtx* effect_ctx) {
+    return ring_Int_debug(env, val, effect_ctx);
+}
+extern "C" void* ring_cl_debug_float(void* env, void* val, EffectCtx* effect_ctx) {
+    return ring_Float_debug(env, val, effect_ctx);
+}
+extern "C" void* ring_cl_debug_str(void* env, void* val, EffectCtx* effect_ctx) {
+    return ring_Str_debug(env, val, effect_ctx);
+}
+extern "C" void* ring_cl_debug_bool(void* env, void* val, EffectCtx* effect_ctx) {
+    return ring_Bool_debug(env, val, effect_ctx);
+}
 static void* ring_make_debug_dict(void* debugfn) {
     // Debug dict: single `debug` closure at slot 0.
     // Same count-prefixed DICT_STATIC layout as Eq/Ord dicts.
@@ -2448,7 +2612,8 @@ static void* ring_make_debug_dict(void* debugfn) {
 
 // ============================================================================
 // Hash trait closure functions — Hash has a single method `hash(val) -> Int`.
-// Each closure takes (env, val) where val is a boxed Ring value, returns a boxed Int.
+// Each closure takes (env, val, effect_ctx) where val is a boxed Ring value,
+// returns a boxed Int, and ignores the context because Hash is pure.
 // ============================================================================
 
 extern "C" int64_t ring_hash_combine(int64_t h1, int64_t h2) {
@@ -2460,7 +2625,7 @@ extern "C" int64_t ring_hash_combine(int64_t h1, int64_t h2) {
     return (int64_t)h;
 }
 
-static void* ring_cl_hash_int(void* /*env*/, void* val) {
+static void* ring_cl_hash_int(void* /*env*/, void* val, EffectCtx* /*effect_ctx*/) {
     uint64_t x = (uint64_t)ring_unbox_int(val);
     // multiply-xorshift mixing (splitmix64 finalizer)
     x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -2469,7 +2634,7 @@ static void* ring_cl_hash_int(void* /*env*/, void* val) {
     return ring_box_int((int64_t)x);
 }
 
-static void* ring_cl_hash_str(void* /*env*/, void* val) {
+static void* ring_cl_hash_str(void* /*env*/, void* val, EffectCtx* /*effect_ctx*/) {
     RingStr* s = as_str(val);
     // FNV-1a 64-bit
     uint64_t h = 14695981039346656037ULL;
@@ -2480,8 +2645,17 @@ static void* ring_cl_hash_str(void* /*env*/, void* val) {
     return ring_box_int((int64_t)h);
 }
 
-static void* ring_cl_hash_bool(void* /*env*/, void* val) {
+static void* ring_cl_hash_bool(void* /*env*/, void* val, EffectCtx* /*effect_ctx*/) {
     return ring_box_int(ring_unbox_int(val) ? 1LL : 0LL);
+}
+extern "C" void* ring_cl_hash_int_export(void* env, void* val, EffectCtx* effect_ctx) {
+    return ring_cl_hash_int(env, val, effect_ctx);
+}
+extern "C" void* ring_cl_hash_str_export(void* env, void* val, EffectCtx* effect_ctx) {
+    return ring_cl_hash_str(env, val, effect_ctx);
+}
+extern "C" void* ring_cl_hash_bool_export(void* env, void* val, EffectCtx* effect_ctx) {
+    return ring_cl_hash_bool(env, val, effect_ctx);
 }
 
 static void* ring_make_hash_dict(void* hashfn) {
@@ -2602,6 +2776,15 @@ static void drop_evidence(void* data) {
     for (int64_t i = 0; i < count; i++) {
         if (slots[i]) ring_drop(slots[i]);
     }
+}
+
+static void drop_effect_ctx(void* data) {
+    EffectCtx* ctx = (EffectCtx*)data;
+    EffectCtxEntry* entries = effect_ctx_entries(ctx);
+    for (int64_t i = 0; i < ctx->entry_count; i++) {
+        if (entries[i].evidence) ring_drop(entries[i].evidence);
+    }
+    if (ctx->parent) ring_drop(ctx->parent);
 }
 
 extern "C" void* ring_get_builtin_dict(void* name_ptr) {

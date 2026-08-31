@@ -34,15 +34,19 @@ fn area(s: Shape) -> Int {
 
 // === Effect System + Handler ===
 
+effect FileAccess {
+    fn read(path: Str) -> Str
+}
+
 fn read_config() -> Str {
-    io.read("config.toml")
+    FileAccess.read("config.toml")
 }
 
 fn load_data() -> Str {
     let config = handle {
         read_config()
     } with {
-        io.read(path) => "mock:${path}",
+        FileAccess.read(path) => "mock:${path}",
     }
     config
 }

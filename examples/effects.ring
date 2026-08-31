@@ -5,8 +5,12 @@ struct Config {
     port: Int,
 }
 
+effect FileAccess {
+    fn read(path: Str) -> Str
+}
+
 fn load_config(path: Str) -> Config {
-    let raw = io.read(path)
+    let raw = FileAccess.read(path)
     Config { host: raw, port: 8080 }
 }
 
@@ -16,10 +20,10 @@ fn get_config() -> Config {
 
 test "effect handler mock" {
     handle {
-        let raw = io.read("test.toml")
+        let raw = FileAccess.read("test.toml")
         assert(raw == "mock data", "mock read")
     } with {
-        io.read(_path) => "mock data",
+        FileAccess.read(_path) => "mock data",
     }
 }
 
@@ -28,7 +32,7 @@ fn main() {
         let config = get_config()
         print("Server at ${config.host}:${config.port}")
     } with {
-        io.read(_path) => "fallback",
+        FileAccess.read(_path) => "fallback",
         fail.raise(e) => panic("failed"),
     }
 }

@@ -16,7 +16,7 @@ impl<T: Hash> Hash for Wrap<T> {
     }
 }
 
-fn hash_one<T: Hash>(value: T) -> Int {
+fn hash_one<T: Hash>(value: T) -> Int with {} {
     value.hash()
 }
 
@@ -34,7 +34,7 @@ fn hash_later<T: Hash>(value: Wrap<T>) -> Int {
     later(value)
 }
 
-fn constant<T>(_value: T) -> Int {
+fn constant<T>(_value: T) -> Int with {} {
     107
 }
 
@@ -74,7 +74,7 @@ fn local_cell_shadow(
     apply_int(Cell, value)
 }
 
-fn plus_one(value: Int) -> Int {
+fn plus_one(value: Int) -> Int with {} {
     value + 1
 }
 
@@ -144,26 +144,26 @@ fn dynamic_wrapper_callee<T: Hash>(value: Wrap<T>) -> Int {
     ({ hash_one })(value)
 }
 
-fn identity<Renamed>(value: Renamed) -> Renamed {
+fn identity<Renamed>(value: Renamed) -> Renamed with {} {
     value
 }
 
-fn default_ground(value: Int, f: fn(Int) -> Int = plus_one) -> Int {
+fn apply_ground(value: Int, f: fn(Int) -> Int) -> Int {
     f(value)
 }
 
-fn default_generic<Outer>(
+fn apply_generic_identity<Outer>(
     value: Outer,
-    f: fn(Outer) -> Outer = identity
+    f: fn(Outer) -> Outer
 ) -> Outer {
     f(value)
 }
 
-fn forty_two() -> Int {
+fn forty_two() -> Int with {} {
     42
 }
 
-fn default_zero(f: fn() -> Int = forty_two) -> Int {
+fn apply_zero(f: fn() -> Int) -> Int {
     f()
 }
 
@@ -171,17 +171,17 @@ fn default_zero(f: fn() -> Int = forty_two) -> Int {
 // closure ABI while retaining the ordinary backend's scalar-to-display
 // conversion, Unit normalisation, and (on LLVM-C) cross-engine marshalling.
 fn call_print(
-    f: fn(Int) -> Unit with {io},
+    f: fn(Int) -> Unit with {console},
     value: Int
-) -> Unit with {io} {
+) -> Unit with {console} {
     f(value)
 }
 
 fn call_assert(
-    f: fn(Bool, Str) -> Unit with {io},
+    f: fn(Bool, Str) -> Unit with {console},
     condition: Bool,
     message: Str
-) -> Unit with {io} {
+) -> Unit with {console} {
     f(condition, message)
 }
 
@@ -218,25 +218,25 @@ fn main() {
     assert(dynamic_wrapper_callee(Wrap { value: 29 }) == hash_one(29),
         "dynamic wrapped-dict Block materialises as an immediate callee")
 
-    assert(default_ground(40) == 41,
-        "ground callable default resolves")
-    assert(default_generic("renamed") == "renamed",
-        "generic callable default resolves after renamed parameter substitution")
-    assert(default_zero() == 42,
-        "zero-argument callable default resolves")
+    assert(apply_ground(40, plus_one) == 41,
+        "ground callable argument resolves")
+    assert(apply_generic_identity("renamed", identity) == "renamed",
+        "generic callable argument resolves after renamed parameter substitution")
+    assert(apply_zero(forty_two) == 42,
+        "zero-argument callable argument resolves")
 
     assert(local_print_shadow(plus_one, 50) == 51,
         "local print binding fails closed instead of becoming builtin extern")
     assert(local_cell_shadow(plus_one, 60) == 61,
         "local Cell binding fails closed instead of becoming prelude callable")
 
-    match apply_payload(Payload::Value, 70) {
+    match apply_payload(fn(value) { Payload::Value(value) }, 70) {
         Payload::Value(value) =>
-            assert(value == 70, "user positional enum ctor remains Ring callable"),
+            assert(value == 70, "explicit lambda constructs user positional enum"),
     }
-    match apply_option(some, 80) {
+    match apply_option(fn(value) { some(value) }, 80) {
         some(value) =>
-            assert(value == 80, "builtin positional enum ctor remains Ring callable"),
+            assert(value == 80, "explicit lambda constructs builtin Option.some"),
         none => panic("builtin positional enum ctor returned none"),
     }
 

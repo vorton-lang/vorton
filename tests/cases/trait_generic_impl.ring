@@ -1,9 +1,7 @@
-// Regression: generic trait impl + default method + __prefix naming convention
+// Regression: generic trait impl + explicit method + __prefix naming convention
 trait Summable {
     fn total(self) -> Int
-    fn label(self) -> Str {
-        "total=${self.total()}"
-    }
+    fn label(self) -> Str
 }
 
 struct Scores {
@@ -14,6 +12,7 @@ impl Summable for Scores {
     fn total(self) -> Int {
         self.values.fold(0, fn(acc, x) { acc + x })
     }
+    fn label(self) -> Str { "total=${self.total()}" }
 }
 
 struct Counts {
@@ -25,6 +24,7 @@ impl Summable for Counts {
     fn total(self) -> Int {
         self.a + self.b
     }
+    fn label(self) -> Str { "total=${self.total()}" }
 }
 
 fn show_total<T: Summable>(x: T) -> Str {

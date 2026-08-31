@@ -1,0 +1,4 @@
+E0301
+Enum constructor 'Payload::Value' cannot be used as a first-class function value; use an explicit lambda that directly calls the constructor
+Enum constructor 'Option::some' cannot be used as a first-class function value; use an explicit lambda that directly calls the constructor
+!Undefined variable

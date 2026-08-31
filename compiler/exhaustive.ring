@@ -83,7 +83,11 @@ fn instantiate_struct_fields(env: TypeEnv, name: Str, type_params: List<Type>) -
             if inst_map.len() == 0 { return struct_def.fields }
             let mut result: List<StructField> = []
             for f in struct_def.fields {
-                result.push(StructField { name: f.name, ty: apply_subst_map(inst_map, f.ty), is_pub: f.is_pub })
+                result.push(StructField {
+                    name: f.name, ty: apply_subst_map(inst_map, f.ty),
+                    is_pub: f.is_pub, field_ref: f.field_ref,
+                    field_index: f.field_index, span: f.span
+                })
             }
             result
         },
@@ -140,7 +144,9 @@ fn type_is_recursive(env: TypeEnv, ty: Type, key: Str, mut cache: ExhCache) -> B
 
 // Use Map<Str, Bool> instead of Set<Str> for O(1) string lookups.
 // Set<Str> uses __ring_deep_eq linear scan — O(n) per lookup.
-fn type_contains_key(env: TypeEnv, ty: Type, key: Str, mut visited: Map<Str, Bool>) -> Bool {
+fn type_contains_key(
+    env: TypeEnv, ty: Type, key: Str, mut visited: Map<Str, Bool>
+) -> Bool with {mut<Map<Str, Bool>>} {
     let ty_str = type_to_string(ty)
     if ty_str == key { return true }
     if visited.contains_key(ty_str) { return false }
@@ -485,7 +491,7 @@ fn index_of(list: List<Str>, target: Str) -> Int {
     0 - 1
 }
 
-fn specialize_row(row: List<Pattern>, ctor: Ctor) -> List<Pattern>? {
+fn specialize_row(row: List<Pattern>, ctor: Ctor) -> List<Pattern>? with {} {
     let first = pat_at(row, 0)
     // B-132: use List.slice instead of element-by-element O(n) copy
     let rest = row.slice(1, row.len())
@@ -583,7 +589,14 @@ fn specialize_row(row: List<Pattern>, ctor: Ctor) -> List<Pattern>? {
 // B-132: expanding uses Map<Str, Bool> for O(1) string lookups instead of
 // Set<Str> which uses __ring_deep_eq linear scan.
 // cache is threaded through for memoizing finite_type_ctors and type_is_recursive.
-fn check_matrix(env: TypeEnv, rows: List<List<Pattern>>, col_types: List<Type>, subst: UnionFind, expanding: Map<Str, Bool>, mut cache: ExhCache) -> List<Str>? {
+fn check_matrix(
+    env: TypeEnv,
+    rows: List<List<Pattern>>,
+    col_types: List<Type>,
+    subst: UnionFind,
+    expanding: Map<Str, Bool>,
+    mut cache: ExhCache
+) -> List<Str>? with {mut<UnionFind>, mut<ExhCache>, mut<List<Type>>} {
     if col_types.len() == 0 {
         if rows.len() > 0 {
             return none

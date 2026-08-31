@@ -6,15 +6,15 @@
 // tarjan_scc: standard Tarjan algorithm, returns SCCs in reverse topological order
 // (dependencies before dependents — leaf callees first, top-level callers last).
 
-use ast::{Decl, Expr, Stmt, MatchArm, EffectHandler, StringInterpPart, StructFieldInit}
+use ast::{Decl, Expr, Stmt, StringInterpPart}
 use hir::{compare_by_first}
 
 // ============================================================
 // Collect registered fn names from decls (mirrors Pass 1 registration)
 // ============================================================
 
-// Collect all fn/method names that Pass 1 would have registered.
-// Used to build the registered_fns filter set for call graph construction.
+// Value and impl callables have disjoint scheduler domains. Impl method leaf
+// names must not shadow a same-spelled top-level or inline value node.
 pub fn collect_registered_fn_names(decls: List<Decl>) -> Set<Str> {
     let mut names: Set<Str> = set_new()
     collect_fn_names_from_decls(decls, names, none)
@@ -28,17 +28,7 @@ fn collect_fn_names_from_decls(decls: List<Decl>, mut names: Set<Str>, mod_prefi
                 let full_name = match mod_prefix { some(p) => "${p}::${name}", none => name }
                 names.insert(full_name)
             },
-            Decl::Impl { methods, .. } => {
-                for method in methods {
-                    match method {
-                        Decl::Fn { name: mname, .. } => {
-                            let full_name = match mod_prefix { some(p) => "${p}::${mname}", none => mname }
-                            names.insert(full_name)
-                        },
-                        _ => {}
-                    }
-                }
-            },
+            Decl::Impl { .. } => {},
             Decl::ModBlock { name: mod_name, decls: mod_decls, .. } => {
                 let prefix = match mod_prefix { some(p) => "${p}::${mod_name}", none => mod_name }
                 collect_fn_names_from_decls(mod_decls, names, some(prefix))
@@ -58,7 +48,17 @@ fn collect_fn_names_from_decls(decls: List<Decl>, mut names: Set<Str>, mod_prefi
 //
 // For impl blocks, all methods share a single node "impl::TypeName" (or "impl::TypeName::TraitName").
 // Self.method() calls within the same impl produce no external edge.
-pub fn build_call_graph(decls: List<Decl>, registered_fns: Set<Str>) -> Map<Str, List<Str>> {
+fn impl_scc_node(target_type: Str, trait_name: Str?) -> Str {
+    match trait_name {
+        some(name) => "impl::${target_type}::${name}",
+        none => "impl::${target_type}"
+    }
+}
+
+pub fn build_call_graph(
+    decls: List<Decl>, registered_fns: Set<Str>,
+    explicit_lexical_root: Str?
+) -> Map<Str, List<Str>> {
     let mut graph: Map<Str, List<Str>> = map_new()
 
     // Ensure every registered fn has an entry (even if no outgoing edges).
@@ -72,15 +72,32 @@ pub fn build_call_graph(decls: List<Decl>, registered_fns: Set<Str>) -> Map<Str,
         }
     }
 
+    let mut root_scope = ""
+    for name in sorted_names {
+        let parts = name.split("$$_")
+        if root_scope == "" && parts.len() > 1 {
+            root_scope = "${parts.get(0).unwrap_or("")}$$_"
+        }
+    }
+    let root_lexical_scope = match explicit_lexical_root {
+        some(root) => root,
+        none => root_scope
+    }
     for decl in decls {
-        collect_decl_edges(decl, registered_fns, graph, none)
+        collect_decl_edges(
+            decl, registered_fns, graph, none, root_lexical_scope,
+            explicit_lexical_root)
     }
     graph
 }
 
 // Collect edges from a declaration.
 // impl_node: if set, we are inside an impl block and edges go from this node.
-fn collect_decl_edges(decl: Decl, registered_fns: Set<Str>, mut graph: Map<Str, List<Str>>, impl_node: Str?) {
+fn collect_decl_edges(
+    decl: Decl, registered_fns: Set<Str>,
+    mut graph: Map<Str, List<Str>>, impl_node: Str?, lexical_scope: Str,
+    explicit_lexical_root: Str?
+) {
     match decl {
         Decl::Fn { name, body, .. } => {
             let caller = match impl_node { some(inode) => inode, none => name }
@@ -88,10 +105,19 @@ fn collect_decl_edges(decl: Decl, registered_fns: Set<Str>, mut graph: Map<Str, 
                 graph.insert(caller, [])
             }
             let mut edges: Set<Str> = set_new()
-            collect_expr_callees(body, registered_fns, caller, edges)
+            let scope = match impl_node {
+                some(_) => lexical_scope,
+                none => match explicit_lexical_root {
+                    some(_) => lexical_scope,
+                    none => fn_scope_prefix(caller)
+                }
+            }
+            collect_expr_callees(body, registered_fns, scope, edges)
             let mut sorted_edges: List<Str> = []
             for e in edges {
-                if e != caller { sorted_edges.push(e) }
+                // Keep self edges: a singleton SCC is recursive only when its
+                // own call edge survives graph construction.
+                sorted_edges.push(e)
             }
             sorted_edges.sort()
             match graph.get(caller) {
@@ -104,29 +130,35 @@ fn collect_decl_edges(decl: Decl, registered_fns: Set<Str>, mut graph: Map<Str, 
             }
         },
         Decl::Impl { target_type, trait_name, methods, .. } => {
-            let inode = match trait_name {
-                some(tn) => "impl::${target_type}::${tn}",
-                none => "impl::${target_type}"
-            }
+            let inode = impl_scc_node(target_type, trait_name)
             if !graph.contains_key(inode) {
                 graph.insert(inode, [])
             }
             for method in methods {
-                collect_decl_edges(method, registered_fns, graph, some(inode))
+                collect_decl_edges(
+                    method, registered_fns, graph,
+                    some(inode), lexical_scope, explicit_lexical_root)
             }
         },
         Decl::ModBlock { name, decls, .. } => {
+            let nested_lexical_scope = match explicit_lexical_root {
+                some(root) => "${root}${name}::",
+                none => "${name}::"
+            }
             for d in decls {
                 // ModBlock fns are prefixed with "mod_name::" by prefix_decl_name,
                 // but at call-graph time we see the raw AST before prefixing.
                 // The registered_fns set has the prefixed names.
                 // We need to prefix here to match.
                 let prefixed = prefix_mod_decl(name, d)
-                collect_decl_edges(prefixed, registered_fns, graph, impl_node)
+                collect_decl_edges(
+                    prefixed, registered_fns, graph,
+                    impl_node, nested_lexical_scope,
+                    explicit_lexical_root)
             }
         },
-        // Test, Struct, Enum, Effect, Trait, ExternFn, ExternType, TypeAlias, Const, Sig,
-        // EffectAlias, Delegate, AssocType — no fn bodies to scan
+        // Test, Struct, Enum, Effect, Trait, ExternFn, ExternType, TypeAlias, Const,
+        // EffectAlias, AssocType — no fn bodies to scan
         _ => {}
     }
 }
@@ -134,18 +166,24 @@ fn collect_decl_edges(decl: Decl, registered_fns: Set<Str>, mut graph: Map<Str, 
 // Prefix a declaration name for ModBlock scoping (mirrors prefix_decl_name logic).
 fn prefix_mod_decl(mod_name: Str, decl: Decl) -> Decl {
     match decl {
-        Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, is_abstract, span } =>
+        Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span } =>
             Decl::Fn { name: "${mod_name}::${name}", type_params: type_params, params: params,
                 return_type: return_type, declared_effects: declared_effects, body: body,
-                is_pub: is_pub, is_abstract: is_abstract, span: span },
+                is_pub: is_pub, span: span },
         Decl::Impl { target_type, type_params, trait_name, methods, span } => {
-            let mut prefixed_methods: List<Decl> = []
-            for m in methods {
-                prefixed_methods.push(prefix_mod_decl(mod_name, m))
+            let prefixed_target = if target_type.contains("::") {
+                target_type
+            } else {
+                "${mod_name}::${target_type}"
             }
-            Decl::Impl { target_type: target_type, type_params: type_params, trait_name: trait_name,
-                methods: prefixed_methods, span: span }
+            Decl::Impl { target_type: prefixed_target,
+                type_params: type_params, trait_name: trait_name,
+                methods: methods, span: span }
         },
+        Decl::ModBlock { name, uses, decls, required_effects, is_pub, span } =>
+            Decl::ModBlock { name: "${mod_name}::${name}", uses: uses,
+                decls: decls, required_effects: required_effects,
+                is_pub: is_pub, span: span },
         _ => decl
     }
 }
@@ -444,10 +482,13 @@ fn fn_scope_prefix(fn_name: Str) -> Str {
     ""
 }
 
-fn collect_expr_callees(expr: Expr, registered_fns: Set<Str>, caller: Str, mut callees: Set<Str>) {
+fn collect_expr_callees(
+    expr: Expr, registered_fns: Set<Str>, scope_prefix: Str,
+    mut callees: Set<Str>
+) {
     walk_expr_callees(expr, CalleeMode::TopLevel {
         registered_fns: registered_fns,
-        scope_prefix: fn_scope_prefix(caller)
+        scope_prefix: scope_prefix
     }, callees)
 }
 

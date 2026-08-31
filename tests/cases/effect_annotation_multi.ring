@@ -2,19 +2,19 @@
 // Tests multi-effect combinations, fail propagation, catch interaction
 
 // Multiple effects in one annotation
-fn read_or_fail(x: Int) -> Str with {io, fail<Str>} {
+fn read_or_fail(x: Int) -> Str with {console, fail<Str>} {
     if x < 0 { fail.raise("negative") }
     print("reading ${x.to_str()}")
     x.to_str()
 }
 
 // Catch removes fail effect — remaining is io
-fn safe_read(x: Int) -> Str with {io} {
+fn safe_read(x: Int) -> Str with {console} {
     read_or_fail(x) catch { _ => "default" }
 }
 
 // Effect propagation: caller inherits callee's effects
-fn wrapper() -> Str with {io, fail<Str>} {
+fn wrapper() -> Str with {console, fail<Str>} {
     read_or_fail(42)
 }
 

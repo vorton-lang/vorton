@@ -1,8 +1,9 @@
-// Audit #258, option C: closures capture custom-effect evidence lexically.
-// A handler removes only an explicit matching label from its body row; an
-// unknown callback tail remains open and propagates to the outer scope.
-// Tail-resumptive arms implement their operation, so their result matches the
-// operation return type and their own effects escape the handle.
+// Audit #258 tail-row rules under R1 dynamic handled evidence. Ordinary
+// closures borrow exact evidence at each call and never capture creation-site
+// handlers. A complete custom-effect table removes the whole exact effect from
+// its body row; an unknown callback tail remains open and propagates outward.
+// Tail-resumptive arms are internal runtime objects: they may retain explicit
+// outer evidence so a same-effect re-perform escapes the current handler.
 
 effect Probe {
     fn value(seed: Int) -> Int
@@ -22,7 +23,7 @@ effect OpenEcho<T> {
     fn second(value: T) -> T
 }
 
-fn direct_io_handler() -> Int with {io} {
+fn direct_io_handler() -> Int with {console} {
     handle {
         Probe.value(4)
     } with {
@@ -30,11 +31,12 @@ fn direct_io_handler() -> Int with {io} {
             print("io-arm:${seed}")
             seed + 1
         },
+        Probe.bottom() => 0,
     }
 }
 
-// The inner arm captures the outer Relay evidence. Its re-perform therefore
-// propagates to the enclosing handler instead of recursing into itself.
+// The internal inner arm retains the outer Relay evidence. Its re-perform
+// therefore propagates to the enclosing handler instead of recursing into itself.
 // No annotation pins the inferred effect row: the outer call only receives the
 // required evidence when the arm's Relay effect is merged back into this row.
 fn relay_once(value: Int) -> Int {
@@ -57,9 +59,9 @@ fn generic_handler() -> Int {
     }
 }
 
-// The callback is created under an outer GenericProbe<Str> handler. Its
-// closure captures that outer evidence. This inner GenericProbe<Int> arm must
-// not intercept the callback merely because the callback row is still open.
+// The callback is invoked under an outer GenericProbe<Str> handler. The inner
+// GenericProbe<Int> arm must not intercept that exact Str effect merely because
+// the callback row is still open.
 fn recover_external(callback: fn() -> Int) -> Int {
     handle {
         callback()
@@ -73,9 +75,9 @@ fn text_length() -> Int with {GenericProbe<Str>} {
     text.len()
 }
 
-// A callback created inside the handled body captures the current handler.
-// Its explicit OpenEcho<Str> label also connects both generic operation arms
-// to the performed instance.
+// A callback created and invoked inside the handled body borrows the current
+// handler at the call. Its explicit OpenEcho<Str> label also connects both
+// generic operation arms to the performed instance.
 fn local_callback_handler() -> Str {
     handle {
         let callback = fn() -> Str {
@@ -94,6 +96,7 @@ fn closed_pure_handler() -> Int {
         40
     } with {
         Probe.value(seed) => seed,
+        Probe.bottom() => 0,
     }
 }
 
@@ -102,6 +105,7 @@ fn bottom_handler() -> Int {
         handle {
             Probe.bottom()
         } with {
+            Probe.value(seed) => seed,
             Probe.bottom() => fail.raise("tail-bottom"),
         }
     } with {

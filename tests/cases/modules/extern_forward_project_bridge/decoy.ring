@@ -1,8 +1,15 @@
-// Same leaf as the forward, incompatible signature: never a candidate.
+use forward::{marker}
+
+// Same leaf as the forward, incompatible signature: never an exact match.
 pub fn bridge(value: Str) -> Str { value }
 
-// Same signature as a real FFI declaration but no reverse dependency: it
-// must not capture the raw ABI call.
-pub fn parse_int(value: Str) -> Option<Int> { none }
+// Same leaf as a real FFI declaration but a different contract: it must not
+// capture the raw ABI call even though this module depends on forward.
+pub fn parse_int(value: Int) -> Int { value }
 
-pub fn keep_decoy() -> Int { 0 }
+// The rendered type leaf is deliberately identical to forward::Token.  Exact
+// Core nominal identity must keep this candidate distinct.
+pub struct Token { value: Int }
+pub fn token_bridge(value: Token) -> Int { value.value + 100 }
+
+pub fn keep_decoy() -> Int { marker() }

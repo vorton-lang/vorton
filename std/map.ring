@@ -82,6 +82,33 @@ pub fn map_clone<K, V>(m: Map<K, V>) -> Map<K, V> {
     Map { meta: new_meta, keys: new_keys, values: new_values, len: m.len, cap: m.cap }
 }
 
+fn map_deep_clone<K: Clone, V: Clone>(m: Map<K, V>) -> Map<K, V> {
+    if m.len == 0 { return map_new() }
+    let new_meta = ring_buf_alloc(m.cap)
+    let new_keys: Ptr<K> = ring_slot_alloc(m.cap)
+    let new_values: Ptr<V> = ring_slot_alloc(m.cap)
+    let mut i = 0
+    while i < m.cap {
+        let meta = ring_buf_get_byte(m.meta, i)
+        ring_buf_set_byte(new_meta, i, meta)
+        if meta == 1 {
+            let key = ring_slot_read(m.keys, i)
+            let value = ring_slot_read(m.values, i)
+            ring_slot_write(new_keys, i, key.clone())
+            ring_slot_write(new_values, i, value.clone())
+        }
+        i = i + 1
+    }
+    Map {
+        meta: new_meta, keys: new_keys, values: new_values,
+        len: m.len, cap: m.cap
+    }
+}
+
+impl<K: Clone, V: Clone> Clone for Map<K, V> {
+    fn clone(self: Map<K, V>) -> Map<K, V> { map_deep_clone(self) }
+}
+
 // Panic-on-miss subscript access (used by codegen for m[key] IndexExpr)
 pub fn map_get_panic<K: Hash + Eq, V>(m: Map<K, V>, key: K) -> V {
     if m.cap == 0 {

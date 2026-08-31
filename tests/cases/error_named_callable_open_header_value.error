@@ -1,0 +1,5 @@
+E0404
+:10:17
+recursively closed registration header
+with { ... }
+!internal compiler error

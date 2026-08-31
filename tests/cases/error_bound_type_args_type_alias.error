@@ -1,0 +1,4 @@
+E0503
+Trait bound 'GenericTrait' uses unsupported type arguments
+trait-bound type arguments are not representable
+!internal compiler error

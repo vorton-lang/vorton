@@ -29,6 +29,33 @@ pub fn set_clone<T>(s: Set<T>) -> Set<T> {
     Set { entries: map_clone(s.entries) }
 }
 
+fn set_deep_clone<T: Clone>(s: Set<T>) -> Set<T> {
+    let source = s.entries
+    if source.len == 0 { return set_new() }
+    let new_meta = ring_buf_alloc(source.cap)
+    let new_keys: Ptr<T> = ring_slot_alloc(source.cap)
+    let new_values: Ptr<Unit> = ring_slot_alloc(source.cap)
+    let mut i = 0
+    while i < source.cap {
+        let meta = ring_buf_get_byte(source.meta, i)
+        ring_buf_set_byte(new_meta, i, meta)
+        if meta == 1 {
+            let key = ring_slot_read(source.keys, i)
+            ring_slot_write(new_keys, i, key.clone())
+            ring_slot_write(new_values, i, ())
+        }
+        i = i + 1
+    }
+    Set { entries: Map {
+        meta: new_meta, keys: new_keys, values: new_values,
+        len: source.len, cap: source.cap
+    } }
+}
+
+impl<T: Clone> Clone for Set<T> {
+    fn clone(self: Set<T>) -> Set<T> { set_deep_clone(self) }
+}
+
 pub struct SetIterator<T> { pub items: List<T>, pub index: Int }
 
 impl<T> Iterator for SetIterator<T> {

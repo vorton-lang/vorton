@@ -49,8 +49,14 @@ fn compile_extern_shadow_probe(foreign: ForeignShadow) {
                 InnerDispatch.local_only(observed)
                 ExternShadow.inspect(foreign)
             } with {
+                InnerDispatch.add(value) => {
+                    let ignored_add = value
+                },
                 InnerDispatch.local_only(value) => {
                     let ignored_value = value
+                },
+                InnerDispatch.shadow(value) => {
+                    let ignored_shadow = value
                 },
                 ExternShadow.inspect(shadowed) => {
                     let ignored_foreign = shadowed

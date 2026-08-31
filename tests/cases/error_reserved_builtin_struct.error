@@ -1,0 +1,4 @@
+E0207
+builtin type 'List' is already defined
+List is a reserved 0.1 builtin type
+!internal compiler error

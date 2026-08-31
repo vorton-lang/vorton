@@ -1,11 +1,11 @@
-// Test: io effect is correctly tracked from print/assert/exit
+// Test: console system effect is correctly tracked from print/assert.
 
-// Function with io effect (inferred from print)
+// Function with console effect (inferred from print)
 fn greet(name: Str) {
     print("hello ${name}")
 }
 
-// Function that calls greet — should also infer io
+// Function that calls greet — should also infer console
 fn greet_all() {
     greet("world")
     greet("ring")

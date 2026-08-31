@@ -2,9 +2,9 @@ effect Logger {
     fn log(msg: Str) -> Unit
 }
 
-effect alias IO = {io, fail<Str>}
+effect alias IO = {console, fail<Str>}
 effect alias Logging = {Logger}
-effect alias Combined = {io, Logger}
+effect alias Combined = {console, Logger}
 
 fn greet(name: Str) -> Str with {IO} {
     print("Hello, ${name}")

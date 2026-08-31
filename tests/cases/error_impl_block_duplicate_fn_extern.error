@@ -1,3 +1,6 @@
-E0504
-Duplicate method 'clash' in impl for 'DuplicateImplFnExtern'
+E0103
+impl-member extern fn is not part of Ring 0.1
+!E0101
+!E0201
+!E0504
 !internal compiler error

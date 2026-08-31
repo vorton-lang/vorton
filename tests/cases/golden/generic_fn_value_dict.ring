@@ -10,7 +10,7 @@ struct Dog { name: Str }
 impl Describe for Dog { fn describe(self) -> Str { "dog:${self.name}" } }
 
 // generic function with a trait bound — used below as a first-class value
-fn show<T: Describe>(x: T) -> Str { x.describe() }
+fn show<T: Describe>(x: T) -> Str with {} { x.describe() }
 
 // higher-order fn: takes a fn value and applies it
 fn apply_show(f: fn(Dog) -> Str, d: Dog) -> Str { f(d) }

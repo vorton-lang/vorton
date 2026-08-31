@@ -1,8 +1,8 @@
-fn increment(value: Int) -> Int {
+fn increment(value: Int) -> Int with {} {
     value + 1
 }
 
-fn add_two(value: Int) -> Int {
+fn add_two(value: Int) -> Int with {} {
     value + 2
 }
 

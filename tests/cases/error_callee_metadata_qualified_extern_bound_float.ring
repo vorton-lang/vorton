@@ -2,7 +2,7 @@
 // A qualified two-hop ExternCallable validates bounds but has no Ring dict ABI.
 
 pub mod origin {
-    pub extern fn print<T: Hash>(value: T) -> Unit with {io}
+    pub extern fn print<T: Hash>(value: T) -> Unit with {console}
 }
 
 pub mod middle {
@@ -14,9 +14,9 @@ pub mod facade {
 }
 
 fn call_float(
-    emit: fn(Float) -> Unit with {io},
+    emit: fn(Float) -> Unit with {console},
     value: Float
-) -> Unit with {io} {
+) -> Unit with {console} {
     emit(value)
 }
 

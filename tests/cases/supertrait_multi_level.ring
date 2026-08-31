@@ -24,7 +24,7 @@ fn use_top<T: Top>(x: T) -> Int {
     x.base_val() + x.mid_val() + x.top_val()
 }
 
-fn main() with {io} {
+fn main() with {console} {
     let s = MyStruct { v: 10 }
     assert(use_top(s) == 60, "10 + 20 + 30 = 60")
     print("Supertrait multi-level: all passed")

@@ -1,0 +1,1278 @@
+// Callable candidate provenance graph construction, ranked solve, and body cutover.
+// Extracted mechanically from resource_planner; rule sites, candidate cells,
+// promotion ordering, selections, and resolved event bindings are unchanged.
+
+use flow_ir::{make_flow_instruction_ref, make_flow_block_ref,
+    flow_projection_contract_result_type}
+use ir_identity::{core_type_ref_index}
+use core_type_source::{
+    FlowGenericParamFact, flow_generic_param_fact_same,
+    flow_type_substitution_parameter,
+    flow_type_substitution_replacement}
+use resource_certificate::{
+    CandidateCellKind, CandidateCellSpec, CandidateRuleSite,
+    CandidateRuleKind, CandidateRule, CandidatePromotion,
+    CandidateSelection, CallableCandidateProof,
+    make_candidate_cell_spec, make_global_candidate_rule_site,
+    make_instruction_candidate_rule_site,
+    make_terminator_candidate_rule_site, make_edge_candidate_rule_site,
+    make_candidate_rule, make_candidate_promotion,
+    make_candidate_selection, make_callable_candidate_proof,
+    candidate_cell_parameter, candidate_cell_result, candidate_cell_state,
+    candidate_rule_seed, candidate_rule_copy, candidate_rule_all,
+    callable_candidate_proof_callable_count,
+    callable_candidate_proof_cells, callable_candidate_proof_rules,
+    callable_candidate_proof_promotions,
+    callable_candidate_proof_final_values,
+    candidate_cell_spec_kind, candidate_cell_spec_owner,
+    candidate_cell_spec_block, candidate_cell_spec_boundary,
+    candidate_cell_spec_component, candidate_cell_spec_candidate,
+    candidate_cell_kind_tag, candidate_rule_kind,
+    candidate_rule_target_cell, candidate_rule_premise_cells,
+    candidate_rule_kind_tag}
+use resource_type_lfp::{
+    PlannerTypeNode, PlannerCallable, PlannerBody, PlannerBlock, PlannerPlace,
+    PlannerEvent, PlannerEventValue, PlannerCallableOriginValue,
+    PlannerCallableLocation, PlannerCallTarget,
+    planner_type_is_callable, planner_place_is_slot, planner_place_slot,
+    planner_place_base, planner_place_projection, planner_place_value_type,
+    planner_call_target_is_direct, planner_call_target_direct,
+    planner_call_target_slot, planner_call_target_type_substitutions,
+    planner_call_target_actual_type,
+    make_planner_callable_slot_location,
+    make_planner_callable_projection_location,
+    planner_callable_location_is_slot, planner_callable_location_slot,
+    planner_callable_location_base, planner_callable_location_projection,
+    planner_callable_location_same,
+    copy_planner_callable_location, with_planner_callable_provenance,
+    with_planner_event_decision, make_planner_call,
+    copy_planner_event, make_planner_block,
+    make_planner_body, int_list_contains,
+    flow_callable_index_for_planner, planner_body_reachable_blocks}
+
+// ============================================================
+// Planner-owned callable-slot candidate fixed point
+// ============================================================
+
+fn empty_candidate_set(callable_count: Int) -> List<Bool> {
+    let mut result: List<Bool> = []
+    let mut index = 0
+    while index < callable_count {
+        result.push(false)
+        index = index + 1
+    }
+    result
+}
+
+fn candidate_set_indices(values: List<Bool>) -> List<Int> {
+    let mut result: List<Int> = []
+    let mut index = 0
+    while index < values.len() {
+        if values.get(index).unwrap() { result.push(index) }
+        index = index + 1
+    }
+    result
+}
+
+fn candidate_formal_contains(
+    values: List<FlowGenericParamFact>, target: FlowGenericParamFact
+) -> Bool {
+    values.any(fn(value) { flow_generic_param_fact_same(value, target) })
+}
+
+fn append_candidate_formal(
+    mut values: List<FlowGenericParamFact>, value: FlowGenericParamFact
+) -> Bool {
+    if candidate_formal_contains(values, value) { return false }
+    values.push(value)
+    true
+}
+
+fn planner_type_accepts_candidates(
+    type_nodes: List<PlannerTypeNode>, type_index: Int,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    if type_index < 0 || type_index >= type_nodes.len() {
+        panic("ResourcePlanner: candidate type is outside frozen graph")
+    }
+    if planner_type_is_callable(type_nodes, type_index) { return true }
+    match type_nodes.get(type_index).unwrap().parameter_fact {
+        some(parameter) => candidate_formal_contains(
+            active_formals, parameter),
+        none => false
+    }
+}
+
+fn planner_type_is_active_formal(
+    type_nodes: List<PlannerTypeNode>, type_index: Int,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    if type_index < 0 || type_index >= type_nodes.len() { return false }
+    match type_nodes.get(type_index).unwrap().parameter_fact {
+        some(parameter) => candidate_formal_contains(
+            active_formals, parameter),
+        none => false
+    }
+}
+
+fn planner_location_type_index(
+    body: PlannerBody, location: PlannerCallableLocation
+) -> Int {
+    if planner_callable_location_is_slot(location) {
+        return body.slots.get(
+            planner_callable_location_slot(location)).unwrap().type_index
+    }
+    core_type_ref_index(flow_projection_contract_result_type(
+        planner_callable_location_projection(location)))
+}
+
+fn planner_location_is_active_formal(
+    body: PlannerBody, location: PlannerCallableLocation,
+    type_nodes: List<PlannerTypeNode>,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    planner_type_is_active_formal(
+        type_nodes, planner_location_type_index(body, location),
+        active_formals)
+}
+
+fn planner_callable_location_for_place(
+    value: PlannerPlace
+) -> PlannerCallableLocation {
+    if planner_place_is_slot(value) {
+        make_planner_callable_slot_location(planner_place_slot(value))
+    } else {
+        make_planner_callable_projection_location(
+            planner_place_base(value), planner_place_projection(value))
+    }
+}
+
+fn planner_location_overwritten_by_place(
+    location: PlannerCallableLocation, value: PlannerPlace
+) -> Bool {
+    if planner_place_is_slot(value) {
+        let base = if planner_callable_location_is_slot(location) {
+            planner_callable_location_slot(location)
+        } else { planner_callable_location_base(location) }
+        planner_place_slot(value) == base
+    } else {
+        planner_callable_location_same(
+            location, planner_callable_location_for_place(value))
+    }
+}
+
+fn collect_active_candidate_formals(
+    type_nodes: List<PlannerTypeNode>, bodies: List<PlannerBody>
+) -> List<FlowGenericParamFact> {
+    let mut active: List<FlowGenericParamFact> = []
+    let mut forwards: List<(FlowGenericParamFact, FlowGenericParamFact)> = []
+    for body in bodies {
+        let reachable = planner_body_reachable_blocks(body)
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            if reachable.get(block_index).unwrap() {
+                for event in body.blocks.get(block_index).unwrap().events {
+                    match event.value {
+                        PlannerEventValue::CallValue { call_target, .. } => if
+                                planner_call_target_is_direct(call_target) {
+                            for substitution in
+                                    planner_call_target_type_substitutions(
+                                        call_target) {
+                                let formal = flow_type_substitution_parameter(
+                                    substitution)
+                                let actual = core_type_ref_index(
+                                    flow_type_substitution_replacement(
+                                        substitution))
+                                if actual < 0 || actual >= type_nodes.len() {
+                                    panic("ResourcePlanner: direct substitution actual is absent")
+                                }
+                                if planner_type_is_callable(
+                                        type_nodes, actual) {
+                                    let _ = append_candidate_formal(
+                                        active, formal)
+                                } else {
+                                    match type_nodes.get(actual).unwrap()
+                                            .parameter_fact {
+                                        some(source) => {
+                                            if !forwards.any(fn(edge) {
+                                                    flow_generic_param_fact_same(
+                                                        edge.0, formal) &&
+                                                    flow_generic_param_fact_same(
+                                                        edge.1, source)
+                                                }) {
+                                                forwards.push((formal, source))
+                                            }
+                                        },
+                                        none => {}
+                                    }
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            block_index = block_index + 1
+        }
+    }
+    let mut changed = true
+    while changed {
+        changed = false
+        for edge in forwards {
+            if candidate_formal_contains(active, edge.1) &&
+               append_candidate_formal(active, edge.0) {
+                changed = true
+            }
+        }
+    }
+    active
+}
+
+fn planner_call_formal_accepts_candidates(
+    type_nodes: List<PlannerTypeNode>, call_target: PlannerCallTarget,
+    callee: Int, formal_type_index: Int,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    if planner_type_is_callable(type_nodes, formal_type_index) { return true }
+    let formal = match type_nodes.get(formal_type_index).unwrap().parameter_fact {
+        some(value) => value,
+        none => return false
+    }
+    if !planner_call_target_is_direct(call_target) ||
+       planner_call_target_direct(call_target) != callee {
+        return false
+    }
+    match planner_call_target_actual_type(call_target, formal) {
+        some(actual) => planner_type_accepts_candidates(
+            type_nodes, actual, active_formals),
+        none => false
+    }
+}
+
+fn replace_call_candidates(
+    event: PlannerEvent, candidates: List<Int>
+) -> PlannerEvent {
+    match event.value {
+        PlannerEventValue::CallValue {
+            call_target, argument_demands, result_owned,
+            result_type_index, result_origin_argument_ordinals,
+            argument_slots, result_slot, ..
+        } => with_planner_event_decision(
+            with_planner_callable_provenance(make_planner_call(
+                event.step, event.operands,
+                call_target, candidates, argument_slots, argument_demands,
+                result_owned, result_type_index,
+                result_origin_argument_ordinals, result_slot),
+                event.callable_provenance),
+            event.decision),
+        _ => copy_planner_event(event)
+    }
+}
+
+pub struct CandidateProofGraph {
+    callable_count: Int,
+    cells: List<CandidateCellSpec>,
+    rules: List<CandidateRule>
+}
+
+fn candidate_cell_index(
+    cells: List<CandidateCellSpec>, kind: CandidateCellKind,
+    owner: Int, block: Int, boundary: Int,
+    component: Int, candidate: Int
+) -> Int {
+    let mut index = 0
+    while index < cells.len() {
+        let cell = cells.get(index).unwrap()
+        if candidate_cell_kind_tag(candidate_cell_spec_kind(cell)) ==
+               candidate_cell_kind_tag(kind) &&
+           candidate_cell_spec_owner(cell) == owner &&
+           candidate_cell_spec_block(cell) == block &&
+           candidate_cell_spec_boundary(cell) == boundary &&
+           candidate_cell_spec_component(cell) == component &&
+           candidate_cell_spec_candidate(cell) == candidate {
+            return index
+        }
+        index = index + 1
+    }
+    panic("ResourcePlanner: callable-candidate proof cell is absent")
+}
+
+fn add_candidate_rule(
+    mut rules: List<CandidateRule>, kind: CandidateRuleKind,
+    site: CandidateRuleSite, target: Int, premises: List<Int>
+) {
+    rules.push(make_candidate_rule(kind, site, target, premises))
+}
+
+fn add_candidate_conjunction_rule(
+    mut rules: List<CandidateRule>, site: CandidateRuleSite,
+    target: Int, left: Int, right: Int
+) {
+    if left == right {
+        add_candidate_rule(
+            rules, candidate_rule_copy(), site, target, [left])
+    } else {
+        add_candidate_rule(
+            rules, candidate_rule_all(), site, target, [left, right])
+    }
+}
+
+fn append_callable_location(
+    mut values: List<PlannerCallableLocation>,
+    value: PlannerCallableLocation
+) {
+    if !values.any(fn(existing) {
+            planner_callable_location_same(existing, value)
+        }) {
+        values.push(copy_planner_callable_location(value))
+    }
+}
+
+fn body_callable_locations(
+    body: PlannerBody, type_nodes: List<PlannerTypeNode>,
+    active_formals: List<FlowGenericParamFact>
+) -> List<PlannerCallableLocation> {
+    let mut result: List<PlannerCallableLocation> = []
+    let mut slot = 0
+    while slot < body.slots.len() {
+        if planner_type_accepts_candidates(
+                type_nodes, body.slots.get(slot).unwrap().type_index,
+                active_formals) {
+            append_callable_location(
+                result, make_planner_callable_slot_location(slot))
+        }
+        slot = slot + 1
+    }
+    for block in body.blocks {
+        for event in block.events {
+            match event.value {
+                PlannerEventValue::AssignValue { target, .. } => if
+                        !planner_place_is_slot(target) {
+                    let location = planner_callable_location_for_place(target)
+                    if planner_location_is_active_formal(
+                            body, location, type_nodes, active_formals) {
+                        append_callable_location(result, location)
+                    }
+                },
+                PlannerEventValue::MovePlaceValue { source, .. } => if
+                        !planner_place_is_slot(source) {
+                    let location = planner_callable_location_for_place(source)
+                    if planner_location_is_active_formal(
+                            body, location, type_nodes, active_formals) {
+                        append_callable_location(result, location)
+                    }
+                },
+                PlannerEventValue::ProjectValue {
+                    source, projection, value_type_index, ..
+                } => if planner_type_is_active_formal(
+                        type_nodes, value_type_index, active_formals) {
+                    append_callable_location(result,
+                        make_planner_callable_projection_location(
+                            source, projection))
+                },
+                _ => {}
+            }
+            for fact in event.callable_provenance {
+                append_callable_location(result, fact.target)
+                match fact.origin {
+                    PlannerCallableOriginValue::LocationCallableOriginValue(
+                        sources) => {
+                            for source in sources {
+                                append_callable_location(result, source)
+                            }
+                        },
+                    _ => {}
+                }
+            }
+        }
+    }
+    result
+}
+
+fn callable_location_index(
+    body: PlannerBody, type_nodes: List<PlannerTypeNode>,
+    active_formals: List<FlowGenericParamFact>,
+    target: PlannerCallableLocation
+) -> Int {
+    let locations = body_callable_locations(
+        body, type_nodes, active_formals)
+    let mut index = 0
+    while index < locations.len() {
+        if planner_callable_location_same(
+                locations.get(index).unwrap(), target) { return index }
+        index = index + 1
+    }
+    panic("ResourcePlanner: callable location is not registered")
+}
+
+fn event_candidate_location_overwritten(
+    event: PlannerEvent, body: PlannerBody,
+    location: PlannerCallableLocation,
+    type_nodes: List<PlannerTypeNode>,
+    active_formals: List<FlowGenericParamFact>
+) -> Bool {
+    for fact in event.callable_provenance {
+        if planner_callable_location_same(fact.target, location) { return true }
+    }
+    let base_slot = if planner_callable_location_is_slot(location) {
+        planner_callable_location_slot(location)
+    } else {
+        planner_callable_location_base(location)
+    }
+    let active_formal = planner_location_is_active_formal(
+        body, location, type_nodes, active_formals)
+    match event.value {
+        PlannerEventValue::InitializeValue { target, .. } =>
+            active_formal && target == base_slot,
+        PlannerEventValue::ReadValue { target, .. } =>
+            active_formal && target == base_slot,
+        PlannerEventValue::ConsumeValue(source, _, target) =>
+            source == base_slot || match target {
+                some(value) => active_formal &&
+                    value == base_slot,
+                none => false
+            },
+        PlannerEventValue::DiscardValue(target) => target == base_slot,
+        PlannerEventValue::ScopeExitValue(scope_id) =>
+            body.slots.get(base_slot).unwrap().scope_id == scope_id,
+        PlannerEventValue::AssignValue { rhs_temp, target } =>
+            rhs_temp == base_slot ||
+            (active_formal && planner_location_overwritten_by_place(
+                location, target)),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            planner_location_overwritten_by_place(location, source) ||
+                (active_formal && target == base_slot),
+        PlannerEventValue::CallValue { result_slot, .. } => match result_slot {
+            some(target) => active_formal && target == base_slot,
+            none => false
+        },
+        PlannerEventValue::ProjectValue { target, .. } =>
+            active_formal && target == base_slot,
+        PlannerEventValue::CaptureValue { target, .. } =>
+            active_formal && target == base_slot,
+        _ => false
+    }
+}
+
+fn add_candidate_location_transfer_rules(
+    graph: CandidateProofGraph, body_index: Int, block_index: Int,
+    boundary: Int, event: PlannerEvent,
+    target: PlannerCallableLocation,
+    sources: List<PlannerCallableLocation>,
+    type_nodes: List<PlannerTypeNode>, bodies: List<PlannerBody>,
+    active_formals: List<FlowGenericParamFact>
+) {
+    let body = bodies.get(body_index).unwrap()
+    if !planner_location_is_active_formal(
+            body, target, type_nodes, active_formals) {
+        return
+    }
+    let site = make_instruction_candidate_rule_site(
+        make_flow_instruction_ref(
+            body.reference, block_index, boundary))
+    for source in sources {
+        if !planner_type_accepts_candidates(
+                type_nodes, planner_location_type_index(body, source),
+                active_formals) {
+            panic("ResourcePlanner: formal candidate transfer source is not callable")
+        }
+        let mut candidate = 0
+        while candidate < graph.callable_count {
+            add_candidate_rule(
+                graph.rules, candidate_rule_copy(), site,
+                candidate_cell_index(
+                    graph.cells, candidate_cell_state(), body_index,
+                    block_index, boundary + 1,
+                    callable_location_index(
+                        body, type_nodes, active_formals, target), candidate),
+                [candidate_cell_index(
+                    graph.cells, candidate_cell_state(), body_index,
+                    block_index, boundary,
+                    callable_location_index(
+                        body, type_nodes, active_formals, source), candidate)])
+            candidate = candidate + 1
+        }
+    }
+}
+
+fn add_candidate_value_transfer_rules(
+    graph: CandidateProofGraph, body_index: Int, block_index: Int,
+    boundary: Int, event: PlannerEvent,
+    type_nodes: List<PlannerTypeNode>,
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>,
+    active_formals: List<FlowGenericParamFact>
+) {
+    let body = bodies.get(body_index).unwrap()
+    match event.value {
+        PlannerEventValue::InitializeValue {
+            input_slots, origin_input_ordinals, target, ..
+        } => {
+            let mut sources: List<PlannerCallableLocation> = []
+            for ordinal in origin_input_ordinals {
+                sources.push(make_planner_callable_slot_location(
+                    input_slots.get(ordinal).unwrap()))
+            }
+            add_candidate_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(target), sources,
+                type_nodes, bodies, active_formals)
+        },
+        PlannerEventValue::ReadValue { source, target } =>
+            add_candidate_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(target),
+                [make_planner_callable_slot_location(source)],
+                type_nodes, bodies, active_formals),
+        PlannerEventValue::ConsumeValue(source, _, target) => match target {
+            some(sink) => add_candidate_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(sink),
+                [make_planner_callable_slot_location(source)],
+                type_nodes, bodies, active_formals),
+            none => {}
+        },
+        PlannerEventValue::AssignValue { rhs_temp, target } =>
+            add_candidate_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                planner_callable_location_for_place(target),
+                [make_planner_callable_slot_location(rhs_temp)],
+                type_nodes, bodies, active_formals),
+        PlannerEventValue::MovePlaceValue { source, target } =>
+            add_candidate_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(target),
+                [planner_callable_location_for_place(source)],
+                type_nodes, bodies, active_formals),
+        PlannerEventValue::ProjectValue {
+            source, target, projection, ..
+        } => add_candidate_location_transfer_rules(
+            graph, body_index, block_index, boundary, event,
+            make_planner_callable_slot_location(target),
+            [make_planner_callable_projection_location(source, projection)],
+            type_nodes, bodies, active_formals),
+        PlannerEventValue::CaptureValue { source, target, .. } =>
+            add_candidate_location_transfer_rules(
+                graph, body_index, block_index, boundary, event,
+                make_planner_callable_slot_location(target),
+                [make_planner_callable_slot_location(source)],
+                type_nodes, bodies, active_formals),
+        PlannerEventValue::CallValue {
+            call_target, argument_slots,
+            result_origin_argument_ordinals, result_slot, ..
+        } => match result_slot {
+            some(result) => {
+                let target = make_planner_callable_slot_location(result)
+                if planner_location_is_active_formal(
+                        body, target, type_nodes, active_formals) {
+                    let site = make_instruction_candidate_rule_site(
+                        make_flow_instruction_ref(
+                            body.reference, block_index, boundary))
+                    let mut callee = 0
+                    while callee < graph.callable_count {
+                        if planner_call_target_is_direct(call_target) &&
+                           planner_call_target_direct(call_target) == callee &&
+                           planner_call_formal_accepts_candidates(
+                                type_nodes, call_target, callee,
+                                callables.get(callee).unwrap().result_type_index,
+                                active_formals) {
+                            let mut candidate = 0
+                            while candidate < graph.callable_count {
+                                add_candidate_rule(
+                                    graph.rules, candidate_rule_copy(), site,
+                                    candidate_cell_index(
+                                        graph.cells, candidate_cell_state(),
+                                        body_index, block_index, boundary + 1,
+                                        callable_location_index(
+                                            body, type_nodes, active_formals,
+                                            target), candidate),
+                                    [candidate_cell_index(
+                                        graph.cells, candidate_cell_result(),
+                                        callee, 0, 0, 0, candidate)])
+                                candidate = candidate + 1
+                            }
+                        }
+                        callee = callee + 1
+                    }
+                    let mut alias_sources: List<PlannerCallableLocation> = []
+                    for ordinal in result_origin_argument_ordinals {
+                        alias_sources.push(make_planner_callable_slot_location(
+                            argument_slots.get(ordinal).unwrap()))
+                    }
+                    add_candidate_location_transfer_rules(
+                        graph, body_index, block_index, boundary, event,
+                        target, alias_sources, type_nodes, bodies,
+                        active_formals)
+                }
+            },
+            none => {}
+        },
+        _ => {}
+    }
+}
+
+fn add_candidate_provenance_rules(
+    graph: CandidateProofGraph, body_index: Int, block_index: Int,
+    boundary: Int, event: PlannerEvent,
+    type_nodes: List<PlannerTypeNode>,
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>,
+    active_formals: List<FlowGenericParamFact>
+) {
+    let body = bodies.get(body_index).unwrap()
+    let site = make_instruction_candidate_rule_site(
+        make_flow_instruction_ref(
+            bodies.get(body_index).unwrap().reference,
+            block_index, boundary))
+    for fact in event.callable_provenance {
+        let mut candidate = 0
+        while candidate < graph.callable_count {
+            let target = candidate_cell_index(
+                graph.cells, candidate_cell_state(), body_index,
+                block_index, boundary + 1,
+                callable_location_index(
+                    body, type_nodes, active_formals, fact.target),
+                candidate)
+            match fact.origin {
+                PlannerCallableOriginValue::DirectCallableOriginValue(direct) =>
+                    if direct == candidate {
+                        add_candidate_rule(
+                            graph.rules, candidate_rule_seed(), site,
+                            target, [])
+                    },
+                PlannerCallableOriginValue::LocationCallableOriginValue(sources) =>
+                    { for source in sources {
+                        add_candidate_rule(
+                            graph.rules, candidate_rule_copy(), site, target,
+                            [candidate_cell_index(
+                                graph.cells, candidate_cell_state(), body_index,
+                                block_index, boundary,
+                                callable_location_index(
+                                    body, type_nodes, active_formals,
+                                    source), candidate)])
+                    } },
+                PlannerCallableOriginValue::CallCallableOriginValue {
+                    target: call_target, arguments: _
+                } => {
+                    let mut callee = 0
+                    while callee < graph.callable_count {
+                        let supports_result = if
+                                planner_call_target_is_direct(call_target) {
+                            planner_call_target_direct(call_target) == callee &&
+                                planner_call_formal_accepts_candidates(
+                                    type_nodes, call_target, callee,
+                                    callables.get(callee).unwrap()
+                                        .result_type_index,
+                                    active_formals)
+                        } else {
+                            planner_type_is_callable(
+                                type_nodes, callables.get(
+                                    callee).unwrap().result_type_index)
+                        }
+                        if !supports_result {
+                            callee = callee + 1
+                            continue
+                        }
+                        let result_cell = candidate_cell_index(
+                            graph.cells, candidate_cell_result(), callee,
+                            0, 0, 0, candidate)
+                        if planner_call_target_is_direct(call_target) {
+                            if planner_call_target_direct(call_target) == callee {
+                                add_candidate_rule(
+                                    graph.rules, candidate_rule_copy(), site,
+                                    target, [result_cell])
+                            }
+                        } else {
+                            add_candidate_conjunction_rule(
+                                graph.rules, site, target,
+                                candidate_cell_index(
+                                    graph.cells, candidate_cell_state(),
+                                    body_index, block_index, boundary,
+                                    callable_location_index(
+                                        body, type_nodes, active_formals,
+                                        make_planner_callable_slot_location(
+                                            planner_call_target_slot(call_target))),
+                                    callee),
+                                result_cell)
+                        }
+                        callee = callee + 1
+                    }
+                }
+            }
+            match event.value {
+                PlannerEventValue::CallValue {
+                    argument_slots, result_origin_argument_ordinals, ..
+                } => { for ordinal in result_origin_argument_ordinals {
+                    let argument_slot = argument_slots.get(ordinal).unwrap()
+                    if !planner_type_accepts_candidates(
+                            type_nodes,
+                            body.slots.get(argument_slot).unwrap().type_index,
+                            active_formals) {
+                        panic("ResourcePlanner: callable result aliases non-callable argument")
+                    }
+                    add_candidate_rule(
+                        graph.rules, candidate_rule_copy(), site, target,
+                        [candidate_cell_index(
+                            graph.cells, candidate_cell_state(), body_index,
+                            block_index, boundary,
+                            callable_location_index(
+                                body, type_nodes, active_formals,
+                                make_planner_callable_slot_location(
+                                    argument_slot)), candidate)])
+                } },
+                _ => {}
+            }
+            candidate = candidate + 1
+        }
+    }
+}
+
+fn add_candidate_call_argument_rules(
+    graph: CandidateProofGraph, body_index: Int, block_index: Int,
+    boundary: Int, event: PlannerEvent,
+    type_nodes: List<PlannerTypeNode>,
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>,
+    active_formals: List<FlowGenericParamFact>
+) {
+    match event.value {
+        PlannerEventValue::CallValue {
+            call_target, argument_slots, ..
+        } => {
+            let site = make_instruction_candidate_rule_site(
+                make_flow_instruction_ref(
+                    bodies.get(body_index).unwrap().reference,
+                    block_index, boundary))
+            let body = bodies.get(body_index).unwrap()
+            let mut callee = 0
+            while callee < graph.callable_count {
+                let parameter_count = callables.get(
+                    callee).unwrap().parameter_type_indices.len()
+                if parameter_count != argument_slots.len() {
+                    callee = callee + 1
+                    continue
+                }
+                let mut parameter = 0
+                while parameter < parameter_count {
+                    let formal_type = callables.get(callee).unwrap()
+                        .parameter_type_indices.get(parameter).unwrap()
+                    let supports_parameter = if
+                            planner_call_target_is_direct(call_target) {
+                        planner_call_target_direct(call_target) == callee &&
+                            planner_call_formal_accepts_candidates(
+                                type_nodes, call_target, callee,
+                                formal_type, active_formals)
+                    } else {
+                        planner_type_is_callable(type_nodes, formal_type)
+                    }
+                    if !supports_parameter {
+                        parameter = parameter + 1
+                        continue
+                    }
+                    let argument_slot = argument_slots.get(parameter).unwrap()
+                    if !planner_type_accepts_candidates(
+                            type_nodes,
+                            body.slots.get(argument_slot).unwrap().type_index,
+                            active_formals) {
+                        panic("ResourcePlanner: callable parameter receives non-callable slot")
+                    }
+                    let mut candidate = 0
+                    while candidate < graph.callable_count {
+                        let target = candidate_cell_index(
+                            graph.cells, candidate_cell_parameter(), callee,
+                            0, 0, parameter, candidate)
+                        let argument_cell = candidate_cell_index(
+                            graph.cells, candidate_cell_state(), body_index,
+                            block_index, boundary,
+                            callable_location_index(
+                                body, type_nodes, active_formals,
+                                make_planner_callable_slot_location(
+                                    argument_slot)), candidate)
+                        if planner_call_target_is_direct(call_target) {
+                            if planner_call_target_direct(call_target) == callee {
+                                add_candidate_rule(
+                                    graph.rules, candidate_rule_copy(), site,
+                                    target, [argument_cell])
+                            }
+                        } else {
+                            add_candidate_conjunction_rule(
+                                graph.rules, site, target,
+                                candidate_cell_index(
+                                    graph.cells, candidate_cell_state(),
+                                    body_index, block_index, boundary,
+                                    callable_location_index(
+                                        body, type_nodes, active_formals,
+                                        make_planner_callable_slot_location(
+                                            planner_call_target_slot(call_target))),
+                                    callee),
+                                argument_cell)
+                        }
+                        candidate = candidate + 1
+                    }
+                    parameter = parameter + 1
+                }
+                callee = callee + 1
+            }
+        },
+        _ => {}
+    }
+}
+
+pub fn build_candidate_proof_graph(
+    type_nodes: List<PlannerTypeNode>,
+    callables: List<PlannerCallable>, bodies: List<PlannerBody>
+) -> CandidateProofGraph {
+    let mut cells: List<CandidateCellSpec> = []
+    let rules: List<CandidateRule> = []
+    let callable_count = callables.len()
+    let active_formals = collect_active_candidate_formals(
+        type_nodes, bodies)
+    let mut callable_index = 0
+    while callable_index < callable_count {
+        let callable = callables.get(callable_index).unwrap()
+        let mut parameter = 0
+        while parameter < callable.parameter_type_indices.len() {
+            if planner_type_accepts_candidates(
+                    type_nodes,
+                    callable.parameter_type_indices.get(parameter).unwrap(),
+                    active_formals) {
+                let mut candidate = 0
+                while candidate < callable_count {
+                    cells.push(make_candidate_cell_spec(
+                        candidate_cell_parameter(), callable_index,
+                        0, 0, parameter, candidate))
+                    candidate = candidate + 1
+                }
+            }
+            parameter = parameter + 1
+        }
+        if planner_type_accepts_candidates(
+                type_nodes, callable.result_type_index, active_formals) {
+            let mut candidate = 0
+            while candidate < callable_count {
+                cells.push(make_candidate_cell_spec(
+                    candidate_cell_result(), callable_index,
+                    0, 0, 0, candidate))
+                candidate = candidate + 1
+            }
+        }
+        callable_index = callable_index + 1
+    }
+    let mut body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let locations = body_callable_locations(
+            body, type_nodes, active_formals)
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut boundary = 0
+            while boundary <= block.events.len() {
+                let mut location = 0
+                while location < locations.len() {
+                    let mut candidate = 0
+                    while candidate < callable_count {
+                        cells.push(make_candidate_cell_spec(
+                            candidate_cell_state(), body_index,
+                            block_index, boundary, location, candidate))
+                        candidate = candidate + 1
+                    }
+                    location = location + 1
+                }
+                boundary = boundary + 1
+            }
+            block_index = block_index + 1
+        }
+        body_index = body_index + 1
+    }
+    let graph = CandidateProofGraph {
+        callable_count: callable_count, cells: cells, rules: rules
+    }
+    // ContractOnly callable result aliases are global copy rules.
+    callable_index = 0
+    while callable_index < callable_count {
+        let callable = callables.get(callable_index).unwrap()
+        if !callable.has_body && planner_type_accepts_candidates(
+                type_nodes, callable.result_type_index, active_formals) {
+            for parameter in callable.result_origin_parameter_ordinals {
+                if !planner_type_accepts_candidates(
+                        type_nodes,
+                        callable.parameter_type_indices.get(parameter).unwrap(),
+                        active_formals) {
+                    panic("ResourcePlanner: callable result aliases non-callable parameter")
+                }
+                let mut candidate = 0
+                while candidate < callable_count {
+                    add_candidate_rule(
+                        graph.rules, candidate_rule_copy(),
+                        make_global_candidate_rule_site(),
+                        candidate_cell_index(
+                            graph.cells, candidate_cell_result(),
+                            callable_index, 0, 0, 0, candidate),
+                        [candidate_cell_index(
+                            graph.cells, candidate_cell_parameter(),
+                            callable_index, 0, 0, parameter, candidate)])
+                    candidate = candidate + 1
+                }
+            }
+        }
+        callable_index = callable_index + 1
+    }
+    body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let locations = body_callable_locations(
+            body, type_nodes, active_formals)
+        let reachable = planner_body_reachable_blocks(body)
+        let callable = flow_callable_index_for_planner(
+            callables, body.reference)
+        // Entry parameter cells.
+        let mut slot_index = 0
+        while slot_index < body.slots.len() {
+            match body.slots.get(slot_index).unwrap().parameter_ordinal {
+                some(parameter) => {
+                    if !planner_type_accepts_candidates(
+                            type_nodes,
+                            body.slots.get(slot_index).unwrap().type_index,
+                            active_formals) {
+                        slot_index = slot_index + 1
+                        continue
+                    }
+                    let mut candidate = 0
+                    while candidate < callable_count {
+                        add_candidate_rule(
+                            graph.rules, candidate_rule_copy(),
+                            make_global_candidate_rule_site(),
+                            candidate_cell_index(
+                                graph.cells, candidate_cell_state(), body_index,
+                                body.entry_block, 0,
+                                callable_location_index(
+                                    body, type_nodes, active_formals,
+                                    make_planner_callable_slot_location(
+                                        slot_index)), candidate),
+                            [candidate_cell_index(
+                                graph.cells, candidate_cell_parameter(),
+                                callable, 0, 0, parameter, candidate)])
+                        candidate = candidate + 1
+                    }
+                },
+                none => {}
+            }
+            slot_index = slot_index + 1
+        }
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            if !reachable.get(block_index).unwrap() {
+                block_index = block_index + 1
+                continue
+            }
+            let mut boundary = 0
+            while boundary < block.events.len() {
+                let event = block.events.get(boundary).unwrap()
+                let site = make_instruction_candidate_rule_site(
+                    make_flow_instruction_ref(
+                        body.reference, block_index, boundary))
+                let mut location = 0
+                while location < locations.len() {
+                    if !event_candidate_location_overwritten(
+                            event, body, locations.get(location).unwrap(),
+                            type_nodes, active_formals) {
+                        let mut candidate = 0
+                        while candidate < callable_count {
+                            add_candidate_rule(
+                                graph.rules, candidate_rule_copy(), site,
+                                candidate_cell_index(
+                                    graph.cells, candidate_cell_state(),
+                                    body_index, block_index, boundary + 1,
+                                    location, candidate),
+                                [candidate_cell_index(
+                                    graph.cells, candidate_cell_state(),
+                                    body_index, block_index, boundary,
+                                    location, candidate)])
+                            candidate = candidate + 1
+                        }
+                    }
+                    location = location + 1
+                }
+                add_candidate_provenance_rules(
+                    graph, body_index, block_index, boundary,
+                    event, type_nodes, callables, bodies, active_formals)
+                add_candidate_value_transfer_rules(
+                    graph, body_index, block_index, boundary,
+                    event, type_nodes, callables, bodies, active_formals)
+                add_candidate_call_argument_rules(
+                    graph, body_index, block_index, boundary,
+                    event, type_nodes, callables, bodies, active_formals)
+                boundary = boundary + 1
+            }
+            let end_boundary = block.events.len()
+            if block.terminator_kind == 3 &&
+               planner_type_accepts_candidates(
+                    type_nodes,
+                    callables.get(callable).unwrap().result_type_index,
+                    active_formals) {
+                for usage in block.terminator_uses {
+                    if !planner_type_accepts_candidates(
+                            type_nodes,
+                            body.slots.get(usage.slot).unwrap().type_index,
+                            active_formals) {
+                        panic("ResourcePlanner: callable return uses non-callable slot")
+                    }
+                    let mut candidate = 0
+                    while candidate < callable_count {
+                        add_candidate_rule(
+                            graph.rules, candidate_rule_copy(),
+                            make_terminator_candidate_rule_site(
+                                make_flow_block_ref(body.reference, block_index)),
+                            candidate_cell_index(
+                                graph.cells, candidate_cell_result(),
+                                callable, 0, 0, 0, candidate),
+                            [candidate_cell_index(
+                                graph.cells, candidate_cell_state(), body_index,
+                                block_index, end_boundary,
+                                callable_location_index(
+                                    body, type_nodes, active_formals,
+                                    make_planner_callable_slot_location(
+                                        usage.slot)), candidate)])
+                        candidate = candidate + 1
+                    }
+                }
+            }
+            let mut edge_index = 0
+            while edge_index < block.edges.len() {
+                let edge = block.edges.get(edge_index).unwrap()
+                match edge.target_block {
+                    some(target_block) => {
+                        let mut location = 0
+                        while location < locations.len() {
+                            let exact_location = locations.get(location).unwrap()
+                            let base_slot = if planner_callable_location_is_slot(
+                                    exact_location) {
+                                planner_callable_location_slot(exact_location)
+                            } else {
+                                planner_callable_location_base(exact_location)
+                            }
+                            if !int_list_contains(
+                                    edge.exited_scope_ids,
+                                    body.slots.get(base_slot).unwrap().scope_id) {
+                                let mut candidate = 0
+                                while candidate < callable_count {
+                                    add_candidate_rule(
+                                        graph.rules, candidate_rule_copy(),
+                                        make_edge_candidate_rule_site(
+                                            make_flow_block_ref(
+                                                body.reference, block_index),
+                                            edge_index),
+                                        candidate_cell_index(
+                                            graph.cells, candidate_cell_state(),
+                                            body_index, target_block, 0,
+                                            location, candidate),
+                                        [candidate_cell_index(
+                                            graph.cells, candidate_cell_state(),
+                                            body_index, block_index,
+                                            end_boundary, location, candidate)])
+                                    candidate = candidate + 1
+                                }
+                            }
+                            location = location + 1
+                        }
+                    },
+                    none => {}
+                }
+                edge_index = edge_index + 1
+            }
+            block_index = block_index + 1
+        }
+        body_index = body_index + 1
+    }
+    graph
+}
+
+fn candidate_rule_is_enabled(
+    rule: CandidateRule, values: List<Bool>
+) -> Bool {
+    if candidate_rule_kind_tag(candidate_rule_kind(rule)) ==
+       candidate_rule_kind_tag(candidate_rule_seed()) {
+        return true
+    }
+    for premise in candidate_rule_premise_cells(rule) {
+        if !values.get(premise).unwrap() { return false }
+    }
+    true
+}
+
+pub fn solve_candidate_proof_graph(
+    graph: CandidateProofGraph
+) -> CallableCandidateProof {
+    let mut values: List<Bool> = []
+    for _ in graph.cells { values.push(false) }
+    let mut promotions: List<CandidatePromotion> = []
+    let mut changed = true
+    while changed {
+        changed = false
+        let mut rule_index = 0
+        while rule_index < graph.rules.len() {
+            let rule = graph.rules.get(rule_index).unwrap()
+            let target = candidate_rule_target_cell(rule)
+            if !values.get(target).unwrap() &&
+               candidate_rule_is_enabled(rule, values) {
+                let mut premises: List<Bool> = []
+                for premise in candidate_rule_premise_cells(rule) {
+                    premises.push(values.get(premise).unwrap())
+                }
+                promotions.push(make_candidate_promotion(
+                    rule_index, target, premises))
+                values.set(target, true)
+                changed = true
+                if promotions.len() > graph.cells.len() {
+                    panic("ResourcePlanner: candidate proof exceeds strict rank budget")
+                }
+            }
+            rule_index = rule_index + 1
+        }
+    }
+    make_callable_candidate_proof(
+        graph.callable_count, graph.cells, graph.rules,
+        promotions, values, [])
+}
+
+fn proof_state_candidate_set(
+    proof: CallableCandidateProof, body: Int, block: Int,
+    boundary: Int, component: Int
+) -> List<Bool> {
+    let cells = callable_candidate_proof_cells(proof)
+    let values = callable_candidate_proof_final_values(proof)
+    let mut result = empty_candidate_set(
+        callable_candidate_proof_callable_count(proof))
+    let mut candidate = 0
+    while candidate < result.len() {
+        let cell = candidate_cell_index(
+            cells, candidate_cell_state(), body,
+            block, boundary, component, candidate)
+        result.set(candidate, values.get(cell).unwrap())
+        candidate = candidate + 1
+    }
+    result
+}
+
+pub fn derive_candidate_selections(
+    proof: CallableCandidateProof, type_nodes: List<PlannerTypeNode>,
+    bodies: List<PlannerBody>
+) -> List<CandidateSelection> {
+    let mut result: List<CandidateSelection> = []
+    let active_formals = collect_active_candidate_formals(
+        type_nodes, bodies)
+    let mut body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let reachable = planner_body_reachable_blocks(body)
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            if !reachable.get(block_index).unwrap() {
+                block_index = block_index + 1
+                continue
+            }
+            let mut boundary = 0
+            while boundary < block.events.len() {
+                match block.events.get(boundary).unwrap().value {
+                    PlannerEventValue::CallValue { call_target, .. } => {
+                        if !planner_call_target_is_direct(call_target) {
+                            let candidates = candidate_set_indices(
+                                proof_state_candidate_set(
+                                    proof, body_index, block_index, boundary,
+                                    callable_location_index(
+                                        body, type_nodes, active_formals,
+                                        make_planner_callable_slot_location(
+                                            planner_call_target_slot(
+                                                call_target)))))
+                            result.push(make_candidate_selection(
+                                make_flow_instruction_ref(
+                                    body.reference, block_index, boundary),
+                                candidates))
+                        }
+                    },
+                    _ => {}
+                }
+                boundary = boundary + 1
+            }
+            block_index = block_index + 1
+        }
+        body_index = body_index + 1
+    }
+    result
+}
+
+pub fn with_candidate_selections(
+    value: CallableCandidateProof, selections: List<CandidateSelection>
+) -> CallableCandidateProof {
+    make_callable_candidate_proof(
+        callable_candidate_proof_callable_count(value),
+        callable_candidate_proof_cells(value),
+        callable_candidate_proof_rules(value),
+        callable_candidate_proof_promotions(value),
+        callable_candidate_proof_final_values(value), selections)
+}
+
+pub fn resolve_bodies_from_candidate_proof(
+    proof: CallableCandidateProof, type_nodes: List<PlannerTypeNode>,
+    bodies: List<PlannerBody>
+) -> List<PlannerBody> {
+    let mut result: List<PlannerBody> = []
+    let active_formals = collect_active_candidate_formals(
+        type_nodes, bodies)
+    let mut body_index = 0
+    while body_index < bodies.len() {
+        let body = bodies.get(body_index).unwrap()
+        let reachable = planner_body_reachable_blocks(body)
+        let mut blocks: List<PlannerBlock> = []
+        let mut block_index = 0
+        while block_index < body.blocks.len() {
+            let block = body.blocks.get(block_index).unwrap()
+            let mut events: List<PlannerEvent> = []
+            if !reachable.get(block_index).unwrap() {
+                for event in block.events {
+                    events.push(copy_planner_event(event))
+                }
+                blocks.push(make_planner_block(
+                    block.terminator_kind, events,
+                    block.terminator_uses, block.edges))
+                block_index = block_index + 1
+                continue
+            }
+            let mut boundary = 0
+            while boundary < block.events.len() {
+                let event = block.events.get(boundary).unwrap()
+                let resolved = match event.value {
+                    PlannerEventValue::CallValue { call_target, .. } => {
+                        let candidates = if planner_call_target_is_direct(
+                                call_target) {
+                            [planner_call_target_direct(call_target)]
+                        } else {
+                            candidate_set_indices(proof_state_candidate_set(
+                                proof, body_index, block_index, boundary,
+                                callable_location_index(
+                                    body, type_nodes, active_formals,
+                                    make_planner_callable_slot_location(
+                                        planner_call_target_slot(call_target)))))
+                        }
+                        if candidates.len() == 0 {
+                            panic("ResourcePlanner: certified required call is empty")
+                        }
+                        replace_call_candidates(event, candidates)
+                    },
+                    _ => copy_planner_event(event)
+                }
+                events.push(resolved)
+                boundary = boundary + 1
+            }
+            blocks.push(make_planner_block(
+                block.terminator_kind, events,
+                block.terminator_uses, block.edges))
+            block_index = block_index + 1
+        }
+        result.push(make_planner_body(
+            body.reference, body.scopes, body.slots,
+            body.entry_block, blocks))
+        body_index = body_index + 1
+    }
+    result
+}

@@ -1,18 +1,49 @@
-use types::{Type, EffectRow, type_to_string, effect_row_to_string, nominal_display_name}
-use ast::{Program, UseDecl, TypeParam, Span}
-use hir::{HProgram, HDecl, HParam, module_item_identity, is_module_item_identity}
-use diagnostics::{Severity, DiagnosticContext, CollectingSink, Diagnostic, new_collecting_sink, make_diag}
+use types::{nominal_display_name}
+use ast::{Program, UseDecl, Span}
+use hir::{HProgram, HDecl,
+    module_item_identity, is_module_item_identity}
+use diagnostics::{Severity, DiagnosticContext, new_collecting_sink, make_diag}
 use formatter::{format_human, format_llm}
 use env::{TypeEnv}
 use checker::{check_module}
+use core_from_hir::{
+    FrozenCoreAssemblyFacts, CoreAssemblyResult,
+    assemble_project_core, core_assembly_result_program,
+    core_assembly_result_diagnostic_projection,
+    core_assembly_result_with_program}
+use core_expr::{
+    CoreExecutableRedirect,
+    core_executable_redirect_source, core_executable_redirect_target,
+    CoreCallableContract, core_callable_reference, core_callable_mode,
+    core_callable_redirect}
+use core_hir::{CoreProgram, core_program_callables, core_program_type_graph,
+    redirect_core_program_executables}
+use ir_inventory::{ExecutableRef, executable_ref_is_named,
+    executable_ref_named_symbol, executable_ref_same,
+    executable_contract_mode_same,
+    executable_contract_mode_concrete_body,
+    executable_contract_mode_contract_only}
+use ir_identity::{symbol_ref_canonical_payload}
+use legacy_projection::{LegacyProjectionFacts}
 use codegen_c::{generate_c_project}
 use resolver::{ModuleGraph, ModuleId, module_key, module_prefix,
     build_module_graph}
 use exports::{ModuleExports, extract_exports}
-use perceus::{perceus_transform, perceus_transform_mutated}
-use verify_rc::{RcFinding, verify_rc_program, rc_fatal_count, format_rc_findings}
+use legacy_projection::{assemble_legacy_projection}
+use ownership_pipeline::{
+    VerifiedOwnershipProgram, OwnershipPipelineOutcome,
+    run_ownership_pipeline,
+    ownership_pipeline_outcome_is_verified,
+    ownership_pipeline_outcome_verified,
+    ownership_pipeline_failure_diagnostics,
+    verified_ownership_program_flow}
+use rc_hir_bridge::{VerifiedProjectHirShell,
+    make_verified_project_hir_shell, materialize_verified_project_hir,
+    MaterializedProjectHirResult, materialized_project_hir_modules,
+    materialized_project_hir_effect_ctx_tokens,
+    materialized_project_hir_module_key,
+    materialized_project_hir_program}
 use codes::{E0708}
-use infer_helpers::{is_value_type}
 use phase_timing::{
     PhaseTiming, PHASE_PROJECT_MODULE_LOAD_PARSE,
     PHASE_TYPE_EFFECT_CHECK_LOWER, PHASE_RESOURCE_PLAN_VERIFY}
@@ -27,25 +58,153 @@ pub struct CompileProjectResult {
 
 struct CompilePhaseResult {
     graph: ModuleGraph,
+    prelude_physical_owner_module_key: Str,
     module_asts: Map<Str, Program>,
     module_hirs: Map<Str, HProgram>,
+    module_core_facts: Map<Str, FrozenCoreAssemblyFacts>,
+    module_legacy_facts: Map<Str, LegacyProjectionFacts>,
     module_exports_map: Map<Str, ModuleExports>,
-    extern_forward_bridges: Map<Str, Str>
+    extern_forward_candidates: List<ProjectExternForwardCandidateSet>
 }
 
+struct ProjectOwnershipRun {
+    assembly: CoreAssemblyResult,
+    ownership: OwnershipPipelineOutcome,
+    redirects: List<CoreExecutableRedirect>
+}
+
+fn run_project_ownership(
+    phases: CompilePhaseResult, error_format: Str
+) -> ProjectOwnershipRun? {
+    let mut core_facts: List<FrozenCoreAssemblyFacts> = []
+    for key in phases.graph.topo_order {
+        core_facts.push(phases.module_core_facts.get(key).unwrap_or_else(fn() {
+            panic("project ownership: Core facts are absent")
+        }))
+    }
+    let assembled = assemble_project_core(core_facts)
+    let program = core_assembly_result_program(assembled)
+    let redirects = match resolve_project_extern_redirects(
+            phases, program, error_format) {
+        some(value) => value,
+        none => return none
+    }
+    let redirected = redirect_core_program_executables(program, redirects)
+    let assembly = core_assembly_result_with_program(assembled, redirected)
+    some(ProjectOwnershipRun {
+        assembly: assembly,
+        ownership: run_ownership_pipeline(
+            core_assembly_result_program(assembly)),
+        redirects: redirects
+    })
+}
+
+fn report_project_ownership_failure(
+    phases: CompilePhaseResult, assembly: CoreAssemblyResult,
+    outcome: OwnershipPipelineOutcome, error_format: Str
+) {
+    let projection = core_assembly_result_diagnostic_projection(assembly)
+    let routed = ownership_pipeline_failure_diagnostics(
+        outcome, projection)
+    for projected in routed {
+        let (finding_module_key, diagnostic) = projected
+        let module = phases.graph.modules.get(
+            finding_module_key).unwrap_or_else(fn() {
+                panic("project ownership diagnostic: projected module is absent")
+            })
+        if diagnostic.span.file != module.file_path {
+            panic("project ownership diagnostic: projected span crosses module file")
+        }
+    }
+    let mut emitted = false
+    for key in phases.graph.topo_order {
+        let mut sink = new_collecting_sink()
+        for routed_diagnostic in routed {
+            let (finding_module_key, diagnostic) = routed_diagnostic
+            if finding_module_key == key {
+                sink.report(diagnostic)
+            }
+        }
+        if sink.has_errors() {
+            emitted = true
+            let module = phases.graph.modules.get(key).unwrap_or_else(fn() {
+                panic("project ownership diagnostic: module is absent")
+            })
+            if error_format == "llm" {
+                eprintln(format_llm(sink.diagnostics(), module.file_path))
+            } else {
+                eprintln(format_human(
+                    sink.diagnostics(), read_file(module.file_path)))
+            }
+        }
+    }
+    if !emitted {
+        panic("project ownership diagnostic: failed plan emitted no error")
+    }
+}
+
+fn materialize_verified_project_ownership(
+    phases: CompilePhaseResult, assembly: CoreAssemblyResult,
+    verified: VerifiedOwnershipProgram
+) -> MaterializedProjectHirResult {
+    let mut legacy_facts: List<LegacyProjectionFacts> = []
+    let mut shells: List<VerifiedProjectHirShell> = []
+    for key in phases.graph.topo_order {
+        legacy_facts.push(
+            phases.module_legacy_facts.get(key).unwrap_or_else(fn() {
+                panic("project ownership: legacy facts are absent")
+            }))
+        shells.push(make_verified_project_hir_shell(
+            key, phases.module_hirs.get(key).unwrap_or_else(fn() {
+                panic("project ownership: HIR shell is absent")
+            })))
+    }
+    let projection = assemble_legacy_projection(
+        legacy_facts, assembly,
+        verified_ownership_program_flow(verified))
+    let materialized = materialize_verified_project_hir(
+        shells, phases.prelude_physical_owner_module_key, verified, projection)
+    let mut seen: Set<Str> = set_new()
+    for value in materialized_project_hir_modules(materialized) {
+        let key = materialized_project_hir_module_key(value)
+        if seen.contains(key) {
+            panic("project ownership: materialized module repeats")
+        }
+        seen.insert(key)
+    }
+    if seen.len() != phases.graph.topo_order.len() {
+        panic("project ownership: materialized module census differs")
+    }
+    materialized
+}
+
+// Project checking produces one already-dict-lowered HProgram per module.
+// Keep builtin derived bodies in the first deterministic physical carrier so
+// project codegen observes the same builtin-before-user order as single-file
+// codegen without per-module synthesis or backend deduplication.
 struct ProjectRingFnCandidate {
     module_key: Str,
-    identity: Str,
-    leaf: Str,
-    signature: Str
+    executable: ExecutableRef,
+    leaf: Str
 }
 
 struct ProjectExternForward {
     module_key: Str,
-    identity: Str,
+    executable: ExecutableRef,
     abi_name: Str,
-    signature: Str,
     span: Span
+}
+
+struct ProjectExternForwardCandidateSet {
+    forward: ProjectExternForward,
+    candidates: List<ProjectRingFnCandidate>
+}
+
+fn project_executable_identity(value: ExecutableRef) -> Str {
+    if !executable_ref_is_named(value) {
+        panic("project extern forward: executable is not named")
+    }
+    symbol_ref_canonical_payload(executable_ref_named_symbol(value))
 }
 
 fn project_identity_leaf(identity: Str) -> Str {
@@ -55,50 +214,19 @@ fn project_identity_leaf(identity: Str) -> Str {
     file_parts.get(file_parts.len() - 1).unwrap_or(inline_leaf)
 }
 
-// Conservative compatibility key for an intentional raw ExternFn forward.
-// Resolved nominal identities remain visible in type_to_string, while named
-// type parameters allow the same explicit generic signature to match across
-// independently checked modules. Bounded generics are deliberately not
-// bridged until their constraints can be compared structurally.
-fn project_callable_signature(
-    type_params: List<TypeParam>, params: List<HParam>,
-    return_type: Type, effects: EffectRow
-) -> Str? {
-    let mut tparams: List<Str> = []
-    for tp in type_params {
-        if tp.bounds.len() > 0 { return none }
-        tparams.push(tp.name)
-    }
-    let mut param_types: List<Str> = []
-    for p in params {
-        // A normal Ring `mut` value-type parameter uses the CELL ABI, while a
-        // genuine ExternFn does not register caller pre-boxing metadata. Until
-        // the checker can mark a declaration as an internal forward explicitly,
-        // do not bridge this ABI-sensitive shape. Mutable struct/context params
-        // are reference-shaped and safe to compare exactly below.
-        if p.is_mutable && is_value_type(p.ty) { return none }
-        let mutability = if p.is_mutable { "mut " } else { "" }
-        param_types.push("${mutability}${type_to_string(p.ty)}")
-    }
-    some("<${tparams.join(",")}>(${param_types.join(",")})->${type_to_string(return_type)} with {${effect_row_to_string(effects)}}")
-}
-
 fn collect_project_ring_candidates(
     module_key_: Str, decls: List<HDecl>, mut out: List<ProjectRingFnCandidate>
 ) {
     for decl in decls {
         match decl {
-            HDecl::Fn { name, type_params, params, return_type, effects, is_pub, .. } => {
+            HDecl::Fn { name, executable_ref, is_pub, .. } => {
                 // Raw prelude functions are repeated in every HProgram. Only a
                 // canonical project definition may satisfy a project forward.
                 if is_pub && is_module_item_identity(name) {
-                    match project_callable_signature(type_params, params, return_type, effects) {
-                        some(signature) => out.push(ProjectRingFnCandidate {
-                            module_key: module_key_, identity: name,
-                            leaf: project_identity_leaf(name), signature: signature
-                        }),
-                        none => {}
-                    }
+                    out.push(ProjectRingFnCandidate {
+                        module_key: module_key_, executable: executable_ref,
+                        leaf: project_identity_leaf(name)
+                    })
                 }
             },
             HDecl::ModBlock { decls: nested, .. } => {
@@ -115,18 +243,15 @@ fn collect_project_extern_forwards(
 ) {
     for decl in decls {
         match decl {
-            HDecl::ExternFn { name, abi_name, type_params, params, return_type, effects, span, .. } => {
+            HDecl::ExternFn { name, abi_name, executable_ref, span, .. } => {
                 // Prelude externs use compiler-intrinsic identities and inline
                 // externs have an additional `::` component. Only this file
                 // module's exact top-level declaration may cycle-break.
                 if name == module_item_identity(module_prefix_, abi_name) {
-                    match project_callable_signature(type_params, params, return_type, effects) {
-                        some(signature) => out.push(ProjectExternForward {
-                            module_key: module_key_, identity: name,
-                            abi_name: abi_name, signature: signature, span: span
-                        }),
-                        none => {}
-                    }
+                    out.push(ProjectExternForward {
+                        module_key: module_key_, executable: executable_ref,
+                        abi_name: abi_name, span: span
+                    })
                 }
             },
             HDecl::ModBlock { decls: nested, .. } => {
@@ -152,7 +277,10 @@ fn report_extern_forward_ambiguity(
     candidates: List<ProjectRingFnCandidate>, error_format: Str
 ) {
     let mut names: List<Str> = []
-    for candidate in candidates { names.push(nominal_display_name(candidate.identity)) }
+    for candidate in candidates {
+        names.push(nominal_display_name(
+            project_executable_identity(candidate.executable)))
+    }
     names.sort()
     let mut sink = new_collecting_sink()
     sink.report(make_diag(
@@ -173,13 +301,12 @@ fn report_extern_forward_ambiguity(
     }
 }
 
-// A bridge is evidence-based rather than a leaf-name fallback. The provider
-// must directly depend on the declaration module (the deliberate cycle-break
-// shape), expose one public canonical Ring function, and match its full
-// resolved signature. Zero matches remains real FFI; ambiguity is an error.
-fn build_project_extern_forward_bridges(
-    graph: ModuleGraph, module_hirs: Map<Str, HProgram>, error_format: Str
-) -> Map<Str, Str>? {
+// HIR discovery only identifies possible providers by the existing ABI leaf
+// and deliberate reverse-dependency shape.  It never compares a rendered
+// type.  The one global CoreProgram below owns exact contract selection.
+fn build_project_extern_forward_candidates(
+    graph: ModuleGraph, module_hirs: Map<Str, HProgram>
+) -> List<ProjectExternForwardCandidateSet> {
     let mut candidates: List<ProjectRingFnCandidate> = []
     let mut forwards: List<ProjectExternForward> = []
     for key in graph.topo_order {
@@ -193,32 +320,100 @@ fn build_project_extern_forward_bridges(
         }
     }
 
-    let mut bridges: Map<Str, Str> = map_new()
-    let mut has_ambiguity = false
+    let mut result: List<ProjectExternForwardCandidateSet> = []
     for forward in forwards {
         let mut matching: List<ProjectRingFnCandidate> = []
         for candidate in candidates {
             if candidate.leaf == forward.abi_name &&
-               candidate.signature == forward.signature &&
                module_directly_depends_on(graph, candidate.module_key, forward.module_key) {
                 matching.push(candidate)
             }
         }
-        if matching.len() == 1 {
-            match matching.get(0) {
-                some(candidate) => {
-                    bridges.insert(forward.identity, candidate.identity)
-                },
-                none => {}
+        result.push(ProjectExternForwardCandidateSet {
+            forward: forward, candidates: matching
+        })
+    }
+    result
+}
+
+fn project_core_callable(
+    callables: List<CoreCallableContract>, reference: ExecutableRef
+) -> CoreCallableContract {
+    let mut found: CoreCallableContract? = none
+    for callable in callables {
+        if executable_ref_same(core_callable_reference(callable), reference) {
+            if found.is_some() {
+                panic("project extern forward: callable contract repeats")
             }
+            found = some(callable)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("project extern forward: exact callable is absent")
+    }
+}
+
+fn resolve_project_extern_redirects(
+    phases: CompilePhaseResult, program: CoreProgram, error_format: Str
+) -> List<CoreExecutableRedirect>? {
+    let graph = core_program_type_graph(program)
+    let callables = core_program_callables(program)
+    let mut redirects: List<CoreExecutableRedirect> = []
+    let mut has_ambiguity = false
+    for group in phases.extern_forward_candidates {
+        let source = project_core_callable(
+            callables, group.forward.executable)
+        if !executable_contract_mode_same(
+                core_callable_mode(source),
+                executable_contract_mode_contract_only()) {
+            panic("project extern forward: source is not contract-only")
+        }
+        let mut matching: List<ProjectRingFnCandidate> = []
+        let mut matching_redirects: List<CoreExecutableRedirect> = []
+        for candidate in group.candidates {
+            let target = project_core_callable(
+                callables, candidate.executable)
+            if executable_contract_mode_same(
+                    core_callable_mode(target),
+                    executable_contract_mode_concrete_body()) {
+                match core_callable_redirect(source, target, graph) {
+                    some(redirect) => {
+                        matching.push(candidate)
+                        matching_redirects.push(redirect)
+                    },
+                    none => {}
+                }
+            }
+        }
+        if matching.len() == 1 {
+            redirects.push(matching_redirects.get(0).unwrap())
         } else if matching.len() > 1 {
-            report_extern_forward_ambiguity(graph, forward, matching, error_format)
+            report_extern_forward_ambiguity(
+                phases.graph, group.forward, matching, error_format)
             has_ambiguity = true
         }
-        // A same-leaf but incompatible/unrelated definition is intentionally
-        // not a candidate: preserve the raw foreign ABI symbol.
+        // Zero exact Core matches is an ordinary raw extern.  A same-leaf
+        // nominal from another module cannot manufacture a redirect.
     }
-    if has_ambiguity { none } else { some(bridges) }
+    if has_ambiguity { none } else { some(redirects) }
+}
+
+fn codegen_extern_forward_bridges(
+    values: List<CoreExecutableRedirect>
+) -> Map<Str, Str> {
+    let mut result: Map<Str, Str> = map_new()
+    for value in values {
+        let source = project_executable_identity(
+            core_executable_redirect_source(value))
+        let target = project_executable_identity(
+            core_executable_redirect_target(value))
+        if source == target || result.contains_key(source) {
+            panic("project extern forward: typed redirect is invalid/duplicated")
+        }
+        result.insert(source, target)
+    }
+    result
 }
 
 fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -> CompilePhaseResult? {
@@ -234,7 +429,13 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
             let check_start = timing.start_phase()
             let mut module_asts: Map<Str, Program> = map_new()
             let mut module_hirs: Map<Str, HProgram> = map_new()
+            let mut module_core_facts: Map<Str, FrozenCoreAssemblyFacts> = map_new()
+            let mut module_legacy_facts: Map<Str, LegacyProjectionFacts> = map_new()
             let mut module_exports_map: Map<Str, ModuleExports> = map_new()
+            let prelude_physical_owner_module_key =
+                graph.topo_order.get(0).unwrap_or_else(fn() {
+                    panic("project checker: module graph has no physical prelude owner")
+                })
 
             // Use cached ASTs from resolver (already parsed during graph construction)
             for key in graph.topo_order {
@@ -249,6 +450,7 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
             // B-145: store each module's type env so the extern-type union below
             // can filter by StructDef.is_extern, avoiding bare-name collisions.
             let mut module_envs: Map<Str, TypeEnv> = map_new()
+            let mut module_order = 0
             for key in graph.topo_order {
                 if check_ok {
                     match module_asts.get(key) {
@@ -271,6 +473,8 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                             }
                             let result = check_module(
                                 ast, key, current_prefix,
+                                module_order,
+                                prelude_physical_owner_module_key,
                                 graph.namespace_plan, dep_exports, sink)
                             if sink.has_errors() {
                                 let mod_file = match graph.modules.get(key) { some(m) => m.file_path, none => "" }
@@ -282,34 +486,79 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                                 }
                                 check_ok = false
                             } else {
-                                // Surface check warnings (non-error diagnostics) without failing the build
-                                if sink.items.len() > 0 {
-                                    let mod_file = match graph.modules.get(key) { some(m) => m.file_path, none => "" }
-                                    if error_format == "llm" {
-                                        eprintln(format_llm(sink.diagnostics(), mod_file))
-                                    } else {
-                                        let src = read_file(mod_file)
-                                        eprintln(format_human(sink.diagnostics(), src))
-                                    }
+                                if result.prelude_physical_owner_module_key !=
+                                        prelude_physical_owner_module_key {
+                                    panic("project checker: module prelude owner drifted")
                                 }
-                                module_hirs.insert(key, result.program)
-                                module_envs.insert(key, result.env)
-                                match graph.modules.get(key) {
+                                let exported = match graph.modules.get(key) {
                                     some(mod_) => {
                                         let prefix = module_prefix(mod_.path_segments)
-                                        let exp = extract_exports(key, prefix, ast, result.program, result.env,
-                                            result.fn_mut_params, result.value_origins,
+                                        extract_exports(
+                                            key, prefix, ast, result.program,
+                                            result.env, result.fn_mut_params,
+                                            result.value_symbols,
                                             result.value_binding_kinds,
-                                            result.impl_facts, dep_exports)
-                                        module_exports_map.insert(key, exp)
+                                            result.impl_facts, dep_exports, sink)
                                     },
-                                    none => {},
+                                    none => panic(
+                                        "project checker: checked module metadata is absent")
+                                }
+                                match exported {
+                                    none => {
+                                        let mod_file = match graph.modules.get(key) {
+                                            some(m) => m.file_path,
+                                            none => ""
+                                        }
+                                        if error_format == "llm" {
+                                            eprintln(format_llm(
+                                                sink.diagnostics(), mod_file))
+                                        } else {
+                                            let src = read_file(mod_file)
+                                            eprintln(format_human(
+                                                sink.diagnostics(), src))
+                                        }
+                                        check_ok = false
+                                    },
+                                    some(exp) => {
+                                        // Surface check warnings (non-error
+                                        // diagnostics) without failing build.
+                                        if sink.items.len() > 0 {
+                                            let mod_file = match graph.modules.get(key) {
+                                                some(m) => m.file_path,
+                                                none => ""
+                                            }
+                                            if error_format == "llm" {
+                                                eprintln(format_llm(
+                                                    sink.diagnostics(), mod_file))
+                                            } else {
+                                                let src = read_file(mod_file)
+                                                eprintln(format_human(
+                                                    sink.diagnostics(), src))
+                                            }
+                                        }
+                                        module_hirs.insert(key, result.program)
+                                        module_core_facts.insert(key,
+                                            match result.core_facts {
+                                                some(value) => value,
+                                                none => panic(
+                                                    "project ownership: successful module lacks Core facts")
+                                            })
+                                        module_legacy_facts.insert(key,
+                                            match result.legacy_facts {
+                                                some(value) => value,
+                                                none => panic(
+                                                    "project ownership: successful module lacks legacy facts")
+                                            })
+                                        module_envs.insert(key, result.env)
+                                        module_exports_map.insert(key, exp)
+                                    }
                                 }
                             }
                         },
                         none => { check_ok = false },
                     }
                 }
+                module_order = module_order + 1
             }
             if check_ok == false {
                 timing.finish_phase(PHASE_TYPE_EFFECT_CHECK_LOWER, check_start)
@@ -373,18 +622,20 @@ fn compile_phases(entry_file: Str, error_format: Str, mut timing: PhaseTiming) -
                 }
             }
 
-            let bridges = build_project_extern_forward_bridges(graph, module_hirs, error_format)
+            let candidates = build_project_extern_forward_candidates(
+                graph, module_hirs)
             timing.finish_phase(PHASE_TYPE_EFFECT_CHECK_LOWER, check_start)
-            match bridges {
-                none => none,
-                some(extern_forward_bridges) => some(CompilePhaseResult {
-                    graph: graph,
-                    module_asts: module_asts,
-                    module_hirs: module_hirs,
-                    module_exports_map: module_exports_map,
-                    extern_forward_bridges: extern_forward_bridges
-                })
-            }
+            some(CompilePhaseResult {
+                graph: graph,
+                prelude_physical_owner_module_key:
+                    prelude_physical_owner_module_key,
+                module_asts: module_asts,
+                module_hirs: module_hirs,
+                module_core_facts: module_core_facts,
+                module_legacy_facts: module_legacy_facts,
+                module_exports_map: module_exports_map,
+                extern_forward_candidates: candidates
+            })
         },
     }
 }
@@ -399,8 +650,27 @@ pub fn compile_project(entry_file: Str, error_format: Str, mut timing: PhaseTimi
             timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
             CompileProjectResult { success: false }
         },
-        some(_) => {
-            timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
+        some(phases) => {
+            let resource_start = timing.start_phase()
+            let run_result = run_project_ownership(phases, error_format)
+            if run_result.is_none() {
+                timing.finish_phase(
+                    PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return CompileProjectResult { success: false }
+            }
+            let run = run_result.unwrap()
+            let assembly = run.assembly
+            let ownership = run.ownership
+            if !ownership_pipeline_outcome_is_verified(ownership) {
+                report_project_ownership_failure(
+                    phases, assembly, ownership, error_format)
+                timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return CompileProjectResult { success: false }
+            }
+            let _ = materialize_verified_project_ownership(
+                phases, assembly,
+                ownership_pipeline_outcome_verified(ownership))
+            timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
             CompileProjectResult { success: true }
         },
     }
@@ -428,25 +698,51 @@ pub fn compile_project_c(
         some(phases) => {
             let resource_start = timing.start_phase()
             let entry_key = module_key(phases.graph.entry.path_segments)
+            let run_result = run_project_ownership(phases, error_format)
+            if run_result.is_none() {
+                timing.finish_phase(
+                    PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return CProjectCompileResult { success: false }
+            }
+            let run = run_result.unwrap()
+            let assembly = run.assembly
+            let ownership = run.ownership
+            if !ownership_pipeline_outcome_is_verified(ownership) {
+                report_project_ownership_failure(
+                    phases, assembly, ownership, error_format)
+                timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+                return CProjectCompileResult { success: false }
+            }
+            let materialized = materialize_verified_project_ownership(
+                phases, assembly,
+                ownership_pipeline_outcome_verified(ownership))
+            let effect_ctx_tokens =
+                materialized_project_hir_effect_ctx_tokens(materialized)
+            let mut materialized_programs: Map<Str, HProgram> = map_new()
+            for value in materialized_project_hir_modules(materialized) {
+                materialized_programs.insert(
+                    materialized_project_hir_module_key(value),
+                    materialized_project_hir_program(value))
+            }
 
             // Build list of (module_prefix, HProgram, uses) in topo order
             let mut modules: List<(Str, HProgram, List<UseDecl>)> = []
             let mut entry_prefix = ""
 
             for key in phases.graph.topo_order {
-                match (phases.graph.modules.get(key), phases.module_hirs.get(key), phases.module_asts.get(key)) {
+                match (phases.graph.modules.get(key),
+                       materialized_programs.get(key),
+                       phases.module_asts.get(key)) {
                     (some(mod_), some(hir), some(ast)) => {
                         let prefix = module_prefix(mod_.path_segments)
-                        let rc_hir = perceus_transform(hir)
-                        modules.push((prefix, rc_hir, ast.uses))
+                        modules.push((prefix, hir, ast.uses))
                         if key == entry_key {
                             entry_prefix = prefix
                         }
                     },
                     (some(mod_), some(hir), none) => {
                         let prefix = module_prefix(mod_.path_segments)
-                        let rc_hir = perceus_transform(hir)
-                        modules.push((prefix, rc_hir, []))
+                        modules.push((prefix, hir, []))
                         if key == entry_key {
                             entry_prefix = prefix
                         }
@@ -458,54 +754,9 @@ pub fn compile_project_c(
             timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
             let build_ok = generate_c_project(
                 modules, entry_prefix, c_path, o_path, emit_lines,
-                phases.extern_forward_bridges)
+                codegen_extern_forward_bridges(run.redirects),
+                effect_ctx_tokens)
             CProjectCompileResult { success: build_ok }
-        },
-    }
-}
-
-// ============================================================
-// B-104 D2: multi-file static RC verification
-// Runs the same per-module perceus_transform as native compilation, then
-// the verify_rc linear check on each module's post-RC HIR.
-// ============================================================
-
-pub struct RcProjectVerifyResult {
-    pub success: Bool,
-    pub fatal: Int,
-    pub exempt: Int,
-    pub report: Str
-}
-
-pub fn verify_project_rc(
-    entry_file: Str, mutate: Str, strict: Bool, error_format: Str,
-    mut timing: PhaseTiming
-) -> RcProjectVerifyResult {
-    match compile_phases(entry_file, error_format, timing) {
-        none => {
-            timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
-            RcProjectVerifyResult { success: false, fatal: 0, exempt: 0, report: "" }
-        },
-        some(phases) => {
-            let resource_start = timing.start_phase()
-            let mut all: List<RcFinding> = []
-            for key in phases.graph.topo_order {
-                match phases.module_hirs.get(key) {
-                    some(hir) => {
-                        let rc_hir = perceus_transform_mutated(hir, mutate)
-                        for f in verify_rc_program(rc_hir) { all.push(f) }
-                    },
-                    none => {},
-                }
-            }
-            let fatal = rc_fatal_count(all)
-            timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
-            RcProjectVerifyResult {
-                success: true,
-                fatal: fatal,
-                exempt: all.len() - fatal,
-                report: format_rc_findings(all, strict)
-            }
         },
     }
 }

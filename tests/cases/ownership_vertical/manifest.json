@@ -1,0 +1,629 @@
+{
+  "schema_version": 1,
+  "matrix": "Ring 0.1 ownership/Core/effect/extern vertical",
+  "scope": {
+    "real_consumers_only": true,
+    "post_0_1_cases": 0,
+    "single_and_project_share_one_semantic_entry": true,
+    "source_string_oracle": false
+  },
+  "fixtures": [
+    {
+      "id": "A1",
+      "path": "single/a_deep_clone_collections.ring",
+      "covers": [
+        "List<List<Int>> deep clone",
+        "Option<List<Int>> deep clone",
+        "Map<Int,List<Int>> deep clone",
+        "Set<Int> deep clone",
+        "mutating clone leaves original independent"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "A_DEEP_CLONE_OK\n"
+      }
+    },
+    {
+      "id": "A2",
+      "path": "single/a_deep_clone_generic_bound.ring",
+      "covers": [
+        "generic T: Clone bound",
+        "derived generic deep clone",
+        "nested clone independence"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "A_GENERIC_CLONE_OK\n"
+      }
+    },
+    {
+      "id": "A3",
+      "path": "single/a_missing_clone_bound.ring",
+      "covers": ["missing generic Clone bound fails loud"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0503",
+        "diagnostic_contains": "does not satisfy trait bound 'Clone'"
+      }
+    },
+    {
+      "id": "A4",
+      "path": "single/a_resource_clone_conflict.ring",
+      "covers": ["Drop and Clone are mutually exclusive for Resource"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0802",
+        "diagnostic_contains": "cannot implement both Drop and Clone"
+      }
+    },
+    {
+      "id": "B1",
+      "path": "single/b_type_resource_matrix.ring",
+      "covers": [
+        "direct Resource reuse after generic consume is rejected",
+        "Wrapper<Resource> reuse after generic consume is rejected",
+        "Wrapper<Int> remains a shareable control",
+        "Option<Resource> reuse is rejected",
+        "List<Resource> reuse is rejected",
+        "Map<Int,Resource> reuse is rejected",
+        "Map<Resource,Int> key hidden-storage reuse is rejected",
+        "Set<Resource> reuse is rejected",
+        "tuple Resource payload reuse is rejected",
+        "recursive generic Resource payload reuse is rejected",
+        "each TypeResource shape has a distinct diagnostic observable"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0801",
+        "diagnostic_contains_all": [
+          "use of moved value: 'direct'",
+          "use of moved value: 'wrapped'",
+          "use of moved value: 'optional'",
+          "use of moved value: 'listed'",
+          "use of moved value: 'mapped'",
+          "use of moved value: 'mapped_key'",
+          "use of moved value: 'setted'",
+          "use of moved value: 'tupled'",
+          "use of moved value: 'recursive'"
+        ],
+        "diagnostic_forbidden": ["use of moved value: 'plain'"]
+      }
+    },
+    {
+      "id": "B2",
+      "path": "single/b_ptr_resource_negative_control.ring",
+      "covers": ["Ptr<Resource> does not inherit pointee TypeResource ownership"],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_PTR_NEGATIVE_CONTROL_OK\n"
+      }
+    },
+    {
+      "id": "B3",
+      "path": "single/b_reuse_after_transitive_consume.ring",
+      "covers": ["Wrapper<Resource> becomes unavailable after an owning sink"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0801",
+        "diagnostic_contains": "use of moved value",
+        "diagnostic_line": 24,
+        "diagnostic_column": 11
+      }
+    },
+    {
+      "id": "B4",
+      "path": "single/b_ptr_container_cleanup.ring",
+      "covers": [
+        "Ptr is an exact foreign-containment seed without extern declarations",
+        "List/Option/Map/Box/struct propagate Ptr containment",
+        "automatic aggregate cleanup never deep-drops a raw pointer"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_PTR_CONTAINER_OK\n"
+      }
+    },
+    {
+      "id": "B5",
+      "path": "single/b_field_projection_own_reject.ring",
+      "covers": [
+        "ordinary Own projection of a logical Resource field fails loud",
+        "diagnostic is keyed by the exact projected place",
+        "aggregate base and sibling are never converted into a whole Take"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0801",
+        "diagnostic_contains": "use of moved value"
+      }
+    },
+    {
+      "id": "B6",
+      "path": "single/b_field_projection_share_clone.ring",
+      "covers": [
+        "borrowed Str parameter remains caller-owned after return",
+        "ordinary Own projection of a shareable field clones the result slot",
+        "aggregate base and sibling remain live",
+        "no whole-aggregate Take or Clone is emitted"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_FIELD_PROJECT_CLONE_OK\n"
+      }
+    },
+    {
+      "id": "B7",
+      "path": "single/b_pattern_projection_ownership.ring",
+      "covers": [
+        "matched Option payload binding is materialized by exact projection",
+        "nested Option tuple bindings preserve their projection path",
+        "struct-pattern bindings remain live across repeated borrowing uses"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_PATTERN_PROJECTION_OK:24\n"
+      }
+    },
+    {
+      "id": "B8",
+      "path": "single/b_try_caught_result.ring",
+      "covers": [
+        "Try protected success keeps its fresh result on the success successor",
+        "Try caught edge creates one fresh error result",
+        "caught binder is Live only on the caught successor",
+        "success and caught cleanup ownership follow their exact slots and types"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "B_TRY_RESULT_PATHS_OK:success/caught:caught\n"
+      }
+    },
+    {
+      "id": "B9",
+      "path": "single/b_pattern_projection_own_reuse.ring",
+      "covers": [
+        "Own pattern extraction propagates result demand to its aggregate parameter",
+        "the caller transfers Option<Resource> ownership into extract",
+        "caller reuse is rejected by the ONE ResourcePlanner"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0801",
+        "diagnostic_contains": "use of moved value: 'source'"
+      }
+    },
+    {
+      "id": "C1",
+      "path": "single/c_exact_callable_carriers.ring",
+      "covers": [
+        "named function value",
+        "lambda",
+        "closure factory",
+        "captured Str closure remains callable after its first invocation",
+        "two same-signature struct function fields",
+        "tuple function payloads",
+        "enum function payload",
+        "no global same-signature ownership widening"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "C_EXACT_CALLABLE_OK:109\n"
+      }
+    },
+    {
+      "id": "C2",
+      "path": "single/c_dead_callable_candidate.ring",
+      "covers": [
+        "entry-unreachable Return cannot widen a callable result",
+        "dead owning callable does not pollute a reachable borrowing call",
+        "final reachable owning consumer remains exact"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "C_DEAD_CALLABLE_OK\n"
+      }
+    },
+    {
+      "id": "D1",
+      "path": "single/d_handled_effect_hof.ring",
+      "covers": [
+        "polymorphic HOF effect formal",
+        "effect substitution",
+        "two distinct HandledEffectRef values with one operation signature",
+        "single-boundary evidence-order swaps change the native result",
+        "an unused bodyless effect declaration contributes no runtime token"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_HANDLED_HOF_OK:1235\n"
+      }
+    },
+    {
+      "id": "D2",
+      "path": "single/d_system_effect_hof.ring",
+      "covers": [
+        "closed pure HOF",
+        "closed console HOF",
+        "pure and console same-signature callable identity",
+        "pure and system-only Ring callables execute through the uniform empty context",
+        "SystemEffectRef contributes zero handled context entries",
+        "system extern function value uses a Ring wrapper without changing the HostImport leaf ABI"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "console:4\n9\nD_SYSTEM_HOF_OK:4/6\n"
+      }
+    },
+    {
+      "id": "D3",
+      "path": "single/d_generalized_effect_tail.ring",
+      "covers": [
+        "one open HOF formal independently instantiates pure, one-effect, and two-effect callbacks",
+        "the two handled effects share an operation signature but retain exact entries",
+        "one callable combines a fixed handled entry with the callback effect formal",
+        "pure, one-effect, two-effect, and fixed-plus-formal outputs are distinguishable"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_GENERALIZED_TAIL_OK:6/12/24/17\n"
+      }
+    },
+    {
+      "id": "D4",
+      "path": "single/d_custom_effect_extern.ring",
+      "covers": ["raw extern ABI cannot carry custom handled evidence"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0407",
+        "diagnostic_contains": "extern"
+      }
+    },
+    {
+      "id": "D5",
+      "path": "single/d_effect_default_operation.ring",
+      "covers": ["Ring 0.1 effect operations are signature-only"],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0103",
+        "diagnostic_contains": "Effect operation bodies are not supported in Ring 0.1"
+      }
+    },
+    {
+      "id": "D7",
+      "path": "single/d_effect_header_composites.ring",
+      "covers": [
+        "Box<fn> actual and fallback branches preserve distinct exact effects and results",
+        "positional and named enum fields preserve distinct exact callable effects and results",
+        "struct and enum constructor paths use exact structural construction without callable context",
+        "effect operation callable parameter and result preserve distinct exact effects and results",
+        "generic fail<T> preserves its nested callable exact effect and result",
+        "fully closed generic custom-effect instance preserves its nested callable effect and result",
+        "nested callable closed effect row contributes one stable handled token"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_EFFECT_HEADER_COMPOSITES_OK:box=101/202;enum=303/404;op=505/606;fail=707;custom=808\n"
+      }
+    },
+    {
+      "id": "D8",
+      "path": "modules/d_effect_order_left/main.ring",
+      "support_paths": [
+        "modules/d_effect_order_left/base.ring",
+        "modules/d_effect_order_left/alpha.ring",
+        "modules/d_effect_order_left/beta.ring"
+      ],
+      "parity_group": "D-effect-dependency-order",
+      "covers": [
+        "two dependency-local raw effect tails remain distinct",
+        "same-origin base callable survives a dependency diamond",
+        "alpha-before-beta import order",
+        "cross-module re-exported open HOF forwards the typed context"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_EFFECT_DEP_ORDER_OK:111/220/13/40\n"
+      }
+    },
+    {
+      "id": "D9",
+      "path": "modules/d_effect_order_right/main.ring",
+      "support_paths": [
+        "modules/d_effect_order_right/base.ring",
+        "modules/d_effect_order_right/alpha.ring",
+        "modules/d_effect_order_right/beta.ring"
+      ],
+      "parity_group": "D-effect-dependency-order",
+      "covers": [
+        "two dependency-local raw effect tails remain distinct",
+        "same-origin base callable survives a dependency diamond",
+        "beta-before-alpha import order",
+        "cross-module re-exported open HOF forwards the typed context"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_EFFECT_DEP_ORDER_OK:111/220/13/40\n",
+        "same_stdout_as": "D8"
+      }
+    },
+    {
+      "id": "D10",
+      "path": "single/d_recursive_generic_self.ring",
+      "covers": [
+        "ordinary generic self recursion keeps one monomorphic in-group type",
+        "the closed function scheme instantiates independently for Int and Str",
+        "the closed callback effect formal instantiates independently for pure and handled calls"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_RECURSIVE_GENERIC_SELF_OK:5/ring/12\n"
+      }
+    },
+    {
+      "id": "D11",
+      "path": "single/d_recursive_top_level_mutual.ring",
+      "covers": [
+        "top-level mutual recursion closes as one SCC",
+        "peer calls share callback type and effect constraints",
+        "both finalized peers accept exact pure or handled callback instances"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_RECURSIVE_TOP_SCC_OK:4/10\n"
+      }
+    },
+    {
+      "id": "D12",
+      "path": "single/d_recursive_inline_module.ring",
+      "covers": [
+        "inline-module mutual recursion closes as one SCC",
+        "private peer recursion preserves the public entry callback effect formal",
+        "one finalized module entry accepts independent pure and handled instances"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_RECURSIVE_INLINE_MODULE_OK:2/10\n"
+      }
+    },
+    {
+      "id": "D13",
+      "path": "single/d_recursive_impl_methods.ring",
+      "covers": [
+        "inherent impl singleton self recursion",
+        "inherent impl mutual-method recursion",
+        "method SCC callback effect formals preserve pure and handled behavior",
+        "direct inherent method and recursive peer calls forward the current context"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_RECURSIVE_IMPL_METHODS_OK:13/18\n"
+      }
+    },
+    {
+      "id": "D14",
+      "path": "single/d_polymorphic_recursion_rejected.ring",
+      "covers": [
+        "one recursive provisional type cannot instantiate from T to List<T>",
+        "Ring 0.1 polymorphic recursion fails through the existing occurs-check diagnostic"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0302",
+        "diagnostic_contains": "infinite type (occurs check)"
+      }
+    },
+    {
+      "id": "D15",
+      "path": "single/d_pending_anonymous_effect_owner.ring",
+      "covers": [
+        "outside-created effectful closure borrows evidence at its later call",
+        "inside-created escaped closure uses a different current handler without stale evidence",
+        "two factory layers remain creation-pure across nested handler rebinding",
+        "nested same-effect handlers select the innermost evidence and restore the outer evidence",
+        "runtime handler arm receives surrounding evidence for its open callback tail",
+        "direct named and indirect closure calls share the current typed context",
+        "indirect generic call orders closure env, Hash dictionary, and EffectCtx",
+        "first-class generic Hash dispatch exercises the runtime builtin trait closure before EffectCtx"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_DYNAMIC_EVIDENCE_OK:12/22/35306/45/77\n"
+      }
+    },
+    {
+      "id": "D16",
+      "path": "single/d_generic_effect_instantiation_order.ring",
+      "covers": [
+        "one generic callable carries fixed mut<T> plus an open callback tail",
+        "Int/mut<Str> and Str/mut<Int> instances reverse same-kind atom order",
+        "type and effect actuals come from instantiation rather than residual reconstruction",
+        "fixed non-handled atoms keep the uniform context at zero handled entries"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_GENERIC_EFFECT_ORDER_OK:5/ring\n"
+      }
+    },
+    {
+      "id": "D17",
+      "path": "single/d_dynamic_evidence_missing_handler.ring",
+      "covers": [
+        "closure creation under a handler does not capture handled evidence",
+        "calling the escaped closure without a current handler fails loud"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0403",
+        "diagnostic_contains": "Unhandled effect 'MissingDynamic' in main function"
+      }
+    },
+    {
+      "id": "D18",
+      "path": "single/d_open_handled_type_formal.ring",
+      "covers": [
+        "direct NestedPort<T> runtime token rejects its callable type formal"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0404",
+        "diagnostic_contains": "must use fully closed type arguments"
+      }
+    },
+    {
+      "id": "D19",
+      "path": "single/d_open_handled_nested_list.ring",
+      "covers": [
+        "NestedPort<List<T>> recursively rejects a nested type formal"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0404",
+        "diagnostic_contains": "must use fully closed type arguments"
+      }
+    },
+    {
+      "id": "D20",
+      "path": "single/d_open_handled_factory_lambda.ring",
+      "covers": [
+        "generic factory cannot hide Probe<T> in an escaped lambda",
+        "a later closed call cannot legalize the factory owner's open token"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0404",
+        "diagnostic_contains": "must use fully closed type arguments"
+      }
+    },
+    {
+      "id": "D21",
+      "path": "single/d_open_handled_nested_fn_row.ring",
+      "covers": [
+        "handled token type argument rejects a nested function open effect formal"
+      ],
+      "expected": {
+        "phase": "check",
+        "status": "fail",
+        "diagnostic_code": "E0404",
+        "diagnostic_contains": "must use fully closed type arguments"
+      }
+    },
+    {
+      "id": "D22",
+      "path": "single/d_late_constrained_mono_closure.ring",
+      "covers": [
+        "provisional anonymous drain does not finalize a same-owner monomorphic token",
+        "a later handle/result annotation closes the callback instance before A1 finalization",
+        "test executable OwnerInferenceBatch closes the same later-constrained callback shape"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "D_LATE_CONSTRAINED_MONO_OK:41\n"
+      }
+    },
+    {
+      "id": "E1",
+      "path": "single/e_user_extern_same_spelling.ring",
+      "covers": [
+        "user externs may reuse all ten compiler bridge leaf spellings",
+        "typed source identity prevents manifest capture"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "E_USER_EXTERN_SPELLING_OK\n"
+      }
+    },
+    {
+      "id": "E2",
+      "path": "single/e_extern_manifest_inventory_runtime.ring",
+      "covers": [
+        "slot alloc",
+        "slot dealloc",
+        "slot read",
+        "slot take",
+        "slot write",
+        "slot replace",
+        "slot swap",
+        "slot move",
+        "slot drop",
+        "list sort",
+        "10/10 unique compiler extern inventory"
+      ],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "E_EXTERN_MANIFEST_10_OF_10_OK\n"
+      }
+    },
+    {
+      "id": "F1",
+      "path": "single/f_single_project_parity.ring",
+      "parity_group": "F-single-project",
+      "covers": ["single-file ownership entry"],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "F_PARITY:82\n"
+      }
+    },
+    {
+      "id": "F2",
+      "path": "modules/f_single_project_parity/main.ring",
+      "support_paths": ["modules/f_single_project_parity/model.ring"],
+      "parity_group": "F-single-project",
+      "covers": ["project ownership entry", "literal output parity with F1"],
+      "expected": {
+        "phase": "native",
+        "status": "pass",
+        "stdout": "F_PARITY:82\n",
+        "same_stdout_as": "F1"
+      }
+    }
+  ],
+  "internal_negative_canaries": [
+    {
+      "id": "D6",
+      "requirement": "raw/unowned effect tail fails closed at the Core boundary",
+      "source_fixture": null,
+      "reason": "A legal Ring source tail is generalized under an ExecutableRef; ordinary source cannot construct the invalid raw Core state without becoming a source-string oracle.",
+      "input_fixture_id": "D3",
+      "mutation": "core-unowned-effect-tail",
+      "expected_panic_exact": "ring panic: Core assembly: unowned raw effect tail crossed Core\n"
+    }
+  ]
+}

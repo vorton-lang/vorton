@@ -1,8 +1,0 @@
-assoc_get=52
-assoc_desc=store(42)
-name=Alice
-desc=I am Alice
-trait_desc=I am Alice
-mut_count=3
-emp_name=Bob
-emp_greet=Hello, Bob!

@@ -112,7 +112,6 @@ pub struct Param {
     pub name: Str,
     pub is_mutable: Bool,
     pub type_annotation: TypeExpr?,
-    pub default_value: Expr?,
     pub span: Span
 }
 
@@ -272,21 +271,11 @@ pub struct EffectOpDecl {
     pub name: Str,
     pub params: List<Param>,
     pub return_type: TypeExpr,
-    pub body: Expr?,
-    pub span: Span
-}
-
-pub struct SigMember {
-    pub name: Str,
-    pub type_params: List<TypeParam>,
-    pub params: List<Param>,
-    pub return_type: TypeExpr?,
-    pub declared_effects: List<TypeExpr>,
     pub span: Span
 }
 
 pub enum Decl {
-    Fn { name: Str, type_params: List<TypeParam>, params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?, body: Expr, is_pub: Bool, is_abstract: Bool, span: Span },
+    Fn { name: Str, type_params: List<TypeParam>, params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?, body: Expr, is_pub: Bool, span: Span },
     Struct { name: Str, type_params: List<TypeParam>, fields: List<StructFieldDecl>, derive_attrs: List<DeriveAttribute>, is_pub: Bool, span: Span },
     Enum { name: Str, type_params: List<TypeParam>, variants: List<EnumVariantDecl>, derive_attrs: List<DeriveAttribute>, is_pub: Bool, span: Span },
     Impl { target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span },
@@ -298,9 +287,7 @@ pub enum Decl {
     TypeAlias { name: Str, type_params: List<TypeParam>, type_expr: TypeExpr, is_pub: Bool, span: Span },
     Const { name: Str, type_annotation: TypeExpr?, init: Expr, is_pub: Bool, span: Span },
     ModBlock { name: Str, uses: List<UseDecl>, decls: List<Decl>, required_effects: List<EffectExpr>?, is_pub: Bool, span: Span },
-    Sig { name: Str, members: List<SigMember>, is_pub: Bool, span: Span },
     EffectAlias { name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, is_pub: Bool, span: Span },
-    Delegate { field: Str, trait_names: List<Str>, span: Span },
     AssocType { name: Str, bounds: List<TypeBound>, value: TypeExpr?, is_pub: Bool, span: Span }
 }
 

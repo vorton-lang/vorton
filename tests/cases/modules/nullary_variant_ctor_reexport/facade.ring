@@ -1,1 +1,2 @@
-pub use origin::{Signal as Pulse, Ready as Go}
+pub use origin::{Signal as Pulse}
+pub use origin::{Ready as Go}

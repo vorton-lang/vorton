@@ -9,10 +9,10 @@ Usage:
     python tests/run_tests.py                        # all suites
     python tests/run_tests.py --suite e2e            # single-file e2e
     python tests/run_tests.py --suite golden         # golden snapshots
-    python tests/run_tests.py --suite rc             # RC verify sweep
     python tests/run_tests.py --suite self-compile   # tracked dist-c fixed point
     python tests/run_tests.py --suite structural     # generated-C structural gates
     python tests/run_tests.py --suite parity         # static evidence matrix
+    python tests/run_tests.py --suite ownership-vertical  # #268/#269 real fixtures
     python tests/run_tests.py --filter substr        # only cases matching substr
     python tests/run_tests.py --update-golden        # regenerate .expected
 """
@@ -37,6 +37,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ownership_vertical_runner import (
+    ExactPanicObservation,
+    RunnerContext,
+    normal_diagnostic_contract_failure,
+    run_ownership_vertical,
+)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -46,7 +53,6 @@ CASES_DIR = REPO / "tests" / "cases"
 GOLDEN_CASES_DIR = CASES_DIR / "golden"
 NATIVE_ONLY_DIR = CASES_DIR / "native_only"
 MODULES_DIR = CASES_DIR / "modules"
-RC_NEG_DIR = CASES_DIR / "verify_rc"
 RUNTIME_CPP = REPO / "ring_runtime.cpp"
 RUNTIME_O = REPO / "ring_runtime.o"
 DIST_C_DIR = REPO / "compiler" / "dist-c"
@@ -92,49 +98,6 @@ RECOVERY_CASES = (
 )
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-RC_FINDING_RE = re.compile(
-    r"^(.+):(\d+):(\d+)\s+rc-verify\[([^\]]+)\]\s+(.+)$",
-    re.MULTILINE,
-)
-RC_SUMMARY_RE = re.compile(
-    r"^RC verify:\s*(\d+) errors?,\s*(\d+) exempt \(documented\) findings$",
-    re.MULTILINE,
-)
-RC_EXEMPT_RE = re.compile(r"^rc-verify exempt classes:\s*(.*)$", re.MULTILINE)
-RC_BOUNDARY_MARKER = "HIR-level proof. Codegen-level drops are outside this check"
-
-
-@dataclass(frozen=True)
-class RcFindingLine:
-    file: str
-    line: int
-    column: int
-    category: str
-    message: str
-
-
-@dataclass(frozen=True)
-class RcReport:
-    fatal: int
-    exempt: int
-    exempt_counts: Dict[str, int]
-    findings: Tuple[RcFindingLine, ...]
-
-
-@dataclass(frozen=True)
-class RcInvocationContract:
-    name: str
-    fixture: str
-    args: Tuple[str, ...]
-    exit_zero: bool
-    strict: bool = False
-    fatal_exact: Optional[int] = None
-    fatal_min: int = 0
-    exempt_min: int = 0
-    exempt_counts: Tuple[Tuple[str, int], ...] = ()
-    finding_counts: Tuple[Tuple[str, int], ...] = ()
-    finding_lines: Tuple[Tuple[str, Tuple[int, ...]], ...] = ()
-    finding_function_bindings: Tuple[Tuple[str, str, str], ...] = ()
 
 # Generated-C evidence owned by the structural suite.  This map is also the
 # parity contract: every fixture below must exist, every structural .ring file
@@ -171,8 +134,8 @@ TIMEOUT_COMPILE = 60   # seconds, for ring.exe build / check
 TIMEOUT_LINK = 60      # seconds, for clang link
 TIMEOUT_COMPILER_LINK = 300  # cold ThinLTO link on slower CI hosts
 TIMEOUT_RUN = 30       # seconds, per test program execution
-TIMEOUT_SELFCOMPILE = 1200  # seconds, for self-compile / rc self-verify (900 was
-                            # exceeded after B-170; clean builds take ~18 min)
+TIMEOUT_SELFCOMPILE = 1200  # seconds; 900 was exceeded after B-170, and clean
+                            # self-compiles take about 18 minutes
 
 PHASE_TIMING_SCHEMA = "ring.test-runner-phase.v1"
 PHASE_TIMING_VERSION = 1
@@ -186,9 +149,8 @@ PHASE_TIMING_FIELDS = frozenset({
 SHARED_POSITIVE_GAPS = {}
 
 # Positive cases whose `ring check` itself fails today.  Unlike shared
-# execution gaps, these are frontend blockers, so every lane
-# that would compile or RC-verify the case (golden/e2e/native/module, rc) must
-# skip it with the same actionable reason.
+# execution gaps, these are frontend blockers, so every lane that would compile
+# the case (golden/e2e/native/module) must skip it with the same actionable reason.
 CHECK_BLOCKED_POSITIVE_GAPS = {}
 
 CHECK_ONLY_GAPS = {}
@@ -2116,7 +2078,8 @@ def ring_build(ring_exe: str, ring_file: str, *,
                extra_args: Optional[List[str]] = None,
                timeout: int = TIMEOUT_COMPILE,
                phase_suite: Optional[str] = None,
-               phase_case: Optional[str] = None) -> subprocess.CompletedProcess:
+               phase_case: Optional[str] = None,
+               cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
     """Run the C-only ring.exe build with optional extra flags."""
     cmd = [ring_exe, "build", ring_file, "--target=c"]
     if out_dir:
@@ -2131,7 +2094,7 @@ def ring_build(ring_exe: str, ring_file: str, *,
         "ring_build", cmd,
         phase_suite=phase_suite, phase_case=phase_case,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, cwd=str(REPO),
+        timeout=timeout, cwd=str(cwd or REPO),
     )
 
 
@@ -2139,7 +2102,8 @@ def ring_check(ring_exe: str, ring_file: str, *,
                extra_args: Optional[List[str]] = None,
                timeout: int = TIMEOUT_COMPILE,
                phase_suite: Optional[str] = None,
-               phase_case: Optional[str] = None) -> subprocess.CompletedProcess:
+               phase_case: Optional[str] = None,
+               cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
     """Run ring.exe check <file> [extra_args...]."""
     cmd = [ring_exe, "check", ring_file]
     if extra_args:
@@ -2149,7 +2113,7 @@ def ring_check(ring_exe: str, ring_file: str, *,
     return _run_subprocess(
         "ring_check", cmd, phase_suite=phase_suite, phase_case=phase_case,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, cwd=str(REPO),
+        timeout=timeout, cwd=str(cwd or REPO),
     )
 
 
@@ -2184,7 +2148,8 @@ def compile_link_run(ring_exe: str, clang_path: str, ring_file: str,
                      tmpdir: str, *,
                      expect_panic: bool = False,
                      phase_suite: Optional[str] = None,
-                     phase_case: Optional[str] = None) -> Tuple[bool, str, str]:
+                     phase_case: Optional[str] = None,
+                     cwd: Optional[Path] = None) -> Tuple[bool, str, str]:
     """Compile a .ring file, link, run, return (ok, stdout, error_detail).
 
     On success, ok=True and stdout contains the program output.
@@ -2203,6 +2168,7 @@ def compile_link_run(ring_exe: str, clang_path: str, ring_file: str,
         r = ring_build(
             ring_exe, ring_file, out_dir=out_dir,
             phase_suite=phase_suite, phase_case=phase_case,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         return False, "", "compile timed out"
@@ -2330,6 +2296,96 @@ def discover_module_positive(modules_dir: Path) -> List[Path]:
             if main.is_file() and expected.is_file():
                 cases.append(main)
     return cases
+
+
+def module_check_positive_census(
+    modules_dir: Path,
+) -> Tuple[List[Path], List[str]]:
+    """Validate every explicit marker before exposing any check-only case."""
+    if not modules_dir.is_dir():
+        return [], []
+    cases: List[Path] = []
+    errors: List[str] = []
+    markers = sorted(modules_dir.glob("*/main.check"))
+    for marker in markers:
+        directory = marker.parent
+        main = directory / "main.ring"
+        expected = directory / "main.expected"
+        error = directory / "main.error"
+        valid = True
+        if marker.is_symlink() or not marker.is_file():
+            errors.append(f"{directory.name}: main.check is not a regular file")
+            valid = False
+        if main.is_symlink() or not main.is_file():
+            errors.append(f"{directory.name}: main.check has no sibling main.ring")
+            valid = False
+        if (
+            expected.exists() or expected.is_symlink()
+            or error.exists() or error.is_symlink()
+        ):
+            errors.append(
+                f"{directory.name}: main.check overlaps main.expected/main.error")
+            valid = False
+        try:
+            contract = marker.read_bytes()
+        except OSError as exc:
+            errors.append(f"{directory.name}: cannot read main.check: {exc}")
+            valid = False
+        else:
+            if contract != b"OK\n":
+                errors.append(
+                    f"{directory.name}: main.check bytes must be exactly OK\\n")
+                valid = False
+        if valid:
+            cases.append(main)
+    if errors:
+        return [], errors
+    return cases, []
+
+
+def discover_module_check_positive(modules_dir: Path) -> List[Path]:
+    """Return cases only after the complete explicit marker census passes."""
+    cases, errors = module_check_positive_census(modules_dir)
+    return [] if errors else cases
+
+
+def module_check_positive_discovery_errors(modules_dir: Path) -> List[str]:
+    """Validate explicit marker ownership for the generic check-only lane."""
+    discovered, errors = module_check_positive_census(modules_dir)
+    required = modules_dir / "plan_namespace_empty_growth_cycle" / "main.ring"
+    if not errors and required not in discovered:
+        errors.append(
+            "plan_namespace_empty_growth_cycle is absent from module check-only discovery")
+    return errors
+
+
+def module_check_positive_discovery_unit_errors() -> List[str]:
+    """Exercise overlap and orphan marker rejection without invoking Ring."""
+    errors: List[str] = []
+    with tempfile.TemporaryDirectory(prefix="ring_module_check_discovery_") as tmp:
+        root = Path(tmp)
+        orphan = root / "orphan"
+        overlap = root / "overlap"
+        orphan.mkdir()
+        overlap.mkdir()
+        (orphan / "main.check").write_bytes(b"OK\n")
+        (overlap / "main.ring").write_text("fn main() {}\n", encoding="utf-8")
+        (overlap / "main.check").write_bytes(b"OK\n")
+        (overlap / "main.expected").write_text("unused\n", encoding="utf-8")
+        discovered, findings = module_check_positive_census(root)
+    expected = [
+        "orphan: main.check has no sibling main.ring",
+        "overlap: main.check overlaps main.expected/main.error",
+    ]
+    if discovered:
+        errors.append(
+            "invalid marker census exposed check-only cases: "
+            + ", ".join(path.parent.name for path in discovered))
+    if findings != expected:
+        errors.append(
+            f"module check-only discovery findings were {findings!r}, "
+            f"expected {expected!r}")
+    return errors
 
 
 def discover_module_negative(modules_dir: Path) -> List[Path]:
@@ -2689,12 +2745,14 @@ def run_native_real_program_contract(
     *,
     name_filter: Optional[str] = None,
 ) -> None:
-    """Preserve the repeated native-frontend/RC regression and execute it."""
+    """Exercise the production resource plan/certificate once, then run it."""
     suite = "e2e"
     key = "tests/native/real_program.ring"
+    label = "native-real-program:resource-planner+certificate"
     if not (
         matches_filter("native-real-program", name_filter)
         or matches_filter(key, name_filter)
+        or matches_filter(label, name_filter)
     ):
         return
     if not NATIVE_REAL_PROGRAM.is_file() or not NATIVE_REAL_PROGRAM_EXPECTED.is_file():
@@ -2704,32 +2762,27 @@ def run_native_real_program_contract(
         ))
         return
 
-    rc_contract = RcInvocationContract(
-        name="native-real-program RC",
-        fixture=key,
-        args=("--verify-rc",),
-        exit_zero=True,
-        fatal_exact=0,
-    )
-    for run_number in range(1, 4):
-        label = f"native-real-program:frontend+rc {run_number}/3"
-        try:
-            result = ring_check(
-                ring_exe,
-                str(NATIVE_REAL_PROGRAM),
-                extra_args=list(rc_contract.args),
-                phase_suite=suite,
-                phase_case=label,
+    try:
+        result = ring_check(
+            ring_exe, str(NATIVE_REAL_PROGRAM),
+            phase_suite=suite, phase_case=label,
+        )
+    except subprocess.TimeoutExpired:
+        collector.add(TestResult(TestResult.FAIL, suite, label, "check timed out"))
+    else:
+        failure = None
+        if result.returncode != 0:
+            failure = (
+                f"expected exit 0, got {result.returncode}: "
+                f"{process_output(result)[:300]}"
             )
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(TestResult.FAIL, suite, label, "check timed out"))
-            continue
-        failure = rc_contract_failure(rc_contract, result.returncode, process_output(result))
+        elif result.stdout != "OK\n":
+            failure = f"expected exact stdout 'OK\\n', got {result.stdout!r}"
+        elif result.stderr != "":
+            failure = f"expected empty stderr, got {result.stderr!r}"
         collector.add(TestResult(
             TestResult.PASS if failure is None else TestResult.FAIL,
-            suite,
-            label,
-            failure or "",
+            suite, label, failure or "",
         ))
 
     expected = norm(NATIVE_REAL_PROGRAM_EXPECTED.read_text(encoding="utf-8"))
@@ -2783,6 +2836,16 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
             name_filter: Optional[str] = None) -> None:
     """Run the E2E test suite."""
     suite = "e2e"
+
+    module_check_errors = module_check_positive_discovery_unit_errors()
+    module_check_errors.extend(
+        module_check_positive_discovery_errors(MODULES_DIR))
+    if module_check_errors:
+        for index, error in enumerate(module_check_errors, 1):
+            collector.add(TestResult(
+                TestResult.FAIL, suite,
+                f"module-check-discovery:{index}", error))
+        return
 
     # --- Positive single-file cases ---
     positive = discover_positive_cases(CASES_DIR)
@@ -2881,15 +2944,10 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
             collector.add(TestResult(TestResult.FAIL, suite, f"neg:{rel}", "check timed out"))
             continue
 
-        if r.returncode == 0:
-            collector.add(TestResult(
-                TestResult.FAIL, suite, f"neg:{rel}",
-                "expected non-zero exit, got 0"))
-            continue
-
         # Check all output (stdout + stderr) against the companion contract.
         combined = (r.stdout or "") + (r.stderr or "")
-        contract_failure = error_contract_failure(contract, combined)
+        contract_failure = normal_diagnostic_contract_failure(
+            r, error_contract_failure(contract, combined))
         if contract_failure is None:
             collector.add(TestResult(TestResult.PASS, suite, f"neg:{rel}"))
         else:
@@ -2932,6 +2990,31 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
                     TestResult.FAIL, suite, f"mod:{mod_name}",
                     f"expected {exp_repr}, got {act_repr}"))
 
+    # --- Explicit module check-only positive ---
+    for main_file in discover_module_check_positive(MODULES_DIR):
+        mod_name = main_file.parent.name
+        label = f"mod-check:{mod_name}"
+        if not matches_filter(label, name_filter):
+            continue
+        try:
+            result = ring_check(
+                ring_exe, str(main_file), phase_suite=suite,
+                phase_case=label)
+        except subprocess.TimeoutExpired:
+            collector.add(TestResult(
+                TestResult.FAIL, suite, label, "check timed out"))
+            continue
+        failure = None
+        if result.returncode != 0:
+            failure = f"expected exit 0, got {result.returncode}"
+        elif result.stdout != "OK\n":
+            failure = f"expected exact stdout 'OK\\n', got {result.stdout!r}"
+        elif result.stderr != "":
+            failure = f"expected empty stderr, got {result.stderr!r}"
+        collector.add(TestResult(
+            TestResult.PASS if failure is None else TestResult.FAIL,
+            suite, label, failure or ""))
+
     # --- Module negative ---
     mod_negative = discover_module_negative(MODULES_DIR)
     for main_file in mod_negative:
@@ -2953,14 +3036,9 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
             collector.add(TestResult(TestResult.FAIL, suite, f"mod-neg:{mod_name}", "timed out"))
             continue
 
-        if r.returncode == 0:
-            collector.add(TestResult(
-                TestResult.FAIL, suite, f"mod-neg:{mod_name}",
-                "expected non-zero exit, got 0"))
-            continue
-
         combined = (r.stdout or "") + (r.stderr or "")
-        contract_failure = error_contract_failure(contract, combined)
+        contract_failure = normal_diagnostic_contract_failure(
+            r, error_contract_failure(contract, combined))
         if contract_failure is None:
             collector.add(TestResult(TestResult.PASS, suite, f"mod-neg:{mod_name}"))
         else:
@@ -2974,6 +3052,163 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
     run_native_real_program_contract(
         ring_exe, clang_path, collector, name_filter=name_filter,
     )
+
+
+def run_normal_diagnostic_exit_contract(
+    collector: ResultCollector,
+    *,
+    name_filter: Optional[str] = None,
+) -> None:
+    """Exercise the shared normal-diagnostic verdict with process results."""
+    suite = "ownership-vertical"
+    label = "runner:normal-diagnostic-exit"
+    if not matches_filter(label, name_filter):
+        return
+
+    diagnostic = "error[E0801]: use of moved value: sample\n"
+    contract = "E0801\nuse of moved value:\n!internal compiler error"
+    failures: List[str] = []
+    for returncode, should_pass in (
+        (1, True),
+        (0, False),
+        (-9, False),
+        (0xC0000374, False),
+    ):
+        result = subprocess.CompletedProcess(
+            args=["ring", "check"], returncode=returncode,
+            stdout=diagnostic, stderr="",
+        )
+        failure = normal_diagnostic_contract_failure(
+            result, error_contract_failure(contract, process_output(result)))
+        if (failure is None) != should_pass:
+            failures.append(
+                f"exit {returncode}: expected "
+                f"{'PASS' if should_pass else 'FAIL'}, got {failure or 'PASS'}"
+            )
+    collector.add(TestResult(
+        TestResult.PASS if not failures else TestResult.FAIL,
+        suite, label, "; ".join(failures),
+    ))
+
+
+def run_prelude_a1_oracles(
+    ring_exe: str, clang_path: str, collector: ResultCollector, *,
+    name_filter: Optional[str] = None,
+) -> None:
+    """Run the four prelude-only A1 acceptance canaries."""
+    suite, group = "ownership-vertical", "P-prelude-A1"
+    labels = (
+        "P1:prelude-self-first", "P2:prelude-mutual-first",
+        "P3:prelude-reverse-edge", "P4:prelude-cycle",
+    )
+    if not any(matches_filter(value, name_filter) for value in (group, *labels)):
+        return
+    case_dir = CASES_DIR / "prelude_a1"
+    probe = case_dir / "probe.ring"
+
+    def overlay(root: Path, name: str, fragments) -> Path:
+        cwd, std = root / name, root / name / "std"
+        shutil.copytree(REPO / "std", std)
+        for target_name, fragment_name in fragments:
+            target = std / target_name
+            target.write_text(
+                target.read_text(encoding="utf-8") + "\n" +
+                (case_dir / fragment_name).read_text(encoding="utf-8"),
+                encoding="utf-8", newline="\n")
+        return cwd
+
+    observed: List[str] = []
+    with tempfile.TemporaryDirectory(prefix="ring_prelude_a1_") as tmpdir:
+        root = Path(tmpdir)
+        for label, fragment in zip(labels[:2], ("self_first.ring", "mutual_first.ring")):
+            try:
+                cwd = overlay(root, label[:2], (("str.ring", fragment),))
+                output = root / f"{label[:2]}-out"
+                output.mkdir()
+                ok, stdout, detail = compile_link_run(
+                    ring_exe, clang_path, str(probe), str(output), cwd=cwd,
+                    phase_suite=suite, phase_case=label)
+            except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+                ok, stdout, detail = False, "", str(exc)
+            if ok and norm(stdout) == "P_PRELUDE_A1_OK:3/ring/10\n":
+                observed.append(norm(stdout))
+                collector.add(TestResult(TestResult.PASS, suite, label))
+            else:
+                collector.add(TestResult(
+                    TestResult.FAIL, suite, label,
+                    detail or f"unexpected stdout {stdout!r}"))
+        collector.add(TestResult(
+            TestResult.PASS if len(observed) == 2 and len(set(observed)) == 1
+            else TestResult.FAIL,
+            suite, "parity:P-prelude-A1-source-order"))
+
+        negatives = (
+            (labels[2], "reverse_early.ring", "reverse_late.ring",
+             "prelude_reverse_early' -> 'prelude_reverse_late"),
+            (labels[3], "cycle_early.ring", "cycle_late.ring",
+             "prelude_cycle_early' -> 'prelude_cycle_late"),
+        )
+        for label, early, late, expected in negatives:
+            try:
+                cwd = overlay(root, label[:2], (
+                    ("str.ring", early), ("io.ring", late)))
+                result = ring_check(
+                    ring_exe, str(probe), cwd=cwd,
+                    phase_suite=suite, phase_case=label)
+                output = process_output(result)
+            except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+                result, output = None, str(exc)
+            passed = (
+                result is not None and result.returncode != 0
+                and "ring panic: prelude file DAG: reverse edge" in output
+                and expected in output and "'$prelude$::str'" in output
+            )
+            collector.add(TestResult(
+                TestResult.PASS if passed else TestResult.FAIL,
+                suite, label, "" if passed else output[:300]))
+
+def run_ownership_vertical_suite(
+    ring_exe: str,
+    clang_path: str,
+    collector: ResultCollector,
+    *,
+    name_filter: Optional[str] = None,
+) -> None:
+    """Adapt aggregate toolchain helpers to the manifest-owned vertical."""
+    suite = "ownership-vertical"
+
+    run_normal_diagnostic_exit_contract(
+        collector, name_filter=name_filter)
+    run_prelude_a1_oracles(
+        ring_exe, clang_path, collector, name_filter=name_filter)
+
+    def add_result(status: str, name: str, detail: str) -> None:
+        collector.add(TestResult(status, suite, name, detail))
+
+    def run_internal_canary(canary, label: str) -> ExactPanicObservation:
+        entry = CASES_DIR / "ownership_vertical" / canary.input_path
+        result = ring_check(
+            ring_exe, str(entry), extra_args=[f"--rc-mutate={canary.mutation}"],
+            phase_suite=suite, phase_case=label,
+        )
+        return ExactPanicObservation(
+            returncode=result.returncode,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
+        )
+
+    context = RunnerContext(
+        manifest_path=CASES_DIR / "ownership_vertical" / "manifest.json",
+        check=lambda entry, label: ring_check(
+            ring_exe, str(entry), phase_suite=suite, phase_case=label),
+        native=lambda entry, output_dir, label: compile_link_run(
+            ring_exe, clang_path, str(entry), str(output_dir),
+            phase_suite=suite, phase_case=label),
+        add_result=add_result,
+        matches_filter=matches_filter,
+        internal_canary=run_internal_canary,
+    )
+    run_ownership_vertical(context, name_filter=name_filter)
 
 
 # ---------------------------------------------------------------------------
@@ -3352,7 +3587,7 @@ def extract_c_function_body(c_source: str, symbol: str) -> Tuple[Optional[str], 
     """Extract one exact generated C function body using its definition symbol."""
     masked = mask_c_strings_and_comments(c_source)
     pattern = re.compile(
-        rf"(?m)^[ \t]*(?:static[ \t]+)?void[ \t]*\*?[ \t]+"
+        rf"(?m)^[ \t]*(?:(?:static|extern)[ \t]+)?void[ \t]*\*?[ \t]+"
         rf"{re.escape(symbol)}[ \t]*\([^;{{}}\n]*\)[ \t]*\{{")
     matches = list(pattern.finditer(masked))
     if len(matches) != 1:
@@ -3400,7 +3635,7 @@ def identity_ledger_event_shape_errors(
             or event.producer
         ):
             errors.append(f"exact event {event.event_id} has malformed shape")
-    elif event.domain in {"name-only", "static", "default-evidence"}:
+    elif event.domain in {"name-only", "static"}:
         if (
             event.def_id != -1 or not event.canonical_key
             or event.producer
@@ -3432,9 +3667,7 @@ def identity_ledger_event_shape_errors(
             errors.append(
                 f"dict receiver {event.event_id} has {event.domain} domain")
     elif event.kind == "effect-receiver-load":
-        if event.domain not in {
-            "name-only", "default-evidence", "computed",
-        }:
+        if event.domain not in {"name-only", "computed"}:
             errors.append(
                 f"effect receiver {event.event_id} has {event.domain} domain")
     elif event.kind == "closure-call":
@@ -3710,7 +3943,7 @@ def identity_ledger_mutation_matrix_errors() -> List[str]:
                             "computed", -1, "", "dict-receiver-load",
                             "t_method", "t_result", 0, 2),
         IdentityLedgerEvent(9, "effect-receiver-load", 0, 2, "child_b", "",
-                            "default-evidence", -1, "__ring_default_E", "",
+                            "name-only", -1, "__ring_ev_E", "",
                             "r_effect", "t_effect", 1, 0),
         IdentityLedgerEvent(10, "closure-call", 0, 2, "child_b", "",
                             "computed", -1, "", "effect-receiver-load",
@@ -3776,7 +4009,8 @@ def identity_ledger_mutation_matrix_errors() -> List[str]:
         ("dict exact domain", lambda rows: rows.__setitem__(6, replace(
             rows[6], domain="exact", def_id=73, canonical_key="dict_local"))),
         ("dict effect-only domain", lambda rows: rows.__setitem__(6, replace(
-            rows[6], domain="default-evidence"))),
+            rows[6], domain="fresh", canonical_key="",
+            producer="forged-dict"))),
         ("effect exact domain", lambda rows: rows.__setitem__(8, replace(
             rows[8], domain="exact", def_id=74, canonical_key="effect_local"))),
         ("effect dict-only domain", lambda rows: rows.__setitem__(8, replace(
@@ -3787,7 +4021,7 @@ def identity_ledger_mutation_matrix_errors() -> List[str]:
             rows[10], canonical_key=""))),
         ("Static producer", lambda rows: rows.__setitem__(10, replace(
             rows[10], producer="forged"))),
-        ("empty DefaultEvidence key", lambda rows: rows.__setitem__(8, replace(
+        ("empty effect NameOnly key", lambda rows: rows.__setitem__(8, replace(
             rows[8], canonical_key=""))),
         ("empty Computed producer", lambda rows: rows.__setitem__(12, replace(
             rows[12], producer=""))),
@@ -3934,7 +4168,6 @@ class CProbeProgram:
 
 
 C_PROBE_CALL_ARITIES = {
-    "ring_Option_some": 1,
     "ring_list_new": 0,
     "ring_List_push": 2,
 }
@@ -3967,26 +4200,6 @@ C_PROBE_TEMPLATES = {
         ("rc", "ring_drop", "v1"),
         ("alias", "v4", "v3"),
         ("return", "v4"),
-    ),
-    "ring_structural_raw_option": (
-        ("declare", "v0"),
-        ("declare", "v1"),
-        ("declare", "v2"),
-        ("alias", "v0", "$value"),
-        ("call", "v1", "ring_Option_some", "v0"),
-        ("alias", "v2", "v1"),
-        ("return", "$unit"),
-    ),
-    "ring_structural_owned_option": (
-        ("declare", "v0"),
-        ("declare", "v1"),
-        ("declare", "v2"),
-        ("alias", "v0", "$value"),
-        ("rc", "ring_dup", "v0"),
-        ("call", "v1", "ring_Option_some", "v0"),
-        ("alias", "v2", "v1"),
-        ("rc", "ring_drop", "v2"),
-        ("return", "$unit"),
     ),
     "ring_structural_raw_list": (
         ("declare", "v0"),
@@ -4345,15 +4558,6 @@ ring_drop(r_decoy); t3 = r_scope; return t3;""",
         "normalized event template mismatch",
     ),
     (
-        "option-wrong-rc-roots",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped; void* r_decoy;
-t1 = r_value; r_decoy = RING_UNIT; ring_dup(r_decoy);
-t2 = ring_Option_some(t1); r_wrapped = t2;
-ring_drop(r_decoy); return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
         "list-wrong-drop-root",
         "ring_structural_owned_list",
         """void* t1; void* r_values; void* t2; void* t3; void* t4;
@@ -4379,37 +4583,6 @@ t1 = r_value; t2 = RING_UNIT; return t2;""",
         "normalized event template mismatch",
     ),
     (
-        "option-wrong-payload-root",
-        "ring_structural_raw_option",
-        """void* t1; void* t2; void* r_wrapped; void* r_decoy;
-r_decoy = RING_UNIT; t1 = r_decoy;
-t2 = ring_Option_some(t1); r_wrapped = t2; return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
-        "option-wrong-result-local",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t1; ring_drop(t2); return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
-        "option-use-after-drop",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-ring_drop(t2); r_wrapped = t2; return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
-        "option-missing-constructor",
-        "ring_structural_raw_option",
-        """void* t1; void* r_wrapped;
-t1 = r_value; r_wrapped = t1; return RING_UNIT;""",
-        "normalized event template mismatch",
-    ),
-    (
         "list-wrong-push-receiver",
         "ring_structural_raw_list",
         """void* t1; void* r_values; void* t2; void* t3;
@@ -4423,83 +4596,6 @@ t3 = ring_List_push(t2, t2); return RING_UNIT;""",
         """void* t1; void* r_values;
 t1 = ring_list_new(); r_values = t1; return RING_UNIT;""",
         "normalized event template mismatch",
-    ),
-    (
-        "return-before-dead-rc",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t2; return RING_UNIT; ring_drop(r_wrapped);""",
-        "return event is not the final statement",
-    ),
-    (
-        "conditional-rc",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t2; if (r_value) { ring_drop(r_wrapped); }
-return RING_UNIT;""",
-        "control flow is outside finite grammar",
-    ),
-    (
-        "aborting-extra-call",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t2; ring_drop(r_wrapped); ring_panic(r_wrapped);
-return RING_UNIT;""",
-        "standalone call ring_panic is outside finite grammar",
-    ),
-    (
-        "late-rc-alias",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped; void* r_late;
-t1 = r_value; ring_dup(r_late); t2 = ring_Option_some(t1);
-r_wrapped = t2; ring_drop(r_wrapped); r_late = r_value;
-return RING_UNIT;""",
-        "r_late used before initialization",
-    ),
-    (
-        "future-payload-alias",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped; void* r_late;
-t1 = r_late; ring_dup(r_value); t2 = ring_Option_some(t1);
-r_wrapped = t2; ring_drop(r_wrapped); r_late = r_value;
-return RING_UNIT;""",
-        "r_late used before initialization",
-    ),
-    (
-        "future-result-alias",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-t1 = r_value; ring_dup(t1); r_wrapped = t2;
-t2 = ring_Option_some(t1); ring_drop(r_wrapped);
-return RING_UNIT;""",
-        "t2 used before initialization",
-    ),
-    (
-        "preprocessor-hidden-probe",
-        "ring_structural_owned_option",
-        """void* t1; void* t2; void* r_wrapped;
-#ifdef RING_NEVER_DEFINED
-t1 = r_value; ring_dup(t1); t2 = ring_Option_some(t1);
-r_wrapped = t2; ring_drop(r_wrapped);
-#endif
-return RING_UNIT;""",
-        "preprocessor directive is outside finite grammar",
-    ),
-    (
-        "line-spliced-comment-hidden-probe",
-        "ring_structural_owned_option",
-        "void* t1; void* t2; void* r_wrapped;\n"
-        "// hidden probe \\\n"
-        "t1 = r_value; \\\n"
-        "ring_dup(t1); \\\n"
-        "t2 = ring_Option_some(t1); \\\n"
-        "r_wrapped = t2; \\\n"
-        "ring_drop(r_wrapped);\n"
-        "return RING_UNIT;",
-        "backslash-newline splice is outside finite grammar",
     ),
     (
         "non-null-declaration-initializer",
@@ -4914,7 +5010,6 @@ def identity_ledger_contract_errors(
             'validate_identity_domain_shape("exact", def_id, source_name, "")',
             'validate_identity_domain_shape("name-only", -1, canonical_key, "")',
             'validate_identity_domain_shape("static", -1, canonical_key, "")',
-            '"default-evidence", -1, canonical_key, ""',
             'validate_identity_domain_shape("computed", -1, "", producer)',
             'validate_identity_domain_shape("fresh", -1, "", producer)',
         ):
@@ -4962,7 +5057,7 @@ def identity_ledger_contract_errors(
     else:
         for token in (
             'domain != "name-only" && domain != "static" && domain != "computed"',
-            'domain != "name-only" && domain != "default-evidence" &&',
+            'domain != "name-only" && domain != "computed"',
             'domain != "computed"',
             "dict receiver has forbidden '${domain}' identity domain",
             "effect receiver has forbidden '${domain}' identity domain",
@@ -4987,7 +5082,8 @@ def identity_ledger_contract_errors(
             'event.producer != "closure-edge:${event.child_frame}"',
             'event.domain != "exact" && event.domain != "name-only"',
             'event.domain != "name-only" && event.domain != "static" &&',
-            'event.domain != "default-evidence" &&',
+            'event.domain != "name-only" &&\n'
+            '           event.domain != "computed"',
             'event.domain != "computed"',
             'event.kind == "closure-call"',
             'event.load_id != 0',
@@ -5136,7 +5232,7 @@ def identity_ledger_contract_errors(
     runner = sources.get("runner", "")
     candidate_mode_match = re.search(
         r"(?ms)^def run_identity_candidate_mode\(.*?"
-        r"(?=^def default_body_identity_generated_c_errors\()",
+        r"(?=^def callable_identity_generated_c_errors\()",
         runner,
     )
     if candidate_mode_match is None:
@@ -5156,7 +5252,7 @@ def identity_ledger_contract_errors(
                 "run_identity_candidate_mode rebuilt a controlled nested environment")
     coff_helper_match = re.search(
         r"(?ms)^def coff_object_timestamp_equality_errors\(.*?"
-        r"(?=^def default_body_identity_generated_c_errors\()",
+        r"(?=^def callable_identity_generated_c_errors\()",
         runner,
     )
     if coff_helper_match is None:
@@ -5175,7 +5271,7 @@ def identity_ledger_contract_errors(
             if coff_helper_source.count(token) != 1:
                 errors.append(f"COFF timestamp equality authority missing {token!r}")
     generated_gate_match = re.search(
-        r"(?ms)^def default_body_identity_generated_c_errors\(.*?"
+        r"(?ms)^def callable_identity_generated_c_errors\(.*?"
         r"(?=^def identity_checkpoint_source_errors\()",
         runner,
     )
@@ -5204,8 +5300,7 @@ def identity_ledger_contract_errors(
         "canonicalize_identity_stdout_root(",
         'IDENTITY_EVIDENCE_ROOT_ENV = "RING_IDENTITY_EVIDENCE_ROOT"',
         "evidence_root, evidence_error = identity_checkpoint_evidence_root()",
-        "identity_candidate_verify_rc_errors(\n        candidate, evidence_root, evidence_log)",
-        "default_body_identity_generated_c_errors(\n            candidate, evidence_root, evidence_log)",
+        "callable_identity_generated_c_errors(\n            candidate, evidence_root, evidence_log)",
         "audit_one_shot_attempt(evidence_dir)",
         "archive_sha256",
         "def identity_ledger_event_shape_errors(",
@@ -5222,9 +5317,9 @@ def identity_ledger_contract_errors(
         errors.append("Python ledger relation bypasses event-shape authority")
     evidence_anchor = (
         "evidence_root, evidence_error = identity_checkpoint_evidence_root()")
-    verify_anchor = "verify_errors = identity_candidate_verify_rc_errors("
-    if evidence_anchor in runner and verify_anchor in runner and (
-            runner.index(evidence_anchor) > runner.index(verify_anchor)):
+    candidate_anchor = "errors.extend(callable_identity_generated_c_errors("
+    if evidence_anchor in runner and candidate_anchor in runner and (
+            runner.index(evidence_anchor) > runner.index(candidate_anchor)):
         errors.append("candidate command can precede evidence-root authority")
     if re.search(
         r"(?m)^    evidence_root, evidence_error = "
@@ -5315,9 +5410,33 @@ def identity_checkpoint_contract_errors(
     errors: List[str] = []
     errors.extend(identity_ledger_contract_errors(sources))
     required_tokens = {
+        "identity": (
+            "pub const BUILTIN_VALUE_SITE_COUNT: Int = 10",
+            "pub const BUILTIN_VALUE_HASH_COMBINE: Int = 5",
+            "pub struct BuiltinValueSite",
+            "pub fn builtin_value_symbol(",
+            '"builtin-value:${tag.to_str()}"',
+            '"builtin:value-site:${tag.to_str()}"',
+        ),
+        "builtins": (
+            "pub struct CheckerBuiltinValue",
+            "pub fn checker_only_builtin_values(",
+            "pub fn checker_builtin_value_name(",
+            "pub fn checker_builtin_value_symbol(",
+            "BUILTIN_VALUE_CELL_CONSTRUCTOR",
+            "BUILTIN_VALUE_ALLOC", "BUILTIN_VALUE_DEALLOC",
+            "BUILTIN_VALUE_PTR_COPY", "BUILTIN_VALUE_PTR_FROM_ADDR",
+            "builtin_value_symbol(site)",
+        ),
         "hir": (
             "pub struct HPatternBinding",
-            "Drop { name: Str, def_id: Int, ty: Type, span: Span }",
+            "Drop { name: Str, def_id: Int, slot: SlotRef, site: HResourceSite,",
+            "reason: HResourceReason, ty: Type, span: Span }",
+            "Take { source: HExpr, source_slot: SlotRef, saved_slot: SlotRef?,",
+            "pub struct HResourceSite",
+            "pub struct HResourceReason",
+            "executable_ref: ExecutableRef",
+            "impl_method_ref: ImplMethodRef?",
             "SYNTHETIC_DICT_DEF_ID_BASE",
             "SYNTHETIC_ANF_DEF_ID_BASE",
             "SYNTHETIC_RC_DEF_ID_BASE",
@@ -5327,34 +5446,51 @@ def identity_checkpoint_contract_errors(
             "block_local_init(stmts, id)",
             "pub fn is_exact_direct_call_ident(",
             "def_id: some(_), dict_closure_dicts: some(_)",
-            "pub dict_ref: DictRef",
+            "BoundMethodValue { method: TraitMethodRef, evidence: DictRef }",
+            "pub fn method_call_ref_bound_evidence(",
+            "callee_ref: CalleeRef?",
+            "system_host: SystemHostCallableRef?",
             "Call { base_dict: DictRef, extra_dicts: List<DictRef> }",
         ),
         "infer": (
             "fn infer_scoped_block(",
             "fn exact_pattern_bindings(",
-            "freshen_default_argument_hir(ctx, dh)",
+            "fn exact_call_callee_ref(",
+            "fn exact_system_host_callable(",
+            "make_system_host_callable_ref(",
+            "system_effects.get(0).unwrap(),\n"
+            "        make_named_executable_ref(callee_ref_named_symbol(callee_ref))",
+            "value_symbol_ref(ctx, def_id)",
+            "current_identity_file_key(ctx)",
+            "slot_domain_lexical(), def_id",
             "bindings: pattern_bindings",
             "resume_binding: resume_binding",
-            "dict_ref: DictRef::Simple(trait_bound_param_name(",
+            "bound_evidence = some(DictRef::Simple(",
         ),
         "infer_decl": (
-            "trait default parameter has no exact DefId",
-            "effect default parameter has no exact DefId",
-            "def_id: some(effect_param_def_id)",
-            "def_id: some(exact_effect_def_id)",
+            "params: op_params, return_type: op.return_type",
             "def_id: some(trait_param_def_id)",
-            "def_id: some(exact_trait_def_id)",
-            "dict_ref: DictRef::Static(dict_name)",
             "let fn_def_id = match registration_scheme {",
         ),
         "checker": (
+            "for builtin in checker_only_builtin_values()",
+            "checker_builtin_value_symbol(builtin)",
+            "record_value_symbol_ref(",
             "let has_errors = ctx.sink.has_errors()",
             "if !has_errors && assembled.drop_types.len() > 0",
             "let checked_program = if has_errors {",
             "program: checked_program",
         ),
         "infer_ctx": (
+            "pub value_symbols: Map<Int, SymbolRef>",
+            "value_symbols_by_payload: Map<Str, SymbolRef>",
+            "for binding in plan.bindings {\n        match binding.namespace {",
+            "NamespaceKind::Value",
+            "symbol_ref_canonical_payload(binding.symbol)",
+            "pub fn value_symbol_ref(",
+            "system_effect_console()",
+            "system_effect_fs()",
+            "system_effect_process()",
             "struct OrPatternBindingAuthority",
             "fn collect_or_pattern_binding_names(",
             "fn same_or_pattern_binding_names(",
@@ -5366,13 +5502,13 @@ def identity_checkpoint_contract_errors(
             "ctx.env.bind(authority.name, authority.scheme)",
             "canonical or-pattern binding has no exact DefId",
             "or-pattern alternative binding has no exact DefId",
-            "pub fn has_variant_ctor_origin_def_id(",
         ),
         "dict": (
             "synthetic_def_id(",
             "SYNTHETIC_DICT_DEF_ID_BASE",
             "base_dict: lowered_base",
-            "dict_ref: dl_ref_static_only(info.dict_ref, defs, seen)",
+            "method_call_ref_bound_evidence(exact), defs, seen",
+            "callee_ref: callee_ref",
             "validate_hir_binder_def_ids(lowered)",
         ),
         "infer_helpers": (
@@ -5388,24 +5524,14 @@ def identity_checkpoint_contract_errors(
             "dict_closure_dicts: some([])",
             "ValueBindingKind::DirectCallable =>",
             "ValueBindingKind::ExternCallable =>",
-            "has_variant_ctor_origin_def_id(resolver, id)",
+            "ValueBindingKind::LocalBorrow =>\n"
+            "                            clear_zonk_local_callee_marker(ident)",
             "clear_zonk_local_callee_marker(ident)",
         ),
         "derive": (
             "base_dict: DictRef::Simple(",
             "base_dict: DictRef::Static(",
             "base_dict: DictRef::Static(dict)",
-        ),
-        "perceus": (
-            "struct OwnedSlot",
-            "fn owned_find_def_id(",
-            "SYNTHETIC_ANF_DEF_ID_BASE",
-            "SYNTHETIC_RC_DEF_ID_BASE",
-            "def_id: slot.def_id",
-            "validate_hir_binder_def_ids(transformed)",
-            "mutate_drop_identity_capture(anf_program)",
-            "is_exact_direct_call_ident(normalized)",
-            "dictionaries remain Call.resolved_dicts",
         ),
         "cctx": (
             "pub struct CExactSlotRef",
@@ -5431,7 +5557,6 @@ def identity_checkpoint_contract_errors(
             "fn resolve_c_dict_for_derived(mut ctx: CCtx, base_dict: DictRef) -> CTypedRef",
             "c_resolve_dict_ref(ctx, base_dict)",
             "FieldAction::Call { base_dict, extra_dicts }",
-            "c_option_some_variant(DictRef::Simple(",
             '"${c_path}.identity-ledger"',
             "some(c_identity_ledger_text(ctx))",
         ),
@@ -5476,19 +5601,6 @@ def identity_checkpoint_contract_errors(
             "parsed.identity_ledger)",
             "--internal-c-identity-ledger is single-file only",
         ),
-        "verify": (
-            "def_ids: List<Int>",
-            "if ctx.def_ids[i] == def_id",
-            "fn v_lookup_name(",
-            "local reference '${name}' has no exact DefId",
-            "fn v_drop(name: Str, def_id: Int",
-            "ctx.kinds[idx] == K_BORROW || ctx.kinds[idx] == K_CAPTURE",
-            "for binding in arm.bindings",
-            "def_id, \"assignment '${name}'\"",
-            "if is_exact_direct_call_ident(callee)",
-            "v_lookup(ctx, direct_def_id) >= 0",
-            "direct-call marker DefId",
-        ),
         "provenance_fixture": (
             "fn __ring_T_Ord(mut value: Int)",
             "fn direct_global_with_ord_evidence<T: Ord>",
@@ -5507,6 +5619,84 @@ def identity_checkpoint_contract_errors(
         for token in tokens:
             if token not in source:
                 errors.append(f"{label}: missing exact-slot contract {token!r}")
+    for label, struct_name, expected_fields in (
+            ("ast", "EffectOpDecl", ["name", "params", "return_type", "span"]),
+            ("env", "EffectOpDef", ["name", "operation_ref", "params", "return_type"]),
+            ("hir", "HEffectOp", ["name", "operation_ref", "params", "return_type"])):
+        fields, field_error = _f0_struct_fields(sources[label], struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None and [name for _, name in fields] != expected_fields:
+            errors.append(f"{label}: {struct_name} retained effect-default fields")
+    effect_def_fields, effect_def_error = _f0_struct_fields(
+        sources["env"], "EffectDef")
+    if effect_def_error:
+        errors.append(effect_def_error)
+    elif effect_def_fields is not None and "all_have_defaults" in (
+            name for _, name in effect_def_fields):
+        errors.append("env: EffectDef retained automatic default evidence")
+    for label, token in (
+            ("inventory", "EXECUTABLE_EFFECT_DEFAULT"),
+            ("cctx", "DefaultEvidence"),
+            ("cctx", "default_evidence"),
+            ("cgen", "default_evidence"),
+            ("cexpr", "default_evidence"),
+            ("types", "IoEffect"),
+            ("cctx", "local_fn_effects"),
+            ("cctx", "effect_ops"),
+            ("cgen", "scan_fn_effects"),
+            ("cgen", "compute_transitive_effect_closure"),
+            ("cgen", "compute_project_effect_closure"),
+            ("cgen", "register_effect_ops_c")):
+        if token in mask_ring_strings_and_comments(sources[label]):
+            errors.append(f"{label}: retired effect authority {token!r} remains")
+    for token in (
+            '"Effect operation bodies are not supported in Ring 0.1"',
+            "let _ = self.parse_block_expr()",
+            "ops.push(EffectOpDecl { name: op_name, params: params,"):
+        if token not in sources["parser"]:
+            errors.append(f"parser: effect signature-only boundary misses {token!r}")
+    for label, expected in (
+            ("andor", 1), ("dict", 1), ("zonk", 1)):
+        count = sources[label].count("callee_ref: callee_ref")
+        if count != expected:
+            errors.append(
+                f"{label}: CalleeRef transport count was {count}, expected {expected}")
+    builtin_value_body, builtin_value_error = extract_ring_function_body(
+        sources["builtins"], "checker_only_builtin_values")
+    if builtin_value_error:
+        errors.append(builtin_value_error)
+    elif not all(token in builtin_value_body for token in (
+            '"Cell", builtin_value_site_from_tag(',
+            "BUILTIN_VALUE_CELL_CONSTRUCTOR",
+            '"alloc", builtin_value_site_from_tag(BUILTIN_VALUE_ALLOC)',
+            '"dealloc", builtin_value_site_from_tag(BUILTIN_VALUE_DEALLOC)',
+            '"ptr_copy", builtin_value_site_from_tag(BUILTIN_VALUE_PTR_COPY)',
+            '"ptr_from_addr", builtin_value_site_from_tag(',
+            "BUILTIN_VALUE_PTR_FROM_ADDR")):
+        errors.append("builtins: checker-only value site relation drifted")
+    elif "BUILTIN_VALUE_HASH_COMBINE" in builtin_value_body:
+        errors.append("builtins: compiler-only hash atom entered source scope")
+    if "CHECKER_ONLY_EXTERN_CALLABLES" in sources["hir"]:
+        errors.append("hir: duplicate checker-only builtin manifest returned")
+    builtin_fields, builtin_fields_error = _f0_struct_fields(
+        sources["builtins"], "CheckerBuiltinValue")
+    if builtin_fields_error:
+        errors.append(builtin_fields_error)
+    elif builtin_fields is not None and (
+            [name for _, name in builtin_fields] != ["name", "symbol"] or
+            any(is_public for is_public, _ in builtin_fields)):
+        errors.append("builtins: checker-only value carrier is forgeable")
+    checker_ctx_body, checker_ctx_error = extract_ring_function_body(
+        sources["checker"], "new_infer_ctx")
+    if checker_ctx_error:
+        errors.append(checker_ctx_error)
+    elif not all(token in checker_ctx_body for token in (
+            "for builtin in checker_only_builtin_values()",
+            "let name = checker_builtin_value_name(builtin)",
+            "record_value_binding_kind(", "record_value_symbol_ref(",
+            "checker_builtin_value_symbol(builtin)")):
+        errors.append("checker: fixed builtin callable identity relation drifted")
 
     pattern_local_contract = (
         "fn c_pattern_local(\n"
@@ -5530,25 +5720,6 @@ def identity_checkpoint_contract_errors(
     if "let fn_scheme = ctx.env.lookup(name)" in sources["infer_decl"]:
         errors.append(
             "infer_decl: function HDecl DefId must not re-query a same-spelled env binding")
-    checker_error_guard = (
-        "    let has_errors = ctx.sink.has_errors()\n"
-        "    // B-002p1: check for use-after-move on Drop types (before lowering)\n"
-        "    if !has_errors && assembled.drop_types.len() > 0 {\n"
-        "        check_drop_moves(assembled, ctx.sink)\n"
-        "    }\n"
-        "    let checked_program = if has_errors {\n"
-        "        assembled\n"
-        "    } else {\n"
-        "        lower_dicts(lower_andor(assembled))\n"
-        "    }\n"
-        "    CheckResult {\n"
-        "        program: checked_program,"
-    )
-    if sources["checker"].count(checker_error_guard) != 2:
-        errors.append(
-            "checker: check/check_module must return assembled HIR on existing "
-            "errors and guard move/lowering")
-
     infer_source = sources["infer"]
     if len(re.findall(r"\binfer_scoped_block\b", infer_source)) != 5:
         errors.append("infer: scoped-block helper must have one definition and four call sites")
@@ -5573,25 +5744,9 @@ def identity_checkpoint_contract_errors(
          "HStmt::Var { name, def_id, init, .. }",
          "validate_hir_local_binding("),
         ("hir", "validate_hir_expr",
-         "HExpr::StructLit { fields, spread, .. }",
-         "HExpr::NamedVariantConstruct { fields, spread, .. }",
-         "validate_hir_field_values("),
-        ("hir", "validate_hir_expr",
          "HExpr::ListLit { elements, .. }",
          "HExpr::TupleLit { elements, .. }",
          "validate_hir_expr_values("),
-        ("infer", "collect_default_stmt_binders",
-         "HStmt::Let { name, def_id, init, .. }",
-         "HStmt::Var { name, def_id, init, .. }",
-         "collect_default_local_binder("),
-        ("infer", "collect_default_expr_binders",
-         "HExpr::StructLit { fields, spread, .. }",
-         "HExpr::NamedVariantConstruct { fields, spread, .. }",
-         "collect_default_field_binders("),
-        ("infer", "collect_default_expr_binders",
-         "HExpr::ListLit { elements, .. }",
-         "HExpr::TupleLit { elements, .. }",
-         "collect_default_expr_value_binders("),
     )
     crossing_bodies: dict[tuple[str, str], str] = {}
     for label, function_name, left, right, helper in crossing_split_inventory:
@@ -5697,15 +5852,9 @@ def identity_checkpoint_contract_errors(
             "                            mark_zonk_direct_callee(ident)",
             "ValueBindingKind::ExternCallable =>\n"
             "                            mark_zonk_direct_callee(ident)",
-            "ValueBindingKind::LocalBorrow => match def_id",
-            "has_variant_ctor_origin_def_id(resolver, id)",
-            "mark_zonk_direct_callee(ident)",
-            "clear_zonk_local_callee_marker(ident)",
-            "else {\n"
-            "                                    clear_zonk_local_callee_marker(ident)\n"
-            "                                }",
-            "none => clear_zonk_local_callee_marker(ident)")):
-        errors.append("final zonk direct/extern/ctor marker authority drifted")
+            "ValueBindingKind::LocalBorrow =>\n"
+            "                            clear_zonk_local_callee_marker(ident)")):
+        errors.append("final zonk direct/extern/local marker authority drifted")
 
     marker_body, marker_error = extract_ring_function_body(
         sources["zonk"], "mark_zonk_direct_callee")
@@ -5763,7 +5912,9 @@ def identity_checkpoint_contract_errors(
             'c_emit(ctx, "${t} = ((void* (*)(${cast_tys.join(", ")}))(((void**)${closure_val})[0]))(${call_args.join(", ")});")',
             "c_record_closure_call(",
         )),
-        ("gen_c_dict_dispatch_call", (
+        ("gen_c_bound_method_call", (
+            "method_call_ref_bound_evidence(exact)",
+            "trait_method_ref_callable_slot_index(",
             'emit_c_receiver_load(\n        ctx, dict_ref, method_idx + 1, "dict")',
             "gen_c_closure_call(ctx, cls_ref, call_args)",
         )),
@@ -5933,16 +6084,18 @@ def identity_checkpoint_contract_errors(
     elif "ctx, dict" in dictref_capture_body:
         errors.append("DictRef::Wrapped static base is captured")
 
-    dict_dispatch_body, dict_dispatch_error = extract_ring_function_body(
-        sources["cexpr"], "gen_c_dict_dispatch_call")
-    if dict_dispatch_error:
-        errors.append(dict_dispatch_error)
-    elif not all(token in dict_dispatch_body for token in (
-            "c_dispatch_dict_name(dd.dict_ref)",
-            "c_resolve_dict_ref(ctx, dd.dict_ref)")):
-        errors.append("DictDispatchInfo tag is not consumed by dispatch codegen")
-    elif "c_name_only_value" in dict_dispatch_body:
-        errors.append("DictDispatchInfo regained ambient name fallback")
+    bound_dispatch_body, bound_dispatch_error = extract_ring_function_body(
+        sources["cexpr"], "gen_c_bound_method_call")
+    if bound_dispatch_error:
+        errors.append(bound_dispatch_error)
+    elif not all(token in bound_dispatch_body for token in (
+            "method_call_ref_bound_evidence(exact)",
+            "trait_method_ref_callable_slot_index(",
+            "method_call_ref_bound(exact)")):
+        errors.append("bound method dispatch does not consume exact evidence/slot")
+    elif any(token in bound_dispatch_body for token in (
+            "method_call_ref_name", "trait_method_order", "c_builtin_method_index")):
+        errors.append("bound method dispatch regained name/order fallback")
 
     derived_resolve_body, derived_resolve_error = extract_ring_function_body(
         sources["cgen"], "resolve_c_dict_for_derived")
@@ -5962,16 +6115,16 @@ def identity_checkpoint_contract_errors(
     elif "fresh_tmp(ctx)" not in wildcard_body or "__ring_for_wildcard" in wildcard_body:
         errors.append("for wildcard regained an ambient name-only binding")
 
-    if "dict_param:" in sources["hir"] or "dict_param:" in sources["infer"]:
-        errors.append("DictDispatchInfo retained untyped dict_param producer")
-    if sources["infer"].count("DictDispatchInfo {") != 1 or (
-        "dict_ref: DictRef::Simple(trait_bound_param_name(" not in sources["infer"]
-    ):
-        errors.append("infer DictDispatchInfo producer is not uniquely bound/Simple")
-    if sources["infer_decl"].count("DictDispatchInfo {") != 1 or (
-        "dict_ref: DictRef::Static(dict_name)" not in sources["infer_decl"]
-    ):
-        errors.append("infer_decl delegated DictDispatchInfo is not uniquely Static")
+    for source_name in ("hir", "infer", "infer_decl", "dict", "cexpr"):
+        if "DictDispatchInfo" in sources[source_name] or (
+                "dict_dispatch" in sources[source_name]):
+            errors.append(f"{source_name}: retired DictDispatchInfo authority returned")
+    if sources["infer"].count(
+            "bound_evidence = some(DictRef::Simple(") != 1 or (
+            "make_bound_method_call_ref(\n"
+            "                        bound, evidence, callee_type," not in
+            sources["infer"]):
+        errors.append("infer bound method producer is not uniquely Simple/exact")
     for label in ("derive", "dict", "cgen"):
         if "FieldAction::Call { dict_name" in sources[label]:
             errors.append(f"{label}: FieldAction base lost explicit DictRef tag")
@@ -6082,35 +6235,6 @@ def identity_checkpoint_contract_errors(
                 errors.append(
                     f"c_push/c_pop does not independently restore {domain}")
 
-    lookup_body, lookup_error = extract_ring_function_body(
-        sources["verify"], "v_lookup")
-    if lookup_error:
-        errors.append(lookup_error)
-    elif "ctx.names[i]" in lookup_body or "ctx.def_ids[i] == def_id" not in lookup_body:
-        errors.append("RC verifier lookup is not exact-DefId-only")
-
-    drops_body, drops_error = extract_ring_function_body(
-        sources["perceus"], "drops_for")
-    if drops_error:
-        errors.append(drops_error)
-    elif not all(token in drops_body for token in (
-            "let mut index = names.len()", "index = index - 1",
-            "def_id: slot.def_id")):
-        errors.append("Perceus cleanup is not reverse-order exact-slot")
-
-    anf_callee_body, anf_callee_error = extract_ring_function_body(
-        sources["perceus"], "anf_callee")
-    if anf_callee_error:
-        errors.append(anf_callee_error)
-    elif not all(token in anf_callee_body for token in (
-            "is_exact_direct_call_ident(normalized)",
-            "return normalized",
-            "is_materializable_fn_value(normalized, externs)")):
-        errors.append("ANF no longer preserves marked syntactic direct callees")
-    elif anf_callee_body.index("return normalized") > anf_callee_body.index(
-            "is_materializable_fn_value(normalized, externs)"):
-        errors.append("ANF direct marker is checked after materialization")
-
     direct_predicate_body, direct_predicate_error = extract_ring_function_body(
         sources["hir"], "is_exact_direct_call_ident")
     if direct_predicate_error:
@@ -6122,45 +6246,13 @@ def identity_checkpoint_contract_errors(
             "_ => false")):
         errors.append("direct-call predicate is broader than exact marked Ident")
 
-    verify_expr_body, verify_expr_error = extract_ring_function_body(
-        sources["verify"], "v_expr")
-    if verify_expr_error:
-        errors.append(verify_expr_error)
-    else:
-        call_start = verify_expr_body.find("HExpr::Call { callee, args, ty, .. }")
-        call_end = verify_expr_body.find("HExpr::FieldAccess", call_start)
-        if call_start < 0 or call_end < 0:
-            errors.append("verify_rc Call accounting arm is missing")
-        else:
-            call_arm = verify_expr_body[call_start:call_end]
-            required_call_tokens = (
-                "if is_exact_direct_call_ident(callee)",
-                "HExpr::Ident { def_id: some(id), .. } => id",
-                "v_lookup(ctx, direct_def_id) >= 0",
-                "direct-call marker DefId ${direct_def_id} is local/captured",
-                "} else {",
-                "v_borrow(callee, \"\", ctx)",
-            )
-            if not all(token in call_arm for token in required_call_tokens):
-                errors.append("verify_rc direct Call context guard drifted")
-            elif call_arm.index("is_exact_direct_call_ident(callee)") > call_arm.index(
-                    "v_borrow(callee, \"\", ctx)"):
-                errors.append("verify_rc checks direct marker after callee borrow")
-
     for function_name, required in (
         ("check_effect_decl", (
-            "let effect_param_def_id = ctx.env.fresh_def_id()",
-            "def_id: some(effect_param_def_id)",
-            "let exact_effect_def_id = match p.def_id",
-            "def_id: some(exact_effect_def_id)",
+            "def_id: none, is_mutable: false",
         )),
         ("check_trait_decl", (
             "let trait_param_def_id = ctx.env.fresh_def_id()",
             "def_id: some(trait_param_def_id)",
-        )),
-        ("check_trait_default_body", (
-            "let exact_trait_def_id = match p.def_id",
-            "def_id: some(exact_trait_def_id)",
         )),
     ):
         body, extract_error = extract_ring_function_body(
@@ -6171,7 +6263,7 @@ def identity_checkpoint_contract_errors(
             for token in required:
                 if body.count(token) != 1:
                     errors.append(
-                        f"{function_name}: exact default parameter contract "
+                        f"{function_name}: exact declaration parameter contract "
                         f"{token!r} matched {body.count(token)} times")
 
     bind_pattern_body, bind_pattern_error = extract_ring_function_body(
@@ -6222,7 +6314,6 @@ def identity_checkpoint_contract_errors(
     # I-prime is identity only: the S-prime producer split and A-prime Take /
     # ownership metadata must remain absent from this checkpoint.
     forbidden = {
-        "perceus": ("DROP_PRODUCER_NOOP_NONE", "is_option_none_ctor_ident"),
         "hir": (
             "OwnershipMetadata", "Take {", "pub dict_param: Str",
             "Call { dict_name: Str",
@@ -6529,7 +6620,7 @@ def coff_object_timestamp_equality_errors(
     return []
 
 
-def default_body_identity_generated_c_errors(
+def callable_identity_generated_c_errors(
     ring_exe: str, evidence_root: Path, evidence_log: List[str],
 ) -> List[str]:
     """Run off/on/on H+T acceptance through durable one-shot receipts."""
@@ -6611,24 +6702,5850 @@ def default_body_identity_generated_c_errors(
     return errors
 
 
+IR_IDENTITY_F0_PATH = REPO / "compiler" / "ir_identity.ring"
+RESOURCE_MODEL_F0_PATH = REPO / "compiler" / "resource_model.ring"
+F0_SEMANTIC_MUTATION_COUNT = 42
+F0_SCOPE_GUARD_COUNT = 9
+
+
+def _f0_function_span(
+    source: str, function_name: str,
+) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(
+        rf"\bfn\s+{re.escape(function_name)}\s*"
+        rf"\([^{{}}]*\)[^{{}}\n]*\{{")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        return None, f"F0 function {function_name} found {len(matches)} times"
+    open_index = masked.rfind("{", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "{", "}")
+    except ValueError as exc:
+        return None, f"F0 function {function_name}: {exc}"
+    return (open_index + 1, close_index), None
+
+
+def _f0_function_body(
+    source: str, function_name: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    span, error = _f0_function_span(source, function_name)
+    if error:
+        return None, error
+    assert span is not None
+    return source[span[0]:span[1]], None
+
+
+def _f0_mutate_function_once(
+    source: str, function_name: str, anchor: str, replacement: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    span, error = _f0_function_span(source, function_name)
+    if error:
+        return None, error
+    assert span is not None
+    body = source[span[0]:span[1]]
+    count = body.count(anchor)
+    if count != 1:
+        return None, (
+            f"F0 function {function_name} mutation anchor matched {count} times")
+    return (
+        source[:span[0]] + body.replace(anchor, replacement, 1) +
+        source[span[1]:], None)
+
+
+def _f0_const_list_span(
+    source: str, name: str,
+) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(
+        rf"\bconst\s+{re.escape(name)}\s*:\s*List<(?:Int|Bool)>\s*=\s*\[")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        return None, f"F0 const {name} found {len(matches)} times"
+    open_index = masked.rfind("[", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "[", "]")
+    except ValueError as exc:
+        return None, f"F0 const {name}: {exc}"
+    return (open_index + 1, close_index), None
+
+
+def _f0_int_list(
+    source: str, name: str,
+) -> Tuple[Optional[List[int]], Optional[str]]:
+    span, error = _f0_const_list_span(source, name)
+    if error:
+        return None, error
+    assert span is not None
+    values: List[int] = []
+    for raw in source[span[0]:span[1]].split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        if re.fullmatch(r"[0-9]+", token) is None:
+            return None, f"F0 const {name} has non-Int token {token!r}"
+        values.append(int(token))
+    return values, None
+
+
+def _f0_bool_list(
+    source: str, name: str,
+) -> Tuple[Optional[List[bool]], Optional[str]]:
+    span, error = _f0_const_list_span(source, name)
+    if error:
+        return None, error
+    assert span is not None
+    values: List[bool] = []
+    for raw in source[span[0]:span[1]].split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        if token not in {"true", "false"}:
+            return None, f"F0 const {name} has non-Bool token {token!r}"
+        values.append(token == "true")
+    return values, None
+
+
+def _f0_replace_const_list(
+    source: str, name: str, values: List[object],
+) -> Tuple[Optional[str], Optional[str]]:
+    span, error = _f0_const_list_span(source, name)
+    if error:
+        return None, error
+    assert span is not None
+    body = ", ".join(
+        ("true" if value else "false") if isinstance(value, bool)
+        else str(value)
+        for value in values)
+    return source[:span[0]] + body + source[span[1]:], None
+
+
+def _f0_struct_fields(
+    source: str, name: str,
+) -> Tuple[Optional[List[Tuple[bool, str]]], Optional[str]]:
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(rf"\bpub\s+struct\s+{re.escape(name)}\s*\{{")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        return None, f"F0 struct {name} found {len(matches)} times"
+    open_index = masked.rfind("{", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "{", "}")
+    except ValueError as exc:
+        return None, f"F0 struct {name}: {exc}"
+    body = masked[open_index + 1:close_index]
+    fields = [
+        (match.group(1) is not None, match.group(2))
+        for match in re.finditer(
+            r"(?m)^\s*(?:(pub)\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", body)
+    ]
+    return fields, None
+
+
+def _f0_lattice_errors(
+    label: str, table: List[int], ranks: List[int], count: int,
+) -> List[str]:
+    errors: List[str] = []
+    if len(table) != count * count:
+        return [f"{label} join table has {len(table)} cells"]
+    if len(ranks) != count:
+        return [f"{label} rank table has {len(ranks)} cells"]
+    if any(value < 0 or value >= count for value in table):
+        return [f"{label} join table contains invalid tag"]
+
+    def join(left: int, right: int) -> int:
+        return table[left * count + right]
+
+    def leq(left: int, right: int) -> bool:
+        return join(left, right) == right
+
+    for left in range(count):
+        if join(left, left) != left:
+            errors.append(f"{label} join is not idempotent at {left}")
+        if join(0, left) != left or join(left, 0) != left:
+            errors.append(f"{label} tag 0 is not Bottom at {left}")
+        for right in range(count):
+            if join(left, right) != join(right, left):
+                errors.append(f"{label} join is not commutative at {left},{right}")
+            result = join(left, right)
+            if ranks[result] < ranks[left] or ranks[result] < ranks[right]:
+                errors.append(f"{label} rank decreases at {left},{right}")
+            if leq(left, right) and leq(right, left) and left != right:
+                errors.append(f"{label} order is not antisymmetric at {left},{right}")
+            for third in range(count):
+                if join(join(left, right), third) != join(
+                        left, join(right, third)):
+                    errors.append(
+                        f"{label} join is not associative at {left},{right},{third}")
+                if leq(left, right) and leq(right, third) and not leq(left, third):
+                    errors.append(
+                        f"{label} order is not transitive at {left},{right},{third}")
+    return errors
+
+
+def _f0_require_function_tokens(
+    source: str, function_name: str, tokens: Tuple[str, ...],
+    errors: List[str],
+) -> str:
+    body, body_error = _f0_function_body(source, function_name)
+    if body_error:
+        errors.append(body_error)
+        return ""
+    assert body is not None
+    for token in tokens:
+        if token not in body:
+            errors.append(f"F0 {function_name} misses relation {token!r}")
+    return body
+
+
+def ir_identity_f0_contract_errors(source: str) -> List[str]:
+    errors: List[str] = []
+    masked = mask_ring_strings_and_comments(source)
+    if re.search(r"(?m)^\s*use\s+", masked):
+        errors.append("IR identity F0 imports another compiler module")
+    for forbidden in (
+        "ParamMode", "SlotFlow", "LogicalOwnershipShape", "PhysicalRcShape",
+        "IdentityManifest", "ModelStage", "NormalizedResourceModel",
+        "FinalFrozenResourceModel", "PlannedResourceModel",
+        "VerifiedResourceModel", "ProjectionPath", "OwnershipMetadata",
+        "FnMeta", "HExpr", "IdentityCounter", "next_identity",
+        "fresh_identity", "identity_name_fallback", "hash_identity",
+        "resolver_lookup",
+    ):
+        if forbidden in masked:
+            errors.append(f"IR identity F0 gained forbidden authority {forbidden!r}")
+
+    private_structs = {
+        "SymbolRef": [
+            "origin_module_key", "namespace_kind", "canonical_payload",
+            "declaration_site_path"],
+        "ModuleBodyRef": ["origin_module_key", "declaration_site_path"],
+        "PathOwnerRef": ["value"],
+        "PathRef": ["owner", "normalized_child_path", "role"],
+        "SlotRef": ["value"],
+        "CalleeRef": ["value"],
+        "GlobalNominalRef": ["symbol", "kind"],
+    }
+    for name, expected_names in private_structs.items():
+        fields, field_error = _f0_struct_fields(source, name)
+        if field_error:
+            errors.append(field_error)
+            continue
+        assert fields is not None
+        if [field for _, field in fields] != expected_names:
+            errors.append(f"IR identity {name} field inventory drifted: {fields!r}")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"IR identity {name} exposes forgeable public fields")
+
+    required_internal_carriers = (
+        "enum PathOwnerValue", "SymbolOwnerValue(SymbolRef)",
+        "ModuleBodyOwnerValue(ModuleBodyRef)", "enum SlotRefValue",
+        "SourceSlotValue {", "SyntheticSlotValue(PathRef)",
+        "enum CalleeRefValue", "NamedCalleeValue(SymbolRef)",
+        "LocalCalleeValue(SlotRef)", "DynamicCalleeValue(PathRef)",
+    )
+    for token in required_internal_carriers:
+        if token not in source:
+            errors.append(f"IR identity F0 misses private carrier {token!r}")
+    for accessor in (
+            "pub fn symbol_ref_origin_module_key(",
+            "pub fn symbol_ref_namespace_kind(",
+            "pub fn symbol_ref_canonical_payload(",
+            "pub fn symbol_ref_declaration_site_path(",
+            "pub fn path_owner_ref_symbol(",
+            "pub fn path_owner_ref_module_body(",
+            "pub fn path_ref_owner(",
+            "pub fn path_ref_normalized_child_path(",
+            "pub fn path_ref_role(",
+            "pub fn slot_ref_source_origin_module_key(",
+            "pub fn slot_ref_source_domain(",
+            "pub fn slot_ref_source_def_id(",
+            "pub fn slot_ref_synthetic_path(",
+            "pub fn callee_ref_named_symbol(",
+            "pub fn callee_ref_local_slot(",
+            "pub fn callee_ref_dynamic_path(",
+            "pub fn global_nominal_ref_symbol(",
+            "pub fn global_nominal_ref_kind("):
+        if accessor not in source:
+            errors.append(f"IR identity F0 misses accessor {accessor!r}")
+
+    symbol_body = _f0_require_function_tokens(source, "symbol_ref_same", (
+        "left.origin_module_key == right.origin_module_key",
+        "namespace_kind_same(left.namespace_kind, right.namespace_kind)",
+        "left.canonical_payload == right.canonical_payload",
+        "left.declaration_site_path == right.declaration_site_path",
+    ), errors)
+    _f0_require_function_tokens(source, "module_body_ref_same", (
+        "left.origin_module_key == right.origin_module_key",
+        "left.declaration_site_path == right.declaration_site_path",
+    ), errors)
+    _f0_require_function_tokens(source, "path_ref_same", (
+        "path_owner_ref_same(left.owner, right.owner)",
+        "string_list_same(",
+        "left.normalized_child_path, right.normalized_child_path",
+        "path_role_same(left.role, right.role)",
+    ), errors)
+    _f0_require_function_tokens(source, "slot_ref_same", (
+        "am == bm", "slot_domain_same(ad, bd)", "ai == bi",
+        "path_ref_same(a, b)", "_ => false",
+    ), errors)
+    _f0_require_function_tokens(source, "callee_ref_same", (
+        "NamedCalleeValue", "symbol_ref_same(a, b)",
+        "LocalCalleeValue", "slot_ref_same(a, b)",
+        "DynamicCalleeValue", "path_ref_same(a, b)", "_ => false",
+    ), errors)
+    _f0_require_function_tokens(source, "global_nominal_ref_same", (
+        "symbol_ref_same(left.symbol, right.symbol)",
+        "nominal_kind_same(left.kind, right.kind)",
+    ), errors)
+
+    constructor_contracts = {
+        "make_symbol_ref": (
+            'origin_module_key == ""', 'canonical_payload == ""',
+            'declaration_site_path == ""', "panic(",
+            "namespace_kind_from_tag(",
+            "namespace_kind_tag(namespace_kind)"),
+        "make_module_body_ref": (
+            'origin_module_key == ""', 'declaration_site_path == ""', "panic("),
+        "make_path_ref": (
+            "validate_normalized_child_path(normalized_child_path)",
+            "path_role_from_tag(path_role_tag(role))",
+            "normalized_child_path: copy_string_list(normalized_child_path)"),
+        "make_source_slot_ref": (
+            'origin_module_key == ""',
+            "slot_domain_from_tag(slot_domain_tag(domain))",
+            "slot_domain_is_lexical(checked_domain)", "def_id < 0",
+            "def_id >= 0", "panic("),
+        "make_global_nominal_ref": (
+            "if !namespace_kind_same(\n"
+            "            symbol_ref_namespace_kind(symbol), namespace_nominal())",
+        ),
+        "require_same_slot": ("if !slot_ref_same(left, right)", "panic("),
+    }
+    for function_name, tokens in constructor_contracts.items():
+        _f0_require_function_tokens(source, function_name, tokens, errors)
+
+    observed_fields = {
+        field for field, token in {
+            "origin_module_key":
+                "left.origin_module_key == right.origin_module_key",
+            "namespace_kind":
+                "namespace_kind_same(left.namespace_kind, right.namespace_kind)",
+            "canonical_payload":
+                "left.canonical_payload == right.canonical_payload",
+            "declaration_site_path":
+                "left.declaration_site_path == right.declaration_site_path",
+        }.items() if token in symbol_body
+    }
+    left = {
+        "origin_module_key": "module-a", "namespace_kind": 0,
+        "canonical_payload": "shared-name", "declaration_site_path": "decl/0"}
+    right = dict(left)
+    right["origin_module_key"] = "module-b"
+    if all(left[field] == right[field] for field in observed_fields):
+        errors.append("SymbolRef accepts same spelling from a different module")
+    return errors
+
+
+def resource_lattice_f0_contract_errors(source: str) -> List[str]:
+    errors: List[str] = []
+    masked = mask_ring_strings_and_comments(source)
+    if re.search(r"(?m)^\s*use\s+", masked):
+        errors.append("resource lattice F0 imports another compiler module")
+    for forbidden in (
+        "SymbolRef", "PathRef", "SlotRef", "CalleeRef", "GlobalNominalRef",
+        "IdentityManifest", "ModelStage", "NormalizedResourceModel",
+        "FinalFrozenResourceModel", "PlannedResourceModel",
+        "VerifiedResourceModel", "OwnershipMetadata", "FnMeta", "HExpr",
+        "resource_model_plan", "ResourceCertificate",
+    ):
+        if forbidden in masked:
+            errors.append(f"resource lattice F0 gained forbidden authority {forbidden!r}")
+
+    for name, expected_names in {
+        "TransferDemand": ["mode", "force"],
+        "LogicalOwnershipShape": ["direct_drop", "may_unique", "param_deps"],
+        "PhysicalRcShape": [
+            "physical_rc", "boxing", "drop_glue", "foreign_containment",
+            "param_deps"],
+    }.items():
+        fields, field_error = _f0_struct_fields(source, name)
+        if field_error:
+            errors.append(field_error)
+            continue
+        assert fields is not None
+        if [field for _, field in fields] != expected_names:
+            errors.append(f"resource lattice {name} field inventory drifted")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"resource lattice {name} exposes forgeable public fields")
+
+    param_table, param_table_error = _f0_int_list(source, "PARAM_MODE_JOIN_TAGS")
+    param_ranks, param_rank_error = _f0_int_list(source, "PARAM_MODE_RANKS")
+    if param_table_error:
+        errors.append(param_table_error)
+    if param_rank_error:
+        errors.append(param_rank_error)
+    expected_param_table = [max(left, right) for left in range(4) for right in range(4)]
+    if param_table is not None and param_ranks is not None:
+        errors.extend(_f0_lattice_errors(
+            "ParamMode", param_table, param_ranks, 4))
+        if param_table != expected_param_table:
+            errors.append("ParamMode is not the strict Bottom<Borrow<MutBorrow<Own chain")
+        if param_ranks != [0, 1, 2, 3]:
+            errors.append("ParamMode ranks drifted")
+
+    _f0_require_function_tokens(source, "make_transfer_demand", (
+        "param_mode_from_tag(param_mode_tag(mode))",
+        "if force && !param_mode_same(checked_mode, param_mode_own())",
+        "panic(",
+    ), errors)
+    _f0_require_function_tokens(source, "transfer_demand_join", (
+        "let joined_mode = param_mode_join(left.mode, right.mode)",
+        "left.force || right.force", "make_transfer_demand(",
+        "joined_mode, left.force || right.force",
+    ), errors)
+    _f0_require_function_tokens(source, "transfer_demand_same", (
+        "param_mode_same(left.mode, right.mode)",
+        "left.force == right.force",
+    ), errors)
+    _f0_require_function_tokens(source, "transfer_demand_leq", (
+        "transfer_demand_same(transfer_demand_join(left, right), right)",
+    ), errors)
+    _f0_require_function_tokens(source, "transfer_demand_rank", (
+        "if value.force { 1 } else { 0 }",
+        "param_mode_rank(value.mode) + force_rank",
+    ), errors)
+
+    transfer_states = [
+        (0, False), (1, False), (2, False),
+        (3, False), (3, True)]
+
+    def transfer_join(
+        left: Tuple[int, bool], right: Tuple[int, bool],
+    ) -> Tuple[int, bool]:
+        mode = max(left[0], right[0])
+        return mode, left[1] or right[1]
+
+    transfer_ranks = {
+        state: state[0] + (1 if state[1] else 0)
+        for state in transfer_states
+    }
+    for left in transfer_states:
+        if transfer_join(left, left) != left:
+            errors.append(f"TransferDemand join is not idempotent at {left!r}")
+        for right in transfer_states:
+            joined = transfer_join(left, right)
+            if joined not in transfer_ranks:
+                errors.append(f"TransferDemand join is not total at {left!r},{right!r}")
+                continue
+            if joined != transfer_join(right, left):
+                errors.append(f"TransferDemand join is not commutative at {left!r},{right!r}")
+            if transfer_ranks[joined] < transfer_ranks[left] or (
+                    transfer_ranks[joined] < transfer_ranks[right]):
+                errors.append(f"TransferDemand rank decreases at {left!r},{right!r}")
+            for third in transfer_states:
+                if transfer_join(joined, third) != transfer_join(
+                        left, transfer_join(right, third)):
+                    errors.append(
+                        f"TransferDemand join is not associative at "
+                        f"{left!r},{right!r},{third!r}")
+
+    bool_join_body = _f0_require_function_tokens(source, "bool_list_join", (
+        "if left.len() != right.len()", "result.push(a || b)",
+    ), errors)
+    logical_body = _f0_require_function_tokens(
+        source, "logical_ownership_shape_join", (
+            "make_logical_ownership_shape(",
+            "left.direct_drop || right.direct_drop",
+            "left.may_unique || right.may_unique",
+            "bool_list_join(left.param_deps, right.param_deps)"), errors)
+    _f0_require_function_tokens(source, "make_logical_ownership_shape", (
+        "if direct_drop && !may_unique", "panic(",
+        "param_deps: copy_bool_list(param_deps)",
+    ), errors)
+    physical_body = _f0_require_function_tokens(
+        source, "physical_rc_shape_join", (
+            "make_physical_rc_shape(",
+            "left.physical_rc || right.physical_rc",
+            "left.boxing || right.boxing",
+            "left.drop_glue || right.drop_glue",
+            "left.foreign_containment || right.foreign_containment",
+            "bool_list_join(left.param_deps, right.param_deps)"), errors)
+    _f0_require_function_tokens(source, "make_physical_rc_shape", (
+        "param_deps: copy_bool_list(param_deps)",
+    ), errors)
+    if not bool_join_body:
+        errors.append("resource shape list join authority is missing")
+    if any(token in logical_body for token in (
+            "physical_rc", "boxing", "drop_glue", "foreign_containment")):
+        errors.append("logical ownership shape reads physical RC state")
+    if "direct_drop" in physical_body or "may_unique" in physical_body:
+        errors.append("physical RC shape reads logical ownership state")
+
+    slot_table, slot_table_error = _f0_int_list(source, "SLOT_FLOW_JOIN_TAGS")
+    slot_ranks, slot_rank_error = _f0_int_list(source, "SLOT_FLOW_RANKS")
+    for error in (slot_table_error, slot_rank_error):
+        if error:
+            errors.append(error)
+    expected_slot_table = [
+        0, 1, 2, 3, 4,
+        1, 1, 4, 4, 4,
+        2, 4, 2, 4, 4,
+        3, 4, 4, 3, 4,
+        4, 4, 4, 4, 4,
+    ]
+    if slot_table is not None and slot_ranks is not None:
+        errors.extend(_f0_lattice_errors(
+            "SlotFlow", slot_table, slot_ranks, 5))
+        if slot_table != expected_slot_table:
+            errors.append("SlotFlow Unreachable/reachable join table drifted")
+        if slot_ranks != [0, 1, 1, 1, 2]:
+            errors.append("SlotFlow ranks drifted")
+    return errors
+
+
+def _f0_semantic_mutation_errors(
+    identity_source: str, resource_source: str,
+) -> Tuple[List[str], int]:
+    errors: List[str] = []
+    count = 0
+    identity_mutations = (
+        ("Symbol module", "symbol_ref_same",
+         "left.origin_module_key == right.origin_module_key", "true"),
+        ("Symbol namespace", "symbol_ref_same",
+         "namespace_kind_same(left.namespace_kind, right.namespace_kind)", "true"),
+        ("Symbol payload", "symbol_ref_same",
+         "left.canonical_payload == right.canonical_payload", "true"),
+        ("Symbol declaration site", "symbol_ref_same",
+         "left.declaration_site_path == right.declaration_site_path", "true"),
+        ("module-body module", "module_body_ref_same",
+         "left.origin_module_key == right.origin_module_key", "true"),
+        ("module-body site", "module_body_ref_same",
+         "left.declaration_site_path == right.declaration_site_path", "true"),
+        ("path owner", "path_ref_same",
+         "path_owner_ref_same(left.owner, right.owner)", "true"),
+        ("path child", "path_ref_same",
+         "string_list_same(\n            left.normalized_child_path, "
+         "right.normalized_child_path)", "true"),
+        ("path role", "path_ref_same",
+         "path_role_same(left.role, right.role)", "true"),
+        ("slot module", "slot_ref_same", "am == bm", "true"),
+        ("slot domain", "slot_ref_same", "slot_domain_same(ad, bd)", "true"),
+        ("slot DefId", "slot_ref_same", "ai == bi", "true"),
+        ("slot synthetic path", "slot_ref_same",
+         "path_ref_same(a, b)", "true"),
+        ("named callee", "callee_ref_same", "symbol_ref_same(a, b)", "true"),
+        ("local callee", "callee_ref_same", "slot_ref_same(a, b)", "true"),
+        ("global nominal kind", "global_nominal_ref_same",
+         "nominal_kind_same(left.kind, right.kind)", "true"),
+        ("incomplete Symbol constructor", "make_symbol_ref",
+         "if origin_module_key == \"\" || canonical_payload == \"\" ||\n"
+         "       declaration_site_path == \"\"", "if false"),
+        ("incomplete module-body constructor", "make_module_body_ref",
+         "if origin_module_key == \"\" || declaration_site_path == \"\"",
+         "if false"),
+        ("unnormalized path constructor", "make_path_ref",
+         "validate_normalized_child_path(normalized_child_path)",
+         "let _ = normalized_child_path"),
+        ("path constructor aliases input", "make_path_ref",
+         "normalized_child_path: copy_string_list(normalized_child_path)",
+         "normalized_child_path: normalized_child_path"),
+        ("source slot module", "make_source_slot_ref",
+         "if origin_module_key == \"\"", "if false"),
+        ("source slot domain", "make_source_slot_ref",
+         "if slot_domain_is_lexical(checked_domain)", "if false"),
+        ("same-slot fail closed", "require_same_slot",
+         "if !slot_ref_same(left, right)", "if false"),
+    )
+    for label, function_name, anchor, replacement in identity_mutations:
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            identity_source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+        elif not ir_identity_f0_contract_errors(mutated or ""):
+            errors.append(f"F0 semantic mutation escaped: {label}")
+
+    nominal_namespace_relation = (
+        "if !namespace_kind_same(\n"
+        "            symbol_ref_namespace_kind(symbol), namespace_nominal())")
+    expected_nominal_finding = (
+        "F0 make_global_nominal_ref misses relation "
+        f"{nominal_namespace_relation!r}")
+    for label, replacement in (
+            ("GlobalNominal namespace check deleted", "if false"),
+            ("GlobalNominal accepts value namespace",
+             nominal_namespace_relation.replace(
+                 "namespace_nominal()", "namespace_value()"))):
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            identity_source, "make_global_nominal_ref",
+            nominal_namespace_relation, replacement)
+        if mutation_error:
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+            continue
+        findings = ir_identity_f0_contract_errors(mutated or "")
+        if findings != [expected_nominal_finding]:
+            errors.append(
+                f"F0 semantic mutation {label} findings were {findings!r}, "
+                f"expected only {expected_nominal_finding!r}")
+
+    resource_mutations = (
+        ("FORCE invalid pair", "make_transfer_demand",
+         "if force && !param_mode_same(checked_mode, param_mode_own())",
+         "if false"),
+        ("FORCE join", "transfer_demand_join",
+         "left.force || right.force", "left.force"),
+        ("FORCE equality", "transfer_demand_same",
+         "left.force == right.force", "true"),
+        ("FORCE order", "transfer_demand_leq",
+         "transfer_demand_same(transfer_demand_join(left, right), right)",
+         "param_mode_leq(left.mode, right.mode)"),
+        ("FORCE rank", "transfer_demand_rank",
+         "if value.force { 1 } else { 0 }", "0"),
+        ("shape arity", "bool_list_join",
+         "if left.len() != right.len()", "if false"),
+        ("logical direct-drop invariant", "make_logical_ownership_shape",
+         "if direct_drop && !may_unique", "if false"),
+        ("logical dependency alias", "make_logical_ownership_shape",
+         "param_deps: copy_bool_list(param_deps)",
+         "param_deps: param_deps"),
+        ("physical dependency alias", "make_physical_rc_shape",
+         "param_deps: copy_bool_list(param_deps)",
+         "param_deps: param_deps"),
+    )
+    for label, function_name, anchor, replacement in resource_mutations:
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            resource_source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+        elif not resource_lattice_f0_contract_errors(mutated or ""):
+            errors.append(f"F0 semantic mutation escaped: {label}")
+
+    cross_axis_mutations = (
+        ("logical consumes physical axis",
+         "left: LogicalOwnershipShape, right: LogicalOwnershipShape\n"
+         ") -> LogicalOwnershipShape",
+         "left: LogicalOwnershipShape, right: LogicalOwnershipShape,\n"
+         "    physical: PhysicalRcShape\n) -> LogicalOwnershipShape",
+         "left.may_unique || right.may_unique",
+         "left.may_unique || right.may_unique || physical.physical_rc"),
+        ("physical consumes logical axis",
+         "left: PhysicalRcShape, right: PhysicalRcShape\n"
+         ") -> PhysicalRcShape",
+         "left: PhysicalRcShape, right: PhysicalRcShape,\n"
+         "    logical: LogicalOwnershipShape\n) -> PhysicalRcShape",
+         "left.physical_rc || right.physical_rc",
+         "left.physical_rc || right.physical_rc || logical.may_unique"),
+    )
+    for label, signature, new_signature, anchor, replacement in (
+            cross_axis_mutations):
+        count += 1
+        if resource_source.count(signature) != 1 or resource_source.count(anchor) < 1:
+            errors.append(f"F0 semantic mutation {label}: anchor missing")
+            continue
+        mutated = resource_source.replace(signature, new_signature, 1)
+        mutated = mutated.replace(anchor, replacement, 1)
+        if not resource_lattice_f0_contract_errors(mutated):
+            errors.append(f"F0 semantic mutation escaped: {label}")
+
+    int_mutations = (
+        ("Param Borrow/MutBorrow chain", "PARAM_MODE_JOIN_TAGS", 6, 1),
+        ("Param Borrow/Own chain", "PARAM_MODE_JOIN_TAGS", 7, 2),
+        ("Param rank chain", "PARAM_MODE_RANKS", 2, 1),
+        ("Unreachable join", "SLOT_FLOW_JOIN_TAGS", 2, 4),
+        ("reachable distinct join", "SLOT_FLOW_JOIN_TAGS", 7, 2),
+    )
+    for label, name, index, replacement in int_mutations:
+        count += 1
+        values, value_error = _f0_int_list(resource_source, name)
+        if value_error:
+            errors.append(f"F0 semantic mutation {label}: {value_error}")
+            continue
+        assert values is not None
+        values[index] = replacement
+        mutated, mutation_error = _f0_replace_const_list(
+            resource_source, name, values)
+        if mutation_error:
+            errors.append(f"F0 semantic mutation {label}: {mutation_error}")
+        elif not resource_lattice_f0_contract_errors(mutated or ""):
+            errors.append(f"F0 semantic mutation escaped: {label}")
+
+    count += 1
+    stage_mutation = identity_source + (
+        "\npub struct IdentityManifest { stage_hash: Str }\n"
+        "pub struct ModelStage { tag: Int }\n")
+    if not ir_identity_f0_contract_errors(stage_mutation):
+        errors.append("F0 semantic mutation escaped: parallel stage API")
+    if count != F0_SEMANTIC_MUTATION_COUNT:
+        errors.append(
+            f"F0 semantic mutation count was {count}, "
+            f"expected {F0_SEMANTIC_MUTATION_COUNT}")
+    return errors, count
+
+
+def _f0_scope_guard_errors(
+    identity_source: str, resource_source: str,
+) -> Tuple[List[str], int]:
+    errors: List[str] = []
+    guards = (
+        ("identity imports checker", "identity", "\nuse checker::{check}\n"),
+        ("identity counter", "identity",
+         "\nstruct IdentityCounter { next_identity: Int }\n"),
+        ("identity name fallback", "identity",
+         "\nfn identity_name_fallback(value: Str) -> Str { value }\n"),
+        ("identity hash", "identity",
+         "\nfn hash_identity(value: Str) -> Str { value }\n"),
+        ("resource imports Perceus", "resource",
+         "\nuse perceus::{perceus_transform}\n"),
+        ("resource planner", "resource", "\nfn resource_model_plan() {}\n"),
+        ("resource stores HIR", "resource",
+         "\nstruct StoredTree { value: HExpr }\n"),
+        ("resource certificate", "resource",
+         "\nstruct ResourceCertificate { rank: Int }\n"),
+        ("premature projection path", "identity",
+         "\nstruct ProjectionPath { steps: List<Str> }\n"),
+    )
+    count = 0
+    for label, target, suffix in guards:
+        count += 1
+        if target == "identity":
+            findings = ir_identity_f0_contract_errors(identity_source + suffix)
+        else:
+            findings = resource_lattice_f0_contract_errors(
+                resource_source + suffix)
+        if not findings:
+            errors.append(f"F0 scope guard escaped: {label}")
+    if count != F0_SCOPE_GUARD_COUNT:
+        errors.append(
+            f"F0 scope guard count was {count}, expected {F0_SCOPE_GUARD_COUNT}")
+    return errors, count
+
+
+def resource_model_f0_source_errors() -> List[str]:
+    errors: List[str] = []
+    try:
+        identity_source = IR_IDENTITY_F0_PATH.read_text(encoding="utf-8")
+        resource_source = RESOURCE_MODEL_F0_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read F0 compiler sources: {exc}"]
+    errors.extend(ir_identity_f0_contract_errors(identity_source))
+    errors.extend(resource_lattice_f0_contract_errors(resource_source))
+    if errors:
+        return errors
+    semantic_errors, _ = _f0_semantic_mutation_errors(
+        identity_source, resource_source)
+    guard_errors, _ = _f0_scope_guard_errors(identity_source, resource_source)
+    errors.extend(semantic_errors)
+    errors.extend(guard_errors)
+    return errors
+
+
+def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(ring_exe))
+    for source_path in (IR_IDENTITY_F0_PATH, RESOURCE_MODEL_F0_PATH):
+        completed = subprocess.run(
+            [ring_exe, "check", str(source_path)],
+            cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="strict", check=False,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            errors.append(
+                f"pinned Ring check failed for {display_path(source_path)}: "
+                f"exit={completed.returncode} stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}")
+        elif completed.stdout.strip() != "OK" or completed.stderr:
+            errors.append(
+                f"pinned Ring check output drifted for "
+                f"{display_path(source_path)}: stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}")
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across F0 checks")
+    return errors
+
+
+IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
+F1_EXECUTABLE_KIND_COUNT = 17
+F1_BINDER_KIND_COUNT = 25
+F1_SEMANTIC_MUTATION_COUNT = 70
+F1_SCOPE_GUARD_COUNT = 13
+
+F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
+F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
+F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
+F2_U1A_SCOPE_GUARD_COUNT = 8
+F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 20
+F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT = 35
+F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT = 36
+
+F1_EXECUTABLE_KINDS = (
+    ("fn", "EXECUTABLE_FN"),
+    ("impl_method", "EXECUTABLE_IMPL_METHOD"),
+    ("test", "EXECUTABLE_TEST"),
+    ("const_initializer", "EXECUTABLE_CONST_INITIALIZER"),
+    ("module_body", "EXECUTABLE_MODULE_BODY"),
+    ("lambda", "EXECUTABLE_LAMBDA"),
+    ("handler", "EXECUTABLE_HANDLER"),
+    ("derived_impl", "EXECUTABLE_DERIVED_IMPL"),
+    ("dict_helper", "EXECUTABLE_DICT_HELPER"),
+    ("const_getter", "EXECUTABLE_CONST_GETTER"),
+    ("drop_glue", "EXECUTABLE_DROP_GLUE"),
+    ("bodyless_trait_member", "EXECUTABLE_BODYLESS_TRAIT_MEMBER"),
+    ("bodyless_effect_operation", "EXECUTABLE_BODYLESS_EFFECT_OPERATION"),
+    ("bodyless_interface_member", "EXECUTABLE_BODYLESS_INTERFACE_MEMBER"),
+    ("extern_fn", "EXECUTABLE_EXTERN_FN"),
+    ("extern_bridge", "EXECUTABLE_EXTERN_BRIDGE"),
+    ("builtin_intrinsic", "EXECUTABLE_BUILTIN_INTRINSIC"),
+)
+
+F1_BINDER_KINDS = (
+    ("source_param", "BINDER_SOURCE_PARAM"),
+    ("let", "BINDER_LET"),
+    ("var", "BINDER_VAR"),
+    ("for", "BINDER_FOR"),
+    ("destructure", "BINDER_DESTRUCTURE"),
+    ("match_pattern", "BINDER_MATCH_PATTERN"),
+    ("if_let_pattern", "BINDER_IF_LET_PATTERN"),
+    ("catch_pattern", "BINDER_CATCH_PATTERN"),
+    ("lambda_param", "BINDER_LAMBDA_PARAM"),
+    ("handler_param", "BINDER_HANDLER_PARAM"),
+    ("handler_resume", "BINDER_HANDLER_RESUME"),
+    ("lambda_capture", "BINDER_LAMBDA_CAPTURE"),
+    ("dictionary_evidence_local", "BINDER_DICTIONARY_EVIDENCE_LOCAL"),
+    ("generated_synthetic_parameter", "BINDER_GENERATED_SYNTHETIC_PARAMETER"),
+    ("lambda_value", "BINDER_LAMBDA_VALUE"),
+    ("call_result", "BINDER_CALL_RESULT"),
+    ("pre_anf", "BINDER_PRE_ANF"),
+    ("pattern_projection", "BINDER_PATTERN_PROJECTION"),
+    ("scope_result", "BINDER_SCOPE_RESULT"),
+    ("control_result", "BINDER_CONTROL_RESULT"),
+    ("assign_temp", "BINDER_ASSIGN_TEMP"),
+    ("effect_ctx_param", "BINDER_EFFECT_CTX_PARAM"),
+    ("effect_ctx_local", "BINDER_EFFECT_CTX_LOCAL"),
+    ("effect_ctx_parent_capture", "BINDER_EFFECT_CTX_PARENT_CAPTURE"),
+    ("dictionary_evidence_param", "BINDER_DICTIONARY_EVIDENCE_PARAM"),
+)
+
+
+def _f1_require_function_tokens(
+    source: str, function_name: str, tokens: Tuple[str, ...],
+    errors: List[str],
+) -> str:
+    body, body_error = _f0_function_body(source, function_name)
+    if body_error:
+        errors.append(body_error.replace("F0 function", "F1 function"))
+        return ""
+    assert body is not None
+    for token in tokens:
+        if token not in body:
+            errors.append(f"F1 {function_name} misses relation {token!r}")
+    return body
+
+
+def ir_inventory_f1_contract_errors(source: str) -> List[str]:
+    errors: List[str] = []
+    masked = mask_ring_strings_and_comments(source)
+    imports = re.findall(r"(?m)^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)", masked)
+    if imports != ["ir_identity"]:
+        errors.append(f"F1 import authority drifted: {imports!r}")
+    for forbidden in (
+        "resolver", "checker", "codegen", "perceus",
+        "OwnershipMetadata", "FnMeta", "HExpr", "HDecl", "Type::FnType",
+        "IdentityCounter", "next_identity", "fresh_identity", "name_fallback",
+        "display_name", "c_symbol", "FlowIrFreezeFacts", "node_count",
+        "edge_count", "region_count", "resource_op_count",
+        "binder_slot_set_same", "ResourcePlanner", "ResourceCertificate",
+        "RcIR", "AbiIR", "CONTRACT_INTRINSIC", "Other", "Unknown",
+    ):
+        if forbidden in masked:
+            errors.append(f"F1 gained forbidden authority {forbidden!r}")
+    if re.search(r"(?m)^\s*(?:pub\s+)?(?:name|span|display|c_name)\s*:", masked):
+        errors.append("F1 identity stores a raw name/span/display/C field")
+    if re.search(r"\b(?:Clone|Take|Drop|Cleanup)\b", masked):
+        errors.append("F1 gained forbidden resource operation")
+    if ".sort" in masked or "sort_by" in masked:
+        errors.append("F1 input order became identity through sorting")
+    for name, expected in {
+        "ExecutableRef": ["value"],
+        "ExecutableParentRef": ["value"],
+        "ExecutableKind": ["tag"],
+        "ExecutableContractMode": ["tag"],
+        "ExecutableContract": ["value"],
+        "ExecutableEntry": ["reference", "parent", "kind", "contract"],
+        "ExecutableInventory": ["entries"],
+        "BinderKind": ["tag"],
+        "BinderEntry": ["slot", "owner", "kind", "site"],
+        "BinderManifest": ["owner", "entries"],
+        "IrInventoryClosure": ["inventory", "manifests"],
+    }.items():
+        fields, field_error = _f0_struct_fields(source, name)
+        if field_error:
+            errors.append(field_error.replace("F0 struct", "F1 struct"))
+            continue
+        assert fields is not None
+        if [field for _, field in fields] != expected:
+            errors.append(f"F1 {name} private field inventory drifted")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"F1 {name} exposes forgeable public fields")
+
+    for index, (function_suffix, constant_name) in enumerate(F1_EXECUTABLE_KINDS):
+        const_token = f"const {constant_name}: Int = {index}"
+        if const_token not in source:
+            errors.append(f"F1 executable kind census misses {const_token!r}")
+        function_name = f"executable_kind_{function_suffix}"
+        _f1_require_function_tokens(source, function_name, (
+            f"executable_kind_from_tag({constant_name})",
+        ), errors)
+    if len(F1_EXECUTABLE_KINDS) != F1_EXECUTABLE_KIND_COUNT:
+        errors.append("F1 executable kind test census is incomplete")
+    if "const EXECUTABLE_KIND_COUNT: Int = 17" not in source:
+        errors.append("F1 executable kind count drifted")
+
+    allowed_modes, allowed_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_ALLOWED_MODE_TAGS")
+    ref_forms, ref_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_REF_FORM_TAGS")
+    namespaces, namespace_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_NAMESPACE_TAGS")
+    executable_roles, executable_role_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_PATH_ROLE_TAGS")
+    parent_forms, parent_form_error = _f0_int_list(
+        source, "EXECUTABLE_KIND_PARENT_FORM_TAGS")
+    if allowed_error:
+        errors.append(allowed_error)
+    if ref_error:
+        errors.append(ref_error)
+    if namespace_error:
+        errors.append(namespace_error)
+    if executable_role_error:
+        errors.append(executable_role_error)
+    if parent_form_error:
+        errors.append(parent_form_error)
+    expected_modes = [
+        0, 0, 0, 0, 0, 0, 0,
+        2, 0, 2, 2,
+        1, 1, 1, 1, 2, 2,
+    ]
+    expected_ref_forms = [
+        0, 0, 1, 0, 1, 1, 1,
+        0, 1, 0, 0,
+        0, 0, 0, 0, 0, 0,
+    ]
+    expected_namespaces = [
+        0, 4, 5, 0, 5, 5, 5,
+        4, 5, 0, 4,
+        4, 4, 4, 0, 0, 0,
+    ]
+    expected_executable_roles = [
+        7, 7, 0, 7, 0, 1, 5,
+        7, 6, 7, 7,
+        7, 7, 7, 7, 7, 7,
+    ]
+    expected_parent_forms = [
+        0, 0, 0, 0, 0, 1, 1,
+        0, 2, 0, 0,
+        0, 0, 0, 0, 0, 0,
+    ]
+    if allowed_modes is not None and allowed_modes != expected_modes:
+        errors.append("F1 executable kind/body-mode matrix drifted")
+    if ref_forms is not None and ref_forms != expected_ref_forms:
+        errors.append("F1 executable kind/ref-form matrix drifted")
+    if namespaces is not None and namespaces != expected_namespaces:
+        errors.append("F1 executable kind/namespace matrix drifted")
+    if executable_roles is not None and (
+            executable_roles != expected_executable_roles):
+        errors.append("F1 executable kind/path-role matrix drifted")
+    if parent_forms is not None and parent_forms != expected_parent_forms:
+        errors.append("F1 executable kind/parent-form matrix drifted")
+    if "pub fn executable_kind_drop_glue()" not in source:
+        errors.append("F1 DropGlue executable kind is missing")
+
+    _f1_require_function_tokens(source, "make_executable_entry", (
+        "if !executable_kind_allows_mode(kind, mode)",
+        "if expected_form != actual_form",
+        "if !executable_kind_allows_parent_form(kind, parent)",
+        "if !executable_parent_matches_reference(reference, parent)",
+        "if !namespace_kind_same(",
+        "if !path_role_same(\n                path_ref_role(path), "
+        "executable_kind_expected_path_role(kind))",
+        "if executable_kind_same(kind, executable_kind_module_body())",
+        "if path_owner_ref_is_symbol(path_ref_owner(path))",
+        "if !path_role_same(path_ref_role(body_path), path_role_child())",
+        "!path_is_direct_child_of_executable(reference, body_path)",
+        "!executable_ref_is_named(reference)",
+    ), errors)
+    _f1_require_function_tokens(source, "executable_parent_matches_reference", (
+        "if executable_parent_is_module_body(parent)",
+        "module_body_ref_same(",
+        "path_ref_normalized_child_path(path).len() == 1",
+        "path_is_direct_child_of_executable(\n            executable_parent, "
+        "executable_ref_anonymous_path(reference))",
+    ), errors)
+    _f1_require_function_tokens(source, "path_is_direct_child_of_executable", (
+        "path_ref_normalized_child_path(path).len() == 1",
+        "child_path.len() == root_path.len() + 1",
+        "string_path_has_prefix(child_path, root_path)",
+    ), errors)
+    _f1_require_function_tokens(source, "make_executable_inventory", (
+        "if executable_ref_same(left.reference, right.reference)",
+        'panic("IR inventory: duplicate executable reference")',
+        "copy_executable_entries(entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "executable_inventory_entries", (
+        "copy_executable_entries(value.entries)",
+    ), errors)
+    for token in (
+            "ConcreteBodyValue(PathRef)", "ContractOnlyValue",
+            "make_concrete_body_contract", "make_contract_only"):
+        if token not in source:
+            errors.append(f"F1 two-mode body contract misses {token!r}")
+
+    for index, (function_suffix, constant_name) in enumerate(F1_BINDER_KINDS):
+        const_token = f"const {constant_name}: Int = {index}"
+        if const_token not in source:
+            errors.append(f"F1 binder kind census misses {const_token!r}")
+        function_name = f"binder_kind_{function_suffix}"
+        _f1_require_function_tokens(source, function_name, (
+            f"binder_kind_from_tag({constant_name})",
+        ), errors)
+    if len(F1_BINDER_KINDS) != F1_BINDER_KIND_COUNT:
+        errors.append("F1 binder kind test census is incomplete")
+    if "const BINDER_KIND_COUNT: Int = 25" not in source:
+        errors.append("F1 binder kind count drifted")
+    binder_roles, binder_role_error = _f0_int_list(
+        source, "BINDER_KIND_PATH_ROLE_TAGS")
+    if binder_role_error:
+        errors.append(binder_role_error)
+    expected_binder_roles = [
+        2, 0, 0, 0, 0, 0, 0, 0, 2, 5, 5,
+        4, 0, 2, 1, 3, 6, 1, 3, 3, 6,
+        2, 5, 4, 2,
+    ]
+    if binder_roles is not None and binder_roles != expected_binder_roles:
+        errors.append("F1 binder kind/path-role matrix drifted")
+
+    _f1_require_function_tokens(source, "make_source_binder_entry", (
+        "if !binder_kind_is_source(kind)",
+        "if !slot_ref_is_source(slot)",
+        "slot_ref_source_def_id(slot) < 0",
+        "slot_ref_source_domain(slot), slot_domain_lexical()",
+        "slot_ref_source_origin_module_key(slot) !=",
+        "executable_ref_origin_module_key(owner)",
+        "path_owner_origin_module_key(path_ref_owner(site))",
+        "!executable_ref_contains_path(owner, site)",
+        "if !path_role_same(\n            path_ref_role(site), "
+        "binder_kind_expected_path_role(kind))",
+    ), errors)
+    _f1_require_function_tokens(source, "make_synthetic_binder_entry", (
+        "if binder_kind_is_source(kind)",
+        "if slot_ref_is_source(slot)",
+        "if !executable_ref_contains_path(owner, site)",
+        "if !path_role_same(\n            path_ref_role(site), "
+        "binder_kind_expected_path_role(kind))",
+        "if !path_ref_same(slot_ref_synthetic_path(slot), site)",
+    ), errors)
+    _f1_require_function_tokens(source, "make_binder_manifest", (
+        "if !executable_ref_same(left.owner, owner)",
+        "if slot_ref_same(left.slot, right.slot)",
+        "copy_binder_entries(entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "binder_manifest_entries", (
+        "copy_binder_entries(value.entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "close_ir_inventory", (
+        "if manifests.len() != inventory.entries.len()",
+        "if manifests_have_duplicate_slot(manifests)",
+        "if !executable_parent_is_registered(inventory, entry)",
+        "if manifest_count_for_owner(manifests, entry.reference) != 1",
+        "let manifest = manifest_for_owner(manifests, entry.reference)",
+        "if !binder_site_has_nearest_registered_owner(inventory, binder)",
+        "manifest.entries.len() != 0",
+        "if !inventory_contains_ref(inventory, manifest.owner)",
+        "make_executable_inventory(inventory.entries)",
+        "copy_binder_manifests(manifests)",
+    ), errors)
+    _f1_require_function_tokens(source, "manifests_have_duplicate_slot", (
+        "if slot_ref_same(existing, entry.slot) { return true }",
+    ), errors)
+    _f1_require_function_tokens(source, "executable_parent_is_registered", (
+        "if executable_parent_is_module_body(entry.parent) { return true }",
+        "let parent_ref = executable_parent_executable(entry.parent)",
+        "executable_contract_mode_concrete_body()",
+    ), errors)
+    _f1_require_function_tokens(source, "binder_site_has_nearest_registered_owner", (
+        "if !inventory_contains_ref(inventory, binder.owner)",
+        "!executable_ref_contains_path(binder.owner, binder.site)",
+        "executable_ref_depth(candidate.reference) > owner_depth",
+    ), errors)
+    _f1_require_function_tokens(source, "ir_inventory_closure_inventory", (
+        "make_executable_inventory(value.inventory.entries)",
+    ), errors)
+    _f1_require_function_tokens(source, "ir_inventory_closure_manifests", (
+        "copy_binder_manifests(value.manifests)",
+    ), errors)
+    return errors
+
+
+def _f1_expected_relation_finding(function_name: str, token: str) -> str:
+    return f"F1 {function_name} misses relation {token!r}"
+
+
+def ir_inventory_f1_semantic_mutation_errors(source: str) -> Tuple[List[str], int]:
+    errors: List[str] = []
+    count = 0
+
+    for index, (function_suffix, constant_name) in enumerate(F1_EXECUTABLE_KINDS):
+        function_name = f"executable_kind_{function_suffix}"
+        anchor = f"executable_kind_from_tag({constant_name})"
+        replacement_constant = F1_EXECUTABLE_KINDS[(index + 1) % len(
+            F1_EXECUTABLE_KINDS)][1]
+        mutated, mutation_error = _f0_mutate_function_once(
+            source, function_name, anchor,
+            f"executable_kind_from_tag({replacement_constant})")
+        count += 1
+        if mutation_error:
+            errors.append(f"F1 semantic mutation {function_suffix}: {mutation_error}")
+            continue
+        findings = ir_inventory_f1_contract_errors(mutated or "")
+        expected = _f1_expected_relation_finding(function_name, anchor)
+        if findings != [expected]:
+            errors.append(
+                f"F1 semantic mutation {function_suffix} findings were "
+                f"{findings!r}, expected only {expected!r}")
+
+    function_mutations = (
+        ("duplicate executable", "make_executable_inventory",
+         "if executable_ref_same(left.reference, right.reference)", "if false"),
+        ("kind/body mode", "make_executable_entry",
+         "if !executable_kind_allows_mode(kind, mode)", "if false"),
+        ("kind/ref form", "make_executable_entry",
+         "if expected_form != actual_form", "if false"),
+        ("kind/parent form", "make_executable_entry",
+         "if !executable_kind_allows_parent_form(kind, parent)", "if false"),
+        ("kind/namespace", "make_executable_entry",
+         "if !namespace_kind_same(", "if false && namespace_kind_same("),
+        ("kind/path role", "make_executable_entry",
+         "if !path_role_same(\n                path_ref_role(path), "
+         "executable_kind_expected_path_role(kind))",
+         "if false"),
+        ("immediate parent", "make_executable_entry",
+         "if !executable_parent_matches_reference(reference, parent)", "if false"),
+        ("parent relation helper", "executable_parent_matches_reference",
+         "path_is_direct_child_of_executable(\n            executable_parent, "
+         "executable_ref_anonymous_path(reference))", "true"),
+        ("module-body owner", "make_executable_entry",
+         "if path_owner_ref_is_symbol(path_ref_owner(path))", "if false"),
+        ("body path role", "make_executable_entry",
+         "if !path_role_same(path_ref_role(body_path), path_role_child())",
+         "if false"),
+        ("body direct child", "make_executable_entry",
+         "!path_is_direct_child_of_executable(reference, body_path)", "false"),
+        ("body direct-child helper", "path_is_direct_child_of_executable",
+         "child_path.len() == root_path.len() + 1", "child_path.len() > root_path.len()"),
+        ("anonymous ContractOnly", "make_executable_entry",
+         "!executable_ref_is_named(reference)", "false"),
+        ("source binder kind", "make_source_binder_entry",
+         "if !binder_kind_is_source(kind)", "if false"),
+        ("source binder slot", "make_source_binder_entry",
+         "if !slot_ref_is_source(slot)", "if false"),
+        ("source binder DefId", "make_source_binder_entry",
+         "slot_ref_source_def_id(slot) < 0", "false"),
+        ("source binder domain", "make_source_binder_entry",
+         "!slot_domain_same(\n            slot_ref_source_domain(slot), slot_domain_lexical())",
+         "false"),
+        ("source binder module", "make_source_binder_entry",
+         "slot_ref_source_origin_module_key(slot) !=\n           executable_ref_origin_module_key(owner)",
+         "false"),
+        ("source binder site containment", "make_source_binder_entry",
+         "!executable_ref_contains_path(owner, site)", "false"),
+        ("source binder site role", "make_source_binder_entry",
+         "if !path_role_same(\n            path_ref_role(site), "
+         "binder_kind_expected_path_role(kind))", "if false"),
+        ("source kind rejected", "make_synthetic_binder_entry",
+         "if binder_kind_is_source(kind)", "if false"),
+        ("source SlotRef rejected", "make_synthetic_binder_entry",
+         "if slot_ref_is_source(slot)", "if false"),
+        ("binder site containment", "make_synthetic_binder_entry",
+         "if !executable_ref_contains_path(owner, site)", "if false"),
+        ("binder site role", "make_synthetic_binder_entry",
+         "if !path_role_same(\n            path_ref_role(site), "
+         "binder_kind_expected_path_role(kind))", "if false"),
+        ("synthetic binder site", "make_synthetic_binder_entry",
+         "if !path_ref_same(slot_ref_synthetic_path(slot), site)", "if false"),
+        ("manifest cross-owner", "make_binder_manifest",
+         "if !executable_ref_same(left.owner, owner)", "if false"),
+        ("manifest duplicate slot", "make_binder_manifest",
+         "if slot_ref_same(left.slot, right.slot)", "if false"),
+        ("closure census", "close_ir_inventory",
+         "if manifests.len() != inventory.entries.len()", "if false"),
+        ("global duplicate slot", "close_ir_inventory",
+         "if manifests_have_duplicate_slot(manifests)", "if false"),
+        ("global duplicate helper", "manifests_have_duplicate_slot",
+         "if slot_ref_same(existing, entry.slot) { return true }", "if false {}"),
+        ("parent registration", "close_ir_inventory",
+         "if !executable_parent_is_registered(inventory, entry)",
+         "if false"),
+        ("parent registration helper", "executable_parent_is_registered",
+         "executable_contract_mode_concrete_body()",
+         "executable_contract_mode_contract_only()"),
+        ("nearest binder owner", "close_ir_inventory",
+         "if !binder_site_has_nearest_registered_owner(inventory, binder)",
+         "if false"),
+        ("nearest binder helper", "binder_site_has_nearest_registered_owner",
+         "executable_ref_depth(candidate.reference) > owner_depth", "false"),
+        ("missing manifest", "close_ir_inventory",
+         "if manifest_count_for_owner(manifests, entry.reference) != 1",
+         "if false"),
+        ("ContractOnly binders", "close_ir_inventory",
+         "manifest.entries.len() != 0", "false"),
+        ("manifest owner absent", "close_ir_inventory",
+         "if !inventory_contains_ref(inventory, manifest.owner)", "if false"),
+    )
+    for label, function_name, anchor, replacement in function_mutations:
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"F1 semantic mutation {label}: {mutation_error}")
+            continue
+        findings = ir_inventory_f1_contract_errors(mutated or "")
+        expected = _f1_expected_relation_finding(function_name, anchor)
+        if findings != [expected]:
+            errors.append(
+                f"F1 semantic mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    table_mutations = (
+        ("DropGlue body-mode", "EXECUTABLE_KIND_ALLOWED_MODE_TAGS", 10, 0,
+         "F1 executable kind/body-mode matrix drifted"),
+        ("dict-helper ref form", "EXECUTABLE_KIND_REF_FORM_TAGS", 8, 0,
+         "F1 executable kind/ref-form matrix drifted"),
+        ("Fn namespace", "EXECUTABLE_KIND_NAMESPACE_TAGS", 0, 5,
+         "F1 executable kind/namespace matrix drifted"),
+        ("handler executable role", "EXECUTABLE_KIND_PATH_ROLE_TAGS", 6, 1,
+         "F1 executable kind/path-role matrix drifted"),
+        ("lambda parent form", "EXECUTABLE_KIND_PARENT_FORM_TAGS", 5, 0,
+         "F1 executable kind/parent-form matrix drifted"),
+        ("lambda-capture role", "BINDER_KIND_PATH_ROLE_TAGS", 11, 1,
+         "F1 binder kind/path-role matrix drifted"),
+        ("source-param role", "BINDER_KIND_PATH_ROLE_TAGS", 0, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("lambda-param role", "BINDER_KIND_PATH_ROLE_TAGS", 8, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handler-param role", "BINDER_KIND_PATH_ROLE_TAGS", 9, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handler-resume role", "BINDER_KIND_PATH_ROLE_TAGS", 10, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("dictionary-local role", "BINDER_KIND_PATH_ROLE_TAGS", 12, 2,
+         "F1 binder kind/path-role matrix drifted"),
+        ("generated-param role", "BINDER_KIND_PATH_ROLE_TAGS", 13, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("call-result role", "BINDER_KIND_PATH_ROLE_TAGS", 15, 6,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handled-evidence-param role", "BINDER_KIND_PATH_ROLE_TAGS", 21, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handled-evidence-local role", "BINDER_KIND_PATH_ROLE_TAGS", 22, 0,
+         "F1 binder kind/path-role matrix drifted"),
+        ("handled-evidence-capture role", "BINDER_KIND_PATH_ROLE_TAGS", 23, 0,
+         "F1 binder kind/path-role matrix drifted"),
+    )
+    for label, table_name, index, replacement, expected in table_mutations:
+        count += 1
+        values, value_error = _f0_int_list(source, table_name)
+        if value_error:
+            errors.append(f"F1 semantic mutation {label}: {value_error}")
+            continue
+        assert values is not None
+        values[index] = replacement
+        mutated, mutation_error = _f0_replace_const_list(
+            source, table_name, values)
+        if mutation_error:
+            errors.append(f"F1 semantic mutation {label}: {mutation_error}")
+            continue
+        findings = ir_inventory_f1_contract_errors(mutated or "")
+        if findings != [expected]:
+            errors.append(
+                f"F1 semantic mutation {label} findings were {findings!r}, "
+                f"expected only {expected!r}")
+
+    if count != F1_SEMANTIC_MUTATION_COUNT:
+        errors.append(
+            f"F1 semantic mutation count was {count}, "
+            f"expected {F1_SEMANTIC_MUTATION_COUNT}")
+    return errors, count
+
+
+def ir_inventory_f1_scope_guard_errors(source: str) -> Tuple[List[str], int]:
+    guards = (
+        ("resolver import", "\nuse resolver::{resolve_namespace_plan}\n"),
+        ("checker import", "\nuse checker::{check}\n"),
+        ("codegen import", "\nuse codegen_c::{generate_c}\n"),
+        ("Perceus import", "\nuse perceus::{perceus_transform}\n"),
+        ("shared counter", "\nstruct IdentityCounter { next_identity: Int }\n"),
+        ("name fallback", "\nfn name_fallback(value: Str) -> Str { value }\n"),
+        ("legacy HIR scan", "\nstruct Legacy { value: HExpr }\n"),
+        ("C symbol identity", "\nstruct CName { c_symbol: Str }\n"),
+        ("fake structural counts", "\nstruct FakeFreeze { node_count: Int }\n"),
+        ("premature binder equality", "\nfn binder_slot_set_same() {}\n"),
+        ("third body mode", "\nconst CONTRACT_INTRINSIC: Int = 2\n"),
+        ("resource census claim", "\nstruct Ops { resource_op_count: Int }\n"),
+        ("resource operation", "\nstruct ResourceOp { op: Take }\n"),
+    )
+    errors: List[str] = []
+    count = 0
+    for label, suffix in guards:
+        count += 1
+        if not ir_inventory_f1_contract_errors(source + suffix):
+            errors.append(f"F1 scope guard escaped: {label}")
+    if count != F1_SCOPE_GUARD_COUNT:
+        errors.append(
+            f"F1 scope guard count was {count}, expected {F1_SCOPE_GUARD_COUNT}")
+    return errors, count
+
+
+def ir_inventory_f1_source_errors() -> List[str]:
+    try:
+        source = IR_INVENTORY_F1_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read {display_path(IR_INVENTORY_F1_PATH)}: {exc}"]
+    errors = ir_inventory_f1_contract_errors(source)
+    if errors:
+        return errors
+    semantic_errors, _ = ir_inventory_f1_semantic_mutation_errors(source)
+    guard_errors, _ = ir_inventory_f1_scope_guard_errors(source)
+    errors.extend(semantic_errors)
+    errors.extend(guard_errors)
+    return errors
+
+
+LLM_WARNING_ENVELOPE_KEYS = frozenset(("version", "file", "diagnostics"))
+LLM_WARNING_DIAGNOSTIC_KEYS = frozenset((
+    "code", "severity", "message", "span", "context",
+    "notes", "suggestions", "category",
+))
+LLM_WARNING_SPAN_KEYS = frozenset(("line", "col", "end_line", "end_col"))
+
+
+def _reject_duplicate_json_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def llm_warning_document_sequence(
+    output: str,
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Decode exact newline-separated formatter-v1 warning documents."""
+    if not output:
+        return None, "expected non-empty LLM warning document sequence"
+    decoder = json.JSONDecoder(object_pairs_hook=_reject_duplicate_json_keys)
+    documents: List[Any] = []
+    offset = 0
+    while offset < len(output):
+        try:
+            document, end = decoder.raw_decode(output, offset)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return None, f"invalid LLM warning JSON document: {exc}"
+        documents.append(document)
+        if end == len(output) or output[end:end + 1] != "\n":
+            return None, "each LLM warning document must end with one newline"
+        offset = end + 1
+        if offset == len(output):
+            break
+
+    flattened: List[Dict[str, Any]] = []
+    unique_keys: set[Tuple[Any, ...]] = set()
+    for document in documents:
+        if not isinstance(document, dict) or (
+                frozenset(document.keys()) != LLM_WARNING_ENVELOPE_KEYS):
+            return None, "LLM warning envelope keys drifted"
+        if document.get("version") != 1 or not isinstance(document.get("file"), str):
+            return None, "LLM warning envelope version/file drifted"
+        diagnostics = document.get("diagnostics")
+        if not isinstance(diagnostics, list) or not diagnostics:
+            return None, "LLM warning envelope has no diagnostics"
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict) or (
+                    frozenset(diagnostic.keys()) !=
+                    LLM_WARNING_DIAGNOSTIC_KEYS):
+                return None, "LLM warning diagnostic keys drifted"
+            span = diagnostic.get("span")
+            if not isinstance(span, dict) or (
+                    frozenset(span.keys()) != LLM_WARNING_SPAN_KEYS):
+                return None, "LLM warning span keys drifted"
+            key = (
+                document["file"], diagnostic.get("code"),
+                span.get("line"), span.get("col"),
+                span.get("end_line"), span.get("end_col"),
+            )
+            if key in unique_keys:
+                return None, f"duplicate LLM warning diagnostic key {key!r}"
+            unique_keys.add(key)
+            flattened.append({
+                "file": document["file"],
+                "diagnostic": diagnostic,
+            })
+    return flattened, None
+
+
+def llm_warning_contract_error(
+    output: str, expected: Sequence[Mapping[str, Any]],
+) -> Optional[str]:
+    actual, error = llm_warning_document_sequence(output)
+    if error is not None or actual is None:
+        return error
+    if actual != list(expected):
+        return (
+            "LLM warning sequence drifted: "
+            f"expected={list(expected)!r} actual={actual!r}")
+    return None
+
+
+def _f1_run_ring_check(
+    ring_exe: str, source_path: Path, environment: dict[str, str],
+    timeout_seconds: int = 120,
+    expected_warnings: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Optional[str]:
+    command = [ring_exe, "check", str(source_path)]
+    if expected_warnings is not None:
+        command.append("--error-format=llm")
+    try:
+        completed = subprocess.run(
+            command, cwd=REPO, env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="strict",
+            check=False, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return (
+            f"pinned Ring check timed out for {source_path} after "
+            f"{timeout_seconds}s")
+    if completed.returncode != 0:
+        return (
+            f"pinned Ring check failed for {source_path}: "
+            f"exit={completed.returncode} stdout={completed.stdout!r} "
+            f"stderr={completed.stderr!r}")
+    if completed.stdout != "OK\n":
+        return (
+            f"pinned Ring check output drifted for {source_path}: "
+            f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+    if expected_warnings is None:
+        if completed.stderr:
+            return (
+                f"pinned Ring check output drifted for {source_path}: "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+    else:
+        warning_error = llm_warning_contract_error(
+            completed.stderr, expected_warnings)
+        if warning_error is not None:
+            return f"pinned Ring warning drift for {source_path}: {warning_error}"
+    return None
+
+
+def ir_inventory_f1_compile_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    compiler_before = _sha256_file(compiler)
+    source = IR_INVENTORY_F1_PATH.read_text(encoding="utf-8")
+    identity_source = IR_IDENTITY_F0_PATH.read_text(encoding="utf-8")
+    environment = dict(_controlled_environment(ring_exe))
+
+    original_error = _f1_run_ring_check(
+        ring_exe, IR_INVENTORY_F1_PATH, environment)
+    if original_error:
+        errors.append(original_error)
+
+    anchor = "executable_kind_from_tag(EXECUTABLE_DROP_GLUE)"
+    mutated, mutation_error = _f0_mutate_function_once(
+        source, "executable_kind_drop_glue", anchor,
+        "executable_kind_from_tag(EXECUTABLE_DICT_HELPER)")
+    if mutation_error:
+        errors.append(f"F1 material mutation could not be built: {mutation_error}")
+    else:
+        assert mutated is not None
+        expected = _f1_expected_relation_finding(
+            "executable_kind_drop_glue", anchor)
+        findings = ir_inventory_f1_contract_errors(mutated)
+        if findings != [expected]:
+            errors.append(
+                f"F1 material mutation findings were {findings!r}, "
+                f"expected only {expected!r}")
+        with tempfile.TemporaryDirectory(prefix="ring_ir_inventory_f1_") as temp:
+            compiler_dir = Path(temp) / "compiler"
+            compiler_dir.mkdir(parents=False, exist_ok=False)
+            identity_path = compiler_dir / "ir_identity.ring"
+            inventory_path = compiler_dir / "ir_inventory.ring"
+            identity_path.write_text(identity_source, encoding="utf-8", newline="\n")
+            inventory_path.write_text(mutated, encoding="utf-8", newline="\n")
+            mutation_check_error = _f1_run_ring_check(
+                ring_exe, inventory_path, environment)
+            if mutation_check_error:
+                errors.append(mutation_check_error)
+    if _sha256_file(compiler) != compiler_before:
+        errors.append("pinned Ring compiler changed across F1 checks")
+    return errors
+
+
+CORE_HIR_C0_PATH = REPO / "compiler" / "core_hir.ring"
+CORE_HIR_C0_MUTATION_COUNT = 29
+CORE_HIR_C0_SCOPE_GUARD_COUNT = 3
+
+
+def core_hir_c0_contract_errors(
+    core_source: str, identity_source: str, inventory_source: str,
+) -> List[str]:
+    errors: List[str] = []
+    core_masked = mask_ring_strings_and_comments(core_source)
+    imports = re.findall(
+        r"(?m)^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)", core_masked)
+    if imports != ["ir_identity", "ir_inventory"]:
+        errors.append(f"C0 import authority drifted: {imports!r}")
+    for forbidden in (
+        "resource_model", "HProgram", "HDecl", "DerivedImpl",
+        "FieldAction", "ImplEntry", "DictDispatchInfo", "ParamMode",
+        "CallResourcePlan", "ResourcePlanner", "ResourceCertificate",
+        "AbiIR", "FlowIR", "RcIR", "HExpr", "HStmt",
+    ):
+        if forbidden in core_masked:
+            errors.append(f"C0 gained forbidden authority {forbidden!r}")
+    if re.search(
+            r"\b(?:ownership|borrow_mode|take_mode|cleanup_mode)\b",
+            core_masked, re.IGNORECASE):
+        errors.append("C0 gained an ownership-mode surface")
+    if ".sort" in core_masked or "sort_by" in core_masked:
+        errors.append("C0 body/inventory order was normalized by sorting")
+    for forbidden in (
+        "core_body_entry_body", "core_program_bodies",
+        "validate_core_expr", "lower_hprogram",
+    ):
+        if forbidden in core_masked:
+            errors.append(f"C0 exposed material-body authority {forbidden!r}")
+
+    origin_fields, origin_error = _f0_struct_fields(
+        identity_source, "OriginRef")
+    if origin_error:
+        errors.append(origin_error.replace("F0 struct", "C0 OriginRef struct"))
+    elif origin_fields is not None:
+        if [name for _, name in origin_fields] != ["value"]:
+            errors.append("C0 OriginRef field inventory drifted")
+        if any(is_public for is_public, _ in origin_fields):
+            errors.append("C0 OriginRef exposes forgeable fields")
+    for token in (
+        "SymbolOriginValue(SymbolRef)", "PathOriginValue(PathRef)",
+    ):
+        if token not in identity_source:
+            errors.append(f"C0 OriginRef form misses {token!r}")
+    symbol_ctor, symbol_error = _f0_function_body(
+        identity_source, "make_symbol_origin_ref")
+    if symbol_error:
+        errors.append(symbol_error)
+    elif symbol_ctor is not None:
+        if "SymbolOriginValue(value)" not in symbol_ctor:
+            errors.append("C0 symbol OriginRef does not wrap exact input")
+        if "make_symbol_ref(" in symbol_ctor:
+            errors.append("C0 symbol OriginRef reconstructs SymbolRef")
+    path_ctor, path_error = _f0_function_body(
+        identity_source, "make_path_origin_ref")
+    if path_error:
+        errors.append(path_error)
+    elif path_ctor is not None:
+        if "PathOriginValue(value)" not in path_ctor:
+            errors.append("C0 path OriginRef does not wrap exact input")
+        if "make_path_ref(" in path_ctor:
+            errors.append("C0 path OriginRef reconstructs PathRef")
+    origin_same, origin_same_error = _f0_function_body(
+        identity_source, "origin_ref_same")
+    if origin_same_error:
+        errors.append(origin_same_error)
+    elif origin_same is not None:
+        for token in (
+            "symbol_ref_same(a, b)", "path_ref_same(a, b)",
+            "_ => false",
+        ):
+            if token not in origin_same:
+                errors.append(f"C0 OriginRef equality misses {token!r}")
+
+    for struct_name, expected_fields in (
+        ("CoreBodyEntry", ["reference", "origin", "body_anchor"]),
+        ("CoreProgram", ["closure", "bodies"]),
+    ):
+        fields, field_error = _f0_struct_fields(core_source, struct_name)
+        if field_error:
+            errors.append(field_error.replace("F0 struct", f"C0 {struct_name} struct"))
+            continue
+        assert fields is not None
+        if [name for _, name in fields] != expected_fields:
+            errors.append(f"C0 {struct_name} field inventory drifted")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"C0 {struct_name} exposes forgeable fields")
+    if "pub fn make_core_body_entry(" not in core_source or (
+            "pub fn make_core_program(" not in core_source):
+        errors.append("C0 smart constructor surface is incomplete")
+    if re.search(
+            r"pub\s+struct\s+CoreBodyEntry\s*\{\s*"
+            r"reference\s*:\s*ExecutableRef\s*,\s*"
+            r"origin\s*:\s*OriginRef\s*,\s*"
+            r"body_anchor\s*:\s*PathRef\s*\}",
+            core_masked) is None:
+        errors.append("C0 body anchor is not an exact PathRef")
+
+    body_ctor, body_ctor_error = _f0_function_body(
+        core_source, "make_core_body_entry")
+    if body_ctor_error:
+        errors.append(body_ctor_error)
+    elif body_ctor is not None and not all(token in body_ctor for token in (
+            "reference: reference", "origin: origin",
+            "body_anchor: body_anchor")):
+        errors.append("C0 body-anchor constructor is incomplete")
+
+    program_ctor, program_ctor_error = _f0_function_body(
+        core_source, "make_core_program")
+    if program_ctor_error:
+        errors.append(program_ctor_error)
+    elif program_ctor is not None:
+        for token in (
+            "close_ir_inventory(inventory, manifests)",
+            "ir_inventory_closure_inventory(closure)",
+            "validate_core_body_subsequence(bodies, closed_inventory)",
+            "closure: closure", "bodies: copy_core_body_entries(bodies)",
+        ):
+            if token not in program_ctor:
+                errors.append(f"C0 program constructor misses {token!r}")
+    subsequence, subsequence_error = _f0_function_body(
+        core_source, "validate_core_body_subsequence")
+    if subsequence_error:
+        errors.append(subsequence_error)
+    elif subsequence is not None:
+        for token in (
+            "core_body_refs_are_unique(bodies)",
+            "for entry in entries", "bodies.get(body_index)",
+            "body.reference, executable_entry_reference(entry)",
+            "body.body_anchor,",
+            "executable_contract_body_path(contract)",
+            "body_index = body_index + 1", "body_index != bodies.len()",
+            "executable_contract_mode_concrete_body()",
+            "executable_contract_mode_contract_only()",
+        ):
+            if token not in subsequence:
+                errors.append(f"C0 body/inventory closure misses {token!r}")
+
+    # Reuse the existing F1 authority for named ImplMethod SymbolRef form and
+    # BinderManifest closure rather than duplicating those tables in C0.
+    inventory_errors = ir_inventory_f1_contract_errors(inventory_source)
+    if inventory_errors:
+        errors.extend(f"C0 inherited inventory failure: {e}" for e in inventory_errors)
+    return errors
+
+
+def core_hir_c0_live_consumer_errors(
+    compiler_sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    consumers: List[str] = []
+    for name, source in compiler_sources.items():
+        if name == "core_hir.ring":
+            continue
+        masked = mask_ring_strings_and_comments(source)
+        if re.search(r"(?m)^\s*use\s+core_hir\b", masked) or (
+                "core_hir::" in masked) or "CoreProgram" in masked:
+            consumers.append(name)
+    if consumers != ["builtins.ring"]:
+        errors.append(
+            f"C0 live consumer inventory drifted: {consumers!r}")
+
+    builtins_source = compiler_sources.get("builtins.ring", "")
+    shadow_body, shadow_error = _f0_function_body(
+        builtins_source, "validate_builtin_method_core_shadow")
+    if shadow_error:
+        errors.append(shadow_error.replace("F0 function", "C0 consumer"))
+    elif shadow_body is not None:
+        for token in (
+            "make_executable_entry(", "make_contract_only()",
+            "make_binder_manifest(executable, [])",
+            "make_core_program(", "core_program_body_count(program) != 0",
+        ):
+            if token not in shadow_body:
+                errors.append(f"C0 live consumer misses {token!r}")
+
+    checker_source = compiler_sources.get("checker.ring", "")
+    load_body, load_error = _f0_function_body(
+        checker_source, "load_prelude")
+    if load_error:
+        errors.append(load_error.replace("F0 function", "C0 consumer"))
+    elif load_body is not None and (
+            "validate_builtin_method_core_shadow(ctx.env)" not in load_body):
+        errors.append("C0 shared checker consumer is missing")
+    return errors
+
+
+def core_hir_c0_mutation_errors(
+    core_source: str, identity_source: str, inventory_source: str,
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("symbol origin rebuild", "identity", "make_symbol_origin_ref",
+         "SymbolOriginValue(value)",
+         "SymbolOriginValue(make_symbol_ref(\"x\", namespace_value(), \"x\", \"x\"))"),
+        ("path origin rebuild", "identity", "make_path_origin_ref",
+         "PathOriginValue(value)",
+         "PathOriginValue(make_path_ref(path_ref_owner(value), [\"x\"], path_role_child()))"),
+        ("symbol origin equality", "identity", "origin_ref_same",
+         "symbol_ref_same(a, b)", "true"),
+        ("path origin equality", "identity", "origin_ref_same",
+         "path_ref_same(a, b)", "true"),
+        ("body ref uniqueness", "core", "validate_core_body_subsequence",
+         "!core_body_refs_are_unique(bodies)", "false"),
+        ("body order", "core", "validate_core_body_subsequence",
+         "body.reference, executable_entry_reference(entry)",
+         "body.reference, body.reference"),
+        ("body anchor", "core", "validate_core_body_subsequence",
+         "body.body_anchor,\n                    executable_contract_body_path(contract)",
+         "body.body_anchor, body.body_anchor"),
+        ("body final census", "core", "validate_core_body_subsequence",
+         "body_index != bodies.len()", "false"),
+        ("inventory close", "core", "make_core_program",
+         "close_ir_inventory(inventory, manifests)",
+         "close_ir_inventory(make_executable_inventory([]), [])"),
+        ("closed inventory", "core", "make_core_program",
+         "ir_inventory_closure_inventory(closure)", "inventory"),
+        ("body copy", "core", "make_core_program",
+         "bodies: copy_core_body_entries(bodies)", "bodies: bodies"),
+        ("concrete mode", "core", "validate_core_body_subsequence",
+         "mode, executable_contract_mode_concrete_body()",
+         "mode, executable_contract_mode_contract_only()"),
+        ("contract-only mode", "core", "validate_core_body_subsequence",
+         "mode, executable_contract_mode_contract_only()",
+         "mode, executable_contract_mode_concrete_body()"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        source = identity_source if source_name == "identity" else core_source
+        mutated, mutation_error = _f0_mutate_function_once(
+            source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"C0 mutation {label}: {mutation_error}")
+            continue
+        assert mutated is not None
+        findings = core_hir_c0_contract_errors(
+            mutated if source_name == "core" else core_source,
+            mutated if source_name == "identity" else identity_source,
+            inventory_source)
+        if not findings:
+            errors.append(f"C0 mutation escaped: {label}")
+        else:
+            killed += 1
+
+    manual_mutations = (
+        ("origin public field", "identity", "pub struct OriginRef {\n    value:",
+         "pub struct OriginRef {\n    pub value:"),
+        ("origin raw name", "identity", "pub struct OriginRef {\n    value: OriginRefValue",
+         "pub struct OriginRef {\n    name: Str,\n    value: OriginRefValue"),
+        ("origin raw span", "identity", "pub struct OriginRef {\n    value: OriginRefValue",
+         "pub struct OriginRef {\n    span: Span,\n    value: OriginRefValue"),
+        ("body public field", "core", "pub struct CoreBodyEntry {\n    reference:",
+         "pub struct CoreBodyEntry {\n    pub reference:"),
+        ("body anchor type", "core",
+         "pub struct CoreBodyEntry {\n    reference: ExecutableRef,\n"
+         "    origin: OriginRef,\n    body_anchor: PathRef",
+         "pub struct CoreBodyEntry {\n    reference: ExecutableRef,\n"
+         "    origin: OriginRef,\n    body_anchor: Str"),
+        ("material body", "core",
+         "pub struct CoreBodyEntry {\n    reference: ExecutableRef,\n"
+         "    origin: OriginRef,\n    body_anchor: PathRef",
+         "pub struct CoreBodyEntry {\n    reference: ExecutableRef,\n"
+         "    origin: OriginRef,\n    body_anchor: PathRef,\n    body: HExpr"),
+        ("program public field", "core", "pub struct CoreProgram {\n    closure:",
+         "pub struct CoreProgram {\n    pub closure:"),
+        ("duplicate inventory", "core", "closure: IrInventoryClosure,\n    bodies:",
+         "closure: IrInventoryClosure,\n    inventory: ExecutableInventory,\n    bodies:"),
+        ("duplicate manifests", "core", "closure: IrInventoryClosure,\n    bodies:",
+         "closure: IrInventoryClosure,\n    manifests: List<BinderManifest>,\n    bodies:"),
+        ("HProgram escape", "core", "pub struct CoreProgram {\n    closure:",
+         "pub struct CoreProgram {\n    legacy: HProgram,\n    closure:"),
+        ("resource import", "core", "use ir_identity::{",
+         "use resource_model::{ParamMode}\nuse ir_identity::{"),
+        ("ownership mode", "core", "pub struct CoreProgram {",
+         "struct OwnershipMode { take_mode: Bool }\n\npub struct CoreProgram {"),
+        ("legacy dict field", "core", "pub struct CoreBodyEntry {",
+         "struct LegacyDispatch { value: DictDispatchInfo }\n\npub struct CoreBodyEntry {"),
+        ("pipeline conversion", "core", "pub struct CoreProgram {",
+         "fn lower_hprogram(program: HProgram) -> CoreProgram { fail.raise() }\n\npub struct CoreProgram {"),
+        ("body sorting", "core", "let entries = executable_inventory_entries(inventory)",
+         "let entries = executable_inventory_entries(inventory)\n    entries.sort()"),
+        ("body accessor", "core", "pub struct CoreProgram {",
+         "pub fn core_body(value: CoreBodyEntry) -> HExpr { value.body }\n\npub struct CoreProgram {"),
+    )
+    for label, source_name, anchor, replacement in manual_mutations:
+        source = identity_source if source_name == "identity" else core_source
+        if source.count(anchor) != 1:
+            errors.append(
+                f"C0 mutation {label}: anchor count was {source.count(anchor)}")
+            continue
+        mutated = source.replace(anchor, replacement, 1)
+        findings = core_hir_c0_contract_errors(
+            mutated if source_name == "core" else core_source,
+            mutated if source_name == "identity" else identity_source,
+            inventory_source)
+        if not findings:
+            errors.append(f"C0 mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != CORE_HIR_C0_MUTATION_COUNT:
+        errors.append(
+            f"C0 killed {killed} mutations, expected "
+            f"{CORE_HIR_C0_MUTATION_COUNT}")
+    return errors
+
+
+def core_hir_c0_scope_guard_errors(
+    core_source: str, identity_source: str, inventory_source: str,
+    compiler_sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("main import", "main.ring", "\nuse core_hir::{CoreProgram}\n"),
+        ("checker consumer", "checker.ring",
+         "\nfn consume_core(value: CoreProgram) {}\n"),
+        ("codegen consumer", "codegen_c.ring",
+         "\nuse core_hir::{CoreProgram}\n"),
+    )
+    killed = 0
+    for label, file_name, suffix in mutations:
+        mutated_sources = dict(compiler_sources)
+        mutated_sources[file_name] = compiler_sources[file_name] + suffix
+        if not core_hir_c0_live_consumer_errors(mutated_sources):
+            errors.append(f"C0 scope guard escaped: {label}")
+        else:
+            killed += 1
+    if killed != CORE_HIR_C0_SCOPE_GUARD_COUNT:
+        errors.append(
+            f"C0 scope guards killed {killed}, expected "
+            f"{CORE_HIR_C0_SCOPE_GUARD_COUNT}")
+    return errors
+
+
+def core_hir_c0_source_errors() -> List[str]:
+    try:
+        core_source = CORE_HIR_C0_PATH.read_text(encoding="utf-8")
+        identity_source = IR_IDENTITY_F0_PATH.read_text(encoding="utf-8")
+        inventory_source = IR_INVENTORY_F1_PATH.read_text(encoding="utf-8")
+        compiler_sources = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in (REPO / "compiler").glob("*.ring")
+        }
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read C0 compiler sources: {exc}"]
+    errors = core_hir_c0_contract_errors(
+        core_source, identity_source, inventory_source)
+    errors.extend(core_hir_c0_live_consumer_errors(compiler_sources))
+    if errors:
+        return errors
+    errors.extend(core_hir_c0_mutation_errors(
+        core_source, identity_source, inventory_source))
+    errors.extend(core_hir_c0_scope_guard_errors(
+        core_source, identity_source, inventory_source, compiler_sources))
+    return errors
+
+
+def core_hir_c0_compile_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe).resolve(strict=True)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(str(compiler)))
+    for source_path in (IR_IDENTITY_F0_PATH, CORE_HIR_C0_PATH):
+        error = _f1_run_ring_check(
+            str(compiler), source_path, environment)
+        if error:
+            errors.append(error)
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across C0 checks")
+    return errors
+
+
+B201_BUILTIN_METHODS = (
+    ("BUILTIN_METHOD_STR_LEN", "Str", "len", "ring_str_len", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CONTAINS", "Str", "contains", "ring_str_contains", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_STARTS_WITH", "Str", "starts_with", "ring_str_starts_with", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_ENDS_WITH", "Str", "ends_with", "ring_str_ends_with", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_SLICE", "Str", "slice", "ring_str_slice", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM", "Str", "trim", "ring_str_trim", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TO_UPPER", "Str", "to_upper", "ring_str_to_upper", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TO_LOWER", "Str", "to_lower", "ring_str_to_lower", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_REPLACE", "Str", "replace", "ring_str_replace", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_SPLIT", "Str", "split", "ring_str_split", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CHAR_AT", "Str", "char_at", "ring_str_char_at", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_INDEX_OF", "Str", "index_of", "ring_str_index_of", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_PAD_START", "Str", "pad_start", "ring_str_pad_start", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_PAD_END", "Str", "pad_end", "ring_str_pad_end", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_REPEAT", "Str", "repeat", "ring_str_repeat", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CHAR_CODE_AT", "Str", "char_code_at", "ring_str_char_code_at", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM_START", "Str", "trim_start", "ring_str_trim_start", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM_END", "Str", "trim_end", "ring_str_trim_end", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_IS_EMPTY", "Str", "is_empty", "ring_str_is_empty", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_LAST_INDEX_OF", "Str", "last_index_of", "ring_str_last_index_of", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_INT_TO_STR", "Int", "to_str", "ring_int_to_str", "register_scalar_method_intrinsics", "int_intrinsics"),
+    ("BUILTIN_METHOD_FLOAT_TO_STR", "Float", "to_str", "ring_float_to_str", "register_scalar_method_intrinsics", "float_intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP_OR", "Option", "unwrap_or", "ring_Option_unwrap_or", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP", "Option", "unwrap", "ring_Option_unwrap", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_IS_SOME", "Option", "is_some", "ring_Option_is_some", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_IS_NONE", "Option", "is_none", "ring_Option_is_none", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_MAP", "Option", "map", "ring_Option_map", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_AND_THEN", "Option", "and_then", "ring_Option_and_then", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE", "Option", "unwrap_or_else", "ring_Option_unwrap_or_else", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_TO_FAIL", "Option", "to_fail", "ring_Option_to_fail", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_GET", "Cell", "get", "ring_Cell_get", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_SET", "Cell", "set", "ring_Cell_set", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_UPDATE", "Cell", "update", "ring_Cell_update", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_INT_EQ", "Int", "eq", "ring_cl_eq_int", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_EQ", "Float", "eq", "ring_cl_eq_float", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_STR_EQ", "Str", "eq", "ring_cl_eq_str", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_BOOL_EQ", "Bool", "eq", "ring_cl_eq_bool", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_INT_CLONE", "Int", "clone", "ring_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_CLONE", "Float", "clone", "ring_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_STR_CLONE", "Str", "clone", "ring_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_BOOL_CLONE", "Bool", "clone", "ring_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_INT_CMP", "Int", "cmp", "ring_cl_cmp_int", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_CMP", "Float", "cmp", "ring_cl_cmp_float", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_STR_CMP", "Str", "cmp", "ring_cl_cmp_str", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_BOOL_CMP", "Bool", "cmp", "ring_cl_cmp_bool", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_INT_DEBUG", "Int", "debug", "ring_cl_debug_int", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_DEBUG", "Float", "debug", "ring_cl_debug_float", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_STR_DEBUG", "Str", "debug", "ring_cl_debug_str", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_BOOL_DEBUG", "Bool", "debug", "ring_cl_debug_bool", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_INT_HASH", "Int", "hash", "ring_cl_hash_int_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_STR_HASH", "Str", "hash", "ring_cl_hash_str_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_BOOL_HASH", "Bool", "hash", "ring_cl_hash_bool_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_PTR_ADDR", "Ptr", "addr", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_CAST", "Ptr", "cast", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_OFFSET", "Ptr", "offset", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_READ", "Ptr", "read", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_TAKE", "Ptr", "take", "", "register_ptr_builtins", "intrinsics"),
+    ("BUILTIN_METHOD_PTR_WRITE", "Ptr", "write", "", "register_ptr_builtins", "intrinsics"),
+)
+B201_BUILTIN_METHOD_MUTATION_COUNT = 23
+
+
+def _b201_function_body(
+    source: str, function_name: str, errors: List[str],
+) -> str:
+    body, body_error = _f0_function_body(source, function_name)
+    if body_error:
+        errors.append(body_error.replace("F0 function", "B-201 function"))
+        return ""
+    assert body is not None
+    return body
+
+
+def _b201_runtime_names(
+    source: str,
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(
+        r"\bconst\s+INTRINSIC_RUNTIME_NAMES\s*:\s*List<Str>\s*=\s*\[")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        return None, (
+            f"B-201 runtime name table found {len(matches)} times")
+    open_index = masked.rfind("[", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "[", "]")
+    except ValueError as exc:
+        return None, f"B-201 runtime name table: {exc}"
+    body = source[open_index + 1:close_index]
+    residue = re.sub(r'"(?:[^"\\]|\\.)*"|[\s,]', "", body)
+    if residue:
+        return None, f"B-201 runtime table has non-string token {residue!r}"
+    return re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', body), None
+
+
+def builtin_method_intrinsic_contract_errors(
+    compiler_sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    identity = compiler_sources["ir_identity.ring"]
+    builtins = compiler_sources["builtins.ring"]
+    env = compiler_sources["env.ring"]
+    hir = compiler_sources["hir.ring"]
+    hir_exact = compiler_sources["hir_exact.ring"]
+    infer = compiler_sources["infer.ring"]
+    infer_helpers = compiler_sources["infer_helpers.ring"]
+    zonk = compiler_sources["zonk.ring"]
+    core = compiler_sources["core_from_hir.ring"]
+    core_expr = compiler_sources["core_expr.ring"]
+    flow_lower = compiler_sources["flow_lower.ring"]
+    codegen = compiler_sources["codegen_c_expr.ring"]
+    runtime = compiler_sources["ring_runtime.cpp"]
+
+    if len(B201_BUILTIN_METHODS) != 58:
+        errors.append("B-201 test census is not exact58")
+    for tag, method in enumerate(B201_BUILTIN_METHODS):
+        constant_name, _, method_name, _, producer, map_name = method
+        declaration = f"pub const {constant_name}: Int = {tag}"
+        if declaration not in identity:
+            errors.append(f"B-201 identity misses {declaration!r}")
+        producer_body = _b201_function_body(builtins, producer, errors)
+        normalized = re.sub(r"\s+", "", producer_body)
+        resource_map = (
+            map_name[:-len("_intrinsics")] + "_resources"
+            if map_name.endswith("_intrinsics") else "resources"
+        )
+        relation = re.sub(r"\s+", "", (
+            f'install_intrinsic_contract({map_name}, {resource_map}, '
+            f'"{method_name}", {constant_name},'
+            if map_name else
+            f'builtin_intrinsic_method("{method_name}", {constant_name},'
+        ))
+        if relation not in normalized:
+            errors.append(
+                f"B-201 producer {producer} misses {constant_name}/{method_name}")
+    if "pub const BUILTIN_METHOD_SITE_COUNT: Int = 58" not in identity:
+        errors.append("B-201 identity site census drifted")
+    ptr_producer = re.sub(r"\s+", "", _b201_function_body(
+        builtins, "register_ptr_builtins", errors))
+    ptr_resource_relations = (
+        'install_intrinsic_contract(intrinsics,resources,"addr",'
+        'BUILTIN_METHOD_PTR_ADDR,builtin_resource_contract('
+        '[callable_resource_role_read()],callable_resource_role_read(),[]))',
+        'install_intrinsic_contract(intrinsics,resources,"cast",'
+        'BUILTIN_METHOD_PTR_CAST,builtin_resource_contract('
+        '[callable_resource_role_read()],callable_resource_role_read(),[0]))',
+        'install_intrinsic_contract(intrinsics,resources,"offset",'
+        'BUILTIN_METHOD_PTR_OFFSET,builtin_resource_contract('
+        '[callable_resource_role_read(),callable_resource_role_read()],'
+        'callable_resource_role_read(),[0]))',
+        'install_intrinsic_contract(intrinsics,resources,"read",'
+        'BUILTIN_METHOD_PTR_READ,builtin_resource_contract('
+        '[callable_resource_role_read()],callable_resource_role_consume(),[]))',
+        'install_intrinsic_contract(intrinsics,resources,"take",'
+        'BUILTIN_METHOD_PTR_TAKE,builtin_resource_contract('
+        '[callable_resource_role_read()],callable_resource_role_consume(),[]))',
+        'install_intrinsic_contract(intrinsics,resources,"write",'
+        'BUILTIN_METHOD_PTR_WRITE,builtin_resource_contract('
+        '[callable_resource_role_read(),callable_resource_role_consume()],'
+        'callable_resource_role_read(),[]))',
+    )
+    for relation in ptr_resource_relations:
+        if relation not in ptr_producer:
+            errors.append(
+                f"B-201 Ptr resource relation misses {relation!r}")
+    if "scalar_trait_intrinsic_tag" in mask_ring_strings_and_comments(builtins):
+        errors.append("B-201 scalar intrinsic identity is reconstructed by names")
+    if "struct BuiltinImplMethodSpec" not in builtins or not all(
+            token in builtins for token in (
+                "intrinsic_tag: Int?",
+                "resource_contract: CallableResourceContractFact?")):
+        errors.append(
+            "B-201 builtin declaration lacks exact intrinsic/resource facts")
+
+    for struct_name, expected_fields in (
+        ("BuiltinMethodSite", ["tag"]),
+        ("IntrinsicRef", ["site", "symbol"]),
+        ("MethodCallRef", ["value", "signature", "receiver_mutable"]),
+        ("BuiltinMethodContractFact", [
+            "intrinsic", "target_owner", "target_owner_type_vars",
+            "method_type_vars", "scheme", "resource",
+        ]),
+    ):
+        source = (
+            hir_exact if struct_name == "MethodCallRef"
+            else builtins if struct_name == "BuiltinMethodContractFact"
+            else identity
+        )
+        fields, field_error = _f0_struct_fields(source, struct_name)
+        if field_error:
+            errors.append(field_error.replace("F0 struct", "B-201 struct"))
+            continue
+        assert fields is not None
+        if [name for _, name in fields] != expected_fields:
+            errors.append(f"B-201 {struct_name} field inventory drifted")
+        if any(is_public for is_public, _ in fields):
+            errors.append(f"B-201 {struct_name} exposes forgeable fields")
+
+    identity_ctor = _b201_function_body(
+        identity, "make_builtin_method_intrinsic_ref", errors)
+    for token in (
+        "builtin_method_site_tag(site)",
+        'symbol_ref_origin_module_key(symbol) != "$builtin"',
+        "namespace_value()", '"builtin-method:${tag.to_str()}"',
+        '"builtin:method-site:${tag.to_str()}"',
+    ):
+        if token not in identity_ctor:
+            errors.append(f"B-201 IntrinsicRef constructor misses {token!r}")
+
+    impl_fields, impl_error = _f0_struct_fields(env, "ImplEntry")
+    if impl_error:
+        errors.append(impl_error.replace("F0 struct", "B-201 ImplEntry"))
+    elif impl_fields is not None and any(
+            [name for _, name in impl_fields].count(field) != 1
+            for field in ("method_intrinsics", "method_resource_contracts")):
+        errors.append(
+            "B-201 ImplEntry lacks one intrinsic/resource relation payload")
+    impl_validator = _b201_function_body(env, "validate_impl_entry", errors)
+    for token in (
+        "entry.method_intrinsics.entries()",
+        "entry.method_schemes.contains_key(method_name)",
+        "entry.method_resource_contracts.contains_key(method_name)",
+        "entry.method_resource_contracts.entries()",
+        "callable_resource_contract_parameter_roles(contract).len() != arity",
+    ):
+        if token not in impl_validator:
+            errors.append(f"B-201 ImplEntry validator misses {token!r}")
+    impl_same = _b201_function_body(env, "impl_entry_final_same", errors)
+    for token in (
+            "method_intrinsic_map_same(",
+            "method_resource_contract_map_same("):
+        if token not in impl_same:
+            errors.append(f"B-201 full owner equality drops {token!r}")
+
+    intrinsic_source = _b201_function_body(
+        builtins, "registered_intrinsic_source", errors)
+    for token in (
+            "intrinsic_ref_same(candidate, intrinsic)",
+            "owner.method_schemes.get(method_name)"):
+        if token not in intrinsic_source:
+            errors.append(f"B-201 exact registry source misses {token!r}")
+    resource_source = _b201_function_body(
+        builtins, "registered_intrinsic_resource_contract", errors)
+    for token in (
+            "intrinsic_ref_same(candidate, intrinsic)",
+            "owner.method_resource_contracts.get(method_name)"):
+        if token not in resource_source:
+            errors.append(f"B-201 exact resource registry misses {token!r}")
+
+    facts_body = _b201_function_body(
+        builtins, "builtin_method_contract_facts", errors)
+    for token in (
+        "for tag in 0..BUILTIN_METHOD_SITE_COUNT",
+        "registered_intrinsic_source(env, intrinsic)",
+        "make_builtin_method_contract_fact(",
+        "registered_intrinsic_resource_contract(env, intrinsic)",
+        "result.len() != BUILTIN_METHOD_SITE_COUNT",
+    ):
+        if token not in facts_body:
+            errors.append(f"B-201 typed contract producer misses {token!r}")
+
+    core_contracts = _b201_function_body(
+        core, "add_builtin_method_contracts", errors)
+    for token in (
+        "facts.builtin_methods.len() != BUILTIN_METHOD_SITE_COUNT",
+        "builtin_method_contract_intrinsic(fact)",
+        "intrinsic_ref_same(",
+        "make_named_executable_ref(",
+        "intrinsic_ref_symbol(intrinsic)",
+        "executable_kind_builtin_intrinsic()",
+        "make_contract_only()",
+        "builtin_method_contract_resource(fact)",
+    ):
+        if token not in core_contracts:
+            errors.append(f"B-201 real Core consumer misses {token!r}")
+
+    method_ctor = _b201_function_body(
+        hir_exact, "make_intrinsic_method_call_ref", errors)
+    if "Type::FnType { .. }" not in method_ctor:
+        errors.append("B-201 MethodCallRef accepts a non-callable signature")
+    method_same = _b201_function_body(
+        hir_exact, "method_call_ref_same", errors)
+    for token in (
+            "intrinsic_ref_same(", "trait_method_ref_same(",
+            "dict_ref_same(", "types_equal("):
+        if token not in method_same:
+            errors.append(f"B-201 MethodCallRef equality misses {token!r}")
+    if re.search(
+            r"Call\s*\{[^{}]*\bmethod_ref\s*:\s*MethodCallRef\?",
+            mask_ring_strings_and_comments(hir)) is None:
+        errors.append("B-201 HExpr::Call lacks exact MethodCallRef carrier")
+    hir_validator = _b201_function_body(hir, "validate_hir_expr", errors)
+    for token in (
+        "some(exact_method)", "HFieldAccessKind::Method",
+        "method_call_ref_signature(exact_method)", "types_equal(",
+    ):
+        if token not in hir_validator:
+            errors.append(f"B-201 HIR validator misses {token!r}")
+
+    lookup_impl = _b201_function_body(
+        infer_helpers, "lookup_impl_method", errors)
+    lookup_trait = _b201_function_body(
+        infer_helpers, "lookup_trait_method", errors)
+    for label, body in (("impl", lookup_impl), ("trait", lookup_trait)):
+        if ".method_intrinsics.get(method)" not in body:
+            errors.append(f"B-201 {label} lookup drops exact intrinsic")
+    infer_method = _b201_function_body(
+        infer, "infer_method_call_from_receiver", errors)
+    for token in (
+        "intrinsic_ref = r.intrinsic_ref",
+        "make_intrinsic_method_call_ref(",
+        "method_ref: exact_method_ref",
+    ):
+        if token not in infer_method:
+            errors.append(f"B-201 infer consumer misses {token!r}")
+    zonk_helper = _b201_function_body(zonk, "zonk_method_call_ref", errors)
+    for token in (
+        "method_call_ref_intrinsic(exact)",
+        "zonk_type(ctx, method_call_ref_signature(exact))",
+    ):
+        if token not in zonk_helper:
+            errors.append(f"B-201 zonk relation misses {token!r}")
+
+    for file_name, function_name, transport in (
+        ("andor_lower.ring", "al_expr", "method_ref: method_ref"),
+        ("dict_lower.ring", "dl_expr",
+         "method_ref: dl_method_call_ref(method_ref, defs, seen)"),
+        ("zonk.ring", "zonk_expr", "method_ref: zonk_method_call_ref(ctx, method_ref)"),
+    ):
+        body = _b201_function_body(
+            compiler_sources[file_name], function_name, errors)
+        if transport not in body:
+            errors.append(
+                f"B-201 {file_name}:{function_name} drops MethodCallRef")
+
+    exact_core = _b201_function_body(core, "exact_method_ref", errors)
+    for token in (
+            "method_call_ref_is_intrinsic(value)",
+            "make_exact_intrinsic_method_ref(method_call_ref_intrinsic(value))",
+            'panic("Core assembly: method selection is not exact")'):
+        if token not in exact_core:
+            errors.append(f"B-201 TypedHIR/Core exact method bridge misses {token!r}")
+    core_validation = _b201_function_body(
+        core_expr, "validate_method_call_identity", errors)
+    for token in (
+            "exact_method_ref_is_intrinsic(method)",
+            "intrinsic_ref_symbol(",
+            "exact_method_ref_intrinsic(method)",
+            'panic("CoreHIR: intrinsic method/callee differs")'):
+        if token not in core_validation:
+            errors.append(f"B-201 Core exact method validation misses {token!r}")
+    flow_target = _b201_function_body(flow_lower, "flow_call_target", errors)
+    for token in (
+            "core_callee_kind_tag(value)",
+            "make_direct_flow_call_target(",
+            "core_callee_direct(value)",
+            'panic("Flow lowering: unknown Core callee form")'):
+        if token not in flow_target:
+            errors.append(f"B-201 Core/Flow exact callee bridge misses {token!r}")
+
+    runtime_names, runtime_error = _b201_runtime_names(codegen)
+    if runtime_error:
+        errors.append(runtime_error)
+    elif runtime_names != [entry[3] for entry in B201_BUILTIN_METHODS]:
+        errors.append("B-201 exact tag-to-ABI projection drifted")
+    if "fn method_to_runtime_c(" in mask_ring_strings_and_comments(codegen):
+        errors.append("B-201 retained the type/name runtime method table")
+    intrinsic_codegen = _b201_function_body(
+        codegen, "gen_c_intrinsic_method_call", errors)
+    for token in (
+        "method_call_ref_signature(method_ref)",
+        "method_call_ref_intrinsic(method_ref)",
+        "builtin_method_site_tag(", "intrinsic_runtime_name(tag)",
+        "rt_use(ctx, runtime_name, call_args.len())",
+    ):
+        if token not in intrinsic_codegen:
+            errors.append(f"B-201 C intrinsic projection misses {token!r}")
+    for forbidden in ("type_to_builtin_name", "method_to_runtime_c"):
+        if forbidden in intrinsic_codegen:
+            errors.append(
+                f"B-201 exact C projection reinterprets {forbidden}")
+    if "gen_c_ptr_intrinsic(" not in intrinsic_codegen:
+        errors.append("B-201 exact C projection drops Ptr inline sites")
+    ptr_codegen = _b201_function_body(
+        codegen, "gen_c_ptr_intrinsic", errors)
+    for constant_name in (
+        "BUILTIN_METHOD_PTR_ADDR", "BUILTIN_METHOD_PTR_CAST",
+        "BUILTIN_METHOD_PTR_OFFSET", "BUILTIN_METHOD_PTR_READ",
+        "BUILTIN_METHOD_PTR_TAKE", "BUILTIN_METHOD_PTR_WRITE",
+    ):
+        if f"tag == {constant_name}" not in ptr_codegen:
+            errors.append(
+                f"B-201 Ptr inline projection misses {constant_name}")
+    masked_codegen = mask_ring_strings_and_comments(codegen)
+    for forbidden in ('type_name == "Ptr"', "gen_c_ptr_method"):
+        if forbidden in masked_codegen:
+            errors.append(
+                f"B-201 Ptr inline projection retains {forbidden}")
+    gen_call = _b201_function_body(codegen, "gen_c_call", errors)
+    exact_pos = gen_call.find("match method_ref")
+    fallback_pos = gen_call.find("let raw = match callee")
+    if exact_pos < 0 or fallback_pos < 0 or exact_pos >= fallback_pos:
+        errors.append("B-201 exact method consumer does not precede fallback")
+
+    cell_update, cell_update_error = extract_c_function_body(
+        runtime, "ring_Cell_update")
+    if cell_update_error:
+        errors.append(cell_update_error)
+    elif cell_update is not None:
+        cell_tokens = (
+            "*(void**)cell = nullptr", "ring_dup(old_val)",
+            "cl->env_ptr, old_val, ring_effect_ctx_empty())",
+            "void* interim = *(void**)cell", "*(void**)cell = new_val",
+            "if (interim) ring_drop(interim)", "ring_drop(old_val)",
+        )
+        positions = [cell_update.find(token) for token in cell_tokens]
+        if (
+            any(position < 0 for position in positions)
+            or positions != sorted(positions)
+            or cell_update.count("ring_effect_ctx_empty()") != 1
+        ):
+            errors.append("Cell.update reentrant/immortal-empty context path drifted")
+
+    return errors
+
+
+def builtin_method_intrinsic_mutation_errors(
+    compiler_sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("site count", "ir_identity.ring", None,
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 58",
+         "pub const BUILTIN_METHOD_SITE_COUNT: Int = 57"),
+        ("tag duplicate", "ir_identity.ring", None,
+         "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 1",
+         "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 0"),
+        ("symbol payload", "ir_identity.ring", "make_builtin_method_intrinsic_ref",
+         '"builtin-method:${tag.to_str()}"', '"builtin-method"'),
+        ("producer swap", "builtins.ring", "register_scalar_method_intrinsics",
+         "BUILTIN_METHOD_STR_LEN", "BUILTIN_METHOD_STR_CONTAINS"),
+        ("scalar producer swap", "builtins.ring", "register_eq_trait",
+         "BUILTIN_METHOD_INT_EQ", "BUILTIN_METHOD_FLOAT_EQ"),
+        ("option producer", "builtins.ring", "register_option",
+         "BUILTIN_METHOD_OPTION_UNWRAP, builtin_resource_contract(",
+         "BUILTIN_METHOD_OPTION_UNWRAP_OR, builtin_resource_contract("),
+        ("cell producer", "builtins.ring", "register_cell",
+         "BUILTIN_METHOD_CELL_SET, builtin_resource_contract(",
+         "BUILTIN_METHOD_CELL_GET, builtin_resource_contract("),
+        ("Ptr producer", "builtins.ring", "register_ptr_builtins",
+         "BUILTIN_METHOD_PTR_ADDR, builtin_resource_contract(",
+         "BUILTIN_METHOD_PTR_CAST, builtin_resource_contract("),
+        ("Ptr resource", "builtins.ring", "register_ptr_builtins",
+         "BUILTIN_METHOD_PTR_WRITE, builtin_resource_contract(\n"
+         "            [callable_resource_role_read(), callable_resource_role_consume()],",
+         "BUILTIN_METHOD_PTR_WRITE, builtin_resource_contract(\n"
+         "            [callable_resource_role_read(), callable_resource_role_read()],"),
+        ("owner scheme relation", "env.ring", "validate_impl_entry",
+         "for intrinsic_entry in entry.method_intrinsics.entries()",
+         "for intrinsic_entry in []"),
+        ("owner resource equality", "env.ring", "impl_entry_final_same",
+         "method_resource_contract_map_same(", "method_core_map_same("),
+        ("registry intrinsic lookup", "builtins.ring",
+         "registered_intrinsic_source",
+         "intrinsic_ref_same(candidate, intrinsic)", "true"),
+        ("registry resource lookup", "builtins.ring",
+         "registered_intrinsic_resource_contract",
+         "owner.method_resource_contracts.get(method_name)",
+         'owner.method_resource_contracts.get("wrong")'),
+        ("typed fact census", "builtins.ring", "builtin_method_contract_facts",
+         "for tag in 0..BUILTIN_METHOD_SITE_COUNT", "for tag in 0..0"),
+        ("Core contract resource", "core_from_hir.ring",
+         "add_builtin_method_contracts",
+         "builtin_method_contract_resource(fact)",
+         "missing_builtin_resource_contract(fact)"),
+        ("call signature kind", "hir_exact.ring", "make_intrinsic_method_call_ref",
+         "Type::FnType { .. }", "_"),
+        ("infer publish", "infer.ring", "infer_method_call_from_receiver",
+         "method_ref: exact_method_ref", "method_ref: none"),
+        ("TypedHIR/Core bridge", "core_from_hir.ring", "exact_method_ref",
+         "make_exact_intrinsic_method_ref(method_call_ref_intrinsic(value))",
+         "make_exact_trait_method_ref(method_call_ref_bound(value))"),
+        ("Core/Flow direct target", "flow_lower.ring", "flow_call_target",
+         "make_direct_flow_call_target(", "make_dynamic_flow_call_target("),
+        ("ABI order", "codegen_c_expr.ring", None,
+         '"ring_str_len", "ring_str_contains"',
+         '"ring_str_contains", "ring_str_len"'),
+        ("Ptr inline", "codegen_c_expr.ring", "gen_c_ptr_intrinsic",
+         "tag == BUILTIN_METHOD_PTR_ADDR",
+         "tag == BUILTIN_METHOD_PTR_CAST"),
+        ("name fallback", "codegen_c_expr.ring", None,
+         "fn intrinsic_runtime_name(tag: Int) -> Str {",
+         "fn method_to_runtime_c(type_name: Str, method: Str) -> Str? { none }\n\nfn intrinsic_runtime_name(tag: Int) -> Str {"),
+        ("Cell.update context fallback", "ring_runtime.cpp", None,
+         "cl->env_ptr, old_val, ring_effect_ctx_empty());",
+         "cl->env_ptr, old_val, effect_ctx);"),
+    )
+    killed = 0
+    for label, file_name, function_name, anchor, replacement in mutations:
+        mutated_sources = dict(compiler_sources)
+        if function_name is None:
+            source = compiler_sources[file_name]
+            if source.count(anchor) != 1:
+                errors.append(
+                    f"B-201 mutation {label}: anchor count was {source.count(anchor)}")
+                continue
+            mutated_sources[file_name] = source.replace(anchor, replacement, 1)
+        else:
+            mutated, mutation_error = _f0_mutate_function_once(
+                compiler_sources[file_name], function_name, anchor, replacement)
+            if mutation_error:
+                errors.append(f"B-201 mutation {label}: {mutation_error}")
+                continue
+            assert mutated is not None
+            mutated_sources[file_name] = mutated
+        findings = builtin_method_intrinsic_contract_errors(mutated_sources)
+        if not findings:
+            errors.append(f"B-201 mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != B201_BUILTIN_METHOD_MUTATION_COUNT:
+        errors.append(
+            f"B-201 killed {killed} mutations, expected "
+            f"{B201_BUILTIN_METHOD_MUTATION_COUNT}")
+    return errors
+
+
+def builtin_method_intrinsic_source_errors() -> List[str]:
+    try:
+        compiler_sources = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in (REPO / "compiler").glob("*.ring")
+        }
+        compiler_sources[RUNTIME_CPP.name] = RUNTIME_CPP.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read B-201 sources: {exc}"]
+    errors = builtin_method_intrinsic_contract_errors(compiler_sources)
+    if errors:
+        return errors
+    errors.extend(builtin_method_intrinsic_mutation_errors(compiler_sources))
+    return errors
+
+
+B201_IMPL_EXTERN_RECOVERY_CASES = (
+    REPO / "tests" / "cases" / "error_impl_block_duplicate_fn_extern.ring",
+    REPO / "tests" / "cases" / "error_trait_impl_pub_extern_recovery.ring",
+)
+
+
+def builtin_impl_extern_recovery_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    expected_message = "impl-member extern fn is not part of Ring 0.1"
+    for source_path in B201_IMPL_EXTERN_RECOVERY_CASES:
+        contract = source_path.with_suffix(".error").read_text(encoding="utf-8")
+        for mode, extra_args in (
+                ("human", None), ("llm", ["--error-format=llm"])):
+            label = f"{source_path.name}:{mode}"
+            try:
+                result = ring_check(
+                    ring_exe, str(source_path), extra_args=extra_args,
+                    phase_suite="structural",
+                    phase_case=f"b201-impl-extern:{label}")
+            except subprocess.TimeoutExpired:
+                errors.append(f"B-201 {label} timed out")
+                continue
+            combined = (result.stdout or "") + (result.stderr or "")
+            if result.returncode == 0:
+                errors.append(f"B-201 {label} unexpectedly succeeded")
+                continue
+            contract_error = error_contract_failure(contract, combined)
+            if contract_error is not None:
+                errors.append(f"B-201 {label}: {contract_error}")
+                continue
+            codes = set(re.findall(r"\bE[0-9]{4}\b", combined))
+            if codes != {"E0103"}:
+                errors.append(
+                    f"B-201 {label} diagnostic set drifted: {sorted(codes)!r}")
+            if combined.count(expected_message) != 1:
+                errors.append(
+                    f"B-201 {label} emitted the rejection message "
+                    f"{combined.count(expected_message)} times")
+    return errors
+
+
+F2_U1A_SOURCE_CONTRACT_MUTATIONS = (
+    # Resolver source-site and exact namespace construction.
+    ("resolver", "source_declaration_site_path", "site.use_index != -1",
+     "false"),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|use:${site.use_index}|item:${site.item_index}"'),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|item:${site.item_index}|owner:forged"'),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|item:${site.item_index}|name:forged"'),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|item:${site.item_index}|payload:forged"'),
+    ("resolver", "source_declaration_site_path",
+     '"frame:${site.frame_index}|item:${site.item_index}"',
+     '"frame:${site.frame_index}|item:${site.item_index}|ordinal:${site.item_index}"'),
+    ("resolver", "source_seed_symbol",
+     "file_key != origin_site.file_key", "false"),
+    ("resolver", "source_seed_symbol",
+     "frame_index != origin_site.frame_index", "false"),
+    ("resolver", "source_seed_symbol",
+     "decl_index != origin_site.item_index", "false"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Value => namespace_value()",
+     "NamespaceKind::Value => namespace_nominal()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Struct => namespace_nominal()",
+     "NamespaceKind::Struct => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Enum => namespace_nominal()",
+     "NamespaceKind::Enum => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::TypeAlias => namespace_nominal()",
+     "NamespaceKind::TypeAlias => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Effect => namespace_effect()",
+     "NamespaceKind::Effect => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::EffectAlias => namespace_effect()",
+     "NamespaceKind::EffectAlias => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "NamespaceKind::Trait => namespace_trait()",
+     "NamespaceKind::Trait => namespace_value()"),
+    ("resolver", "source_seed_symbol",
+     "symbol_ref_origin_module_key(symbol) != origin_site.file_key", "false"),
+    ("resolver", "source_seed_symbol", "!namespace_kind_same(",
+     "false && namespace_kind_same("),
+    ("resolver", "append_namespace_seed", "source_seed_symbol(",
+     "source_seed_symbol_missing("),
+    ("resolver", "append_namespace_seed",
+     "namespace: namespace,\n        symbol: symbol,\n        is_public: effective_public",
+     "namespace: namespace,\n        symbol: existing_symbol.unwrap(),\n        is_public: effective_public"),
+    ("resolver", "append_namespace_seed",
+     "namespace: namespace,\n            symbol: symbol,\n            is_public: true",
+     "namespace: namespace,\n            symbol: existing_symbol.unwrap(),\n            is_public: true"),
+    ("resolver", "append_enum_variant_fact_group",
+     "symbol_ref_same(group.enum_symbol, enum_symbol)", "false"),
+    ("resolver", "append_enum_variant_fact_group",
+     "symbol_ref_same(group.enum_symbol, enum_symbol)",
+     "symbol_ref_same(group.enum_symbol, group.enum_symbol)"),
+    ("resolver", "enum_variant_constructors",
+     "symbol_ref_same(group.enum_symbol, enum_symbol)", "false"),
+    ("resolver", "claim_named_enum_relation_expansion",
+     "symbol_ref_same(expanded.enum_symbol, enum_symbol)", "false"),
+    ("resolver", "collect_decl_seed",
+     "symbol: ctor_symbol,\n                    is_public:",
+     "symbol: enum_symbol,\n                    is_public:"),
+    ("resolver", "collect_decl_seed", "some(ctor_symbol), is_pub",
+     "some(enum_symbol), is_pub"),
+    ("resolver", "binding_with_public", "symbol: binding.symbol",
+     "symbol: candidate.symbol"),
+    ("resolver", "add_namespace_fact",
+     "symbol_ref_same(existing.symbol, candidate.symbol)",
+     "symbol_ref_same(candidate.symbol, candidate.symbol)"),
+    ("resolver", "add_namespace_fact",
+     "symbol_ref_same(existing.symbol, candidate.symbol)", "false"),
+    ("resolver", "reduce_value_lane", "symbol_ref_same(\n"
+     "                           existing.binding.symbol,\n"
+     "                           candidate.binding.symbol)",
+     "symbol_ref_same(candidate.binding.symbol, "
+     "candidate.binding.symbol)"),
+    ("resolver", "project_public_inline_fact", "symbol: fact.symbol",
+     "symbol: candidate.symbol"),
+    ("resolver", "deliver_namespace_fact", "symbol: fact.symbol",
+     "symbol: ctor.symbol"),
+    ("resolver", "materialize_structural_producer",
+     "ValueStructuralProducerSource::ImportCopyValue { .. } => match source {",
+     "ValueStructuralProducerSource::TerminalValue(_) => match source {"),
+    ("resolver", "materialize_structural_producer",
+     "ValueStructuralProducerSource::ProjectionCopyValue { .. } => match source {",
+     "ValueStructuralProducerSource::TerminalValue(_) => match source {"),
+    ("resolver", "append_distinct_symbol_ref",
+     "symbol_ref_same(existing, symbol)", "symbol_ref_same(symbol, symbol)"),
+    ("resolver", "append_materialized_strong_ambiguity",
+     "!symbol_ref_same(\n"
+     "                                       left.binding.symbol,\n"
+     "                                       right.binding.symbol)",
+     "!symbol_ref_same(left.binding.symbol, left.binding.symbol)"),
+    ("resolver", "materialize_structural_value_plan",
+     "symbol_ref_same(\n"
+     "                                                publication.binding.symbol,\n"
+     "                                                local.binding.symbol)",
+     "symbol_ref_same(publication.binding.symbol, "
+     "publication.binding.symbol)"),
+    ("resolver", "materialize_cycle_import_producer",
+     "materialize_value_binding(producer.target, symbol)",
+     "materialize_value_binding(producer.target, forged_symbol)"),
+    # InferCtx may only project an already-resolved symbol to legacy lookup.
+    ("infer_ctx", "apply_project_value_binding",
+     "symbol_ref_canonical_payload(binding.symbol)", "binding.exposed_name"),
+    ("infer_ctx", "apply_project_namespace_binding",
+     "symbol_ref_canonical_payload(binding.symbol)", "binding.exposed_name"),
+    ("infer_ctx", "install_project_namespace_plan",
+     "symbol_ref_canonical_payload(group.enum_symbol)", "group.enum_symbol"),
+    ("infer_ctx", "install_project_namespace_plan",
+     "symbol_ref_canonical_payload(ctor.symbol)", "ctor.exposed_name"),
+)
+
+
+def _f2_u1a_relation_finding(
+    source_name: str, function_name: str, token: str,
+) -> str:
+    return (
+        f"F2 U1a {source_name}.{function_name} misses relation {token!r}")
+
+
+def _f2_u1a_require_function_token(
+    source: str, source_name: str, function_name: str, token: str,
+    errors: List[str],
+) -> None:
+    body, body_error = _f0_function_body(source, function_name)
+    if body_error:
+        errors.append(body_error.replace(
+            "F0 function", f"F2 U1a {source_name} function"))
+        return
+    assert body is not None
+    if token not in body:
+        errors.append(_f2_u1a_relation_finding(
+            source_name, function_name, token))
+
+
+def _f2_u1a_struct_fields(
+    source: str, name: str, expected: List[str], errors: List[str],
+) -> None:
+    masked = mask_ring_strings_and_comments(source)
+    pattern = re.compile(
+        rf"\b(?:pub\s+)?struct\s+{re.escape(name)}\s*\{{")
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1:
+        errors.append(f"F2 U1a struct {name} found {len(matches)} times")
+        return
+    open_index = masked.rfind("{", matches[0].start(), matches[0].end())
+    try:
+        close_index = matching_delimiter(masked, open_index, "{", "}")
+    except ValueError as exc:
+        errors.append(f"F2 U1a struct {name}: {exc}")
+        return
+    body = masked[open_index + 1:close_index]
+    actual = [
+        match.group(1)
+        for match in re.finditer(
+            r"(?m)^\s*(?:pub\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", body)
+    ]
+    if actual != expected:
+        errors.append(
+            f"F2 U1a {name} field inventory drifted: {actual!r}")
+
+
+def _f2_u1a_call_escaped_function_allowlist(
+    source: str, call_token: str, allowed_functions: Tuple[str, ...],
+) -> bool:
+    allowed_spans: List[Tuple[int, int]] = []
+    for function_name in allowed_functions:
+        span, span_error = _f0_function_span(source, function_name)
+        if span_error is not None or span is None:
+            continue
+        allowed_spans.append(span)
+    # Ring string interpolation contains executable expressions.  Scan raw
+    # source so an accessor hidden inside "${...}" cannot evade the allowlist.
+    for match in re.finditer(re.escape(call_token), source):
+        if not any(start <= match.start() < end for start, end in allowed_spans):
+            return True
+    return False
+
+
+def resolver_identity_u1a_contract_errors(
+    resolver_source: str, infer_ctx_source: str,
+) -> List[str]:
+    """Cheap layout-sensitive source guards, not semantic acceptance.
+
+    These checks intentionally do not duplicate the Ring parser and make no
+    claim that formatting-equivalent rewrites cannot evade them.  U1a behavior
+    is accepted only from a source-built candidate running targeted project
+    fixtures in an external Steward evidence packet.
+    """
+    errors: List[str] = []
+    resolver_masked = mask_ring_strings_and_comments(resolver_source)
+    infer_masked = mask_ring_strings_and_comments(infer_ctx_source)
+
+    _f2_u1a_struct_fields(resolver_source, "NamespaceSeed", [
+        "file_key", "frame_index", "decl_index", "origin_site", "owner",
+        "exposed_name", "namespace", "symbol", "is_public", "role",
+        "is_projection"], errors)
+    _f2_u1a_struct_fields(resolver_source, "ResolvedNamespaceBinding", [
+        "file_key", "frame_index", "owner", "exposed_name", "namespace",
+        "symbol", "is_public"], errors)
+    _f2_u1a_struct_fields(resolver_source, "EnumVariantFactGroup", [
+        "enum_symbol", "constructors"], errors)
+    _f2_u1a_struct_fields(resolver_source, "ValueBindingTarget", [
+        "file_key", "frame_index", "owner", "exposed_name", "is_public"],
+        errors)
+    _f2_u1a_struct_fields(resolver_source, "ValueStructuralProducer", [
+        "producer", "target", "occurrence", "source"], errors)
+    _f2_u1a_struct_fields(resolver_source, "ValueStructuralSlot", [
+        "target", "producers", "local_announced", "publication_announced",
+        "projection_registered", "has_public_seed_terminal",
+        "local_winner_index", "publication_winner_index"], errors)
+
+    for token in (
+            "TerminalValue(SymbolRef)", "ImportCopyValue {",
+            "ProjectionCopyValue {"):
+        if token not in resolver_masked:
+            errors.append(
+                f"F2 U1a payload-free Value source misses {token!r}")
+    if ".payload" in resolver_masked or "payload: \"\"" in resolver_source:
+        errors.append("F2 U1a resolver retained raw payload authority")
+
+    if resolver_source.count("make_symbol_ref(") != 1:
+        errors.append("F2 U1a resolver make_symbol_ref authority drifted")
+    source_seed_body, source_seed_error = _f0_function_body(
+        resolver_source, "source_seed_symbol")
+    if source_seed_error:
+        errors.append(source_seed_error.replace(
+            "F0 function", "F2 U1a resolver function"))
+    elif source_seed_body is not None and "make_symbol_ref(" not in source_seed_body:
+        errors.append("F2 U1a source seed helper no longer owns construction")
+
+    required_imports = (
+        "SymbolRef", "make_symbol_ref", "namespace_value",
+        "namespace_nominal", "namespace_trait", "namespace_effect",
+        "namespace_kind_same",
+        "symbol_ref_origin_module_key", "symbol_ref_namespace_kind",
+        "symbol_ref_canonical_payload", "symbol_ref_declaration_site_path",
+        "symbol_ref_same",
+    )
+    for token in required_imports:
+        if token not in resolver_source[:1200]:
+            errors.append(f"F2 U1a resolver import misses {token!r}")
+
+    seen_relations: set[Tuple[str, str, str]] = set()
+    for source_name, function_name, token, _ in (
+            F2_U1A_SOURCE_CONTRACT_MUTATIONS):
+        relation = (source_name, function_name, token)
+        if relation in seen_relations:
+            continue
+        seen_relations.add(relation)
+        source = resolver_source if source_name == "resolver" else infer_ctx_source
+        _f2_u1a_require_function_token(
+            source, source_name, function_name, token, errors)
+
+    if _f2_u1a_call_escaped_function_allowlist(
+            resolver_source, "symbol_ref_canonical_payload(",
+            ("source_seed_symbol", "append_binding_ambiguity")):
+        errors.append(
+            "F2 U1a resolver canonical payload call escaped function allowlist")
+    if re.search(
+            r"(?:[A-Za-z_][A-Za-z0-9_.]*\.(?:symbol|enum_symbol)|"
+            r"[A-Za-z_][A-Za-z0-9_]*(?:_symbol|symbol))\s*(?:==|!=)|"
+            r"(?:==|!=)\s*(?:[A-Za-z_][A-Za-z0-9_.]*\."
+            r"(?:symbol|enum_symbol)|[A-Za-z_][A-Za-z0-9_]*"
+            r"(?:_symbol|symbol))\b",
+            resolver_source):
+        errors.append("F2 U1a resolver used raw SymbolRef equality")
+
+    if "make_symbol_ref" in infer_masked:
+        errors.append("F2 U1a infer_ctx reconstructs SymbolRef")
+    if re.search(r"Map\s*<\s*Str\s*,\s*SymbolRef\s*>", infer_masked):
+        errors.append("F2 U1a infer_ctx gained typed origin side map")
+    if _f2_u1a_call_escaped_function_allowlist(
+            infer_ctx_source, "symbol_ref_canonical_payload(",
+            ("apply_project_value_binding",
+             "apply_project_namespace_binding",
+             "install_project_namespace_plan")):
+        errors.append(
+            "F2 U1a infer_ctx canonical payload call escaped function allowlist")
+    key_body, key_error = _f0_function_body(
+        infer_ctx_source, "project_binding_key")
+    if key_error:
+        errors.append(key_error.replace(
+            "F0 function", "F2 U1a infer_ctx function"))
+    elif key_body is not None and (
+            "binding.symbol" in key_body and
+            "symbol_ref_canonical_payload" not in key_body):
+        errors.append("F2 U1a project binding key became origin authority")
+
+    for forbidden in (
+            "CoreHIR", "FlowIR", "RcIR", "CalleeRef", "SourceBinder",
+            "source_binder", "member_identity", "single_namespace_cutover"):
+        if forbidden in resolver_masked or forbidden in infer_masked:
+            errors.append(f"F2 U1a exceeded resolver-origin scope via {forbidden!r}")
+    return errors
+
+
+def resolver_identity_u1a_source_contract_mutation_errors(
+    resolver_source: str, infer_ctx_source: str,
+) -> Tuple[List[str], int]:
+    """Exercise inexpensive source-contract regressions only."""
+    errors: List[str] = []
+    count = 0
+    for source_name, function_name, anchor, replacement in (
+            F2_U1A_SOURCE_CONTRACT_MUTATIONS):
+        count += 1
+        source = resolver_source if source_name == "resolver" else infer_ctx_source
+        mutated, mutation_error = _f0_mutate_function_once(
+            source, function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(
+                f"F2 U1a source-contract mutation "
+                f"{source_name}.{function_name}: "
+                f"{mutation_error}")
+            continue
+        assert mutated is not None
+        findings = resolver_identity_u1a_contract_errors(
+            mutated if source_name == "resolver" else resolver_source,
+            mutated if source_name == "infer_ctx" else infer_ctx_source)
+        expected = _f2_u1a_relation_finding(
+            source_name, function_name, anchor)
+        if findings != [expected]:
+            errors.append(
+                f"F2 U1a source-contract mutation "
+                f"{source_name}.{function_name} "
+                f"findings were {findings!r}, expected only {expected!r}")
+
+    custom_mutations = (
+        ("NamespaceSeed parallel payload", "resolver",
+         "pub symbol: SymbolRef,\n    pub is_public: Bool,",
+         "pub payload: Str,\n    pub is_public: Bool,",
+         "F2 U1a NamespaceSeed field inventory drifted"),
+        ("Resolved binding parallel payload", "resolver",
+         "pub symbol: SymbolRef,\n    pub is_public: Bool\n}",
+         "pub payload: Str,\n    pub is_public: Bool\n}",
+         "F2 U1a ResolvedNamespaceBinding field inventory drifted"),
+        ("Value target forged symbol", "resolver",
+         "struct ValueBindingTarget {\n    file_key: Str,",
+         "struct ValueBindingTarget {\n    symbol: SymbolRef,\n    file_key: Str,",
+         "F2 U1a ValueBindingTarget field inventory drifted"),
+        ("optional terminal symbol", "resolver",
+         "TerminalValue(SymbolRef)", "TerminalValue(Option<SymbolRef>)",
+         "F2 U1a payload-free Value source misses 'TerminalValue(SymbolRef)'"),
+        ("second resolver constructor", "resolver", "\nfn declaration_payload(",
+         "\nfn forged_symbol() { let _ = make_symbol_ref(\"\", namespace_value(), \"\", \"\") }\n\nfn declaration_payload(",
+         "F2 U1a resolver make_symbol_ref authority drifted"),
+        ("infer reverse construction", "infer_ctx", "\n// ============================================================\n// Error helper",
+         "\nfn infer_forged_symbol() { let _ = make_symbol_ref(\"\", namespace_value(), \"\", \"\") }\n\n"
+         "// ============================================================\n// Error helper",
+         "F2 U1a infer_ctx reconstructs SymbolRef"),
+        ("infer typed side index", "infer_ctx", "\n// ============================================================\n// Error helper",
+         "\nstruct InferOriginSideMap { values: Map<Str, SymbolRef> }\n\n"
+         "// ============================================================\n// Error helper",
+         "F2 U1a infer_ctx gained typed origin side map"),
+        ("application key consumes origin", "infer_ctx",
+         '"${namespace}|${binding.exposed_name}"',
+         '"${namespace}|${binding.exposed_name}|${symbol_ref_canonical_payload(binding.symbol)}"',
+         "F2 U1a infer_ctx canonical payload call escaped function allowlist"),
+        ("cycle canonical collapse", "resolver",
+         "if symbol_ref_same(existing, symbol) { return }",
+         "if symbol_ref_same(existing, symbol) || "
+         "symbol_ref_canonical_payload(existing) == "
+         "symbol_ref_canonical_payload(symbol) { return }",
+         "F2 U1a resolver canonical payload call escaped function allowlist"),
+    )
+    for label, source_name, anchor, replacement, expected_prefix in custom_mutations:
+        count += 1
+        source = resolver_source if source_name == "resolver" else infer_ctx_source
+        if source.count(anchor) != 1:
+            errors.append(
+                f"F2 U1a source-contract mutation {label} anchor count was "
+                f"{source.count(anchor)}")
+            continue
+        mutated = source.replace(anchor, replacement, 1)
+        findings = resolver_identity_u1a_contract_errors(
+            mutated if source_name == "resolver" else resolver_source,
+            mutated if source_name == "infer_ctx" else infer_ctx_source)
+        if len(findings) != 1 or not findings[0].startswith(expected_prefix):
+            errors.append(
+                f"F2 U1a source-contract mutation {label} findings were "
+                f"{findings!r}, expected one {expected_prefix!r}")
+
+    enum_lookup_anchor = "symbol_ref_same(group.enum_symbol, enum_symbol)"
+    enum_fallback_mutations = (
+        ("canonical payload fallback",
+         enum_lookup_anchor + " ||\n"
+         "           symbol_ref_canonical_payload(group.enum_symbol) ==\n"
+         "               symbol_ref_canonical_payload(enum_symbol)",
+         "F2 U1a resolver canonical payload call escaped function allowlist"),
+        ("raw SymbolRef fallback",
+         enum_lookup_anchor + " || group.enum_symbol == enum_symbol",
+         "F2 U1a resolver used raw SymbolRef equality"),
+    )
+    for label, replacement, expected in enum_fallback_mutations:
+        count += 1
+        mutated, mutation_error = _f0_mutate_function_once(
+            resolver_source, "enum_variant_constructors",
+            enum_lookup_anchor, replacement)
+        if mutation_error:
+            errors.append(
+                f"F2 U1a source-contract mutation enum {label}: "
+                f"{mutation_error}")
+            continue
+        assert mutated is not None
+        findings = resolver_identity_u1a_contract_errors(
+            mutated, infer_ctx_source)
+        if findings != [expected]:
+            errors.append(
+                f"F2 U1a source-contract mutation enum {label} findings were "
+                f"{findings!r}, expected only {expected!r}")
+
+    count += 1
+    anchor = "if symbol_ref_same(existing.symbol, candidate.symbol) {"
+    injected = (
+        "if symbol_ref_canonical_payload(existing.symbol) == "
+        "symbol_ref_canonical_payload(candidate.symbol) ||\n"
+        "                   symbol_ref_same(existing.symbol, candidate.symbol) {")
+    if resolver_source.count(anchor) != 1:
+        errors.append("F2 U1a diagnostic-decision mutation anchor missing")
+    else:
+        mutated = resolver_source.replace(anchor, injected, 1)
+        findings = resolver_identity_u1a_contract_errors(
+            mutated, infer_ctx_source)
+        expected = (
+            "F2 U1a resolver canonical payload call escaped function allowlist")
+        if findings != [expected]:
+            errors.append(
+                f"F2 U1a diagnostic-decision mutation findings were "
+                f"{findings!r}, expected only {expected!r}")
+
+    if count != F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT:
+        errors.append(
+            f"F2 U1a source-contract mutation count was {count}, expected "
+            f"{F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT}")
+    return errors, count
+
+
+def resolver_identity_u1a_scope_guard_errors(
+    resolver_source: str, infer_ctx_source: str,
+) -> Tuple[List[str], int]:
+    guards = (
+        ("CoreHIR", "\nstruct CoreHIR { nodes: Int }\n"),
+        ("FlowIR", "\nstruct FlowIR { nodes: Int }\n"),
+        ("RcIR", "\nstruct RcIR { nodes: Int }\n"),
+        ("CalleeRef", "\nstruct CalleeRef { value: Int }\n"),
+        ("source binder", "\nfn source_binder() {}\n"),
+        ("member identity", "\nfn member_identity() {}\n"),
+        ("single cutover", "\nfn single_namespace_cutover() {}\n"),
+        ("source binder carrier", "\nstruct SourceBinder { value: Int }\n"),
+    )
+    errors: List[str] = []
+    count = 0
+    for label, suffix in guards:
+        count += 1
+        if not resolver_identity_u1a_contract_errors(
+                resolver_source + suffix, infer_ctx_source):
+            errors.append(f"F2 U1a scope guard escaped: {label}")
+    if count != F2_U1A_SCOPE_GUARD_COUNT:
+        errors.append(
+            f"F2 U1a scope guard count was {count}, expected "
+            f"{F2_U1A_SCOPE_GUARD_COUNT}")
+    return errors, count
+
+
+def resolver_identity_u1a_source_errors() -> List[str]:
+    """Run non-authoritative U1a source contracts and scope guards."""
+    try:
+        resolver_source = F2_U1A_RESOLVER_PATH.read_text(encoding="utf-8")
+        infer_ctx_source = F2_U1A_INFER_CTX_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read F2 U1a compiler sources: {exc}"]
+    errors = resolver_identity_u1a_contract_errors(
+        resolver_source, infer_ctx_source)
+    if errors:
+        return errors
+    mutation_errors, _ = resolver_identity_u1a_source_contract_mutation_errors(
+        resolver_source, infer_ctx_source)
+    guard_errors, _ = resolver_identity_u1a_scope_guard_errors(
+        resolver_source, infer_ctx_source)
+    errors.extend(mutation_errors)
+    errors.extend(guard_errors)
+    return errors
+
+
+def resolver_identity_u1a_source_check_errors(ring_exe: str) -> List[str]:
+    """Parse/typecheck the two sources; this is not candidate behavior."""
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(ring_exe))
+    for source_path in (F2_U1A_RESOLVER_PATH, F2_U1A_INFER_CTX_PATH):
+        completed = subprocess.run(
+            [ring_exe, "check", str(source_path)], cwd=REPO, env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            errors="strict", check=False, timeout=120)
+        if completed.returncode != 0:
+            errors.append(
+                f"pinned Ring source check failed for "
+                f"{display_path(source_path)}: "
+                f"exit={completed.returncode} stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}")
+        elif completed.stdout.strip() != "OK":
+            errors.append(
+                f"pinned Ring source check output drifted for "
+                f"{display_path(source_path)}: stdout={completed.stdout!r}")
+    if _sha256_file(compiler) != before:
+        errors.append(
+            "pinned Ring compiler changed across F2 U1a source checks")
+    return errors
+
+
+F2_U1B_PATHS = {
+    "identity": REPO / "compiler" / "ir_identity.ring",
+    "resolver": REPO / "compiler" / "resolver.ring",
+    "types": REPO / "compiler" / "types.ring",
+    "env": REPO / "compiler" / "env.ring",
+    "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
+    "infer_register": REPO / "compiler" / "infer_register.ring",
+    "hir": REPO / "compiler" / "hir.ring",
+    "infer": REPO / "compiler" / "infer.ring",
+    "core": REPO / "compiler" / "core_from_hir.ring",
+    "core_expr": REPO / "compiler" / "core_expr.ring",
+    "flow": REPO / "compiler" / "flow_lower.ring",
+}
+
+
+def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
+    """Cheap U1b source relations; candidate behavior remains external."""
+    errors: List[str] = []
+    struct_field_fields, field_error = _f0_struct_fields(
+        sources["types"], "StructField")
+    if field_error:
+        errors.append(field_error)
+    elif struct_field_fields is not None and [
+            name for _, name in struct_field_fields] != [
+                "name", "ty", "is_pub", "field_ref", "field_index", "span"]:
+        errors.append("F2 U1b StructField identity/span inventory drifted")
+    struct_def_fields, def_error = _f0_struct_fields(
+        sources["env"], "StructDef")
+    if def_error:
+        errors.append(def_error)
+    elif struct_def_fields is not None and [
+            name for _, name in struct_def_fields] != [
+                "name", "owner_ref", "type_params", "type_param_vars",
+                "fields", "derive_attrs", "derived_provider_plan",
+                "resource_storage_parameter_ordinals", "is_extern"]:
+        errors.append("F2 U1b StructDef owner inventory drifted")
+    registered_fields, registered_error = _f0_struct_fields(
+        sources["identity"], "RegisteredNominalRef")
+    if registered_error:
+        errors.append(registered_error)
+    elif registered_fields is not None and [
+            name for _, name in registered_fields] != ["symbol", "display_name"]:
+        errors.append("F2 U1b registered nominal inventory drifted")
+    nominal_fields, nominal_error = _f0_struct_fields(
+        sources["identity"], "NominalFieldRef")
+    if nominal_error:
+        errors.append(nominal_error)
+    elif nominal_fields is not None and [
+            name for _, name in nominal_fields] != [
+                "owner", "member", "field_index", "field_name"]:
+        errors.append("F2 U1b nominal field inventory drifted")
+
+    required_relations = (
+        ("identity", "make_registered_nominal_ref",
+         "display_name == \"\""),
+        ("identity", "make_nominal_field_ref",
+         "symbol_ref_origin_module_key(owner) !="),
+        ("identity", "make_nominal_field_ref",
+         "symbol_ref_canonical_payload(member) !="),
+        ("identity", "make_nominal_field_ref",
+         '"${symbol_ref_canonical_payload(owner)}::${field_name}"'),
+        ("identity", "make_nominal_field_ref",
+         "symbol_ref_declaration_site_path(member) !="),
+        ("identity", "make_nominal_field_ref",
+         '"${symbol_ref_declaration_site_path(owner)}|field:${field_index}|kind:struct-field"'),
+        ("resolver", "collect_struct_identity_fact", "none, field_index)"),
+        ("resolver", "resolve_namespace_plan",
+         "append_struct_identity_fact(fact, struct_identities)"),
+        ("infer_ctx", "install_struct_identity_ledger",
+         "for existing in ctx.struct_identity_unconsumed {\n"
+         "                if existing.frame_index == fact.frame_index"),
+        ("infer_ctx", "peek_struct_identity_fact",
+         'none => panic("struct identity ledger: missing declaration fact")'),
+        ("infer_ctx", "commit_struct_identity_fact",
+         'panic("struct identity ledger: commit fact mismatch")'),
+        ("infer_ctx", "peek_struct_identity_completion",
+         'panic("struct identity ledger: duplicate pending completion")'),
+        ("infer_ctx", "commit_struct_identity_completion",
+         'panic("struct identity ledger: completion commit mismatch")'),
+        ("infer_ctx", "close_struct_identity_ledger",
+         "ctx.struct_identity_unconsumed.len() != 0"),
+        ("infer_ctx", "apply_project_namespace_binding",
+         "registered_nominal_ref_symbol(def.owner_ref)"),
+        ("infer_register", "complete_struct_fields",
+         "field_ref: field_identity.field_ref"),
+        ("infer_register", "complete_struct_fields",
+         "peek_struct_identity_completion("),
+        ("infer_register", "complete_struct_fields",
+         "commit_struct_identity_completion(ctx, identity)"),
+        ("infer_register", "preregister_struct",
+         "peek_struct_identity_fact("),
+        ("infer_register", "preregister_struct",
+         "commit_struct_identity_fact(ctx, identity, true)"),
+        ("infer_register", "register_extern_type_common",
+         "commit_struct_identity_fact(ctx, identity, false)"),
+        ("infer_register", "complete_struct_fields",
+         "resolved_fields.push(StructField {"),
+        ("hir", "validate_hir_field_access_kind",
+         "registered_nominal_ref_symbol(owner_ref)"),
+        ("hir", "validate_hir_field_access_kind",
+         "field != nominal_field_ref_name(field_ref)"),
+        ("hir", "validate_hir_field_access_kind",
+         "Type::StructType { name, .. }"),
+        ("hir", "validate_hir_field_access_kind",
+         "if name != registered_nominal_ref_display_name(owner_ref)"),
+        ("hir", "validate_hir_field_access_kind",
+         'panic("HIR identity: ErrorRecovery field access reached successful HIR")'),
+        ("infer", "infer_field_access", "field_ref: found_field.field_ref"),
+        ("infer", "infer_field_access", "field_index: found_field.field_index"),
+        ("infer", "infer_field_access",
+         "access_kind = HFieldAccessKind::NominalField {"),
+        ("infer", "infer_field_access", "owner_ref: struct_def.owner_ref"),
+        ("infer", "infer_struct_lit", "owner_ref: struct_def.owner_ref"),
+        ("core", "producer_record_type",
+         "registered_nominal_ref_symbol(def.owner_ref)"),
+        ("core", "producer_record_type",
+         "make_nominal_flow_field_identity(field.field_ref)"),
+        ("core", "producer_record_type",
+         "def.resource_storage_parameter_ordinals"),
+        ("core_expr", "make_core_nominal_field",
+         "CoreFieldRefValue::NominalFieldValue(value)"),
+        ("flow", "flow_field",
+         "make_nominal_flow_field_identity(core_field_ref_nominal(value))"),
+    )
+    for source_name, function_name, token in required_relations:
+        _f2_u1a_require_function_token(
+            sources[source_name], source_name, function_name, token, errors)
+
+    for source_name, function_name, ordered_tokens in (
+        ("infer_register", "preregister_struct", (
+            "peek_struct_identity_fact(", "let def = StructDef {",
+            "commit_struct_identity_fact(ctx, identity, true)",
+            "ctx.env.types.structs.insert(name, def)")),
+        ("infer_register", "register_extern_type_common", (
+            "peek_struct_identity_fact(", "let def = StructDef {",
+            "commit_struct_identity_fact(ctx, identity, false)",
+            "ctx.env.types.extern_structs.insert(name, def)")),
+        ("infer_register", "complete_struct_fields", (
+            "peek_struct_identity_completion(",
+            "let mut resolved_fields: List<StructField> = []",
+            "commit_struct_identity_completion(ctx, identity)",
+            "committed_def.fields = resolved_fields")),
+    ):
+        body, body_error = extract_ring_function_body(
+            sources[source_name], function_name)
+        if body_error:
+            errors.append(body_error)
+            continue
+        positions = [body.find(token) for token in ordered_tokens]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
+            errors.append(
+                f"F2 U1b {function_name} atomic order drifted")
+
+    hir_masked = mask_ring_strings_and_comments(sources["hir"])
+    for token in (
+            "pub enum HFieldAccessKind", "NominalField { owner_ref:",
+            "RecordField", "TupleField", "Method", "ErrorRecovery",
+            "owner_ref: RegisteredNominalRef", "field_ref: NominalFieldRef",
+            "field_index: Int"):
+        if token not in sources["hir"]:
+            errors.append(f"F2 U1b HIR schema misses {token!r}")
+    if re.search(r"StructType\s*\{[^}\n]*owner_ref", sources["types"]):
+        errors.append("F2 U1b leaked owner identity into Type::StructType")
+    if "HFieldAccessKind::ErrorRecovery" not in hir_masked:
+        errors.append("F2 U1b successful-HIR ErrorRecovery rejection drifted")
+    for forbidden in (
+            "take_struct_identity_fact", "take_struct_identity_completion",
+            "stage_struct_identity_completion", "def.fields.push("):
+        if forbidden in sources["infer_ctx"] or forbidden in sources["infer_register"]:
+            errors.append(f"F2 U1b retained non-atomic ledger path {forbidden!r}")
+    return errors
+
+
+F2_U1B_SOURCE_CONTRACT_MUTATIONS = (
+    ("identity", "make_nominal_field_ref",
+     "symbol_ref_origin_module_key(owner) !=", "false &&"),
+    ("identity", "make_nominal_field_ref",
+     "symbol_ref_canonical_payload(member) !=", "false &&"),
+    ("identity", "make_nominal_field_ref",
+     'symbol_ref_declaration_site_path(member) !=', "false &&"),
+    ("resolver", "collect_struct_identity_fact", "none, field_index)",
+     "none, 0)"),
+    ("resolver", "resolve_namespace_plan",
+     "append_struct_identity_fact(fact, struct_identities)",
+     "discard_struct_identity_fact(fact)"),
+    ("infer_ctx", "install_struct_identity_ledger",
+     "for existing in ctx.struct_identity_unconsumed {\n"
+     "                if existing.frame_index == fact.frame_index",
+     "for existing in ctx.struct_identity_unconsumed {\n"
+     "                if false"),
+    ("infer_ctx", "peek_struct_identity_fact",
+     'none => panic("struct identity ledger: missing declaration fact")',
+     "none => StructIdentityFact {}"),
+    ("infer_ctx", "commit_struct_identity_fact",
+     'panic("struct identity ledger: commit fact mismatch")', "{}"),
+    ("infer_register", "complete_struct_fields",
+     "field_ref: field_identity.field_ref",
+     "field_ref: identity.fields.get(0).unwrap().field_ref"),
+    ("infer_register", "complete_struct_fields",
+     "peek_struct_identity_completion(",
+     "early_commit_struct_identity_completion("),
+    ("infer_register", "preregister_struct",
+     "peek_struct_identity_fact(", "early_commit_struct_identity_fact("),
+    ("infer_register", "complete_struct_fields",
+     "resolved_fields.push(StructField {",
+     "committed_def.fields.push(StructField {"),
+    ("hir", "validate_hir_field_access_kind",
+     "field != nominal_field_ref_name(field_ref)", "false"),
+    ("hir", "validate_hir_field_access_kind",
+     "if name != registered_nominal_ref_display_name(owner_ref)",
+     "if false"),
+    ("infer", "infer_field_access", "field_ref: found_field.field_ref",
+     "field_ref: missing_field_ref"),
+    ("infer", "infer_field_access",
+     "access_kind = HFieldAccessKind::NominalField {",
+     "access_kind = HFieldAccessKind::RecordField"),
+    ("infer", "infer_field_access", "owner_ref: struct_def.owner_ref",
+     "owner_ref: wrong_owner_ref"),
+    ("infer", "infer_struct_lit", "owner_ref: struct_def.owner_ref",
+     "owner_ref: wrong_owner_ref"),
+    ("core", "producer_record_type",
+     "make_nominal_flow_field_identity(field.field_ref)",
+     "make_nominal_flow_field_identity(def.fields.get(0).unwrap().field_ref)"),
+    ("flow", "flow_field",
+     "make_nominal_flow_field_identity(core_field_ref_nominal(value))",
+     "make_path_flow_field_identity(core_field_ref_record_path(value))"),
+)
+
+
+def nominal_field_u1b_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_U1B_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read F2 U1b compiler sources: {exc}"]
+    errors = nominal_field_u1b_contract_errors(sources)
+    if errors:
+        return errors
+    count = 0
+    for source_name, function_name, anchor, replacement in (
+            F2_U1B_SOURCE_CONTRACT_MUTATIONS):
+        count += 1
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(
+                f"F2 U1b source mutation {source_name}.{function_name}: "
+                f"{mutation_error}")
+            continue
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source or ""
+        if not nominal_field_u1b_contract_errors(mutated):
+            errors.append(
+                f"F2 U1b source mutation escaped: "
+                f"{source_name}.{function_name} {anchor!r}")
+    if count != F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT:
+        errors.append(
+            f"F2 U1b source mutation count was {count}, expected "
+            f"{F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT}")
+    return errors
+
+
+def nominal_field_u1b_source_check_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(ring_exe))
+    for source_path in (F2_U1B_PATHS["identity"], F2_U1B_PATHS["hir"]):
+        error = _f1_run_ring_check(ring_exe, source_path, environment)
+        if error:
+            errors.append(error)
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across F2 U1b checks")
+    return errors
+
+
+F2_TRAIT_METHOD_IDENTITY_PATHS = {
+    "identity": REPO / "compiler" / "ir_identity.ring",
+    "resolver": REPO / "compiler" / "resolver.ring",
+    "ctx": REPO / "compiler" / "infer_ctx.ring",
+    "env": REPO / "compiler" / "env.ring",
+    "register": REPO / "compiler" / "infer_register.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
+    "hir": REPO / "compiler" / "hir.ring",
+    "decl": REPO / "compiler" / "infer_decl.ring",
+    "andor": REPO / "compiler" / "andor_lower.ring",
+    "dict": REPO / "compiler" / "dict_lower.ring",
+    "codegen": REPO / "compiler" / "codegen_c_expr.ring",
+}
+F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 41
+
+
+def _trait_method_function_body(
+    sources: Mapping[str, str], source_name: str, function_name: str,
+    errors: List[str],
+) -> str:
+    body, body_error = _f0_function_body(
+        sources[source_name], function_name)
+    if body_error:
+        errors.append(body_error)
+        return ""
+    assert body is not None
+    return body
+
+
+def trait_method_identity_u1c_contract_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    """Exact trait declarations; candidate behavior remains an external gate."""
+    errors: List[str] = []
+    identity = sources["identity"]
+    resolver = sources["resolver"]
+    ctx = sources["ctx"]
+    env = sources["env"]
+    register = sources["register"]
+    builtins = sources["builtins"]
+    hir = sources["hir"]
+    decl = sources["decl"]
+    andor = sources["andor"]
+    dict_source = sources["dict"]
+
+    for struct_name, expected_fields in (
+        ("RegisteredTraitRef", ["symbol", "display_name"]),
+        ("TraitMethodRef", [
+            "trait_symbol", "member_symbol", "source_member_index",
+            "callable_slot_index", "method_name"]),
+    ):
+        fields, field_error = _f0_struct_fields(identity, struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None:
+            if [name for _, name in fields] != expected_fields:
+                errors.append(
+                    f"trait identity {struct_name} field inventory drifted")
+            if any(is_public for is_public, _ in fields):
+                errors.append(
+                    f"trait identity {struct_name} exposes forgeable fields")
+
+    fact_fields, fact_error = _f0_struct_fields(
+        resolver, "TraitIdentityFact")
+    if fact_error:
+        errors.append(fact_error)
+    elif fact_fields is not None:
+        if [name for _, name in fact_fields] != [
+                "file_key", "frame_index", "decl_index", "owner_ref",
+                "methods", "assoc_members"]:
+            errors.append("trait identity fact inventory drifted")
+        if not all(is_public for is_public, _ in fact_fields):
+            errors.append("trait identity fact is not transportable")
+
+    registered_body = _trait_method_function_body(
+        sources, "identity", "make_registered_trait_ref", errors)
+    for token in (
+        'display_name == ""',
+        "symbol_ref_namespace_kind(symbol), namespace_trait()",
+        "RegisteredTraitRef { symbol: symbol, display_name: display_name }",
+    ):
+        if token not in registered_body:
+            errors.append(
+                f"RegisteredTraitRef constructor misses relation {token!r}")
+
+    method_body = _trait_method_function_body(
+        sources, "identity", "make_trait_method_ref", errors)
+    for token in (
+        "source_member_index < 0", "callable_slot_index < 0",
+        "source_member_index < callable_slot_index",
+        'method_name == ""',
+        "symbol_ref_namespace_kind(trait_symbol), namespace_trait()",
+        "symbol_ref_origin_module_key(trait_symbol), namespace_member()",
+        "symbol_ref_origin_module_key(trait_symbol) !=",
+        "symbol_ref_namespace_kind(member_symbol), namespace_member()",
+        "symbol_ref_canonical_payload(member_symbol) !=",
+        "symbol_ref_declaration_site_path(member_symbol) !=",
+        "source_member_index: source_member_index",
+        "callable_slot_index: callable_slot_index",
+        "method_name: method_name",
+    ):
+        if token not in method_body:
+            errors.append(
+                f"TraitMethodRef constructor misses relation {token!r}")
+    same_body = _trait_method_function_body(
+        sources, "identity", "trait_method_ref_same", errors)
+    for token in (
+        "symbol_ref_same(left.trait_symbol, right.trait_symbol)",
+        "symbol_ref_same(left.member_symbol, right.member_symbol)",
+        "left.source_member_index == right.source_member_index",
+        "left.callable_slot_index == right.callable_slot_index",
+        "left.method_name == right.method_name",
+    ):
+        if token not in same_body:
+            errors.append(f"TraitMethodRef equality misses {token!r}")
+
+    for container in ("ModuleNamespaceCensus", "ResolvedNamespacePlan"):
+        fields, field_error = _f0_struct_fields(resolver, container)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None and "trait_identities" not in [
+                name for _, name in fields]:
+            errors.append(f"{container} loses exact trait facts")
+
+    collect_body = _trait_method_function_body(
+        sources, "resolver", "collect_trait_identity_fact", errors)
+    for token in (
+        "for source_member_index in 0..methods.len()",
+        "some(Decl::Fn { name, .. })",
+        "owner_ref, source_member_index,",
+        "callable_slot_index, name",
+        "callable_slot_index = callable_slot_index + 1",
+        "append_trait_identity_fact(TraitIdentityFact {",
+    ):
+        if token not in collect_body:
+            errors.append(f"trait resolver producer misses {token!r}")
+    append_body = _trait_method_function_body(
+        sources, "resolver", "append_trait_identity_fact", errors)
+    if not all(token in append_body for token in (
+            "existing.file_key == fact.file_key",
+            "existing.frame_index == fact.frame_index",
+            "existing.decl_index == fact.decl_index",
+            "duplicate trait identity site")):
+        errors.append("trait resolver fact dedupe is not exact-site")
+    seed_body = _trait_method_function_body(
+        sources, "resolver", "collect_decl_seed", errors)
+    if not all(token in seed_body for token in (
+            "Decl::Trait { name, methods, is_pub, .. }",
+            "collect_trait_identity_fact(",
+            "frame, decl_index, owner_ref, methods, trait_identities")):
+        errors.append("trait resolver seed does not own method production")
+    resolve_body = _trait_method_function_body(
+        sources, "resolver", "resolve_namespace_plan", errors)
+    if "append_trait_identity_fact(fact, trait_identities)" not in resolve_body:
+        errors.append("resolved plan bypasses exact trait fact dedupe")
+    if resolver.count("make_trait_method_ref(") != 1:
+        errors.append("resolver TraitMethodRef producer count drifted")
+
+    install_body = _trait_method_function_body(
+        sources, "ctx", "install_struct_identity_ledger", errors)
+    for token in (
+        "ctx.trait_identity_unconsumed.len() != 0",
+        "for fact in plan.trait_identities",
+        "trait_identity_site_same(existing, fact)",
+        "ctx.trait_identity_unconsumed.push(fact)",
+    ):
+        if token not in install_body:
+            errors.append(f"trait registration ledger misses {token!r}")
+    site_body = _trait_method_function_body(
+        sources, "ctx", "trait_identity_site_same", errors)
+    if not all(token in site_body for token in (
+            "left.file_key == right.file_key",
+            "left.frame_index == right.frame_index",
+            "left.decl_index == right.decl_index")):
+        errors.append("trait registration site equality is incomplete")
+    peek_body = _trait_method_function_body(
+        sources, "ctx", "peek_trait_identity_fact", errors)
+    for token in (
+        "fact.file_key == file_key", "fact.frame_index == frame_index",
+        "fact.decl_index == decl_index", "fact.methods.len() != method_count",
+        "missing declaration fact",
+    ):
+        if token not in peek_body:
+            errors.append(f"trait registration peek misses {token!r}")
+    commit_body = _trait_method_function_body(
+        sources, "ctx", "commit_trait_identity_fact", errors)
+    if commit_body.count("trait_identity_fact_same(existing, fact)") != 1 or (
+            "if matches != 1" not in commit_body or
+            "ctx.trait_identity_unconsumed = remaining" not in commit_body):
+        errors.append("trait registration commit is not consume-once")
+    close_body = _trait_method_function_body(
+        sources, "ctx", "close_struct_identity_ledger", errors)
+    if ("ctx.trait_identity_unconsumed.len() != 0" not in close_body or
+            "ctx.trait_identity_unconsumed = []" not in close_body):
+        errors.append("trait registration ledger does not close")
+
+    hydration_body = _trait_method_function_body(
+        sources, "ctx", "apply_project_namespace_binding", errors)
+    for token in (
+        "binding.symbol,\n                        registered_trait_ref_symbol(def.owner_ref)",
+        "registered_trait_ref_display_name(def.owner_ref) !=",
+        "def.name || def.name != canonical_payload",
+        "ctx.env.trait_reg.traits.insert(binding.exposed_name, def)",
+    ):
+        if token not in hydration_body:
+            errors.append(f"trait project hydration misses {token!r}")
+
+    method_def_fields, method_def_error = _f0_struct_fields(
+        env, "TraitMethodDef")
+    if method_def_error:
+        errors.append(method_def_error)
+    elif method_def_fields is not None and [
+            name for _, name in method_def_fields] != [
+                "name", "method_ref", "ty", "effect_schema",
+                "param_mutabilities", "method_type_params"]:
+        errors.append("TraitMethodDef exact ref inventory drifted")
+    trait_def_fields, trait_def_error = _f0_struct_fields(env, "TraitDef")
+    if trait_def_error:
+        errors.append(trait_def_error)
+    elif trait_def_fields is not None and [
+            name for _, name in trait_def_fields] != [
+                "name", "owner_ref", "type_params", "type_param_vars",
+                "self_type_var_id", "methods", "supertraits", "assoc_types",
+                "contract"]:
+        errors.append("TraitDef registered owner inventory drifted")
+
+    register_body = _trait_method_function_body(
+        sources, "register", "register_trait", errors)
+    register_tokens = (
+        "let identity = peek_trait_identity_fact(\n        ctx, decl_index, method_count, assoc_count)",
+        "identity.methods.get(callable_slot_index)",
+        "trait_method_ref_trait(method_ref), identity.owner_ref",
+        "trait_method_ref_source_member_index(method_ref) !=",
+        "trait_method_ref_callable_slot_index(method_ref) !=",
+        "trait_method_ref_name(method_ref) != identity_method_name",
+        "method_ref: method_ref",
+        "let registered_owner = make_registered_trait_ref(identity.owner_ref, name)",
+        "contract: contract",
+        "commit_trait_identity_fact(ctx, identity)",
+    )
+    for token in register_tokens:
+        if token not in register_body:
+            errors.append(f"trait registration consumer misses {token!r}")
+    if register_body.count("commit_trait_identity_fact(ctx, identity)") != 1:
+        errors.append("trait registration does not commit exactly once")
+    peek_at = register_body.find("peek_trait_identity_fact(")
+    commit_at = register_body.find("commit_trait_identity_fact(")
+    semantic_at = register_body.find("validate_type_param_bound_shapes(")
+    publish_at = register_body.find("ctx.env.trait_reg.traits.insert(")
+    if min(peek_at, commit_at, semantic_at, publish_at) < 0 or not (
+            peek_at < commit_at < semantic_at < publish_at):
+        errors.append("trait registration atomic order drifted")
+
+    builtin_body = _trait_method_function_body(
+        sources, "builtins", "builtin_trait_symbol", errors)
+    if not all(token in builtin_body for token in (
+            '"$builtin"', "namespace_trait()", '"builtin:trait:${name}"')):
+        errors.append("builtin trait identity domain drifted")
+    builtin_method_body = _trait_method_function_body(
+        sources, "builtins", "builtin_trait_method", errors)
+    if not all(token in builtin_method_body for token in (
+            "source_member_index != callable_slot_index",
+            "source/slot ordering drifted", "make_trait_method_ref(")):
+        errors.append("builtin trait method bypasses typed relation")
+    if builtins.count("install_builtin_trait_contract(") != 7:
+        errors.append("builtin registered trait census drifted")
+
+    hmethod_fields, hmethod_error = _f0_struct_fields(hir, "HTraitMethod")
+    if hmethod_error:
+        errors.append(hmethod_error)
+    elif hmethod_fields is not None and [
+            name for _, name in hmethod_fields] != [
+                "name", "method_ref", "type_params", "type_formals",
+                "params", "return_type", "effects",
+                "executable_ref", "effect_ctx"]:
+        errors.append("HTraitMethod exact ref inventory drifted")
+    validate_body = _trait_method_function_body(
+        sources, "hir", "validate_hir_decls", errors)
+    for token in (
+        "registered_trait_ref_display_name(owner_ref) != name",
+        "let mut previous_source_member_index = -1",
+        "trait_method_ref_source_member_index(method.method_ref)",
+        "trait_method_ref_trait(method.method_ref)",
+        "registered_trait_ref_symbol(owner_ref)",
+        "trait_method_ref_callable_slot_index(",
+        "method.method_ref) != method_index",
+        "source_member_index < method_index",
+        "source_member_index <= previous_source_member_index",
+        "previous_source_member_index = source_member_index",
+        "trait_method_ref_name(method.method_ref) != method.name",
+    ):
+        if token not in validate_body:
+            errors.append(f"HIR trait relation validator misses {token!r}")
+
+    decl_body = _trait_method_function_body(
+        sources, "decl", "check_trait_decl", errors)
+    for token in (
+        "for method_index in 0..trait_def.methods.len()",
+        "trait_method_ref_source_member_index(m.method_ref)",
+        "trait_method_ref_trait(m.method_ref)",
+        "registered_trait_ref_symbol(trait_def.owner_ref)",
+        "trait_method_ref_callable_slot_index(m.method_ref) != method_index",
+        "source_member_index < method_index",
+        "trait_method_ref_name(m.method_ref) != m.name",
+        "ast_methods.get(source_member_index)",
+        "Decl::Fn { name: source_name, .. }",
+        "source_name != m.name",
+        "source_param.name", "source_param.is_mutable",
+        "method_ref: m.method_ref", "owner_ref: trait_def.owner_ref"):
+        if token not in decl_body:
+            errors.append(f"typed HIR trait transport misses {token!r}")
+    if "find_ast_fn_by_name" in decl:
+        errors.append(
+            "typed HIR trait transport retained fallback 'find_ast_fn_by_name'")
+    for forbidden in (
+            "methods.find(", "ast_methods.filter(", '"p${pi.to_str()}"'):
+        if forbidden in decl_body:
+            errors.append(
+                f"typed HIR trait transport retained fallback {forbidden!r}")
+    for source_name, function_name in (("andor", "al_decl"), ("dict", "dl_decl")):
+        visitor_body = _trait_method_function_body(
+            sources, source_name, function_name, errors)
+        for token in (
+            "owner_ref: trait_owner_ref", "methods: methods"):
+            if token not in visitor_body:
+                errors.append(
+                    f"{source_name} trait transport misses {token!r}")
+
+    combined_nonproducers = "\n".join(
+        sources[name] for name in (
+            "ctx", "env", "hir", "decl", "andor", "dict", "codegen"))
+    if "make_trait_method_ref(" in combined_nonproducers:
+        errors.append("downstream stage remints TraitMethodRef")
+    for token in (
+            "TraitMethodRef", "RegisteredTraitRef",
+            "trait_method_ref_", "registered_trait_ref_"):
+        if token in sources["codegen"]:
+            errors.append(f"backend semantically reads trait identity {token!r}")
+    for source_name in ("ctx", "register", "hir", "decl", "andor", "dict"):
+        masked = mask_ring_strings_and_comments(sources[source_name])
+        if re.search(
+                r"Map\s*<\s*Str\s*,\s*(?:TraitMethodRef|RegisteredTraitRef)\s*>",
+                masked):
+            errors.append(f"{source_name} gained a trait identity side map")
+    return errors
+
+
+def trait_method_identity_u1c_mutation_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("registered owner domain", "identity", "make_registered_trait_ref",
+         "symbol_ref_namespace_kind(symbol), namespace_trait()",
+         "symbol_ref_namespace_kind(symbol), namespace_nominal()"),
+        ("registered display", "identity", "make_registered_trait_ref",
+         'display_name == ""', "false"),
+        ("method owner domain", "identity", "make_trait_method_ref",
+         "symbol_ref_namespace_kind(trait_symbol), namespace_trait()",
+         "symbol_ref_namespace_kind(trait_symbol), namespace_nominal()"),
+        ("source before callable slot", "identity", "make_trait_method_ref",
+         "source_member_index < callable_slot_index", "false"),
+        ("member production domain", "identity", "make_trait_method_ref",
+         "symbol_ref_origin_module_key(trait_symbol), namespace_member()",
+         "symbol_ref_origin_module_key(trait_symbol), namespace_value()"),
+        ("member origin module", "identity", "make_trait_method_ref",
+         "symbol_ref_origin_module_key(trait_symbol) !=",
+         "false &&"),
+        ("member validation domain", "identity", "make_trait_method_ref",
+         "symbol_ref_namespace_kind(member_symbol), namespace_member()",
+         "symbol_ref_namespace_kind(member_symbol), namespace_value()"),
+        ("member payload", "identity", "make_trait_method_ref",
+         "symbol_ref_canonical_payload(member_symbol) !=", "false &&"),
+        ("member path", "identity", "make_trait_method_ref",
+         "symbol_ref_declaration_site_path(member_symbol) !=", "false &&"),
+        ("source member index", "identity", "make_trait_method_ref",
+         "source_member_index: source_member_index",
+         "source_member_index: 0"),
+        ("callable slot index", "identity", "make_trait_method_ref",
+         "callable_slot_index: callable_slot_index",
+         "callable_slot_index: 0"),
+        ("method name", "identity", "make_trait_method_ref",
+         "method_name: method_name", 'method_name: ""'),
+        ("member equality", "identity", "trait_method_ref_same",
+         "symbol_ref_same(left.member_symbol, right.member_symbol)", "true"),
+        ("resolver exact-site frame", "resolver", "append_trait_identity_fact",
+         "existing.frame_index == fact.frame_index", "true"),
+        ("resolver assoc/method order", "resolver", "collect_trait_identity_fact",
+         "owner_ref, source_member_index,\n                    callable_slot_index, name",
+         "owner_ref, callable_slot_index,\n                    source_member_index, name"),
+        ("resolver slot progression", "resolver", "collect_trait_identity_fact",
+         "callable_slot_index = callable_slot_index + 1",
+         "callable_slot_index = callable_slot_index + 0"),
+        ("resolved fact dedupe", "resolver", "resolve_namespace_plan",
+         "append_trait_identity_fact(fact, trait_identities)",
+         "trait_identities.push(fact)"),
+        ("ledger fact census", "ctx", "install_struct_identity_ledger",
+         "for fact in plan.trait_identities", "for fact in []"),
+        ("ledger site declaration", "ctx", "trait_identity_site_same",
+         "left.decl_index == right.decl_index", "true"),
+        ("ledger peek frame", "ctx", "peek_trait_identity_fact",
+         "fact.frame_index == frame_index", "true"),
+        ("zero consume", "register", "register_trait",
+         "commit_trait_identity_fact(ctx, identity)", "{}"),
+        ("double consume", "register", "register_trait",
+         "commit_trait_identity_fact(ctx, identity)",
+         "commit_trait_identity_fact(ctx, identity)\n    commit_trait_identity_fact(ctx, identity)"),
+        ("consume after semantic validation", "register", "register_trait",
+         "commit_trait_identity_fact(ctx, identity)\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)",
+         "validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)\n    commit_trait_identity_fact(ctx, identity)"),
+        ("ledger close", "ctx", "close_struct_identity_ledger",
+         "ctx.trait_identity_unconsumed.len() != 0", "false"),
+        ("hydration binding symbol", "ctx", "apply_project_namespace_binding",
+         "binding.symbol,\n                        registered_trait_ref_symbol(def.owner_ref)",
+         "registered_trait_ref_symbol(def.owner_ref),\n                        registered_trait_ref_symbol(def.owner_ref)"),
+        ("hydration display relation", "ctx", "apply_project_namespace_binding",
+         "registered_trait_ref_display_name(def.owner_ref) !=",
+         "false &&"),
+        ("reexport remint", "ctx", "apply_project_namespace_binding",
+         "ctx.env.trait_reg.traits.insert(binding.exposed_name, def)",
+         "ctx.env.trait_reg.traits.insert(binding.exposed_name, remint_trait(def))"),
+        ("registration owner relation", "register", "register_trait",
+         "trait_method_ref_trait(method_ref), identity.owner_ref",
+         "identity.owner_ref, identity.owner_ref"),
+        ("registration source site", "register", "register_trait",
+         "trait_method_ref_source_member_index(method_ref) !=",
+         "false &&"),
+        ("builtin/source domain", "builtins", "builtin_trait_symbol",
+         '"$builtin"', '"$single$"'),
+        ("builtin source/slot mismatch", "builtins", "builtin_trait_method",
+         "source_member_index != callable_slot_index", "false"),
+        ("trait HIR name scan", "decl", "check_trait_decl",
+         "ast_methods.get(source_member_index)",
+         "find_ast_fn_by_name(ast_methods, m.name)"),
+        ("trait HIR wrong index", "decl", "check_trait_decl",
+         "ast_methods.get(source_member_index)",
+         "ast_methods.get(method_index)"),
+        ("trait HIR filtered index", "decl", "check_trait_decl",
+         "ast_methods.get(source_member_index)",
+         "ast_methods.filter(fn(candidate) { true }).get(source_member_index)"),
+        ("typed HIR transport", "decl", "check_trait_decl",
+         "method_ref: m.method_ref", "method_ref: hmethods.first().unwrap().method_ref"),
+        ("andor transport", "andor", "al_decl",
+         "method_ref: tm.method_ref", "method_ref: new_methods.first().unwrap().method_ref"),
+        ("dict transport", "dict", "dl_decl",
+         "method_ref: tm.method_ref", "method_ref: new_methods.first().unwrap().method_ref"),
+        ("HIR registered display", "hir", "validate_hir_decls",
+         "registered_trait_ref_display_name(owner_ref) != name", "false"),
+        ("HIR callable slot", "hir", "validate_hir_decls",
+         "trait_method_ref_callable_slot_index(\n                            method.method_ref) != method_index",
+         "false"),
+        ("HIR duplicate/decreasing source", "hir", "validate_hir_decls",
+         "source_member_index <= previous_source_member_index", "false"),
+        ("HIR method name", "hir", "validate_hir_decls",
+         "trait_method_ref_name(method.method_ref) != method.name", "false"),
+        ("resolver seed method inventory", "resolver", "collect_decl_seed",
+         "frame, decl_index, owner_ref, methods, trait_identities",
+         "frame, decl_index, owner_ref, [], trait_identities"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"trait identity mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        findings = trait_method_identity_u1c_contract_errors(mutated)
+        if not findings:
+            errors.append(f"trait identity mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT:
+        errors.append(
+            f"trait identity killed {killed} mutations, expected "
+            f"{F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT}")
+    return errors
+
+
+def trait_method_identity_u1c_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_TRAIT_METHOD_IDENTITY_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read trait identity compiler sources: {exc}"]
+    errors = trait_method_identity_u1c_contract_errors(sources)
+    if errors:
+        return errors
+    errors.extend(trait_method_identity_u1c_mutation_errors(sources))
+    return errors
+
+
+def trait_method_identity_u1c_fixture_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe).resolve(strict=True)
+    compiler_before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(str(compiler)))
+    positive = CASES_DIR / "trait_method_identity_assoc_order.ring"
+    negative = CASES_DIR / "error_supertrait_assoc_predicate.ring"
+
+    if positive not in discover_positive_cases(CASES_DIR):
+        errors.append("trait identity assoc-order fixture is not runner-discovered")
+    else:
+        positive_error = _f1_run_ring_check(
+            str(compiler), positive, environment)
+        if positive_error:
+            errors.append(positive_error)
+
+    if negative not in discover_negative_cases(CASES_DIR):
+        errors.append("trait identity clean-diagnostic fixture is not runner-discovered")
+    else:
+        try:
+            completed = subprocess.run(
+                [str(compiler), "check", str(negative)],
+                cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="strict",
+                check=False, timeout=120)
+        except subprocess.TimeoutExpired:
+            errors.append("trait identity clean-diagnostic parser check timed out")
+        else:
+            if completed.returncode == 0:
+                if completed.stdout != "OK\n" or completed.stderr:
+                    errors.append(
+                        "trait identity pre-cutover parser output drifted: "
+                        f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+            else:
+                contract = negative.with_suffix(".error").read_text(
+                    encoding="utf-8")
+                combined = (completed.stdout or "") + (completed.stderr or "")
+                contract_error = error_contract_failure(contract, combined)
+                if contract_error is not None:
+                    errors.append(
+                        "trait identity diagnostic is not clean: "
+                        f"{contract_error}; output={combined[:300]!r}")
+    if _sha256_file(compiler) != compiler_before:
+        errors.append("pinned Ring compiler changed across trait identity fixtures")
+    return errors
+
+
+F2_IMPL_PROVIDER_PATHS = {
+    "identity": REPO / "compiler" / "ir_identity.ring",
+    "resolver": REPO / "compiler" / "resolver.ring",
+    "ctx": REPO / "compiler" / "infer_ctx.ring",
+    "env": REPO / "compiler" / "env.ring",
+    "register": REPO / "compiler" / "infer_register.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
+    "derive": REPO / "compiler" / "derive.ring",
+    "decl": REPO / "compiler" / "infer_decl.ring",
+    "codegen": REPO / "compiler" / "codegen_c_expr.ring",
+}
+F2_IMPL_PROVIDER_MUTATION_COUNT = 42
+
+
+def impl_provider_u1c1_contract_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    identity = sources["identity"]
+    resolver = sources["resolver"]
+    ctx = sources["ctx"]
+    env = sources["env"]
+    register = sources["register"]
+    builtins = sources["builtins"]
+    derive = sources["derive"]
+    decl = sources["decl"]
+
+    for struct_name, expected_fields in (
+        ("ImplProviderKind", ["tag"]),
+        ("ImplProviderRef", ["site", "kind"]),
+    ):
+        fields, field_error = _f0_struct_fields(identity, struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None:
+            if [name for _, name in fields] != expected_fields:
+                errors.append(f"impl provider {struct_name} inventory drifted")
+            if any(is_public for is_public, _ in fields):
+                errors.append(f"impl provider {struct_name} exposes fields")
+
+    provider_body = _trait_method_function_body(
+        sources, "identity", "make_impl_provider_ref", errors)
+    for token in (
+        "path_ref_owner(site)", "path_owner_ref_is_symbol(owner)",
+        "impl_provider_kind_from_tag(", "path_ref_role(site)",
+        "impl_provider_kind_source()", "path_role_declaration()",
+        "path_role_synthetic()", "ImplProviderRef { site: site, kind: checked_kind }",
+    ):
+        if token not in provider_body:
+            errors.append(f"ImplProviderRef constructor misses {token!r}")
+    provider_same = _trait_method_function_body(
+        sources, "identity", "impl_provider_ref_same", errors)
+    if not all(token in provider_same for token in (
+            "path_ref_same(left.site, right.site)",
+            "impl_provider_kind_same(left.kind, right.kind)")):
+        errors.append("ImplProviderRef equality is incomplete")
+
+    fact_schemas = (
+        ("SourceImplProviderFact", [
+            "file_key", "frame_index", "decl_index", "provider_ref",
+            "methods"]),
+        ("ExplicitDerivedProviderFact", ["attr_index", "provider_ref"]),
+        ("NominalDerivedProviderPlanFact", [
+            "file_key", "frame_index", "decl_index",
+            "implicit_provider_ref", "explicit_providers"]),
+    )
+    for struct_name, expected_fields in fact_schemas:
+        fields, field_error = _f0_struct_fields(resolver, struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None:
+            if [name for _, name in fields] != expected_fields:
+                errors.append(f"{struct_name} inventory drifted")
+            if not all(is_public for is_public, _ in fields):
+                errors.append(f"{struct_name} is not transportable")
+
+    for container in ("ModuleNamespaceCensus", "ResolvedNamespacePlan"):
+        fields, field_error = _f0_struct_fields(resolver, container)
+        if field_error:
+            errors.append(field_error)
+            continue
+        assert fields is not None
+        names = [name for _, name in fields]
+        for required in (
+                "source_impl_providers", "nominal_derived_providers"):
+            if required not in names:
+                errors.append(f"{container} loses {required}")
+
+    source_provider_body = _trait_method_function_body(
+        sources, "resolver", "source_provider_ref", errors)
+    for token in (
+        'frame.file_key, "frame:${frame.frame_index}"',
+        "path_owner_for_module_body(module_body)",
+        "path_role_declaration()", "path_role_synthetic()",
+        "impl_provider_kind_source()", "impl_provider_kind_derived()",
+    ):
+        if token not in source_provider_body:
+            errors.append(f"resolver provider producer misses {token!r}")
+    nominal_body = _trait_method_function_body(
+        sources, "resolver", "collect_nominal_derived_provider_fact", errors)
+    for token in (
+        '"decl:${decl_index}", "derive:implicit"',
+        "for attr_index in 0..derive_attrs.len()",
+        '"decl:${decl_index}", "derive:attr:${attr_index}"',
+        "attr_index: attr_index",
+        "append_nominal_derived_provider_fact(",
+    ):
+        if token not in nominal_body:
+            errors.append(f"nominal derive producer misses {token!r}")
+    impl_fact_body = _trait_method_function_body(
+        sources, "resolver", "collect_impl_provider_facts", errors)
+    for token in ('"decl:${decl_index}", "impl"',):
+        if token not in impl_fact_body:
+            errors.append(f"source provider producer misses {token!r}")
+    for function_name, tokens in (
+        ("append_source_impl_provider_fact", (
+            "existing.file_key == fact.file_key",
+            "existing.frame_index == fact.frame_index",
+            "existing.decl_index == fact.decl_index")),
+        ("append_nominal_derived_provider_fact", (
+            "existing.file_key == fact.file_key",
+            "existing.frame_index == fact.frame_index",
+            "existing.decl_index == fact.decl_index")),
+    ):
+        body = _trait_method_function_body(
+            sources, "resolver", function_name, errors)
+        for token in tokens:
+            if token not in body:
+                errors.append(f"{function_name} misses {token!r}")
+    resolve_body = _trait_method_function_body(
+        sources, "resolver", "resolve_namespace_plan", errors)
+    for token in (
+        "append_source_impl_provider_fact(fact, source_impl_providers)",
+        "append_nominal_derived_provider_fact(",
+    ):
+        if token not in resolve_body:
+            errors.append(f"resolved provider plan misses {token!r}")
+
+    env_schemas = (
+        ("ExplicitDerivedProviderPlan", ["attribute", "provider_ref"]),
+        ("NominalDerivedProviderPlan", [
+            "implicit_provider_ref", "explicit_providers"]),
+        ("EnumDef", [
+            "name", "owner_ref", "type_params", "type_param_vars",
+            "variants", "variant_refs", "variant_field_refs",
+            "variant_field_effect_schemas", "derive_attrs",
+            "derived_provider_plan", "variant_index"]),
+        ("ImplEntry", [
+            "trait_name", "target_type_name", "type_params",
+            "type_param_vars", "predicates", "method_names", "assoc_types",
+            "assoc_type_effect_schemas", "method_schemes", "method_refs",
+            "method_intrinsics", "method_resource_contracts",
+            "provider_ref", "trait_ref", "owner_ref",
+            "span"]),
+    )
+    for struct_name, expected_fields in env_schemas:
+        fields, field_error = _f0_struct_fields(env, struct_name)
+        if field_error:
+            errors.append(field_error)
+        elif fields is not None and [
+                name for _, name in fields] != expected_fields:
+            errors.append(f"{struct_name} provider inventory drifted")
+
+    for retired in (
+            "MethodOrigin", "ImplOwnerState", "ProvisionalPrelude",
+            "find_impl_by_origin", "impl_decl_origin", "impl_method_origin"):
+        if retired in env or retired in builtins or retired in register:
+            errors.append(f"retired impl provider authority returned: {retired}")
+
+    validate_body = _trait_method_function_body(
+        sources, "env", "validate_impl_entry", errors)
+    for token in (
+        "match (entry.trait_name, entry.trait_ref)",
+        "registered_trait_ref_symbol(def.owner_ref), trait_ref",
+        "match (entry.provider_ref, entry.owner_ref)",
+        "entry.method_refs.len() != entry.method_schemes.len()",
+        "impl owner: final owner lacks typed identity",
+    ):
+        if token not in validate_body:
+            errors.append(f"impl provider state validator misses {token!r}")
+    key_body = _trait_method_function_body(
+        sources, "env", "impl_entry_exact_key_same", errors)
+    for token in (
+        "match (left.owner_ref, right.owner_ref)",
+        "impl_owner_ref_same(a, b)",
+    ):
+        if token not in key_body:
+            errors.append(f"impl exact owner key misses {token!r}")
+    install_body = _trait_method_function_body(
+        sources, "env", "install_method_core", errors)
+    for token in (
+        "let incoming_owner = impl_method_ref_owner(incoming)",
+        "find_impl_by_provider(", "impl_owner_ref_trait(incoming_owner)",
+        "impl_owner_ref_provider(incoming_owner)",
+        "impl_method_ref_same(stored_ref, incoming)",
+        "reg.method_index.get(target_type)",
+    ):
+        if token not in install_body:
+            errors.append(f"method origin provider closure misses {token!r}")
+    add_body = _trait_method_function_body(
+        sources, "env", "add_impl", errors)
+    if "impl_entry_exact_key_same(existing, entry)" not in add_body:
+        errors.append("registry add_impl does not use the typed owner key")
+
+    ledger_functions = (
+        ("peek_source_impl_provider_fact", (
+            "fact.frame_index == frame_index", "fact.decl_index == decl_index",
+            "missing source impl fact")),
+        ("commit_source_impl_provider_fact", (
+            "source_impl_provider_fact_same(existing, fact)",
+            "if matches != 1")),
+        ("peek_nominal_derived_provider_fact", (
+            "fact.explicit_providers.len() != attr_count",
+            "explicit.attr_index != index", "derive attribute order changed")),
+        ("commit_nominal_derived_provider_fact", (
+            "nominal_derived_provider_fact_same(existing, fact)",
+            "if matches != 1")),
+    )
+    for function_name, tokens in ledger_functions:
+        body = _trait_method_function_body(
+            sources, "ctx", function_name, errors)
+        for token in tokens:
+            if token not in body:
+                errors.append(f"{function_name} misses {token!r}")
+    close_body = _trait_method_function_body(
+        sources, "ctx", "close_struct_identity_ledger", errors)
+    for token in (
+        "ctx.source_impl_provider_unconsumed.len() != 0",
+        "ctx.nominal_derived_provider_unconsumed.len() != 0",
+    ):
+        if token not in close_body:
+            errors.append(f"provider ledger close misses {token!r}")
+
+    consume_body = _trait_method_function_body(
+        sources, "register", "consume_nominal_derived_provider_plan", errors)
+    for token in (
+        "peek_nominal_derived_provider_fact(",
+        "value.attr_index != attr_index", "attribute: attribute",
+        "commit_nominal_derived_provider_fact(ctx, fact)",
+        "implicit_provider_ref: fact.implicit_provider_ref",
+    ):
+        if token not in consume_body:
+            errors.append(f"nominal derive registration misses {token!r}")
+    register_impl_body = _trait_method_function_body(
+        sources, "register", "register_impl", errors)
+    if not all(token in register_impl_body for token in (
+            "peek_source_impl_provider_fact(ctx, decl_index)",
+            "commit_source_impl_provider_fact(ctx, provider_fact)",
+            "provider_fact.provider_ref")):
+        errors.append("source impl provider is not consumed before registration")
+    canonical_impl_body = _trait_method_function_body(
+        sources, "register", "register_impl_canonical", errors)
+    for token in (
+        "provider_ref: some(provider_ref)",
+        "trait_ref: resolved_trait_ref",
+        "owner_ref: some(owner_ref)",
+        "method_refs: exact_method_refs",
+    ):
+        if token not in canonical_impl_body:
+            errors.append(f"source impl final owner misses {token!r}")
+    for function_name in ("preregister_struct", "preregister_enum"):
+        body = _trait_method_function_body(
+            sources, "register", function_name, errors)
+        if ("consume_nominal_derived_provider_plan(" not in body or
+                "derived_provider_plan: some(derived_provider_plan)" not in body):
+            errors.append(f"{function_name} loses the nominal provider plan")
+
+    builtin_provider = _trait_method_function_body(
+        sources, "builtins", "builtin_impl_provider", errors)
+    if not all(token in builtin_provider for token in (
+            '"$builtin", "builtin:impl-providers"',
+            "[ordinal.to_str()]", "path_role_synthetic()",
+            "impl_provider_kind_builtin()")):
+        errors.append("builtin impl provider domain drifted")
+    builtin_masked = mask_ring_strings_and_comments(builtins)
+    site_matches = re.findall(
+        r"\bstruct\s+BuiltinImplProviderSite\s*\{\s*tag\s*:\s*Int\s*\}",
+        builtin_masked)
+    if len(site_matches) != 1 or re.search(
+            r"\bpub\s+struct\s+BuiltinImplProviderSite\b",
+            builtin_masked):
+        errors.append("builtin provider site private inventory drifted")
+    ordinals, ordinal_error = _f0_int_list(
+        builtins, "BUILTIN_PROVIDER_ORDINALS")
+    if ordinal_error:
+        errors.append(ordinal_error)
+    elif ordinals != list(range(13)):
+        errors.append(f"builtin provider ordinal table drifted: {ordinals!r}")
+    site_body = _trait_method_function_body(
+        sources, "builtins", "builtin_impl_provider_site_from_tag", errors)
+    for token in (
+        "tag < 0 || tag >= BUILTIN_PROVIDER_SITE_COUNT",
+        "BUILTIN_PROVIDER_ORDINALS.len() != BUILTIN_PROVIDER_SITE_COUNT",
+        "ordinal != expected", "seen.contains(ordinal)",
+        "BuiltinImplProviderSite { tag: tag }",
+    ):
+        if token not in site_body:
+            errors.append(f"builtin provider site validator misses {token!r}")
+    for forbidden in (
+            "trait_name", "target_type_name", "origin", "method_name",
+            "provider_path"):
+        if forbidden in builtin_provider:
+            errors.append(
+                f"builtin provider path uses semantic spelling {forbidden!r}")
+    for retired in (
+            "seed_std_hof_owner", "require_std_hof_seed",
+            "seed_std_hof_owners"):
+        if retired in builtins:
+            errors.append(f"builtin provisional HOF path returned: {retired}")
+    install_builtin = _trait_method_function_body(
+        sources, "builtins", "install_builtin_method_owner", errors)
+    for token in (
+        "builtin_impl_provider(provider_site)",
+        "provider_ref: some(provider_ref)", "trait_ref: trait_ref",
+        "owner_ref: some(owner_ref)", "method_refs: method_refs",
+    ):
+        if token not in install_builtin:
+            errors.append(f"builtin final owner misses {token!r}")
+
+    collect_body = _trait_method_function_body(
+        sources, "derive", "collect_user_types", errors)
+    if collect_body.count("provider_plan: def.derived_provider_plan.unwrap()") != 2:
+        errors.append("derive registry does not copy both nominal provider plans")
+    explicit_body = _trait_method_function_body(
+        sources, "derive", "explicit_derive_request", errors)
+    for token in (
+        "ut.provider_plan.explicit_providers.len() != ut.derive_attrs.len()",
+        "request.attribute.trait_name != attribute.trait_name",
+        "return some(request)",
+    ):
+        if token not in explicit_body:
+            errors.append(f"explicit derive provider selection misses {token!r}")
+    derive_register = _trait_method_function_body(
+        sources, "derive", "register_derived_impl", errors)
+    for token in (
+        "provider_ref: some(provider_ref)", "trait_ref: some(trait_ref)",
+        "owner_ref: some(owner_ref)", "method_refs: method_refs",
+    ):
+        if token not in derive_register:
+            errors.append(f"derived owner provider closure misses {token!r}")
+    if "make_impl_provider_ref(" in derive:
+        errors.append("derive remints provider identity")
+    if derive.count("implicit_derive_provider(ut)") != 2:
+        errors.append("implicit derived owners do not share the nominal provider")
+    json_body = _trait_method_function_body(
+        sources, "derive", "derive_json_trait", errors)
+    for token in (
+        "let provider_ref = explicit_derive_request(",
+        "env, ut, plan, provider_ref",
+        'env, ut, "Json", known, provider_ref',
+        "some(di.trait_ref), di.provider_ref",
+        "finalize_derived_impl(",
+    ):
+        if token not in json_body:
+            errors.append(
+                f"explicit Json descriptor provider chain misses {token!r}")
+    if json_body.count("let provider_ref = explicit_derive_request(") != 2:
+        errors.append("explicit Json descriptor provider census drifted")
+
+    rebind_body = _trait_method_function_body(
+        sources, "decl", "store_rebound_impl_method_scheme", errors)
+    for token in (
+        "let owner = match find_impl_by_provider(",
+        "impl_owner_ref_provider(owner_ref)",
+        "owner.method_refs.get(method_name).unwrap()",
+    ):
+        if token not in rebind_body:
+            errors.append(f"impl rebind provider copy misses {token!r}")
+    for token in ("ImplProviderRef", "impl_provider_ref_"):
+        if token in sources["codegen"]:
+            errors.append(f"backend reads 3a1 provider identity {token!r}")
+    return errors
+
+
+def impl_provider_u1c1_mutation_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("module-body owner", "identity", "make_impl_provider_ref",
+         "path_owner_ref_is_symbol(owner)", "false"),
+        ("source declaration role", "identity", "make_impl_provider_ref",
+         "path_role_same(role, path_role_declaration())",
+         "path_role_same(role, path_role_synthetic())"),
+        ("generated synthetic role", "identity", "make_impl_provider_ref",
+         "else if !path_role_same(role, path_role_synthetic())", "else if false"),
+        ("provider path equality", "identity", "impl_provider_ref_same",
+         "path_ref_same(left.site, right.site)", "true"),
+        ("provider kind equality", "identity", "impl_provider_ref_same",
+         "impl_provider_kind_same(left.kind, right.kind)", "true"),
+        ("source module frame", "resolver", "source_provider_ref",
+         'frame.file_key, "frame:${frame.frame_index}"',
+         'frame.file_key, "frame:0"'),
+        ("implicit derive site", "resolver", "collect_nominal_derived_provider_fact",
+         '"decl:${decl_index}", "derive:implicit"',
+         '"decl:${decl_index}", "derive:attr:0"'),
+        ("explicit derive site", "resolver", "collect_nominal_derived_provider_fact",
+         '"decl:${decl_index}", "derive:attr:${attr_index}"',
+         '"decl:${decl_index}", "derive:implicit"'),
+        ("explicit attr order", "resolver", "collect_nominal_derived_provider_fact",
+         "attr_index: attr_index", "attr_index: 0"),
+        ("source fact exact frame", "resolver", "append_source_impl_provider_fact",
+         "existing.frame_index == fact.frame_index", "true"),
+        ("nominal fact exact decl", "resolver", "append_nominal_derived_provider_fact",
+         "existing.decl_index == fact.decl_index", "true"),
+        ("resolved source fact dedupe", "resolver", "resolve_namespace_plan",
+         "append_source_impl_provider_fact(fact, source_impl_providers)",
+         "source_impl_providers.push(fact)"),
+        ("resolved nominal fact dedupe", "resolver", "resolve_namespace_plan",
+         "append_nominal_derived_provider_fact(\n                fact, nominal_derived_providers)",
+         "nominal_derived_providers.push(fact)"),
+        ("source peek declaration", "ctx", "peek_source_impl_provider_fact",
+         "fact.decl_index == decl_index", "true"),
+        ("source consume once", "ctx", "commit_source_impl_provider_fact",
+         "if matches != 1", "if false"),
+        ("derive attr count", "ctx", "peek_nominal_derived_provider_fact",
+         "fact.explicit_providers.len() != attr_count", "false"),
+        ("derive attr order", "ctx", "peek_nominal_derived_provider_fact",
+         "explicit.attr_index != index", "false"),
+        ("derive consume once", "ctx", "commit_nominal_derived_provider_fact",
+         "if matches != 1", "if false"),
+        ("close source facts", "ctx", "close_struct_identity_ledger",
+         "ctx.source_impl_provider_unconsumed.len() != 0", "false"),
+        ("close derive facts", "ctx", "close_struct_identity_ledger",
+         "ctx.nominal_derived_provider_unconsumed.len() != 0", "false"),
+        ("method/provider closure", "env", "validate_impl_entry",
+         "entry.method_refs.len() != entry.method_schemes.len()", "false"),
+        ("final provider", "env", "validate_impl_entry",
+         "match (entry.provider_ref, entry.owner_ref)",
+         "match (none, entry.owner_ref)"),
+        ("exact trait relation", "env", "validate_impl_entry",
+         "registered_trait_ref_symbol(def.owner_ref), trait_ref", "trait_ref, trait_ref"),
+        ("owner key target", "env", "impl_entry_exact_key_same",
+         "match (left.owner_ref, right.owner_ref)",
+         "match (none, right.owner_ref)"),
+        ("owner key trait", "env", "impl_entry_exact_key_same",
+         "impl_owner_ref_same(a, b)", "true"),
+        ("owner key provider", "env", "impl_entry_exact_key_same",
+         "impl_owner_ref_same(a, b)", "impl_owner_ref_same(a, a)"),
+        ("method owner lookup", "env", "install_method_core",
+         "find_impl_by_provider(", "find_impl_by_origin("),
+        ("method exact trait", "env", "install_method_core",
+         "impl_owner_ref_trait(incoming_owner)", "none"),
+        ("registry typed key", "env", "add_impl",
+         "impl_entry_exact_key_same(existing, entry)",
+         "false"),
+        ("source provider zero consume", "register", "register_impl",
+         "commit_source_impl_provider_fact(ctx, provider_fact)", "{}"),
+        ("source owner provider", "register", "register_impl_canonical",
+         "provider_ref: some(provider_ref)", "provider_ref: none"),
+        ("nominal derive zero consume", "register", "consume_nominal_derived_provider_plan",
+         "commit_nominal_derived_provider_fact(ctx, fact)", "{}"),
+        ("nominal derive attr order", "register", "consume_nominal_derived_provider_plan",
+         "value.attr_index != attr_index", "false"),
+        ("builtin provider domain", "builtins", "builtin_impl_provider",
+         "impl_provider_kind_builtin()", "impl_provider_kind_derived()"),
+        ("builtin string path", "builtins", "builtin_impl_provider",
+         "[ordinal.to_str()]", '["trait", ordinal.to_str()]'),
+        ("builtin ordinal order", "builtins", "builtin_impl_provider_site_from_tag",
+         "ordinal != expected", "false"),
+        ("builtin ordinal duplicate", "builtins", "builtin_impl_provider_site_from_tag",
+         "seen.contains(ordinal)", "false"),
+        ("builtin site bypass", "builtins", "install_builtin_method_owner",
+         "builtin_impl_provider(provider_site)",
+         "builtin_impl_provider(builtin_trait_factory_site())"),
+        ("builtin final owner", "builtins", "install_builtin_method_owner",
+         "owner_ref: some(owner_ref)", "owner_ref: none"),
+        ("derive remint", "derive", "register_derived_impl",
+         "provider_ref: some(provider_ref)",
+         "provider_ref: some(make_impl_provider_ref(provider_ref))"),
+        ("implicit derive copy", "derive", "derive_trait",
+         "implicit_derive_provider(ut)",
+         "explicit_derive_request(ut, trait_name).unwrap().provider_ref"),
+        ("rebind provider copy", "decl", "store_rebound_impl_method_scheme",
+         "owner.method_refs.get(method_name).unwrap()",
+         "wrong_method_ref"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"impl provider mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        findings = impl_provider_u1c1_contract_errors(mutated)
+        if not findings:
+            errors.append(f"impl provider mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != F2_IMPL_PROVIDER_MUTATION_COUNT:
+        errors.append(
+            f"impl provider killed {killed} mutations, expected "
+            f"{F2_IMPL_PROVIDER_MUTATION_COUNT}")
+    return errors
+
+
+def impl_provider_u1c1_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_IMPL_PROVIDER_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read impl provider compiler sources: {exc}"]
+    errors = impl_provider_u1c1_contract_errors(sources)
+    if errors:
+        return errors
+    errors.extend(impl_provider_u1c1_mutation_errors(sources))
+    return errors
+
+
+F2_IMPL_PROVIDER_CARRIER_PATHS = {
+    "hir": REPO / "compiler" / "hir.ring",
+    "checker": REPO / "compiler" / "checker.ring",
+    "exports": REPO / "compiler" / "exports.ring",
+    "decl": REPO / "compiler" / "infer_decl.ring",
+    "core": REPO / "compiler" / "core_from_hir.ring",
+    "core_expr": REPO / "compiler" / "core_expr.ring",
+    "codegen": REPO / "compiler" / "codegen_c.ring",
+}
+F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 15
+F2_IMPL_PROVIDER_CARRIER_SCOPE_COUNT = 1
+
+
+def impl_provider_u1c2_contract_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    hir = sources["hir"]
+    fact_fields, fact_error = _f0_struct_fields(hir, "ModuleImplFact")
+    if fact_error:
+        errors.append(fact_error)
+    elif fact_fields is not None and [
+            name for _, name in fact_fields] != [
+                "target", "provider_ref", "trait_ref", "owner_ref",
+                "method_names", "public_inherent_method_names",
+                "is_top_level"]:
+        errors.append("impl provider carrier: ModuleImplFact inventory drifted")
+    if "is_trait_impl" in hir:
+        errors.append("impl provider carrier: second trait truth returned")
+
+    hir_validate = _trait_method_function_body(
+        sources, "hir", "validate_hir_decls", errors)
+    for token in (
+        "impl_provider_ref_kind(provider_ref)",
+        "impl_provider_kind_tag(",
+        "trait_name.is_some() != trait_ref.is_some()",
+        "impl trait name/ref presence drifted",
+        "impl_owner_ref_provider(owner_ref), provider_ref",
+        "impl_owner_ref_trait(owner_ref), trait_ref",
+    ):
+        if token not in hir_validate:
+            errors.append(f"impl provider HIR validator misses {token!r}")
+
+    source_body = _trait_method_function_body(
+        sources, "decl", "check_impl_decl_canonical", errors)
+    for token in (
+        "let provider_ref = match impl_owner.provider_ref",
+        "provider_ref: provider_ref, trait_ref: impl_owner.trait_ref",
+    ):
+        if token not in source_body:
+            errors.append(f"source impl carrier misses {token!r}")
+    checker = sources["checker"]
+    carrier_body = _trait_method_function_body(
+        sources, "checker", "validate_impl_carriers", errors)
+    for token in (
+        "find_impl_by_provider(",
+        "env.trait_reg, target_type, trait_ref, provider_ref",
+        "optional_symbol_ref_same(owner.trait_ref, trait_ref)",
+        "owner.method_schemes.contains_key(name)",
+        "validate_impl_carriers(env, inner)",
+    ):
+        if token not in carrier_body:
+            errors.append(f"checker impl carrier closure misses {token!r}")
+    collect_body = _trait_method_function_body(
+        sources, "checker", "collect_module_impl_facts", errors)
+    for token in (
+        "find_impl_by_provider(", "provider_ref: provider_ref",
+        "trait_ref: trait_ref", "owner_ref: owner_ref",
+    ):
+        if token not in collect_body:
+            errors.append(f"ModuleImplFact collector misses {token!r}")
+    for forbidden in (
+            "exact_module_impl_owner", "trait_impls.get(",
+            "method_origins.get(", "MethodOrigin"):
+        if forbidden in collect_body or forbidden in checker:
+            errors.append(f"ModuleImplFact collector retained {forbidden!r}")
+    for function_name in ("check", "check_module"):
+        body = _trait_method_function_body(
+            sources, "checker", function_name, errors)
+        validate_at = body.find("validate_impl_carriers(")
+        collect_at = body.find("collect_module_impl_facts(")
+        if min(validate_at, collect_at) < 0 or validate_at > collect_at:
+            errors.append(f"{function_name} publishes facts before validation")
+
+    exports = sources["exports"]
+    append_body = _trait_method_function_body(
+        sources, "exports", "append_exact_impl_owner", errors)
+    if ("impl_entry_exact_key_same(existing, owner)" not in append_body or
+            "!impl_entry_final_same(existing, owner)" not in append_body):
+        errors.append("export owner union is not typed/structural")
+    facts_body = _trait_method_function_body(
+        sources, "exports", "export_impl_facts", errors)
+    for token in (
+        "find_impl_by_provider(", "fact.trait_ref, fact.provider_ref",
+        "impl_owner_ref_same(",
+        "impl_entry_exact_key_same(seen, owner)",
+        "method_ref_matches_owner(",
+    ):
+        if token not in facts_body:
+            errors.append(f"export impl fact closure misses {token!r}")
+    method_insert = _trait_method_function_body(
+        sources, "exports", "insert_exact_method_ref", errors)
+    for token in (
+        "target_index.get(method_name)",
+        "impl_method_ref_same(existing, method_ref)",
+        "target_index.insert(method_name, method_ref)",
+    ):
+        if token not in method_insert:
+            errors.append(f"exact export method index misses {token!r}")
+    inject_body = _trait_method_function_body(
+        sources, "checker", "inject_module_exports", errors)
+    for token in (
+        "let owner_ref = impl_method_ref_owner(method_ref)",
+        "find_impl_by_provider(", "impl_owner_ref_trait(owner_ref)",
+        "impl_owner_ref_provider(owner_ref)",
+        "some(expected) => if !impl_method_ref_same(",
+        "expected, method_ref",
+    ):
+        if token not in inject_body:
+            errors.append(f"hydration typed owner closure misses {token!r}")
+
+    core_impl_fields, core_impl_error = _f0_struct_fields(
+        sources["core_expr"], "CoreImplMetadata")
+    if core_impl_error:
+        errors.append(core_impl_error)
+    elif core_impl_fields is not None and [
+            name for _, name in core_impl_fields] != [
+                "owner", "methods", "assoc_bindings"]:
+        errors.append("Core impl metadata gained a name/span/fallback carrier")
+    core_impl = _trait_method_function_body(
+        sources, "core_expr", "make_core_impl_metadata", errors)
+    for token in (
+            "impl_owner_ref_same(impl_method_ref_owner(method), owner)",
+            "impl_method_ref_callable_slot_index(method)",
+            "CoreImplMetadata {"):
+        if token not in core_impl:
+            errors.append(f"Core impl registry validation misses {token!r}")
+    core_assembly = _trait_method_function_body(
+        sources, "core", "assemble_decls", errors)
+    for token in (
+            "HDecl::Impl {",
+            "assembly.impls.push(make_core_impl_metadata(",
+            "owner_ref, method_refs, bindings"):
+        if token not in core_assembly:
+            errors.append(f"HIR/Core impl carrier misses {token!r}")
+
+    for source_name in ("codegen",):
+        masked = mask_ring_strings_and_comments(sources[source_name])
+        if "ImplProviderRef" in masked or "provider_ref" in masked or (
+                "trait_ref" in masked):
+            errors.append(f"{source_name} semantically reads impl provider carrier")
+    return errors
+
+
+def impl_provider_u1c2_mutation_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("HIR provider validation", "hir", "validate_hir_decls",
+         "impl_provider_ref_kind(provider_ref)",
+         "impl_provider_ref_kind(wrong_provider_ref)"),
+        ("HIR trait presence", "hir", "validate_hir_decls",
+         "trait_name.is_some() != trait_ref.is_some()", "false"),
+        ("HIR owner/provider relation", "hir", "validate_hir_decls",
+         "impl_owner_ref_provider(owner_ref), provider_ref",
+         "provider_ref, provider_ref"),
+        ("HIR owner/trait relation", "hir", "validate_hir_decls",
+         "impl_owner_ref_trait(owner_ref), trait_ref",
+         "trait_ref, trait_ref"),
+        ("source provider", "decl", "check_impl_decl_canonical",
+         "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
+        ("source trait", "decl", "check_impl_decl_canonical",
+         "trait_ref: impl_owner.trait_ref", "trait_ref: none"),
+        ("checker provider lookup", "checker", "validate_impl_carriers",
+         "find_impl_by_provider(", "find_impl_by_origin("),
+        ("collector provider", "checker", "collect_module_impl_facts",
+         "provider_ref: provider_ref", "provider_ref: wrong_provider_ref"),
+        ("collector trait", "checker", "collect_module_impl_facts",
+         "trait_ref: trait_ref", "trait_ref: none"),
+        ("export typed union", "exports", "append_exact_impl_owner",
+         "impl_entry_exact_key_same(existing, owner)", "true"),
+        ("export fact provider", "exports", "export_impl_facts",
+         "fact.trait_ref, fact.provider_ref",
+         "fact.trait_ref, wrong_provider_ref"),
+        ("exact export method", "exports", "insert_exact_method_ref",
+         "impl_method_ref_same(existing, method_ref)",
+         "true"),
+        ("hydration provider", "checker", "inject_module_exports",
+         "impl_owner_ref_provider(owner_ref)",
+         "wrong_provider_ref"),
+        ("Core impl owner", "core", "assemble_decls",
+         "owner_ref, method_refs, bindings",
+         "missing, method_refs, bindings"),
+        ("Core method owner validation", "core_expr",
+         "make_core_impl_metadata",
+         "impl_owner_ref_same(impl_method_ref_owner(method), owner)",
+         "true"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"impl provider carrier mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        if not impl_provider_u1c2_contract_errors(mutated):
+            errors.append(f"impl provider carrier mutation escaped: {label}")
+        else:
+            killed += 1
+
+    if killed != F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT:
+        errors.append(
+            f"impl provider carrier killed {killed} mutations, expected "
+            f"{F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT}")
+    return errors
+
+
+def impl_provider_u1c2_scope_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    for source_name in ("codegen",):
+        mutated = dict(sources)
+        mutated[source_name] = sources[source_name] + (
+            "\nfn forbidden_impl_provider_read(provider_ref: ImplProviderRef) "
+            "{ let _ = provider_ref }\n")
+        if not impl_provider_u1c2_contract_errors(mutated):
+            errors.append(f"impl provider carrier scope escaped: {source_name}")
+    return errors
+
+
+def impl_provider_u1c2_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_IMPL_PROVIDER_CARRIER_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read impl provider carrier sources: {exc}"]
+    errors = impl_provider_u1c2_contract_errors(sources)
+    if errors:
+        return errors
+    errors.extend(impl_provider_u1c2_mutation_errors(sources))
+    errors.extend(impl_provider_u1c2_scope_errors(sources))
+    return errors
+
+
+F2_DERIVED_IMPL_CARRIER_PATHS = {
+    "hir": REPO / "compiler" / "hir.ring",
+    "derive": REPO / "compiler" / "derive.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
+    "checker": REPO / "compiler" / "checker.ring",
+    "project": REPO / "compiler" / "compiler_mod.ring",
+    "dict": REPO / "compiler" / "dict_lower.ring",
+    "core": REPO / "compiler" / "core_from_hir.ring",
+    "codegen": REPO / "compiler" / "codegen_c.ring",
+}
+F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT = 17
+
+
+def derived_impl_carrier_u1c4_contract_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    hir = sources["hir"]
+    derive = sources["derive"]
+    builtins = sources["builtins"]
+    checker = sources["checker"]
+    project = sources["project"]
+    core = sources["core"]
+    codegen = sources["codegen"]
+
+    fields, field_error = _f0_struct_fields(hir, "DerivedImpl")
+    if field_error:
+        errors.append(field_error)
+    elif fields is not None and [name for _, name in fields] != [
+            "semantic_kind", "owner_ref", "provider_ref", "trait_ref",
+            "target_owner", "target_type", "methods", "hash_mix",
+            "text_plan", "type_name", "trait_name", "type_params",
+            "bounds", "type_kind", "struct_fields", "enum_variants"]:
+        errors.append("derived impl carrier inventory drifted")
+    if ("pub struct DerivedImpl {\n"
+            "    pub semantic_kind: DerivedSemanticKind,\n"
+            "    pub owner_ref: ImplOwnerRef,\n"
+            "    pub provider_ref: ImplProviderRef," not in hir or
+            "pub type_params: List<HTypeParam>" not in hir):
+        errors.append("derived impl carrier identity types drifted")
+
+    register = _trait_method_function_body(
+        sources, "derive", "register_derived_impl", errors)
+    for token in (
+        "let trait_name = di.trait_name",
+        "let provider_ref = di.provider_ref",
+        "registered_derive_trait_ref(env, trait_name)",
+        "!symbol_ref_same(trait_ref, di.trait_ref)",
+        "provider_ref: some(provider_ref)",
+        "trait_ref: some(trait_ref)",
+    ):
+        if token not in register:
+            errors.append(f"derived owner registration misses {token!r}")
+
+    finalize = _trait_method_function_body(
+        sources, "derive", "finalize_derived_impl", errors)
+    for token in (
+        "let owner_provider = match owner.provider_ref",
+        "let owner_trait = match owner.trait_ref",
+        "!impl_provider_ref_same(owner_provider, di.provider_ref)",
+        "!symbol_ref_same(owner_trait, di.trait_ref)",
+        "derived_runtime_bounds_from_owner(env, owner)",
+        "type_params: derived_h_type_params(env, owner)",
+        "provider_ref: owner_provider",
+        "trait_ref: owner_trait",
+    ):
+        if token not in finalize:
+            errors.append(f"derived descriptor finalizer misses {token!r}")
+
+    json_body = _trait_method_function_body(
+        sources, "derive", "derive_json_trait", errors)
+    for token in (
+        "let provider_ref = explicit_derive_request(",
+        "find_impl_by_provider(",
+        "some(di.trait_ref), di.provider_ref",
+        "finalize_derived_impl(",
+    ):
+        if token not in json_body:
+            errors.append(f"Json derived descriptor misses {token!r}")
+    if "find_impl(\n                        env.trait_reg, ut.name, \"Json\")" in json_body:
+        errors.append("Json derived descriptor falls back to trait name lookup")
+
+    owner_match = _trait_method_function_body(
+        sources, "derive", "derived_impl_matches_owner", errors)
+    for token in (
+        "impl_provider_ref_same(", "symbol_ref_same(",
+        "owner.target_type_name != di.type_name",
+        "derived_h_type_params(env, owner), di.type_params",
+        "derived_runtime_bounds_from_owner(env, owner), di.bounds",
+    ):
+        if token not in owner_match:
+            errors.append(f"derived descriptor owner relation misses {token!r}")
+    validate = _trait_method_function_body(
+        sources, "derive", "validate_derived_impls", errors)
+    for token in (
+        "derived_impl_key_same(existing, di)",
+        "find_impl_by_provider(",
+        "some(di.trait_ref), di.provider_ref",
+        "derived_impl_matches_owner(env, di, owner)",
+        "impl_provider_kind_builtin()",
+        "impl_provider_kind_derived()",
+        "if matches != 1",
+    ):
+        if token not in validate:
+            errors.append(f"derived descriptor validator misses {token!r}")
+
+    census = (
+        'const BUILTIN_OPTION_DERIVED_TRAITS: List<Str> = '
+        '["Eq", "Debug", "Clone"]')
+    if census not in builtins:
+        errors.append("builtin Option derived owner census drifted")
+    builtin_owners = _trait_method_function_body(
+        sources, "builtins", "builtin_option_derived_owners", errors)
+    for token in (
+        "require_builtin_option_derived_owner(env, trait_name)",
+        "find_impl_by_provider(",
+        "some(ord_ref), provider_ref",
+        ").is_some()",
+        "builtin Option derived owner census gained Ord",
+    ):
+        if token not in builtin_owners:
+            errors.append(f"builtin Option owner census misses {token!r}")
+    require_builtin = _trait_method_function_body(
+        sources, "builtins", "require_builtin_option_derived_owner", errors)
+    for token in (
+        "find_impl_by_provider(",
+        "some(trait_ref), provider_ref",
+        "builtin Option derived owner is missing",
+    ):
+        if token not in require_builtin:
+            errors.append(f"builtin Option exact owner lookup misses {token!r}")
+    option_descriptor = _trait_method_function_body(
+        sources, "derive", "builtin_option_derived_impl", errors)
+    for token in (
+        "derived_runtime_bounds_from_owner(env, owner)",
+        "if bounds.len() != 1",
+        'bound.type_param != "T" || bound.trait_name != trait_name',
+        '"Eq" => some([', '"Debug" => some([', '"Clone" => some([',
+        "provider_ref: provider_ref", "trait_ref: trait_ref",
+    ):
+        if token not in option_descriptor:
+            errors.append(f"builtin Option descriptor misses {token!r}")
+    option_list = _trait_method_function_body(
+        sources, "derive", "builtin_option_derived_impls", errors)
+    for token in (
+        "result.len() != 3",
+        'result.get(0).unwrap().trait_name != "Eq"',
+        'result.get(1).unwrap().trait_name != "Debug"',
+        'result.get(2).unwrap().trait_name != "Clone"',
+    ):
+        if token not in option_list:
+            errors.append(f"builtin Option descriptor order misses {token!r}")
+    derive_pass = _trait_method_function_body(
+        sources, "derive", "run_derive_pass", errors)
+    for token in (
+            "if ctx.core_module_order == 0",
+            "for builtin in builtin_option_derived_impls(ctx.env)",
+            "for derived in derived_impls { exact.push(derived) }",
+            "close_derived_text_plans(ctx, exact)"):
+        if token not in derive_pass:
+            errors.append(f"derive pass physical carrier misses {token!r}")
+
+    single = _trait_method_function_body(sources, "checker", "check", errors)
+    single_validate = single.find("validate_derived_impls(")
+    single_lower = single.find("lower_dicts(lower_andor(assembled))")
+    if min(single_validate, single_lower) < 0 or single_validate > single_lower:
+        errors.append("single checker derived validation order drifted")
+    module_check = _trait_method_function_body(
+        sources, "checker", "check_module", errors)
+    module_validate = module_check.find("validate_derived_impls(")
+    module_lower = module_check.find("lower_dicts(lower_andor(assembled))")
+    if min(module_validate, module_lower) < 0 or module_validate > module_lower:
+        errors.append("module checker derived validation order drifted")
+    if "assemble_project_builtin_derived_impls" in project or (
+            "prepend_builtin_option_derived_impls" in project):
+        errors.append("project retained a second builtin derived assembly authority")
+
+    dict_body = _trait_method_function_body(
+        sources, "dict", "dl_derived_impl", errors)
+    for token in (
+            "provider_ref: di.provider_ref", "trait_ref: di.trait_ref",
+            "type_params: di.type_params"):
+        if token not in dict_body:
+            errors.append(f"dict lowering loses derived carrier {token!r}")
+
+    append_core = _trait_method_function_body(
+        sources, "core", "append_derived_impl", errors)
+    for token in (
+            "derived_semantic_kind_tag(",
+            "make_core_impl_metadata("):
+        if token not in append_core:
+            errors.append(f"Core derived consumer misses {token!r}")
+
+    codegen_masked = mask_ring_strings_and_comments(codegen)
+    for forbidden in (
+        "emit_c_builtin_derived_impls", "c_option_some_variant",
+        "c_option_none_variant", "emit_c_derived_impls",
+        "emit_c_derived_impl_bodies",
+    ):
+        if forbidden in codegen_masked:
+            errors.append(f"C backend retains derived authority {forbidden!r}")
+    if "DerivedImpl {" in codegen_masked:
+        errors.append("C backend constructs a derived descriptor")
+    if codegen.count(
+            "C ABI boundary: semantic DerivedImpl carrier was not retired") != 1:
+        errors.append("C backend derived retirement boundary drifted")
+    if codegen.count(
+            "C ABI boundary: project DerivedImpl carrier was not retired") != 1:
+        errors.append("project C backend derived retirement boundary drifted")
+    return errors
+
+
+def derived_impl_carrier_u1c4_mutation_errors(
+    sources: Mapping[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("register trait relation", "derive", "register_derived_impl",
+         "!symbol_ref_same(trait_ref, di.trait_ref)", "false"),
+        ("final provider copy", "derive", "finalize_derived_impl",
+         "provider_ref: owner_provider", "provider_ref: di.provider_ref"),
+        ("final exact type params", "derive", "finalize_derived_impl",
+         "type_params: derived_h_type_params(env, owner)",
+         "type_params: []"),
+        ("validator typed owner", "derive", "validate_derived_impls",
+         "find_impl_by_provider(", "find_impl("),
+        ("validator owner relation", "derive", "validate_derived_impls",
+         "derived_impl_matches_owner(env, di, owner)", "true"),
+        ("validator type parameters", "derive", "derived_impl_matches_owner",
+         "derived_h_type_params(env, owner), di.type_params",
+         "di.type_params, di.type_params"),
+        ("Option exact predicate", "derive", "builtin_option_derived_impl",
+         "if bounds.len() != 1", "if false"),
+        ("order-zero physical carrier", "derive", "run_derive_pass",
+         "if ctx.core_module_order == 0", "if true"),
+        ("dict exact type params", "dict", "dl_derived_impl",
+         "type_params: di.type_params", "type_params: []"),
+        ("Core semantic tag", "core", "append_derived_impl",
+         "derived_semantic_kind_tag(", "derived_semantic_kind_tag_broken("),
+        ("single validation", "checker", "check",
+         "validate_derived_impls(ctx.env, derived_impls)", "{}"),
+        ("module validation", "checker", "check_module",
+         "validate_derived_impls(ctx.env, hprogram.derived_impls)", "{}"),
+    )
+    killed = 0
+    for label, source_name, function_name, anchor, replacement in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(f"derived carrier mutation {label}: {mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        if not derived_impl_carrier_u1c4_contract_errors(mutated):
+            errors.append(f"derived carrier mutation escaped: {label}")
+        else:
+            killed += 1
+
+    manual_mutations = (
+        ("owner schema optional", "hir",
+         "pub struct DerivedImpl {\n"
+         "    pub semantic_kind: DerivedSemanticKind,\n"
+         "    pub owner_ref: ImplOwnerRef,",
+         "pub struct DerivedImpl {\n"
+         "    pub semantic_kind: DerivedSemanticKind,\n"
+         "    pub owner_ref: ImplOwnerRef?,"),
+        ("type parameters lose exact ids", "hir",
+         "    pub type_params: List<HTypeParam>,",
+         "    pub type_params: List<Str>,"),
+        ("Option Ord census", "builtins",
+         '["Eq", "Debug", "Clone"]', '["Eq", "Debug", "Ord", "Clone"]'),
+        ("backend accepts pending descriptor", "codegen",
+         "C ABI boundary: semantic DerivedImpl carrier was not retired",
+         "C ABI boundary: pending descriptor accepted"),
+        ("backend descriptor constructor", "codegen",
+         "pub fn generate_c(",
+         "fn forged() { let _ = DerivedImpl { } }\npub fn generate_c("),
+    )
+    for label, source_name, anchor, replacement in manual_mutations:
+        source = sources[source_name]
+        if source.count(anchor) != 1:
+            errors.append(
+                f"derived carrier mutation {label}: anchor count "
+                f"was {source.count(anchor)}")
+            continue
+        mutated = dict(sources)
+        mutated[source_name] = source.replace(anchor, replacement, 1)
+        if not derived_impl_carrier_u1c4_contract_errors(mutated):
+            errors.append(f"derived carrier mutation escaped: {label}")
+        else:
+            killed += 1
+    if killed != F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT:
+        errors.append(
+            f"derived carrier killed {killed} mutations, expected "
+            f"{F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT}")
+    return errors
+
+
+def derived_impl_carrier_u1c4_fixture_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe).resolve(strict=True)
+    compiler_before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(str(compiler)))
+    negative = CASES_DIR / "error_option_ord_unavailable.ring"
+    if negative not in discover_negative_cases(CASES_DIR):
+        errors.append("Option Ord negative fixture is not runner-discovered")
+    else:
+        try:
+            completed = subprocess.run(
+                [str(compiler), "check", str(negative)],
+                cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="strict",
+                check=False, timeout=120)
+        except subprocess.TimeoutExpired:
+            errors.append("Option Ord negative fixture timed out")
+        else:
+            if completed.returncode == 0:
+                errors.append("Option Ord negative unexpectedly passed")
+            else:
+                contract = negative.with_suffix(".error").read_text(
+                    encoding="utf-8")
+                combined = (completed.stdout or "") + (completed.stderr or "")
+                contract_error = error_contract_failure(contract, combined)
+                if contract_error is not None:
+                    errors.append(
+                        "Option Ord negative contract failed: "
+                        f"{contract_error}; output={combined[:300]!r}")
+    if _sha256_file(compiler) != compiler_before:
+        errors.append("pinned Ring compiler changed across derived fixtures")
+    return errors
+
+
+def derived_impl_carrier_u1c4_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    try:
+        for name, path in F2_DERIVED_IMPL_CARRIER_PATHS.items():
+            sources[name] = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cannot read derived impl carrier sources: {exc}"]
+    errors = derived_impl_carrier_u1c4_contract_errors(sources)
+    if errors:
+        return errors
+    errors.extend(derived_impl_carrier_u1c4_mutation_errors(sources))
+    return errors
+
+
+F2_U1C0_PATHS = {
+    "hir": REPO / "compiler" / "hir.ring",
+    "env": REPO / "compiler" / "env.ring",
+    "register": REPO / "compiler" / "infer_register.ring",
+    "builtins": REPO / "compiler" / "builtins.ring",
+    "ctx": REPO / "compiler" / "infer_ctx.ring",
+    "helpers": REPO / "compiler" / "infer_helpers.ring",
+    "infer": REPO / "compiler" / "infer.ring",
+    "decl": REPO / "compiler" / "infer_decl.ring",
+    "derive": REPO / "compiler" / "derive.ring",
+    "exports": REPO / "compiler" / "exports.ring",
+    "checker": REPO / "compiler" / "checker.ring",
+}
+
+F2_U1C0_WARNING_MESSAGE = (
+    "catch on expression with no fail effect; handler will never execute")
+
+
+def _u1c0_warning(
+    file_name: str, line: int, col: int, end_line: int, end_col: int,
+) -> Dict[str, Any]:
+    return {
+        "file": str(REPO / "compiler" / file_name),
+        "diagnostic": {
+            "code": "W0001",
+            "severity": "warning",
+            "message": F2_U1C0_WARNING_MESSAGE,
+            "span": {
+                "line": line, "col": col,
+                "end_line": end_line, "end_col": end_col,
+            },
+            "context": {
+                "kind": "other", "detail": "body has no fail effect",
+            },
+            "notes": [],
+            "suggestions": [],
+            "category": "warning",
+        },
+    }
+
+
+F2_U1C0_PARSER_WARNINGS = (
+    _u1c0_warning("parser.ring", 1778, 40, 1778, 88),
+    _u1c0_warning("parser.ring", 1721, 33, 1721, 86),
+    _u1c0_warning("parser.ring", 1731, 33, 1731, 82),
+    _u1c0_warning("parser.ring", 1743, 41, 1743, 87),
+    _u1c0_warning("parser.ring", 1751, 41, 1751, 90),
+    _u1c0_warning("parser.ring", 806, 36, 806, 73),
+)
+F2_U1C0_CHECKER_WARNINGS = (*F2_U1C0_PARSER_WARNINGS,
+    _u1c0_warning("infer.ring", 937, 38, 938, 74),
+    _u1c0_warning("infer.ring", 674, 30, 674, 87),
+    _u1c0_warning("infer.ring", 781, 30, 781, 87),
+    _u1c0_warning("infer.ring", 3434, 22, 3434, 72),
+    _u1c0_warning("infer_decl.ring", 165, 21, 166, 65),
+)
+F2_U1C0_EXPORTS_WARNINGS = F2_U1C0_PARSER_WARNINGS
+
+
+def _warning_document(
+    file_name: str, diagnostics: Sequence[Mapping[str, Any]],
+) -> str:
+    return json.dumps({
+        "version": 1,
+        "file": str(REPO / "compiler" / file_name),
+        "diagnostics": list(diagnostics),
+    }, separators=(",", ":"))
+
+
+def llm_warning_document_sequence_probe_errors() -> List[str]:
+    errors: List[str] = []
+    first = F2_U1C0_PARSER_WARNINGS[0]
+    second = _u1c0_warning("infer.ring", 937, 38, 938, 74)
+    first_diag = first["diagnostic"]
+    second_diag = second["diagnostic"]
+    single = _warning_document("parser.ring", [first_diag]) + "\n"
+    multi = (
+        _warning_document("parser.ring", [first_diag]) + "\n" +
+        _warning_document("infer.ring", [second_diag]) + "\n")
+    if llm_warning_contract_error(single, [first]) is not None:
+        errors.append("LLM warning probe rejected valid single document")
+    if llm_warning_contract_error(multi, [first, second]) is not None:
+        errors.append("LLM warning probe rejected valid multi-document sequence")
+
+    duplicate_key = single.replace(
+        '"version":1', '"version":1,"version":1', 1)
+    if llm_warning_contract_error(duplicate_key, [first]) is None:
+        errors.append("LLM warning probe accepted duplicate JSON key")
+    if llm_warning_contract_error(single + "panic", [first]) is None:
+        errors.append("LLM warning probe accepted trailing raw output")
+    if llm_warning_contract_error(single[:-1], [first]) is None:
+        errors.append("LLM warning probe accepted missing final newline")
+    duplicate_diag = _warning_document(
+        "parser.ring", [first_diag, first_diag]) + "\n"
+    if llm_warning_contract_error(duplicate_diag, [first]) is None:
+        errors.append("LLM warning probe accepted duplicate diagnostic")
+    extra_warning = _warning_document(
+        "parser.ring", [first_diag, F2_U1C0_PARSER_WARNINGS[1]["diagnostic"]]
+    ) + "\n"
+    if llm_warning_contract_error(extra_warning, [first]) is None:
+        errors.append("LLM warning probe accepted extra W0001")
+    w0002 = dict(first_diag)
+    w0002["code"] = "W0002"
+    if llm_warning_contract_error(
+            _warning_document("parser.ring", [w0002]) + "\n", [first]) is None:
+        errors.append("LLM warning probe accepted W0002")
+    error_diag = dict(first_diag)
+    error_diag["severity"] = "error"
+    if llm_warning_contract_error(
+            _warning_document("parser.ring", [error_diag]) + "\n", [first]
+    ) is None:
+        errors.append("LLM warning probe accepted error severity")
+    return errors
+
+
+def impl_export_closure_contract_errors(
+    sources: dict[str, str],
+) -> List[str]:
+    """Cheap exact-owner export closure guard; behavior stays packet-owned."""
+    errors: List[str] = []
+    hir_source = sources.get("hir", "")
+    fact_fields, fact_field_error = _f0_struct_fields(
+        hir_source, "ModuleImplFact")
+    if fact_field_error:
+        errors.append(fact_field_error)
+    elif fact_fields is not None and [
+            name for _, name in fact_fields] != [
+                "target", "provider_ref", "trait_ref", "owner_ref",
+                "method_names", "public_inherent_method_names",
+                "is_top_level"]:
+        errors.append("impl export closure: ModuleImplFact typed inventory drifted")
+    if "is_trait_impl" in hir_source:
+        errors.append("impl export closure: ModuleImplFact retained second trait truth")
+
+    checker_source = sources.get("checker", "")
+    if "fn exact_module_impl_owner" in checker_source:
+        errors.append("impl export closure: stale method-shape owner resolver remains")
+    validate_carriers, validate_carriers_error = _f0_function_body(
+        checker_source, "validate_impl_carriers")
+    if validate_carriers_error:
+        errors.append(validate_carriers_error)
+    elif validate_carriers is not None and not all(
+            token in validate_carriers for token in (
+                "find_impl_by_provider(",
+                "env.trait_reg, target_type, trait_ref, provider_ref",
+                "optional_symbol_ref_same(owner.trait_ref, trait_ref)",
+                "owner.method_schemes.contains_key(name)",
+                "typed owner is missing",
+                "validate_impl_carriers(env, inner)",
+            )):
+        errors.append("impl export closure: HIR carrier validator is incomplete")
+
+    collect_body, collect_error = _f0_function_body(
+        checker_source, "collect_module_impl_facts")
+    if collect_error:
+        errors.append(collect_error)
+    elif collect_body is not None:
+        for token in (
+                "find_impl_by_provider(",
+                "env.trait_reg, target_type, trait_ref, provider_ref",
+                "provider_ref: provider_ref", "trait_ref: trait_ref",
+                "owner_ref: owner_ref",
+                "optional_symbol_ref_same(",
+                "owner.method_schemes.contains_key(method_name)",
+                "HDecl::Fn { name, is_pub, .. }",
+                "if trait_ref.is_none() && is_pub",
+                "public_inherent_method_names.push(name)"):
+            if token not in collect_body:
+                errors.append(
+                    f"impl export closure: typed collector misses {token!r}")
+        for forbidden in (
+                "trait_impls.get(", "method_origins.get(", "MethodOrigin",
+                "exact_module_impl_owner("):
+            if forbidden in collect_body:
+                errors.append(
+                    f"impl export closure: collector re-resolves by {forbidden!r}")
+        if "if trait_name.is_some() || method_names.len() > 0" not in collect_body:
+            errors.append("impl export closure: empty inherent skip is not explicit")
+        if not all(token in collect_body for token in (
+            "HDecl::ModBlock { decls: mod_decls, is_pub, .. }",
+            "if is_pub {",
+            "env, mod_decls, false, facts",
+        )):
+            errors.append("impl export closure: public/private nested inventory is open")
+        if "allow_incomplete" in collect_body or "sink.has_errors()" in collect_body:
+            errors.append("impl export closure: collector retained global error bypass")
+        if "none => panic(" not in collect_body:
+            errors.append("impl export closure: typed owner miss is not internal")
+
+    env_source = sources.get("env", "")
+    owner_shape_body, owner_shape_error = _f0_function_body(
+        env_source, "impl_entry_owner_shape_same")
+    if owner_shape_error:
+        errors.append(owner_shape_error)
+    elif owner_shape_body is not None and not all(
+            token in owner_shape_body for token in (
+                "left.target_type_name == right.target_type_name",
+                "optional_string_same(left.trait_name, right.trait_name)",
+                "optional_symbol_ref_same(left.trait_ref, right.trait_ref)",
+                "string_list_same(left.type_params, right.type_params)",
+                "int_list_same(left.type_param_vars, right.type_param_vars)",
+                "frozen_impl_predicate_set_same(left.predicates, right.predicates)",
+                "assoc_type_map_same(left.assoc_types, right.assoc_types)",
+            )):
+        errors.append("impl export closure: final-owner shape equality is incomplete")
+    owner_same_body, owner_same_error = _f0_function_body(
+        env_source, "impl_entry_final_same")
+    if owner_same_error:
+        errors.append(owner_same_error)
+    elif owner_same_body is not None and not all(
+            token in owner_same_body for token in (
+                "optional_impl_provider_ref_same(",
+                "left.provider_ref, right.provider_ref",
+                "impl_entry_owner_shape_same(left, right)",
+                "string_list_same(left.method_names, right.method_names)",
+                "method_core_map_same(left.method_schemes, right.method_schemes)",
+                "method_ref_map_same(left.method_refs, right.method_refs)",
+                "method_intrinsic_map_same(",
+            )):
+        errors.append("impl export closure: shared final-owner equality is incomplete")
+
+    exports_source = sources.get("exports", "")
+    if any(token in exports_source for token in (
+            "MethodOrigin", "method_origins", "method_origin_same",
+            "insert_exact_method_origin", "map_clone(origins)")):
+        errors.append("impl export closure: whole target method map merge remains")
+    for helper_name in (
+        "copy_inline_export", "extract_decl_export",
+        "copy_exported_name", "export_impl_facts",
+    ):
+        helper_body, helper_error = _f0_function_body(
+            exports_source, helper_name)
+        if helper_error:
+            errors.append(helper_error)
+        elif helper_body is not None and (
+                "method_index.insert(" in helper_body or
+                "append_owner_method_indexes(" in helper_body):
+            errors.append(
+                f"impl export closure: {helper_name} produces method indexes")
+    owner_shape_body, owner_shape_error = _f0_function_body(
+        exports_source, "method_ref_matches_owner")
+    if owner_shape_error:
+        errors.append(owner_shape_error)
+    elif owner_shape_body is not None and not all(token in owner_shape_body for token in (
+        "impl_method_ref_owner(method_ref), owner_ref",
+        "owner.method_refs.get(impl_method_ref_name(method_ref))",
+        "impl_method_ref_same(expected, method_ref)",
+    )):
+        errors.append("impl export closure: method index owner shape is not exact")
+    insert_body, insert_error = _f0_function_body(
+        exports_source, "insert_exact_method_ref")
+    if insert_error:
+        errors.append(insert_error)
+    elif insert_body is not None and not all(token in insert_body for token in (
+        "some(existing) => if !impl_method_ref_same(existing, method_ref)",
+        "distinct identities share one method index",
+    )):
+        errors.append("impl export closure: method map union can silently overwrite")
+    dedupe_body, dedupe_error = _f0_function_body(
+        exports_source, "append_exact_impl_owner")
+    if dedupe_error:
+        errors.append(dedupe_error)
+    elif dedupe_body is not None and not all(token in dedupe_body for token in (
+        "impl_entry_exact_key_same(existing, owner)",
+        "!impl_entry_final_same(existing, owner)",
+        "same-provider owner structure drifted",
+    )):
+        errors.append("impl export closure: same-origin owner drift is not rejected")
+    indexes_body, indexes_error = _f0_function_body(
+        exports_source, "append_owner_method_indexes")
+    if indexes_error:
+        errors.append(indexes_error)
+    elif indexes_body is not None and not all(token in indexes_body for token in (
+        "owner.method_schemes.entries()",
+        "for core_entry in sorted_cores",
+        "if !allowed_method_names.contains(method_name) { continue }",
+        "!method_ref_matches_owner(method_ref, owner)",
+        "insert_exact_method_ref(",
+    )):
+        errors.append("impl export closure: owner indexes are not same-origin exact")
+    elif indexes_body is not None and "if method_name" in indexes_body:
+        errors.append("impl export closure: owner index production is conditional")
+    facts_body, facts_error = _f0_function_body(
+        exports_source, "export_impl_facts")
+    if facts_error:
+        errors.append(facts_error)
+    elif facts_body is not None:
+        if not all(token in facts_body for token in (
+            "find_impl_by_provider(",
+            "env.trait_reg, fact.target,",
+            "fact.trait_ref, fact.provider_ref",
+            "registered, fact.owner_ref",
+            "append_exact_impl_owner(owner, fact_owners)",
+        )):
+            errors.append("impl export closure: fact export loses exact owner")
+        if not all(token in facts_body for token in (
+            "let mut seen_fact_owners: List<ImplEntry> = []",
+            "impl_entry_exact_key_same(seen, owner)",
+            "user impl fact was exported twice",
+        )):
+            errors.append("impl export closure: user fact is not consumed once")
+        if "append_owner_method_indexes(" in facts_body or (
+                "method_index.insert(" in facts_body):
+            errors.append("impl export closure: fact helper produces method indexes")
+        for token in (
+                "fact.trait_ref.is_some() &&",
+                "fact.public_inherent_method_names.len() != 0",
+                "fact.method_names.contains(public_name)"):
+            if token not in facts_body:
+                errors.append(
+                    f"impl export closure: visibility projection misses {token!r}")
+
+    extract_body, extract_error = _f0_function_body(
+        exports_source, "extract_exports")
+    if extract_error:
+        errors.append(extract_error)
+    elif extract_body is not None:
+        if not all(token in extract_body for token in (
+            "let mut fact_owners: List<ImplEntry> = []",
+            "for owner in fact_owners",
+            "append_exact_impl_owner(owner, trait_impls)",
+        )):
+            errors.append("impl export closure: final owner union omits module facts")
+        map_at = extract_body.find(
+            "let mut method_index: Map<Str, Map<Str, ImplMethodRef>> = map_new()")
+        final_union_at = extract_body.find("for owner in trait_impls")
+        closed_owner_at = extract_body.rfind(
+            "append_exact_impl_owner(impl_, trait_impls)")
+        if (map_at < 0 or final_union_at < 0 or closed_owner_at < 0 or
+                map_at < closed_owner_at or map_at > final_union_at):
+            errors.append("impl export closure: index map is not fresh after owner union")
+        if extract_body.count("target_exported &&") != 2 or (
+                "exported_trait_ids.contains(name)" not in extract_body):
+            errors.append("impl export closure: trait impl visibility is not target+trait")
+        if "exported_owner_method_names(owner, inherent_methods)" not in extract_body:
+            errors.append("impl export closure: callable index ignores inherent visibility")
+        if "validate_impl_export_closure(\n        trait_impls, method_index, inherent_methods)" not in extract_body:
+            errors.append("impl export closure: final owner/index relation is unvalidated")
+    validate_body, validate_error = _f0_function_body(
+        exports_source, "validate_impl_export_closure")
+    if validate_error:
+        errors.append(validate_error)
+    elif validate_body is not None and not all(token in validate_body for token in (
+        "!owner.method_schemes.contains_key(method_name)",
+        "if matches != 1",
+        "let allowed = exported_owner_method_names(owner, inherent_methods)",
+        "if !allowed.contains(method_name) { continue }",
+        "for core_entry in owner.method_schemes.entries()",
+        "owner core has no exported index",
+        "owner core index is not exact",
+    )):
+        errors.append("impl export closure: final validator is not bidirectional")
+
+    inject_body, inject_error = _f0_function_body(
+        checker_source, "inject_module_exports")
+    if inject_error:
+        errors.append(inject_error)
+    elif inject_body is not None and not all(token in inject_body for token in (
+        "find_impl_by_provider(",
+        "impl_owner_ref_trait(owner_ref)",
+        "impl_owner_ref_provider(owner_ref)",
+        "some(expected) => if !impl_method_ref_same(",
+        "expected, method_ref",
+        "impl hydration: exported index has no owner core",
+        "impl hydration: exported index owner is missing",
+    )):
+        errors.append("impl export closure: hydration treats missing owner as ambiguity")
+    if "report_hydrated_method_collision" in checker_source:
+        errors.append("impl export closure: stale missing-owner E0504 helper remains")
+    return errors
+
+
+def impl_export_closure_mutation_errors(
+    sources: dict[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    mutations = (
+        ("checker", "validate_impl_carriers",
+         "find_impl_by_provider(", "find_impl_by_origin(",
+         "HIR carrier validator is incomplete"),
+        ("checker", "collect_module_impl_facts",
+         "find_impl_by_provider(", "find_impl_by_origin(",
+         "typed collector misses"),
+        ("checker", "collect_module_impl_facts",
+         "owner.method_schemes.contains_key(method_name)",
+         "false",
+         "typed collector misses"),
+        ("checker", "collect_module_impl_facts",
+         "if trait_ref.is_none() && is_pub",
+         "if is_pub",
+         "typed collector misses"),
+        ("checker", "collect_module_impl_facts",
+         "owner_ref: owner_ref", "owner_ref: wrong_owner_ref",
+         "typed collector misses"),
+        ("checker", "collect_module_impl_facts",
+         "if trait_name.is_some() || method_names.len() > 0", "if true",
+         "empty inherent skip is not explicit"),
+        ("checker", "collect_module_impl_facts",
+         "if is_pub {", "if true {",
+         "public/private nested inventory is open"),
+        ("checker", "collect_module_impl_facts",
+         "none => panic(", "none => {} // swallowed typed owner miss\n                panic(",
+         "typed owner miss is not internal"),
+        ("exports", "method_ref_matches_owner",
+         "impl_method_ref_owner(method_ref), owner_ref", "owner_ref, owner_ref",
+         "method index owner shape is not exact"),
+        ("exports", "method_ref_matches_owner",
+         "owner.method_refs.get(impl_method_ref_name(method_ref))",
+         "owner.method_refs.get(\"wrong\")",
+         "method index owner shape is not exact"),
+        ("exports", "insert_exact_method_ref",
+         "!impl_method_ref_same(existing, method_ref)", "false",
+         "method map union can silently overwrite"),
+        ("exports", "append_exact_impl_owner",
+         "impl_entry_exact_key_same(existing, owner)", "true",
+         "same-origin owner drift is not rejected"),
+        ("exports", "append_exact_impl_owner",
+         "!impl_entry_final_same(existing, owner)", "false",
+         "same-origin owner drift is not rejected"),
+        ("env", "impl_entry_owner_shape_same",
+         "frozen_impl_predicate_set_same(left.predicates, right.predicates)",
+         "true", "final-owner shape equality is incomplete"),
+        ("env", "impl_entry_owner_shape_same",
+         "assoc_type_map_same(left.assoc_types, right.assoc_types)",
+         "true", "final-owner shape equality is incomplete"),
+        ("env", "impl_entry_final_same",
+         "string_list_same(left.method_names, right.method_names)",
+         "true", "shared final-owner equality is incomplete"),
+        ("env", "impl_entry_final_same",
+         "method_core_map_same(left.method_schemes, right.method_schemes)",
+         "true", "shared final-owner equality is incomplete"),
+        ("env", "impl_entry_final_same",
+         "method_ref_map_same(left.method_refs, right.method_refs)",
+         "true", "shared final-owner equality is incomplete"),
+        ("env", "impl_entry_final_same",
+         "method_intrinsic_map_same(\n            left.method_intrinsics, right.method_intrinsics)",
+         "true", "shared final-owner equality is incomplete"),
+        ("exports", "append_owner_method_indexes",
+         "!method_ref_matches_owner(method_ref, owner)", "false",
+         "owner indexes are not same-origin exact"),
+        ("exports", "export_impl_facts",
+         "fact.trait_ref, fact.provider_ref",
+         "fact.trait_ref, wrong_provider_ref",
+         "fact export loses exact owner"),
+        ("exports", "export_impl_facts",
+         "impl_entry_exact_key_same(seen, owner)", "false",
+         "user fact is not consumed once"),
+        ("exports", "copy_exported_name",
+         "types.insert(local_name, def)",
+         "types.insert(local_name, def)\n            method_index.insert(canonical_type, map_clone(source.method_index.get(canonical_type).unwrap()))",
+         "copy_exported_name produces method indexes"),
+        ("exports", "export_impl_facts",
+         "append_exact_impl_owner(owner, fact_owners)",
+         "append_exact_impl_owner(owner, fact_owners)\n        append_owner_method_indexes(owner, env.trait_reg.method_index, fact.method_names, method_index)",
+         "fact helper produces method indexes"),
+        ("exports", "extract_exports",
+         "for owner in fact_owners {",
+         "for owner in [] {",
+         "final owner union omits module facts"),
+        ("exports", "extract_exports",
+         "some(name) => target_exported &&\n                exported_trait_ids.contains(name)",
+         "some(name) => target_exported ||\n                exported_trait_ids.contains(name)",
+         "trait impl visibility is not target+trait"),
+        ("exports", "append_owner_method_indexes",
+         "for core_entry in sorted_cores {",
+         "for core_entry in [] {",
+         "owner indexes are not same-origin exact"),
+        ("exports", "extract_exports",
+         "validate_impl_export_closure(\n        trait_impls, method_index, inherent_methods)", "{}",
+         "final owner/index relation is unvalidated"),
+        ("exports", "validate_impl_export_closure",
+         "!owner.method_schemes.contains_key(method_name)", "false",
+         "final validator is not bidirectional"),
+        ("exports", "validate_impl_export_closure",
+         "if matches != 1", "if false",
+         "final validator is not bidirectional"),
+        ("exports", "validate_impl_export_closure",
+         "for core_entry in owner.method_schemes.entries()",
+         "for core_entry in []",
+         "final validator is not bidirectional"),
+        ("exports", "validate_impl_export_closure",
+         "panic(\"impl export closure: owner core index is not exact\")",
+         "{}", "final validator is not bidirectional"),
+        ("checker", "inject_module_exports",
+         "panic(\n                                \"impl hydration: exported index has no owner core\")",
+         "{}", "hydration treats missing owner as ambiguity"),
+        ("checker", "inject_module_exports",
+         "panic(\n                        \"impl hydration: exported index owner is missing\")",
+         "{}", "hydration treats missing owner as ambiguity"),
+    )
+    killed = 0
+    for source_name, function_name, anchor, replacement, expected in mutations:
+        mutated_source, mutation_error = _f0_mutate_function_once(
+            sources[source_name], function_name, anchor, replacement)
+        if mutation_error:
+            errors.append(
+                f"impl export closure mutation {source_name}.{function_name}: "
+                f"{mutation_error}")
+            continue
+        assert mutated_source is not None
+        mutated = dict(sources)
+        mutated[source_name] = mutated_source
+        findings = impl_export_closure_contract_errors(mutated)
+        if not any(expected in finding for finding in findings):
+            errors.append(
+                f"impl export closure mutation {source_name}.{function_name} "
+                f"missed {expected!r}: {findings!r}")
+        else:
+            killed += 1
+
+    hir_source = sources["hir"]
+    anchor = "    pub owner_ref: ImplOwnerRef,\n"
+    if hir_source.count(anchor) != 1:
+        errors.append(
+            f"impl export closure HIR mutation anchor count was "
+            f"{hir_source.count(anchor)}")
+    else:
+        mutated = dict(sources)
+        mutated["hir"] = hir_source.replace(anchor, "", 1)
+        findings = impl_export_closure_contract_errors(mutated)
+        expected = "ModuleImplFact typed inventory drifted"
+        if not any(expected in finding for finding in findings):
+            errors.append(
+                f"impl export closure HIR mutation missed {expected!r}: "
+                f"{findings!r}")
+        else:
+            killed += 1
+    visibility_anchor = "    pub public_inherent_method_names: List<Str>,\n"
+    if hir_source.count(visibility_anchor) != 1:
+        errors.append(
+            f"impl export closure visibility mutation anchor count was "
+            f"{hir_source.count(visibility_anchor)}")
+    else:
+        mutated = dict(sources)
+        mutated["hir"] = hir_source.replace(visibility_anchor, "", 1)
+        findings = impl_export_closure_contract_errors(mutated)
+        expected = "ModuleImplFact typed inventory drifted"
+        if not any(expected in finding for finding in findings):
+            errors.append(
+                f"impl export closure visibility mutation missed {expected!r}: "
+                f"{findings!r}")
+        else:
+            killed += 1
+    if killed != F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT:
+        errors.append(
+            f"impl export closure killed {killed} mutations, expected "
+            f"{F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT}")
+    return errors
+
+
+def impl_predicate_u1c0_contract_errors(
+    sources: dict[str, str],
+) -> List[str]:
+    """Cheap U1c0 structure guard; candidate behavior is an external gate."""
+    errors: List[str] = []
+    combined = "\n".join(sources.values())
+    for forbidden in (
+        "ImplDictBound",
+        "instantiate_impl_dict_requirements",
+        "trait_reg.impl_methods",
+        "install_method_scheme",
+        "normalize_impl_bounds",
+    ):
+        if forbidden in combined:
+            errors.append(f"U1c0 retired predicate authority remains: {forbidden}")
+
+    env_source = sources.get("env", "")
+    for token in (
+        "pub struct TypedImplPredicate",
+        "pub struct FrozenImplPredicateSet",
+        "pub struct ImplMethodSchemeCore",
+        "pub predicates: FrozenImplPredicateSet",
+        "pub method_schemes: Map<Str, ImplMethodSchemeCore>",
+        "pub method_refs: Map<Str, ImplMethodRef>",
+        "pub owner_ref: ImplOwnerRef?",
+        "pub trait_name: Str?",
+        "pub type_param_vars: List<Int>",
+        "pub fn instantiate_impl_runtime_requirements",
+    ):
+        if token not in env_source:
+            errors.append(f"U1c0 env schema missing {token!r}")
+    if "pub impl_methods:" in env_source:
+        errors.append("U1c0 TraitRegistry still exposes flat method schemes")
+
+    core_body, core_error = extract_ring_function_body(
+        env_source, "impl_method_core_from_scheme")
+    if core_error:
+        errors.append(core_error)
+    elif core_body is not None and not all(token in core_body for token in (
+        "scheme.bounds.len() != 0",
+        "method-owned bounds are unsupported",
+    )):
+        errors.append("U1c0 core conversion does not reject method bounds")
+
+    freeze_body, freeze_error = extract_ring_function_body(
+        env_source, "freeze_impl_predicate_set")
+    if freeze_error:
+        errors.append(freeze_error)
+    elif freeze_body is not None and not all(token in freeze_body for token in (
+        "subject does not match owner type variables",
+        "duplicate owner predicate",
+        "expanded path has no direct root",
+    )):
+        errors.append("U1c0 frozen predicate validation is incomplete")
+    add_impl_body, add_impl_error = extract_ring_function_body(
+        env_source, "add_impl")
+    if add_impl_error:
+        errors.append(add_impl_error)
+    elif add_impl_body is not None and "validate_impl_entry(reg, entry)" not in add_impl_body:
+        errors.append("U1c0 owner insertion bypasses relational validation")
+    if "expanded predicate path is not a supertrait edge" not in env_source:
+        errors.append("U1c0 expanded predicate paths are not relationally validated")
+    validate_owner_body, validate_owner_error = extract_ring_function_body(
+        env_source, "validate_impl_entry")
+    if validate_owner_error:
+        errors.append(validate_owner_error)
+    elif validate_owner_body is not None and not all(
+            token in validate_owner_body for token in (
+                "entry.method_refs.len() != entry.method_schemes.len()",
+                "impl_owner_ref_provider(owner), provider",
+                "impl owner: typed owner/method closure drifted")):
+        errors.append("U1c0 final owner exact closure is incomplete")
+    for retired in (
+            "ImplOwnerState", "ProvisionalPrelude",
+            "finalize_provisional_impl_owner", "find_impl_by_origin"):
+        if retired in env_source:
+            errors.append(f"U1c0 retired provisional authority returned: {retired}")
+
+    register_source = sources.get("register", "")
+    for token in (
+        "fn freeze_source_impl_predicates",
+        "BoundShapeContext::ImplMethodBound",
+        "BoundShapeContext::ProtocolImplBound",
+        "fn collect_supertraits_dfs",
+        "impl_owner_fn_bounds",
+    ):
+        if token not in register_source:
+            errors.append(f"U1c0 registration missing {token!r}")
+    super_body, super_error = extract_ring_function_body(
+        register_source, "collect_all_supertraits")
+    if super_error:
+        errors.append(super_error)
+    elif super_body is not None and "let mut stack: List<Str>" in super_body:
+        errors.append("U1c0 supertrait closure still uses LIFO authority")
+    if "ctx, mtps, BoundShapeContext::ImplMethodBound, method_span" not in register_source:
+        errors.append("U1c0 impl method bound gate is not attached to method registration")
+    canonical_body, canonical_error = extract_ring_function_body(
+        register_source, "register_impl_canonical")
+    if canonical_error:
+        errors.append(canonical_error)
+    elif canonical_body is not None and not all(token in canonical_body for token in (
+            "let tv = ctx.env.fresh_var()",
+            "provider_ref: some(provider_ref)",
+            "owner_ref: some(owner_ref)",
+            "add_impl(ctx.env.trait_reg, owner_entry)")):
+        errors.append("U1c0 source impl does not publish one exact final owner")
+    for retired in (
+            "find_impl_by_origin(", "finalize_provisional_impl_owner(",
+            "ImplOwnerState::ProvisionalPrelude"):
+        if retired in register_source:
+            errors.append(f"U1c0 registration retained provisional route {retired!r}")
+    for function_name in (
+        "register_fn_common",
+        "register_effect",
+        "register_type_alias",
+        "register_effect_alias",
+    ):
+        body, error = extract_ring_function_body(register_source, function_name)
+        if error:
+            errors.append(error)
+        elif body is not None and "validate_type_param_bound_shapes(" not in body:
+            errors.append(f"U1c0 {function_name} bypasses TypeBound shape validation")
+    for token in (
+        "protocol lowering does not yet consume",
+        "protocol lowering has not consumed nested impl predicates",
+    ):
+        if token not in register_source:
+            errors.append(f"U1c0 protocol fail-loud wording missing {token!r}")
+
+    builtins = sources.get("builtins", "")
+    for retired in (
+            "<std-predecl>", "ImplOwnerState", "ProvisionalPrelude",
+            "seed_std_hof_owners", "seed_std_hof_owner",
+            "require_std_hof_seed"):
+        if retired in builtins:
+            errors.append(f"U1c0 provisional builtin authority returned: {retired}")
+    install_builtin_body, install_builtin_error = extract_ring_function_body(
+        builtins, "install_builtin_method_owner")
+    if install_builtin_error:
+        errors.append(install_builtin_error)
+    elif install_builtin_body is not None and not all(
+            token in install_builtin_body for token in (
+                "method_schemes: map_clone(cores)",
+                "method_refs: method_refs",
+                "method_intrinsics: map_clone(method_intrinsics)",
+                "provider_ref: some(provider_ref)",
+                "owner_ref: some(owner_ref)")):
+        errors.append("U1c0 builtin owner exact closure is incomplete")
+    register_hof_body, register_hof_error = extract_ring_function_body(
+        builtins, "register_hof_intrinsics")
+    if register_hof_error:
+        errors.append(register_hof_error)
+    elif register_hof_body is not None:
+        if register_hof_body.count("register_option_hof(env, sink)") != 1:
+            errors.append("U1c0 normal HOF registration lost exact Option builtin")
+        for forbidden_call in (
+            "register_list_hof(", "register_map_hof(", "register_set_hof("):
+            if forbidden_call in register_hof_body:
+                errors.append("U1c0 normal path publishes std HOF method cores")
+    fallback_body, fallback_error = extract_ring_function_body(
+        builtins, "finalize_std_hof_fallbacks")
+    if fallback_error:
+        errors.append(fallback_error)
+    elif fallback_body is not None and not all(token in fallback_body for token in (
+        "register_list_hof(env, sink)",
+        "register_map_hof(env, sink)",
+        "register_set_hof(env, sink)",
+    )):
+        errors.append("U1c0 no-std fallback does not finalize all std HOF owners")
+    for function_name in (
+        "register_list_hof", "register_map_hof", "register_set_hof"):
+        body, error = extract_ring_function_body(builtins, function_name)
+        if error:
+            errors.append(error)
+        elif body is not None and not all(token in body for token in (
+                "env.fresh_var_id()", "install_builtin_method_owner(")):
+            errors.append(
+                f"U1c0 {function_name} does not mint one independent final owner")
+        elif function_name == "register_list_hof" and body is not None and (
+                "let t_id = env.fresh_var_id()" not in body):
+            errors.append("U1c0 List fallback lost its exact fresh owner variable")
+
+    ctx_source = sources.get("ctx", "")
+    for token in (
+        "ImplOwnerEvidenceSource",
+        "resolve_impl_owner_evidence",
+        "resolve_or_defer_dicts_from_impl_owner",
+        "impl_predicate_constraints_satisfied",
+    ):
+        if token not in ctx_source:
+            errors.append(f"U1c0 evidence consumer missing {token!r}")
+    if "source: PendingEvidenceSource::ImplOwnerEvidenceSource {" not in ctx_source:
+        errors.append("U1c0 pending obligation does not retain the exact owner")
+
+    helpers = sources.get("helpers", "")
+    if "ctx.env.trait_reg.method_index.get(type_name)" not in helpers or (
+        "let owner_ref = impl_method_ref_owner(method_ref)" not in helpers or
+        "find_impl_by_provider(" not in helpers
+    ):
+        errors.append("U1c0 method lookup does not follow the exact owner index")
+    infer_source = sources.get("infer", "")
+    if "resolve_or_defer_dicts_from_impl_owner(" not in infer_source:
+        errors.append("U1c0 method call does not consume owner predicates")
+    decl_source = sources.get("decl", "")
+    if "let impl_bounds = impl_owner_fn_bounds(impl_owner)" not in decl_source:
+        errors.append("U1c0 impl checking reconstructs predicates from AST")
+    derive_source = sources.get("derive", "")
+    if "struct DerivedPredicatePlan" not in derive_source or (
+        "freeze_impl_predicate_set(" not in derive_source
+    ):
+        errors.append("U1c0 derive does not freeze its transient plan")
+    exports_source = sources.get("exports", "")
+    if "pub impl_methods:" in exports_source or "source.impl_methods" in exports_source:
+        errors.append("U1c0 exports retain a flat method scheme copy")
+    checker_source = sources.get("checker", "")
+    owner_add = checker_source.find("add_impl(ctx.env.trait_reg, impl_)")
+    index_install = checker_source.find("install_method_core(", owner_add)
+    if owner_add < 0 or index_install < 0 or owner_add > index_install:
+        errors.append("U1c0 hydration does not install owners before indexes")
+    if "assert_no_provisional_impl_owners" in checker_source:
+        errors.append("U1c0 checker retained provisional close authority")
+    load_prelude_body, load_prelude_error = extract_ring_function_body(
+        checker_source, "load_prelude")
+    if load_prelude_error:
+        errors.append(load_prelude_error)
+    elif load_prelude_body is not None:
+        if load_prelude_body.count("finalize_std_hof_fallbacks(") != 1:
+            errors.append("U1c0 no-std fallback branch is not unique")
+        fallback_at = load_prelude_body.find("none => {")
+        finalize_at = load_prelude_body.find("finalize_std_hof_fallbacks(")
+        if fallback_at < 0 or finalize_at < fallback_at:
+            errors.append("U1c0 std-present path can reach late HOF fallback")
+    return errors
+
+
+F2_U1C0_SOURCE_CONTRACT_MUTATIONS = (
+    ("env", "pub predicates: FrozenImplPredicateSet", "pub predicates: List<TypedImplPredicate>"),
+    ("env", "pub method_schemes: Map<Str, ImplMethodSchemeCore>", "pub method_schemes: Map<Str, TypeScheme>"),
+    ("env", "scheme.bounds.len() != 0", "false"),
+    ("env", "panic(\"impl predicate: duplicate owner predicate\")", "{}"),
+    ("register", "ctx, mtps, BoundShapeContext::ImplMethodBound, method_span", "ctx, mtps, BoundShapeContext::OrdinaryBound, method_span"),
+    ("register", "BoundShapeContext::ProtocolImplBound", "BoundShapeContext::ImplOwnerBound"),
+    ("register", "provider_ref: some(provider_ref),\n            trait_ref: resolved_trait_ref,\n            owner_ref: some(owner_ref)", "provider_ref: none,\n            trait_ref: resolved_trait_ref,\n            owner_ref: some(owner_ref)"),
+    ("decl", "let impl_bounds = impl_owner_fn_bounds(impl_owner)", "let impl_bounds: List<FnBoundsEntry> = []"),
+    ("env", "entry.method_refs.len() != entry.method_schemes.len()", "false"),
+    ("env", "impl_owner_ref_provider(owner), provider", "provider, provider"),
+    ("builtins", "method_intrinsics: map_clone(method_intrinsics),\n        provider_ref: some(provider_ref)", "method_intrinsics: map_clone(method_intrinsics),\n        provider_ref: none"),
+    ("builtins", "trait_ref: trait_ref,\n        owner_ref: some(owner_ref)", "trait_ref: trait_ref,\n        owner_ref: none"),
+    ("builtins", "method_schemes: map_clone(cores),\n        method_refs: method_refs,\n        method_intrinsics: map_clone(method_intrinsics)", "method_schemes: map_clone(cores),\n        method_refs: map_new(),\n        method_intrinsics: map_clone(method_intrinsics)"),
+    ("builtins", "pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {", "pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {\n    register_list_hof(env, sink)"),
+    ("builtins", "register_option_hof(env, sink)", "register_list_hof(env, sink)"),
+    ("builtins", "register_list_hof(env, sink)\n", "{}\n"),
+    ("builtins", "register_map_hof(env, sink)\n", "{}\n"),
+    ("builtins", "register_set_hof(env, sink)\n", "{}\n"),
+    ("builtins", "fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {\n    let mut methods: Map<Str, TypeScheme> = map_new()\n    // map: (List<T>, (T) -> U / e) -> List<U> / e\n    let t_id = env.fresh_var_id()", "fn register_list_hof(mut env: TypeEnv, sink: CollectingSink) {\n    let mut methods: Map<Str, TypeScheme> = map_new()\n    // map: (List<T>, (T) -> U / e) -> List<U> / e\n    let t_id = 0"),
+    ("checker", "finalize_std_hof_fallbacks(ctx.env, ctx.sink)", "{}"),
+    ("checker", "some(std_dir) => {", "some(std_dir) => {\n            finalize_std_hof_fallbacks(ctx.env, ctx.sink)"),
+    ("register", "span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool\n) {\n    {}"),
+    ("register", "ops: List<EffectOpDecl>, span: Span, decl_index: Int\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "ops: List<EffectOpDecl>, span: Span, decl_index: Int\n) {\n    {}"),
+    ("register", "type_expr: TypeExpr, span: Span\n) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "type_expr: TypeExpr, span: Span\n) {\n    {}"),
+    ("register", "fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, span: Span) {\n    validate_type_param_bound_shapes(\n        ctx, type_params, BoundShapeContext::OrdinaryBound, span)", "fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, span: Span) {\n    {}"),
+    ("register", "that protocol lowering does not yet consume", "that exact dictionary evidence cannot preserve"),
+    ("register", "protocol lowering has not consumed nested impl predicates", "nested impl predicates are not yet representable in ImplEntry"),
+    ("ctx", "source: PendingEvidenceSource::ImplOwnerEvidenceSource {", "source: PendingEvidenceSource::SchemeEvidenceSource("),
+    ("helpers", "ctx.env.trait_reg.method_index.get(type_name)", "ctx.env.trait_reg.impl_methods.get(type_name)"),
+    ("infer", "resolve_or_defer_dicts_from_impl_owner(", "resolve_or_defer_dicts_from_scheme("),
+    ("derive", "freeze_impl_predicate_set(", "empty_frozen_impl_predicate_set("),
+    ("exports", "pub trait_impls: List<ImplEntry>,", "pub trait_impls: List<ImplEntry>,\n    pub impl_methods: Map<Str, Map<Str, TypeScheme>>,"),
+    ("checker", "add_impl(ctx.env.trait_reg, impl_)", "{}"),
+    ("env", "pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {\n    validate_impl_entry(reg, entry)", "pub fn add_impl(mut reg: TraitRegistry, entry: ImplEntry) {\n    {}"),
+)
+
+
+def impl_predicate_u1c0_source_errors() -> List[str]:
+    errors: List[str] = []
+    sources: dict[str, str] = {}
+    for name, path in F2_U1C0_PATHS.items():
+        try:
+            sources[name] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"cannot read {display_path(path)}: {exc}")
+    if errors:
+        return errors
+    errors.extend(llm_warning_document_sequence_probe_errors())
+    errors.extend(impl_predicate_u1c0_contract_errors(sources))
+    errors.extend(impl_export_closure_contract_errors(sources))
+    errors.extend(impl_export_closure_mutation_errors(sources))
+    killed = 0
+    for source_name, old, new in F2_U1C0_SOURCE_CONTRACT_MUTATIONS:
+        source = sources[source_name]
+        if source.count(old) != 1:
+            errors.append(
+                f"U1c0 mutation anchor {source_name}:{old!r} count was "
+                f"{source.count(old)}")
+            continue
+        mutated = dict(sources)
+        mutated[source_name] = source.replace(old, new, 1)
+        findings = impl_predicate_u1c0_contract_errors(mutated)
+        if not findings:
+            errors.append(f"U1c0 source mutation escaped: {source_name}:{old!r}")
+        else:
+            killed += 1
+    if killed != F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT:
+        errors.append(
+            f"U1c0 killed {killed} mutations, expected "
+            f"{F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT}")
+    return errors
+
+
+def impl_predicate_u1c0_source_check_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe)
+    before = _sha256_file(compiler)
+    environment = dict(_controlled_environment(ring_exe))
+    for source_path in (
+        F2_U1C0_PATHS["env"], F2_U1C0_PATHS["builtins"],
+        F2_U1C0_PATHS["hir"], F2_U1C0_PATHS["checker"],
+        F2_U1C0_PATHS["exports"],
+    ):
+        timeout_seconds = (
+            600 if source_path == F2_U1C0_PATHS["checker"] else 120)
+        expected_warnings: Optional[Sequence[Mapping[str, Any]]] = None
+        if source_path == F2_U1C0_PATHS["checker"]:
+            expected_warnings = F2_U1C0_CHECKER_WARNINGS
+        elif source_path == F2_U1C0_PATHS["exports"]:
+            expected_warnings = F2_U1C0_EXPORTS_WARNINGS
+        error = _f1_run_ring_check(
+            ring_exe, source_path, environment, timeout_seconds,
+            expected_warnings)
+        if error:
+            errors.append(error)
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across F2 U1c0 checks")
+    return errors
+
+
+def impl_predicate_u1c0_no_std_errors(ring_exe: str) -> List[str]:
+    errors: List[str] = []
+    compiler = Path(ring_exe).resolve(strict=True)
+    before = _sha256_file(compiler)
+    fixture = CASES_DIR / "no_std_hof_fallback.ring"
+    environment = dict(_controlled_environment(str(compiler)))
+    with tempfile.TemporaryDirectory(prefix="ring_u1c0_no_std_") as temp:
+        cwd = Path(temp).resolve(strict=True)
+        if (cwd / "std").exists() or (cwd.parent / "std").exists():
+            return ["U1c0 no-std check root unexpectedly contains std"]
+        completed = subprocess.run(
+            [str(compiler), "check", str(fixture)],
+            cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="strict",
+            check=False, timeout=120)
+        if completed.returncode != 0:
+            errors.append(
+                f"U1c0 no-std HOF fallback failed: exit={completed.returncode} "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+        elif completed.stdout != "OK\n" or completed.stderr:
+            errors.append(
+                f"U1c0 no-std HOF fallback output drifted: "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
+    if _sha256_file(compiler) != before:
+        errors.append("pinned Ring compiler changed across U1c0 no-std check")
+    return errors
+
+
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
+        "ast": REPO / "compiler" / "ast.ring",
+        "parser": REPO / "compiler" / "parser.ring",
+        "env": REPO / "compiler" / "env.ring",
+        "types": REPO / "compiler" / "types.ring",
+        "inventory": REPO / "compiler" / "ir_inventory.ring",
+        "identity": REPO / "compiler" / "ir_identity.ring",
+        "builtins": REPO / "compiler" / "builtins.ring",
         "hir": REPO / "compiler" / "hir.ring",
         "infer": REPO / "compiler" / "infer.ring",
         "infer_decl": REPO / "compiler" / "infer_decl.ring",
+        "andor": REPO / "compiler" / "andor_lower.ring",
         "checker": REPO / "compiler" / "checker.ring",
         "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
         "infer_helpers": REPO / "compiler" / "infer_helpers.ring",
         "zonk": REPO / "compiler" / "zonk.ring",
         "derive": REPO / "compiler" / "derive.ring",
         "dict": REPO / "compiler" / "dict_lower.ring",
-        "perceus": REPO / "compiler" / "perceus.ring",
         "cctx": REPO / "compiler" / "codegen_c_ctx.ring",
         "cgen": REPO / "compiler" / "codegen_c.ring",
         "cexpr": REPO / "compiler" / "codegen_c_expr.ring",
         "cli": REPO / "compiler" / "cli.ring",
         "runner": REPO / "tests" / "run_tests.py",
-        "verify": REPO / "compiler" / "verify_rc.ring",
         "provenance_fixture": (
             REPO / "tests" / "cases" / "provenance_b_capture_identity.ring"
         ),
@@ -6648,9 +12565,32 @@ def identity_checkpoint_source_errors() -> List[str]:
     errors.extend(identity_stdout_canonicalization_errors())
 
     mutations = (
-        ("Drop DefId", "hir", "Drop { name: Str, def_id: Int, ty: Type, span: Span }",
-         "Drop { name: Str, ty: Type, span: Span }"),
-        ("default freshening", "infer", "freshen_default_argument_hir(ctx, dh)", "dh"),
+        ("Drop DefId", "hir",
+         "Drop { name: Str, def_id: Int, slot: SlotRef, site: HResourceSite,",
+         "Drop { name: Str, slot: SlotRef, site: HResourceSite,"),
+        ("Take exact source slot", "hir",
+         "Take { source: HExpr, source_slot: SlotRef, saved_slot: SlotRef?,",
+         "Take { source: HExpr, saved_slot: SlotRef?,"),
+        ("HDecl exact executable", "hir",
+         "Fn { name: Str, def_id: Int?, executable_ref: ExecutableRef,",
+         "Fn { name: Str, def_id: Int?,"),
+        ("builtin value site census", "identity",
+         "pub const BUILTIN_VALUE_SITE_COUNT: Int = 10",
+         "pub const BUILTIN_VALUE_SITE_COUNT: Int = 9"),
+        ("builtin value fixed relation", "builtins",
+         '"ptr_copy", builtin_value_site_from_tag(BUILTIN_VALUE_PTR_COPY)',
+         '"ptr_copy", builtin_value_site_from_tag(BUILTIN_VALUE_DEALLOC)'),
+        ("checker builtin SymbolRef relation", "checker",
+         "checker_builtin_value_symbol(builtin)",
+         "value_symbol_ref(ctx, 0)"),
+        ("typed callee carrier", "hir", "callee_ref: CalleeRef?",
+         "callee_ref: Str?"),
+        ("resolver value SymbolRef census", "infer_ctx",
+         "for binding in plan.bindings {\n        match binding.namespace {",
+         "for binding in [] {\n        match binding.namespace {"),
+        ("local callee exact module", "infer",
+         "current_identity_file_key(ctx),\n                        slot_domain_lexical(), def_id",
+         '"forged",\n                        slot_domain_lexical(), def_id'),
         ("assignment exact slot", "cexpr", "c_exact_value_slot(ctx, name, exact_def_id)",
          "ctx.named_values.get(name)"),
         ("exact local closure call", "cexpr",
@@ -6665,16 +12605,17 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("dict receiver atomic domain guard", "cexpr",
          'domain != "name-only" && domain != "static" && domain != "computed"',
          "false"),
-        ("effect receiver atomic domain guard", "cexpr",
-         'domain != "name-only" && domain != "default-evidence" &&',
-         "false &&"),
+        ("system host call carrier", "hir",
+         "system_host: SystemHostCallableRef?",
+         "system_host: Str?"),
         ("dict receiver ledger domain guard", "cctx",
          'event.domain != "name-only" && event.domain != "static" &&',
          "false &&"),
-        ("effect receiver ledger domain guard", "cctx",
-         'event.domain != "name-only" &&\n'
-         '           event.domain != "default-evidence" &&',
-         "false &&\n           false &&"),
+        ("system host producer", "infer",
+         "system_effects.get(0).unwrap(),\n"
+         "        make_named_executable_ref(callee_ref_named_symbol(callee_ref))",
+         "system_effects.last().unwrap(),\n"
+         "        make_named_executable_ref(callee_ref_named_symbol(callee_ref))"),
         ("capture edge environment", "cctx",
          "store.dest_slot != edge.source_slot",
          "store.dest_slot == edge.source_slot"),
@@ -6714,8 +12655,8 @@ def identity_checkpoint_source_errors() -> List[str]:
          "ValueBindingKind::ExternCallable =>\n"
          "                            mark_zonk_direct_callee(ident)",
          "ValueBindingKind::ExternCallable => ident"),
-        ("constructor exact marker", "zonk",
-         "has_variant_ctor_origin_def_id(resolver, id)",
+        ("constructor exact target", "infer_helpers",
+         "exact_variant_constructor_target(ctx, def_id).is_some()",
          "false"),
         ("LocalBorrow marker clearing", "zonk",
          "..ident, dict_closure_dicts: none",
@@ -6723,24 +12664,18 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("ConstGetter direct marker", "infer_helpers",
          "dict_closure_dicts: some([]), ty: getter_ty",
          "dict_closure_dicts: none, ty: getter_ty"),
-        ("ANF marked direct preservation", "perceus",
-         "if is_exact_direct_call_ident(normalized) {\n"
-         "        return normalized\n"
-         "    }",
-         "if is_exact_direct_call_ident(normalized) {\n"
-         "        return anf_materialize(normalized, hoists, counter)\n"
-         "    }"),
+        ("dict CalleeRef transport", "dict",
+         "callee_ref: callee_ref,\n                method_ref: dl_method_call_ref",
+         "callee_ref: none,\n                method_ref: dl_method_call_ref"),
+        ("andor CalleeRef transport", "andor",
+         "resolved_dicts: resolved_dicts, callee_ref: callee_ref,",
+         "resolved_dicts: resolved_dicts, callee_ref: none,"),
+        ("zonk CalleeRef transport", "zonk",
+         "callee_ref: callee_ref,\n                method_ref: zonk_method_call_ref",
+         "callee_ref: none,\n                method_ref: zonk_method_call_ref"),
         ("direct predicate exact marker shape", "hir",
          "def_id: some(_), dict_closure_dicts: some(_), ..",
          ".."),
-        ("verifier direct Call context guard", "verify",
-         "if is_exact_direct_call_ident(callee) {",
-         "if false {"),
-        ("verifier direct marker local-slot guard", "verify",
-         "if v_lookup(ctx, direct_def_id) >= 0 {\n"
-         "                    panic(\"RC verifier direct-call marker DefId ${direct_def_id} is local/captured\")\n"
-         "                }",
-         "if false {}"),
         ("exact callee miss panic", "cexpr",
          "none => panic(\n"
          "                    \"C codegen: exact local callee '${name}' DefId ${id} has no slot\")",
@@ -6785,12 +12720,9 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("Wrapped dictionary capture census", "cexpr",
          "DictRef::Wrapped { inner_dicts, .. }",
          "DictRef::Wrapped { dict, inner_dicts, .. }"),
-        ("bound DictDispatchInfo tag", "infer",
-         "dict_ref: DictRef::Simple(trait_bound_param_name(",
-         "dict_ref: DictRef::Static(trait_bound_param_name("),
-        ("delegated DictDispatchInfo tag", "infer_decl",
-         "dict_ref: DictRef::Static(dict_name)",
-         "dict_ref: DictRef::Simple(dict_name)"),
+        ("bound method evidence tag", "infer",
+         "bound_evidence = some(DictRef::Simple(",
+         "bound_evidence = some(DictRef::Static("),
         ("FieldAction bound base tag", "derive",
          "base_dict: DictRef::Simple(\n"
          "                    trait_bound_param_name(param_name, trait_name))",
@@ -6921,18 +12853,10 @@ def identity_checkpoint_source_errors() -> List[str]:
          "    if false:\n"
          "        return errors, \"source/mutation authority failed; "
          "candidate not evaluated\""),
-        ("verifier exact lookup", "verify", "ctx.def_ids[i] == def_id",
-         "ctx.names[i] == name"),
         ("or-pattern shared slot", "cexpr", "bind_c_root_pattern_after_success(",
          "bind_c_nested_pattern("),
-        ("effect default HParam identity", "infer_decl", "def_id: some(effect_param_def_id)",
+        ("trait method HParam identity", "infer_decl", "def_id: some(trait_param_def_id)",
          "def_id: none"),
-        ("effect default body identity", "infer_decl", "def_id: some(exact_effect_def_id)",
-         "def_id: some(ctx.env.fresh_def_id())"),
-        ("trait default HParam identity", "infer_decl", "def_id: some(trait_param_def_id)",
-         "def_id: none"),
-        ("trait default body identity", "infer_decl", "def_id: some(exact_trait_def_id)",
-         "def_id: some(ctx.env.fresh_def_id())"),
         ("function registration DefId authority", "infer_decl",
          "let fn_def_id = match registration_scheme {\n"
          "        some(scheme) => scheme.def_id,\n"
@@ -6972,14 +12896,6 @@ def identity_checkpoint_source_errors() -> List[str]:
          "        HStmt::Var { name, def_id, init, .. } =>\n"
          "            validate_hir_local_binding(\n"
          "                name, def_id, init, seen, scope)"),
-        ("default traversal crossing arm split", "infer",
-         "HExpr::ListLit { elements, .. } =>\n"
-         "            collect_default_expr_value_binders(ctx, elements, remap),\n"
-         "        HExpr::TupleLit { elements, .. } =>\n"
-         "            collect_default_expr_value_binders(ctx, elements, remap)",
-         "HExpr::ListLit { elements, .. } |\n"
-         "        HExpr::TupleLit { elements, .. } =>\n"
-         "            collect_default_expr_value_binders(ctx, elements, remap)"),
     )
     for label, source_name, anchor, replacement in mutations:
         if sources[source_name].count(anchor) < 1:
@@ -6992,93 +12908,347 @@ def identity_checkpoint_source_errors() -> List[str]:
     return errors
 
 
-IDENTITY_CANDIDATE_RC_FIXTURES = (
-    "tests/cases/provenance_b_capture_identity.ring",
-    "tests/cases/local_closure_exact_call.ring",
-    "tests/cases/drop_nullary_variant_ctor_repeat.ring",
-    "tests/cases/golden/generic_extern_fn_value_bound.ring",
-)
-
-
-def identity_candidate_verify_rc_errors(
-    ring_exe: str, evidence_root: Path, evidence_log: List[str],
+def preacceptance_source_contract_errors(
+    sources: Mapping[str, str],
 ) -> List[str]:
+    """Cheap A1 receipt-atomicity and Core-to-Flow temp authority guard."""
     errors: List[str] = []
-    environment = dict(_controlled_environment(ring_exe))
-    try:
-        parent = identity_candidate_case_root(evidence_root, "verify-rc")
-    except RuntimeError as exc:
-        return [str(exc)]
-    for index, fixture in enumerate(IDENTITY_CANDIDATE_RC_FIXTURES):
-        evidence_dir = parent / f"case-{index}"
-        try:
-            evidence_dir.mkdir(parents=False, exist_ok=False)
-        except OSError as exc:
-            errors.append(
-                f"cannot create verify-rc evidence root {evidence_dir}: {exc}")
-            return errors
-        argv = (
-            str(Path(ring_exe).resolve()), "check",
-            str((REPO / fixture).resolve()), "--verify-rc",
-        )
-        spec = OneShotSpec(
-            evidence_dir=evidence_dir.resolve(),
-            gate_id=f"identity-verify-rc-{index}",
-            argv=argv,
-            reviewed_argv=argv,
-            cwd=REPO.resolve(),
-            env=environment,
-            reviewed_env=tuple(sorted(environment.items())),
-            limits=OneShotLimits(
-                wall_seconds=60,
-                stdout_cap_bytes=1024 * 1024,
-                stderr_cap_bytes=1024 * 1024,
-                job_memory_bytes=(
-                    12 * 1024 * 1024 * 1024 if os.name == "nt" else None),
-                active_process_limit=(5 if os.name == "nt" else None),
-            ),
-        )
-        verdict: Optional[dict[str, Any]] = None
-        wrapper_error: Optional[str] = None
-        try:
-            verdict = run_one_shot(spec)
-        except Exception as exc:
-            wrapper_error = str(exc)
-        audit = audit_one_shot_attempt(evidence_dir)
-        archive_path = evidence_root / f"verify-rc-{index}.tar"
-        archive_error: Optional[str] = None
-        try:
-            create_one_shot_archive(evidence_dir, archive_path)
-            archive_hash = _sha256_file(archive_path)
-        except Exception as exc:
-            archive_error = str(exc)
-            archive_hash = "unavailable"
-        archive_detail = (
-            f"sha256={archive_hash}" if archive_error is None
-            else f"error={archive_error}")
-        evidence_log.append(
-            f"verify-rc-{index}:raw={evidence_dir};audit={audit['state']}/"
-            f"{audit['status']};archive={archive_path};{archive_detail}")
-        if wrapper_error is not None:
-            errors.append(
-                f"candidate verify-rc wrapper failed for {fixture}: "
-                f"{wrapper_error}; raw={evidence_dir}; archive={archive_path}; "
-                f"{archive_detail}")
+    specs = (
+        ("transaction", "infer_decl", "infer_and_commit_value_draft_group", (
+            "begin_infer_mutation_journal(ctx)",
+            "preflight_value_draft_group(ctx, prepared)",
+            "let declarations = commit_value_draft_group(ctx, prepared)",
+            "commit_infer_mutation_journal(ctx, mutation_checkpoint)",
+            "rollback_infer_mutation_journal(ctx, mutation_checkpoint)",
+        )),
+        ("impl-transaction", "infer_decl", "infer_and_commit_impl_draft_group", (
+            "begin_infer_mutation_journal(ctx)",
+            "preflight_impl_draft_group(",
+            "let declarations = commit_impl_draft_group(",
+            "commit_infer_mutation_journal(ctx, mutation_checkpoint)",
+            "rollback_infer_mutation_journal(ctx, mutation_checkpoint)",
+        )),
+        ("prepare", "infer_decl", "prepare_fn_draft_group", (
+            "preflight_owner_batches(ctx, batches)",)),
+        ("publish", "infer_ctx", "publish_owner_batches", (
+            "preflight_owner_batches(ctx, batches)",
+            "publish_effect_fact_batches(ctx.env, facts)")),
+        ("projection", "infer_ctx", "project_owner_batch_receipts", (
+            "headers, pending.target",
+            "pending.receipt.source_to_actual.get(source)",
+            "for projection in finalized",
+            "batch.pending_projections = []")),
+        ("call", "infer", "infer_call", (
+            "false, callee_receipts", "if callee_receipts.len() != 1",
+            "let receipt = callee_receipt.unwrap_or_else",
+            "metadata.live_scheme, receipt, s, span")),
+        ("assoc", "infer", "for_protocol_assoc_type", (
+            "instantiate_assoc_type_from_callable_receipt(\n"
+            "        receipt, localized_assoc, subst)",)),
+        ("admin-site", "flow", "admin_site", (
+            'path.push("$flow")', "path.push(label)", "path.push(ordinal.to_str())",
+            "make_path_ref(executable_path_owner(ctx.owner), path, role)")),
+        ("admin-slot", "flow", "new_admin_slot", (
+            "admin_site(ctx, label, ctx.slots.len(), role_tag)",
+            "make_synthetic_slot_ref(site)",
+            "reference, ctx.owner, kind, site",
+            "scope_slot_count(ctx, scope)")),
+        ("manifest", "inventory", "make_binder_manifest", (
+            "if slot_ref_same(left.slot, right.slot)",)),
+    )
+    bodies: Dict[str, str] = {}
+    for key, source_name, function_name, tokens in specs:
+        body, error = extract_ring_function_body(sources[source_name], function_name)
+        if error:
+            errors.append(error)
             continue
-        assert verdict is not None
-        if verdict["status"] != "success":
+        assert body is not None
+        bodies[key] = body
+        if any(token not in body for token in tokens):
+            errors.append(f"preacceptance {key} contract drifted")
+    transaction = bodies.get("transaction", "")
+    if not (
+        transaction.find("preflight_value_draft_group(ctx, prepared)")
+        < transaction.find("let declarations = commit_value_draft_group(ctx, prepared)")
+        < transaction.find("commit_infer_mutation_journal(ctx, mutation_checkpoint)")
+    ):
+        errors.append("A1 group publish order drifted")
+    impl_transaction = bodies.get("impl-transaction", "")
+    if not (
+        impl_transaction.find("preflight_impl_draft_group(")
+        < impl_transaction.find("let declarations = commit_impl_draft_group(")
+        < impl_transaction.find(
+            "commit_infer_mutation_journal(ctx, mutation_checkpoint)")
+    ):
+        errors.append("A1 impl group publish order drifted")
+    publish = bodies.get("publish", "")
+    if publish.find("preflight_owner_batches(ctx, batches)") > publish.find(
+            "publish_effect_fact_batches(ctx.env, facts)"):
+        errors.append("A1 owner facts publish before group preflight")
+    if (
+        "pub struct CallableInstantiationReceipt {\n"
+        "    ty: Type,\n    source_to_actual: Map<Int, Type>," not in
+        sources["infer_ctx"]
+        or "source: PendingEvidenceSource,\n"
+        "    receipt: CallableInstantiationReceipt,\n"
+        "    fn_bounds: List<FnBoundsEntry>," not in sources["infer_ctx"]
+    ):
+        errors.append("A1 unique CallableInstantiationReceipt carrier drifted")
+    core = mask_ring_strings_and_comments(sources["core"])
+    for kind in ("pre_anf", "scope_result", "control_result", "assign_temp"):
+        if f"binder_kind_{kind}()" in core:
+            errors.append(f"Core prebuilt Flow administrative temp {kind}")
+    return errors
+
+OWNERSHIP_CUTOVER_PATHS = {
+    "checker": REPO / "compiler" / "checker.ring",
+    "cli": REPO / "compiler" / "cli.ring",
+    "project": REPO / "compiler" / "compiler_mod.ring",
+    "pipeline": REPO / "compiler" / "ownership_pipeline.ring",
+    "hir_exact": REPO / "compiler" / "hir_exact.ring",
+    "infer": REPO / "compiler" / "infer.ring",
+    "infer_decl": REPO / "compiler" / "infer_decl.ring",
+    "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
+    "core": REPO / "compiler" / "core_from_hir.ring",
+    "flow": REPO / "compiler" / "flow_lower.ring",
+    "inventory": REPO / "compiler" / "ir_inventory.ring",
+}
+
+
+def ownership_cutover_source_errors() -> List[str]:
+    sources: dict[str, str] = {}
+    errors: List[str] = []
+    for label, path in OWNERSHIP_CUTOVER_PATHS.items():
+        try:
+            sources[label] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"cannot read {display_path(path)}: {exc}")
+    if errors:
+        return errors
+
+    for label in ("cli", "project"):
+        masked = mask_ring_strings_and_comments(sources[label])
+        if re.search(r"(?m)^\s*use\s+perceus\b", masked):
+            errors.append(f"{label}: direct Perceus import survived Core cutover")
+        if re.search(r"\bperceus_transform\s*\(", masked):
+            errors.append(f"{label}: direct Perceus call survived Core cutover")
+
+    error_result, error_result_error = extract_ring_function_body(
+        sources["checker"], "failed_check_result")
+    if error_result_error:
+        errors.append(error_result_error)
+    elif not all(token in error_result for token in (
+            "core_facts: none", "legacy_facts: none")):
+        errors.append("checker: diagnostic result published frozen facts")
+
+    for function_name in ("check", "check_module"):
+        body, body_error = extract_ring_function_body(
+            sources["checker"], function_name)
+        if body_error:
+            errors.append(body_error)
+            continue
+        required = (
+            "let frozen = if has_errors { none } else { some(",
+            "freeze_core_and_legacy_facts(",
+            "ctx.core_module_key, ctx.core_module_order,",
+            "checked_program, ctx.env,",
+            "core_facts: frozen.map(",
+            "frozen_core_and_legacy_core(value)",
+            "legacy_facts: frozen.map(",
+            "frozen_core_and_legacy_legacy(value)",
+        )
+        for token in required:
+            if token not in body:
+                errors.append(
+                    f"checker.{function_name}: cutover relation misses {token!r}")
+        for retired in (
+                "ctx.core_recorder", "ctx.core_type_sources",
+                "ctx.core_handled_evidence_type_sources"):
+            if retired in body:
+                errors.append(
+                    f"checker.{function_name}: retired freeze input {retired!r} survived")
+
+    def require_order(
+        label: str, body: str, tokens: Tuple[str, ...],
+    ) -> None:
+        positions = [body.find(token) for token in tokens]
+        if any(position < 0 for position in positions):
+            errors.append(f"{label}: ownership stage census is incomplete")
+        elif positions != sorted(positions) or len(set(positions)) != len(positions):
+            errors.append(f"{label}: ownership stage order drifted")
+
+    pipeline, pipeline_error = extract_ring_function_body(
+        sources["pipeline"], "run_ownership_pipeline")
+    if pipeline_error:
+        errors.append(pipeline_error)
+    else:
+        require_order("ownership_pipeline.run_ownership_pipeline", pipeline, (
+            "lower_core_to_flow(validated_core)",
+            "verify_and_plan_resource_program(flow)",
+            "if !planning_outcome_is_verified(planning)",
+            "planning_outcome_verified(planning)",
+        ))
+        for token in (
+                "OwnershipPipelineFailedValue(",
+                "findings: findings, step_map: step_map",
+                "OwnershipPipelineVerifiedValue("):
+            if token not in pipeline:
+                errors.append(
+                    f"ownership pipeline: outcome closure misses {token!r}")
+
+    diagnostic_adapter, diagnostic_adapter_error = extract_ring_function_body(
+        sources["pipeline"], "ownership_pipeline_failure_diagnostics")
+    if diagnostic_adapter_error:
+        errors.append(diagnostic_adapter_error)
+    else:
+        for token in (
+                "failed_ownership_program_core_node_for_finding(",
+                "core_diagnostic_projection_origin_location(",
+                "core_diagnostic_projection_slot_display_label(",
+                "E0801", "use of moved value:"):
+            if token not in diagnostic_adapter:
+                errors.append(
+                    f"ownership diagnostics: exact adapter misses {token!r}")
+
+    single_report, single_report_error = extract_ring_function_body(
+        sources["cli"], "report_single_ownership_failure")
+    if single_report_error:
+        errors.append(single_report_error)
+    elif not all(token in single_report for token in (
+            "ownership_pipeline_failure_diagnostics(",
+            "diagnostic.span.file != file_path", "sink.report(diagnostic)",
+            "failed single-file plan emitted no error")):
+        errors.append("cli: single ownership diagnostic route drifted")
+
+    single_materialize, single_materialize_error = extract_ring_function_body(
+        sources["cli"], "materialize_single_verified_ownership")
+    if single_materialize_error:
+        errors.append(single_materialize_error)
+    else:
+        require_order("cli.materialize_single_verified_ownership",
+                      single_materialize, (
+            "assemble_legacy_projection(",
+            "verified_ownership_program_flow(verified)",
+            "materialize_verified_hir(",
+        ))
+
+    project_run, project_run_error = extract_ring_function_body(
+        sources["project"], "run_project_ownership")
+    if project_run_error:
+        errors.append(project_run_error)
+    else:
+        require_order("compiler_mod.run_project_ownership", project_run, (
+            "assemble_project_core(core_facts)",
+            "run_ownership_pipeline(",
+        ))
+
+    project_report, project_report_error = extract_ring_function_body(
+        sources["project"], "report_project_ownership_failure")
+    if project_report_error:
+        errors.append(project_report_error)
+    elif not all(token in project_report for token in (
+            "ownership_pipeline_failure_diagnostics(",
+            "diagnostic.span.file != module.file_path",
+            "for key in phases.graph.topo_order", "sink.report(diagnostic)",
+            "failed plan emitted no error")):
+        errors.append("compiler_mod: project ownership diagnostic route drifted")
+
+    project, project_error = extract_ring_function_body(
+        sources["project"], "materialize_verified_project_ownership")
+    if project_error:
+        errors.append(project_error)
+    else:
+        require_order("compiler_mod.materialize_verified_project_ownership",
+                      project, (
+            "for key in phases.graph.topo_order",
+            "assemble_legacy_projection(",
+            "verified_ownership_program_flow(verified)",
+            "materialize_verified_project_hir(",
+        ))
+        for token in (
+                "make_verified_project_hir_shell(",
+                "key, phases.module_hirs.get(key)",
+                "materialized_project_hir_module_key(value)",
+                "result.insert(key, materialized_project_hir_program(value))",
+                "result.len() != phases.graph.topo_order.len()"):
+            if token not in project:
+                errors.append(
+                    f"compiler_mod: project shell partition misses {token!r}")
+
+    for function_name in (
+            "compile_project", "compile_project_c", "verify_project_rc"):
+        body, body_error = extract_ring_function_body(
+            sources["project"], function_name)
+        if body_error:
+            errors.append(body_error)
+        elif not all(token in body for token in (
+                "run_project_ownership(phases)",
+                "ownership_pipeline_outcome_is_verified(ownership)",
+                "report_project_ownership_failure(",
+                "materialize_verified_project_ownership(")):
             errors.append(
-                f"candidate verify-rc failed for {fixture}: "
-                f"{verdict['classification']}; raw={evidence_dir}; "
-                f"archive={archive_path}; archive_sha256={archive_hash}")
-        if audit["state"] != "complete" or audit["status"] != "success":
-            errors.append(
-                f"candidate verify-rc audit failed for {fixture}: {audit}; "
-                f"archive={archive_path}; archive_sha256={archive_hash}")
-        if archive_error is not None:
-            errors.append(
-                f"candidate verify-rc archive failed for {fixture}: "
-                f"{archive_error}; raw={evidence_dir}")
+                f"compiler_mod.{function_name}: project ownership outcome path drifted")
+    if "--rc-mutate has no typed ownership-pipeline mutation entry" not in (
+            sources["cli"] + sources["project"]):
+        errors.append("ownership cutover: unsupported mutation did not fail loud")
+
+    guard_errors = preacceptance_source_contract_errors(sources)
+    errors.extend(guard_errors)
+    if not guard_errors:
+        mutations = (
+            ("group-preflight", "infer_decl", "infer_and_commit_value_draft_group",
+             "preflight_value_draft_group(ctx, prepared)", "{}"),
+            ("publish-preflight", "infer_ctx", "publish_owner_batches",
+             "preflight_owner_batches(ctx, batches)", "{}"),
+            ("failure-rollback", "infer_decl", "infer_and_commit_value_draft_group",
+             "rollback_infer_mutation_journal(ctx, mutation_checkpoint)", "{}"),
+            ("impl-preflight", "infer_decl", "infer_and_commit_impl_draft_group",
+             "preflight_impl_draft_group(", "discard_impl_preflight("),
+            ("impl-commit-journal", "infer_decl", "infer_and_commit_impl_draft_group",
+             "commit_infer_mutation_journal(ctx, mutation_checkpoint)", "{}"),
+            ("impl-failure-rollback", "infer_decl", "infer_and_commit_impl_draft_group",
+             "rollback_infer_mutation_journal(ctx, mutation_checkpoint)", "{}"),
+            ("receipt-missing", "infer", "infer_call",
+             "false, callee_receipts", "false, []"),
+            ("receipt-delete", "infer_ctx", None,
+             "runtime_owner: ExecutableRef,\n"
+             "    source: PendingEvidenceSource,\n"
+             "    receipt: CallableInstantiationReceipt,",
+             "runtime_owner: ExecutableRef,\n"
+             "    source: PendingEvidenceSource,"),
+            ("receipt-swap", "infer_ctx", "project_owner_batch_receipts",
+             "headers, pending.target", "headers, headers.first().unwrap().executable"),
+            ("consumer-rebuild", "infer", "for_protocol_assoc_type",
+             "instantiate_assoc_type_from_callable_receipt(\n"
+             "        receipt, localized_assoc, subst)", "localized_assoc"),
+            ("Core-prebuild", "core", "body_anchor",
+             "let mut path = executable_prefix(value)",
+             "let _ = binder_kind_pre_anf()\n    let mut path = executable_prefix(value)"),
+            ("scope-ordinal", "flow", "new_admin_slot",
+             "admin_site(ctx, label, ctx.slots.len(), role_tag)",
+             "admin_site(ctx, label, scope_slot_count(ctx, scope), role_tag)"),
+            ("duplicate-PathRef", "flow", "new_admin_slot",
+             "admin_site(ctx, label, ctx.slots.len(), role_tag)",
+             "admin_site(ctx, label, 0, role_tag)"),
+        )
+        for label, source_name, function_name, anchor, replacement in mutations:
+            mutated = dict(sources)
+            if function_name is None:
+                if sources[source_name].count(anchor) != 1:
+                    errors.append(f"preacceptance mutation anchor drifted: {label}")
+                    continue
+                mutated[source_name] = sources[source_name].replace(
+                    anchor, replacement, 1)
+            else:
+                value, mutation_error = _f0_mutate_function_once(
+                    sources[source_name], function_name, anchor, replacement)
+                if mutation_error:
+                    errors.append(f"preacceptance mutation {label}: {mutation_error}")
+                    continue
+                assert value is not None
+                mutated[source_name] = value
+            if not preacceptance_source_contract_errors(mutated):
+                errors.append(f"preacceptance mutation escaped: {label}")
     return errors
 
 
@@ -7166,12 +13336,8 @@ def identity_checkpoint_errors() -> Tuple[List[str], str]:
             f"{IDENTITY_EVIDENCE_ROOT_ENV}=invalid")
     assert evidence_root is not None
     evidence_log: List[str] = []
-    verify_errors = identity_candidate_verify_rc_errors(
-        candidate, evidence_root, evidence_log)
-    errors.extend(verify_errors)
-    if not verify_errors:
-        errors.extend(default_body_identity_generated_c_errors(
-            candidate, evidence_root, evidence_log))
+    errors.extend(callable_identity_generated_c_errors(
+        candidate, evidence_root, evidence_log))
     post_candidate, post_digest, post_error = (
         identity_checkpoint_candidate_identity())
     if post_error is not None:
@@ -7195,6 +13361,204 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
             collector.add(TestResult(
                 TestResult.FAIL, suite, f"fixture validation {index}", error))
         return
+
+    # This permanent gate covers cheap source structure and parse/typecheck
+    # only.  Candidate behavior requires an external source-built compiler
+    # packet running the targeted project fixtures.
+    provider_identity_label = "compiler.impl_provider_identity_u1c1_source_contract"
+    if matches_filter(provider_identity_label, name_filter):
+        provider_identity_errors = impl_provider_u1c1_source_errors()
+        detail = (
+            f"isolated_mutations={F2_IMPL_PROVIDER_MUTATION_COUNT}; "
+            "provider_kinds=3; candidate_behavior=not_evaluated; "
+            "behavior_gate=aggregate_source_built_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not provider_identity_errors else TestResult.FAIL,
+            suite, provider_identity_label,
+            "; ".join([detail, *provider_identity_errors])))
+
+    provider_carrier_label = "compiler.impl_provider_carrier_u1c2_source_contract"
+    if matches_filter(provider_carrier_label, name_filter):
+        provider_carrier_errors = impl_provider_u1c2_source_errors()
+        detail = (
+            f"isolated_mutations={F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT}; "
+            f"scope_guards={F2_IMPL_PROVIDER_CARRIER_SCOPE_COUNT}; "
+            "candidate_behavior=not_evaluated; "
+            "behavior_gate=aggregate_source_built_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not provider_carrier_errors else TestResult.FAIL,
+            suite, provider_carrier_label,
+            "; ".join([detail, *provider_carrier_errors])))
+
+    derived_carrier_label = "compiler.derived_impl_identity_u1c4_source_contract"
+    if matches_filter(derived_carrier_label, name_filter):
+        derived_carrier_errors = derived_impl_carrier_u1c4_source_errors()
+        if not derived_carrier_errors:
+            derived_carrier_errors.extend(
+                derived_impl_carrier_u1c4_fixture_errors(ring_exe))
+        detail = (
+            f"isolated_mutations={F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT}; "
+            "builtin_option_owners=3; proper_negatives=1; "
+            "positive_runtime=aggregate_source_built_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not derived_carrier_errors else TestResult.FAIL,
+            suite, derived_carrier_label,
+            "; ".join([detail, *derived_carrier_errors])))
+
+    trait_identity_label = "compiler.trait_method_identity_u1c_source_contract"
+    if matches_filter(trait_identity_label, name_filter):
+        trait_identity_errors = trait_method_identity_u1c_source_errors()
+        if not trait_identity_errors:
+            trait_identity_errors.extend(
+                trait_method_identity_u1c_fixture_errors(ring_exe))
+        detail = (
+            f"isolated_mutations="
+            f"{F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT}; "
+            "source_producer=resolver+builtin; proper_parser_cases=2; "
+            "candidate_behavior=not_evaluated; "
+            "behavior_gate=external_source_built_aggregate_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not trait_identity_errors else TestResult.FAIL,
+            suite, trait_identity_label,
+            "; ".join([detail, *trait_identity_errors])))
+
+    impl_predicate_label = "compiler.impl_predicate_u1c0_source_contract"
+    if matches_filter(impl_predicate_label, name_filter):
+        impl_predicate_errors = impl_predicate_u1c0_source_errors()
+        if not impl_predicate_errors:
+            impl_predicate_errors.extend(
+                impl_predicate_u1c0_source_check_errors(ring_exe))
+        if not impl_predicate_errors:
+            impl_predicate_errors.extend(
+                impl_predicate_u1c0_no_std_errors(ring_exe))
+        detail = (
+            f"source_contract_mutations="
+            f"{F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT}; "
+            f"impl_export_closure_mutations="
+            f"{F2_IMPL_EXPORT_CLOSURE_MUTATION_COUNT}; "
+            "pinned_source_checks=5; no_std_behavior_checks=1; "
+            "candidate_behavior=not_evaluated; "
+            "behavior_gate=external_source_built_candidate_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not impl_predicate_errors else TestResult.FAIL,
+            suite, impl_predicate_label,
+            "; ".join([detail, *impl_predicate_errors])))
+
+    nominal_field_label = "compiler.nominal_field_identity_u1b_source_contract"
+    if matches_filter(nominal_field_label, name_filter):
+        nominal_field_errors = nominal_field_u1b_source_errors()
+        if not nominal_field_errors:
+            nominal_field_errors.extend(
+                nominal_field_u1b_source_check_errors(ring_exe))
+        detail = (
+            f"source_contract_mutations="
+            f"{F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT}; "
+            "pinned_source_checks=2; actual_fixtures=2; "
+            "candidate_behavior=not_evaluated; "
+            "behavior_gate=external_source_built_candidate_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not nominal_field_errors else TestResult.FAIL,
+            suite, nominal_field_label,
+            "; ".join([detail, *nominal_field_errors])))
+
+    resolver_identity_label = "compiler.resolver_identity_u1a_source_contract"
+    if matches_filter(resolver_identity_label, name_filter):
+        resolver_identity_errors = resolver_identity_u1a_source_errors()
+        if not resolver_identity_errors:
+            resolver_identity_errors.extend(
+                resolver_identity_u1a_source_check_errors(ring_exe))
+        detail = (
+            f"source_contract_mutations="
+            f"{F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT}; "
+            f"scope_guards={F2_U1A_SCOPE_GUARD_COUNT}; "
+            "pinned_source_checks=2; candidate_behavior=not_evaluated; "
+            "behavior_gate=external_source_built_candidate_packet")
+        collector.add(TestResult(
+            TestResult.PASS if not resolver_identity_errors else TestResult.FAIL,
+            suite, resolver_identity_label,
+            "; ".join([detail, *resolver_identity_errors])))
+
+    inventory_label = "compiler.ir_inventory_f1"
+    if matches_filter(inventory_label, name_filter):
+        inventory_errors = ir_inventory_f1_source_errors()
+        if not inventory_errors:
+            inventory_errors.extend(ir_inventory_f1_compile_errors(ring_exe))
+        detail = (
+            f"executable_kinds={F1_EXECUTABLE_KIND_COUNT}; "
+            f"binder_kinds={F1_BINDER_KIND_COUNT}; "
+            f"semantic_mutations={F1_SEMANTIC_MUTATION_COUNT}; "
+            f"scope_guards={F1_SCOPE_GUARD_COUNT}; pinned_ring_checks=2")
+        collector.add(TestResult(
+            TestResult.PASS if not inventory_errors else TestResult.FAIL,
+            suite, inventory_label,
+            "; ".join([detail, *inventory_errors])))
+
+    core_c0_label = "compiler.core_hir_c0_schema_construction"
+    if matches_filter(core_c0_label, name_filter):
+        core_c0_errors = core_hir_c0_source_errors()
+        if not core_c0_errors:
+            core_c0_errors.extend(core_hir_c0_compile_errors(ring_exe))
+        detail = (
+            f"source_mutations={CORE_HIR_C0_MUTATION_COUNT}; "
+            f"scope_guards={CORE_HIR_C0_SCOPE_GUARD_COUNT}; "
+            "pinned_source_checks=2; pipeline_consumers=1; "
+            "contract_only_builtin_shadow=true; body_anchor_closure=true")
+        collector.add(TestResult(
+            TestResult.PASS if not core_c0_errors else TestResult.FAIL,
+            suite, core_c0_label,
+            "; ".join([detail, *core_c0_errors])))
+
+    builtin_method_label = "compiler.builtin_method_intrinsic_vertical"
+    if matches_filter(builtin_method_label, name_filter):
+        builtin_method_errors = builtin_method_intrinsic_source_errors()
+        detail = (
+            "producer=registered_impl_payload; "
+            "consumer=typed_hir+core_contract+flow_target+c_abi; "
+            f"intrinsic_sites={len(B201_BUILTIN_METHODS)}; "
+            f"source_mutations={B201_BUILTIN_METHOD_MUTATION_COUNT}; "
+            "single_canary=builtin_intrinsic_identity; "
+            "project_canary=builtin_intrinsic_identity_project; "
+            "old_method_name_table=retired; impl_member_extern=hard_reject")
+        collector.add(TestResult(
+            TestResult.PASS if not builtin_method_errors else TestResult.FAIL,
+            suite, builtin_method_label,
+            "; ".join([detail, *builtin_method_errors])))
+
+    impl_extern_label = "compiler.impl_extern_local_recovery"
+    if matches_filter(impl_extern_label, name_filter):
+        recovery_errors = builtin_impl_extern_recovery_errors(ring_exe)
+        collector.add(TestResult(
+            TestResult.PASS if not recovery_errors else TestResult.FAIL,
+            suite, impl_extern_label,
+            "; ".join([
+                "hard_reject=E0103; local_recovery=next_impl_member; "
+                "formats=human+llm; cases=inherent+trait",
+                *recovery_errors])))
+
+    resource_label = "compiler.resource_model_f0"
+    if matches_filter(resource_label, name_filter):
+        resource_errors = resource_model_f0_source_errors()
+        if not resource_errors:
+            resource_errors.extend(resource_model_f0_compile_errors(ring_exe))
+        detail = (
+            f"semantic_mutations={F0_SEMANTIC_MUTATION_COUNT}; "
+            f"scope_guards={F0_SCOPE_GUARD_COUNT}; pinned_ring_checks=2")
+        collector.add(TestResult(
+            TestResult.PASS if not resource_errors else TestResult.FAIL,
+            suite, resource_label,
+            "; ".join([detail, *resource_errors])))
+
+    ownership_cutover_label = "compiler.core_ownership_cutover"
+    if matches_filter(ownership_cutover_label, name_filter):
+        ownership_cutover_errors = ownership_cutover_source_errors()
+        collector.add(TestResult(
+            TestResult.PASS if not ownership_cutover_errors else TestResult.FAIL,
+            suite, ownership_cutover_label,
+            "; ".join([
+                "single_project_shared_pipeline=true; "
+                "legacy_projection_bound_to_verified_flow=true; "
+                "direct_perceus_authority=retired",
+                *ownership_cutover_errors])))
 
     identity_label = "compiler.identity_checkpoint"
     if matches_filter(identity_label, name_filter):
@@ -7516,126 +13880,6 @@ def diagnostic_by_code(
 ) -> Optional[Dict[str, Any]]:
     """Return the first diagnostic with an exact stable code."""
     return next((item for item in diagnostics if item.get("code") == code), None)
-
-
-def parse_rc_report(output: str) -> Tuple[Optional[RcReport], Optional[str]]:
-    """Parse the stable text contract emitted by ``format_rc_findings``."""
-    clean = strip_ansi(output)
-    summaries = RC_SUMMARY_RE.findall(clean)
-    if len(summaries) != 1:
-        return None, f"expected exactly one RC summary, found {len(summaries)}"
-    fatal, exempt = (int(value) for value in summaries[0])
-
-    exempt_lines = RC_EXEMPT_RE.findall(clean)
-    if len(exempt_lines) > 1:
-        return None, "expected at most one RC exempt-class summary"
-    exempt_counts: Dict[str, int] = {}
-    if exempt_lines:
-        for token in exempt_lines[0].split():
-            match = re.fullmatch(r"([^=\s]+)=(\d+)", token)
-            if match is None:
-                return None, f"malformed RC exempt-class token: {token!r}"
-            category, count_text = match.groups()
-            if category in exempt_counts:
-                return None, f"duplicate RC exempt class: {category}"
-            exempt_counts[category] = int(count_text)
-    if exempt > 0 and not exempt_lines:
-        return None, "RC report omitted exempt-class counts"
-    if exempt == 0 and exempt_lines:
-        return None, "RC report emitted exempt-class counts for zero exemptions"
-    if sum(exempt_counts.values()) != exempt:
-        return None, (
-            "RC exempt-class counts disagree with summary: "
-            f"classes={sum(exempt_counts.values())}, summary={exempt}"
-        )
-    if RC_BOUNDARY_MARKER not in clean:
-        return None, "RC report omitted the documented HIR/codegen boundary"
-
-    findings = tuple(
-        RcFindingLine(
-            file=match.group(1),
-            line=int(match.group(2)),
-            column=int(match.group(3)),
-            category=match.group(4),
-            message=match.group(5),
-        )
-        for match in RC_FINDING_RE.finditer(clean)
-    )
-    return RcReport(fatal, exempt, exempt_counts, findings), None
-
-
-def rc_contract_failure(
-    contract: RcInvocationContract,
-    returncode: int,
-    output: str,
-) -> Optional[str]:
-    """Return why an RC CLI invocation violates its exact migrated contract."""
-    if contract.exit_zero and returncode != 0:
-        return f"expected exit 0, got {returncode}: {strip_ansi(output)[:300]}"
-    if not contract.exit_zero and returncode == 0:
-        return "expected non-zero exit, got 0"
-
-    report, parse_failure = parse_rc_report(output)
-    if parse_failure is not None or report is None:
-        return parse_failure
-    if contract.fatal_exact is not None and report.fatal != contract.fatal_exact:
-        return f"expected {contract.fatal_exact} fatal findings, got {report.fatal}"
-    if report.fatal < contract.fatal_min:
-        return f"expected at least {contract.fatal_min} fatal findings, got {report.fatal}"
-    if report.exempt < contract.exempt_min:
-        return f"expected at least {contract.exempt_min} exempt findings, got {report.exempt}"
-
-    printed_expected = report.fatal + (report.exempt if contract.strict else 0)
-    if len(report.findings) != printed_expected:
-        mode = "strict" if contract.strict else "non-strict"
-        return (
-            f"{mode} RC report printed {len(report.findings)} findings; "
-            f"expected {printed_expected}"
-        )
-
-    for category, minimum in contract.exempt_counts:
-        actual = report.exempt_counts.get(category, 0)
-        if actual < minimum:
-            return f"expected {category}>={minimum} exempt findings, got {actual}"
-
-    fixture_suffix = contract.fixture.replace("\\", "/").lower()
-    by_category: Dict[str, List[RcFindingLine]] = {}
-    for finding in report.findings:
-        by_category.setdefault(finding.category, []).append(finding)
-    for category, minimum in contract.finding_counts:
-        matching = by_category.get(category, [])
-        local = [
-            finding for finding in matching
-            if finding.file.replace("\\", "/").lower().endswith(fixture_suffix)
-        ]
-        if len(local) < minimum:
-            return (
-                f"expected {category}>={minimum} findings in {contract.fixture}, "
-                f"got {len(local)} local / {len(matching)} total"
-            )
-    for category, required_lines in contract.finding_lines:
-        actual_lines = {
-            finding.line for finding in by_category.get(category, [])
-            if finding.file.replace("\\", "/").lower().endswith(fixture_suffix)
-        }
-        missing = sorted(set(required_lines) - actual_lines)
-        if missing:
-            return f"{category} findings missing fixture lines {missing}"
-    for category, function_name, binding_name in contract.finding_function_bindings:
-        expected_message = (
-            f"in {function_name}: Drop of borrowed binding '{binding_name}' "
-            "(param/pattern/for-in projection) — frees a reference owned elsewhere"
-        )
-        matching = [
-            finding for finding in by_category.get(category, [])
-            if finding.message == expected_message
-        ]
-        if len(matching) != 1:
-            return (
-                f"expected exactly one {category} finding for "
-                f"{function_name}/{binding_name}, got {len(matching)}"
-            )
-    return None
 
 
 def expected_gap_lanes(scope: str, evidence: str,
@@ -8073,296 +14317,6 @@ def run_parity(collector: ResultCollector, *,
 
 
 # ---------------------------------------------------------------------------
-# RC verify suite
-# ---------------------------------------------------------------------------
-
-def run_rc(ring_exe: str, collector: ResultCollector, *,
-           name_filter: Optional[str] = None) -> None:
-    """Run the RC verify suite."""
-    suite = "rc"
-
-    # 1. Self-verify: compiler/main.ring --verify-rc
-    compiler_main = REPO / "compiler" / "main.ring"
-    if not matches_filter("self-verify (compiler/main.ring)", name_filter):
-        pass
-    elif compiler_main.is_file():
-        try:
-            r = ring_check(ring_exe, str(compiler_main),
-                           extra_args=["--verify-rc"],
-                           timeout=TIMEOUT_SELFCOMPILE,
-                           phase_suite=suite,
-                           phase_case="self-verify (compiler/main.ring)")
-            contract = RcInvocationContract(
-                name="self-verify (compiler/main.ring)",
-                fixture="compiler/main.ring",
-                args=("--verify-rc",),
-                exit_zero=True,
-                fatal_exact=0,
-            )
-            failure = rc_contract_failure(
-                contract, r.returncode, process_output(r),
-            )
-            if failure is None:
-                collector.add(TestResult(TestResult.PASS, suite, "self-verify (compiler/main.ring)"))
-            else:
-                collector.add(TestResult(
-                    TestResult.FAIL, suite, "self-verify (compiler/main.ring)",
-                    failure))
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(TestResult.FAIL, suite, "self-verify", f"timed out ({TIMEOUT_SELFCOMPILE}s)"))
-    else:
-        collector.add(TestResult(TestResult.SKIP, suite, "self-verify", "compiler/main.ring not found"))
-
-    # 2. Positive case sweep: tests/cases/*.ring and tests/cases/golden/*.ring
-    for directory, label in [(CASES_DIR, "cases"), (GOLDEN_CASES_DIR, "golden")]:
-        positive = discover_positive_cases(directory)
-        for ring_file in positive:
-            name = f"{label}/{ring_file.name}"
-            if not matches_filter(name, name_filter):
-                continue
-            blocked = check_blocked_gap_reason(ring_file)
-            if blocked:
-                collector.add(TestResult(TestResult.SKIP, suite, name, blocked))
-                continue
-            try:
-                r = ring_check(
-                    ring_exe, str(ring_file), extra_args=["--verify-rc"],
-                    phase_suite=suite, phase_case=name,
-                )
-            except subprocess.TimeoutExpired:
-                collector.add(TestResult(TestResult.FAIL, suite, name, "timed out"))
-                continue
-
-            if r.returncode == 0:
-                collector.add(TestResult(TestResult.PASS, suite, name))
-            else:
-                combined = (r.stdout or "") + (r.stderr or "")
-                if "rc-verify[leak-temp]" in combined:
-                    collector.add(TestResult(TestResult.SKIP, suite, name,
-                                            "known rc-verify limitation (leak-temp)"))
-                else:
-                    collector.add(TestResult(
-                        TestResult.FAIL, suite, name,
-                        f"exit {r.returncode}: {combined[:300]}"))
-
-    # 3. Exact negative/degradation contracts migrated from the legacy RC harness.
-    #    In particular, a generic "RC verify: 0 errors" line is not evidence
-    #    for a negative case: every expected category/count/location is checked.
-    rc_contracts = (
-        RcInvocationContract(
-            "field-overwrite lax", "tests/cases/verify_rc/field_overwrite_leak.ring",
-            ("--verify-rc",), True, fatal_exact=0, exempt_min=2,
-            exempt_counts=(("x-overwrite-field", 2),),
-        ),
-        RcInvocationContract(
-            "field-overwrite strict", "tests/cases/verify_rc/field_overwrite_leak.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=2,
-            exempt_counts=(("x-overwrite-field", 2),),
-            finding_counts=(("x-overwrite-field", 2),),
-            finding_lines=(("x-overwrite-field", (14, 15)),),
-        ),
-        RcInvocationContract(
-            "option-temporary live", "tests/cases/verify_rc/option_temp_leak.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "option-temporary skip-anf mutation", "tests/cases/verify_rc/option_temp_leak.ring",
-            ("--verify-rc", "--rc-mutate=skip-anf"), False, fatal_min=2,
-            finding_counts=(("leak-temp", 2),),
-            finding_lines=(("leak-temp", (11, 27)),),
-        ),
-        RcInvocationContract(
-            "drop-borrow live", "tests/cases/verify_rc/drop_borrow_uaf.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "drop-borrow drop-params mutation", "tests/cases/verify_rc/drop_borrow_uaf.ring",
-            ("--verify-rc", "--rc-mutate=drop-params"), False, fatal_min=2,
-            finding_function_bindings=(
-                ("uaf-drop-borrow", "describe", "name"),
-                ("uaf-drop-borrow", "describe", "age"),
-            ),
-        ),
-        RcInvocationContract(
-            "exact reference identity live",
-            "tests/cases/verify_rc/exact_reference_def_id.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "exact-DefId shadowing live", "tests/cases/verify_rc/shadow_overwrite.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "control-flow value", "tests/cases/verify_rc/cf_value_leak.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=2,
-            exempt_counts=(("x-cf-value", 2),),
-            finding_counts=(("x-cf-value", 2),),
-        ),
-        RcInvocationContract(
-            "effect value", "tests/cases/verify_rc/effect_value.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-effect-value", 1),),
-            finding_counts=(("x-effect-value", 1),),
-        ),
-        RcInvocationContract(
-            "parameter overwrite", "tests/cases/verify_rc/overwrite_param.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-overwrite-param", 1),),
-            finding_counts=(("x-overwrite-param", 1),),
-        ),
-        RcInvocationContract(
-            "variable overwrite", "tests/cases/verify_rc/overwrite_var.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-overwrite-var", 1),),
-            finding_counts=(("x-overwrite-var", 1),),
-        ),
-        RcInvocationContract(
-            "spread source", "tests/cases/verify_rc/spread_leak.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-spread", 1),), finding_counts=(("x-spread", 1),),
-        ),
-        RcInvocationContract(
-            "discard owned", "tests/cases/verify_rc/discard_owned.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-discard", 1),), finding_counts=(("x-discard", 1),),
-        ),
-        RcInvocationContract(
-            "boxed overwrite", "tests/cases/verify_rc/overwrite_boxed.ring",
-            ("--verify-rc-strict",), False, strict=True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-overwrite-boxed", 1),),
-            finding_counts=(("x-overwrite-boxed", 1),),
-        ),
-        RcInvocationContract(
-            "callee call materialized", "tests/cases/verify_rc/callee_call.ring",
-            ("--verify-rc",), True, fatal_exact=0,
-        ),
-        RcInvocationContract(
-            "shadow mismatch lax", "tests/cases/verify_rc/shadow_mismatch.ring",
-            ("--verify-rc",), True, fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-effect-value", 1),),
-        ),
-        RcInvocationContract(
-            "shadow mismatch strict", "tests/cases/verify_rc/shadow_mismatch.ring",
-            ("--verify-rc-strict",), False, strict=True,
-            fatal_exact=0, exempt_min=1,
-            exempt_counts=(("x-effect-value", 1),),
-            finding_counts=(("x-effect-value", 1),),
-            finding_lines=(("x-effect-value", (12,)),),
-        ),
-    )
-
-    fixture_files = {
-        normalized_repo_path(path) for path in RC_NEG_DIR.glob("*.ring")
-    } if RC_NEG_DIR.is_dir() else set()
-    contracted_files = {contract.fixture for contract in rc_contracts}
-    if fixture_files != contracted_files:
-        missing = sorted(fixture_files - contracted_files)
-        stale = sorted(contracted_files - fixture_files)
-        detail = f"uncontracted={missing}; missing fixtures={stale}"
-        collector.add(TestResult(TestResult.FAIL, suite, "negative contract wiring", detail))
-
-    for contract in rc_contracts:
-        name = f"neg/{contract.name}"
-        if not (
-            matches_filter(name, name_filter)
-            or matches_filter(contract.fixture, name_filter)
-        ):
-            continue
-        ring_file = REPO / contract.fixture
-        try:
-            result = ring_check(
-                ring_exe,
-                str(ring_file),
-                extra_args=list(contract.args),
-                phase_suite=suite,
-                phase_case=name,
-            )
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(TestResult.FAIL, suite, name, "timed out"))
-            continue
-        failure = rc_contract_failure(
-            contract, result.returncode, process_output(result),
-        )
-        if (
-            failure is None
-            and contract.name == "exact-DefId shadowing live"
-            and "x-shadow-overwrite" in process_output(result)
-        ):
-            failure = "exact-DefId shadowing still reports shared-name overwrite"
-        collector.add(TestResult(
-            TestResult.PASS if failure is None else TestResult.FAIL,
-            suite,
-            name,
-            failure or "",
-        ))
-
-    identity_fixture = "tests/cases/verify_rc/exact_reference_def_id.ring"
-    identity_mutations = (
-        ("local", "strip-local-ident-def-id"),
-        ("capture", "strip-capture-ident-def-id"),
-    )
-    for mutation_name, mutation in identity_mutations:
-        label = f"neg/exact reference {mutation_name} DefId mutation"
-        if not (
-            matches_filter(label, name_filter)
-            or matches_filter(identity_fixture, name_filter)
-        ):
-            continue
-        try:
-            result = ring_check(
-                ring_exe, str(REPO / identity_fixture),
-                extra_args=["--verify-rc", f"--rc-mutate={mutation}"],
-                phase_suite=suite, phase_case=label,
-            )
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(TestResult.FAIL, suite, label, "timed out"))
-            continue
-        output = strip_ansi(process_output(result))
-        failure = None
-        if result.returncode == 0:
-            failure = "stripped exact local reference DefId did not fail"
-        elif "HIR Ident local reference" not in output:
-            failure = (
-                "missing fail-loud exact-reference diagnostic: "
-                + output[:300]
-            )
-        collector.add(TestResult(
-            TestResult.PASS if failure is None else TestResult.FAIL,
-            suite, label, failure or "",
-        ))
-
-    capture_drop_label = "neg/exact capture Drop mutation"
-    if (
-        matches_filter(capture_drop_label, name_filter)
-        or matches_filter(identity_fixture, name_filter)
-    ):
-        try:
-            result = ring_check(
-                ring_exe, str(REPO / identity_fixture),
-                extra_args=["--verify-rc", "--rc-mutate=drop-capture"],
-                phase_suite=suite, phase_case=capture_drop_label,
-            )
-        except subprocess.TimeoutExpired:
-            collector.add(TestResult(
-                TestResult.FAIL, suite, capture_drop_label, "timed out"))
-        else:
-            output = strip_ansi(process_output(result))
-            failure = None
-            if result.returncode == 0:
-                failure = "Drop of borrowed exact capture did not fail"
-            elif (
-                "rc-verify[uaf-drop-borrow]" not in output
-                or "capture_slot" not in output
-            ):
-                failure = (
-                    "missing exact capture Drop finding: " + output[:300])
-            collector.add(TestResult(
-                TestResult.PASS if failure is None else TestResult.FAIL,
-                suite, capture_drop_label, failure or "",
-            ))
-
-
-# ---------------------------------------------------------------------------
 # Self-compile suite
 # ---------------------------------------------------------------------------
 
@@ -8446,8 +14400,8 @@ def print_summary(collector: ResultCollector) -> None:
     summary = collector.summary()
 
     for suite_name in [
-        "e2e", "golden", "rc", "self-compile", "structural", "parity",
-        "runner",
+        "e2e", "golden", "self-compile", "structural", "parity",
+        "ownership-vertical", "runner",
     ]:
         if suite_name not in summary:
             continue
@@ -8471,13 +14425,17 @@ def print_summary(collector: ResultCollector) -> None:
 
 def _run_selected(args: argparse.Namespace) -> int:
     suites = args.suites or [
-        "e2e", "golden", "rc", "self-compile", "structural", "parity",
+        "e2e", "golden", "self-compile", "structural", "parity",
+        "ownership-vertical",
     ]
 
     # --- Tool discovery ---
     needs_ring = any(
         suite in suites
-        for suite in ["e2e", "golden", "rc", "self-compile", "structural"]
+        for suite in [
+            "e2e", "golden", "self-compile", "structural",
+            "ownership-vertical",
+        ]
     )
     needs_clang = needs_ring
     clang_path = find_clang() if needs_clang else None
@@ -8504,7 +14462,8 @@ def _run_selected(args: argparse.Namespace) -> int:
         return 1
 
     # Ensure runtime .o is built
-    needs_runtime = any(suite in suites for suite in ["e2e", "golden"])
+    needs_runtime = any(
+        suite in suites for suite in ["e2e", "golden", "ownership-vertical"])
     if needs_runtime and clang_path:
         if not ensure_runtime(clang_path):
             print("ERROR: failed to build ring_runtime.o from ring_runtime.cpp.", file=sys.stderr)
@@ -8534,11 +14493,6 @@ def _run_selected(args: argparse.Namespace) -> int:
             name_filter=args.name_filter,
         ))
 
-    if "rc" in suites:
-        _run_timed_suite("rc", lambda: run_rc(
-            ring_exe, collector, name_filter=args.name_filter,
-        ))
-
     if "self-compile" in suites:
         _run_timed_suite("self-compile", lambda: run_self_compile(
             ring_exe, collector, name_filter=args.name_filter,
@@ -8552,6 +14506,12 @@ def _run_selected(args: argparse.Namespace) -> int:
     if "parity" in suites:
         _run_timed_suite("parity", lambda: run_parity(
             collector, name_filter=args.name_filter,
+        ))
+
+    if "ownership-vertical" in suites:
+        _run_timed_suite("ownership-vertical", lambda: run_ownership_vertical_suite(
+            ring_exe, clang_path or "", collector,
+            name_filter=args.name_filter,
         ))
 
     if args.name_filter and not collector.results:
@@ -8569,7 +14529,8 @@ def main() -> int:
     parser.add_argument(
         "--suite",
         choices=[
-            "e2e", "golden", "rc", "self-compile", "structural", "parity",
+            "e2e", "golden", "self-compile", "structural", "parity",
+            "ownership-vertical",
         ],
         action="append", dest="suites",
         help="Test suite(s) to run. Omit for all C-native suites.")

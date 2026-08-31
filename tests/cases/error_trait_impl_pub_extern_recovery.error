@@ -1,0 +1,6 @@
+E0103
+impl-member extern fn is not part of Ring 0.1
+!E0101
+!E0201
+!E0502
+!internal compiler error

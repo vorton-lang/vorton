@@ -3,11 +3,9 @@ pub mod same {
         Clash,
     }
     pub struct Handle {}
-}
 
-pub mod same {
     pub enum Second {
-        Clash,
+        Other,
     }
     pub extern type Handle
 }

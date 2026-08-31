@@ -2,10 +2,7 @@
 trait Container {
     type Item
     fn get(self) -> Self::Item
-    fn transform(self) -> Self::Item {
-        // Self::Item in default method body
-        self.get()
-    }
+    fn transform(self) -> Self::Item
 }
 
 struct IntBox {
@@ -15,7 +12,7 @@ struct IntBox {
 impl Container for IntBox {
     type Item = Int
     fn get(self) -> Self::Item { self.val }
-    // transform uses default impl
+    fn transform(self) -> Self::Item { self.get() }
 }
 
 struct StrBox {
@@ -34,7 +31,7 @@ impl Container for StrBox {
 fn main() {
     let ib = IntBox { val: 42 }
     let v = ib.transform()
-    assert(v == 42, "Self::Item in default body should resolve correctly")
+    assert(v == 42, "Self::Item in impl body should resolve correctly")
 
     let sb = StrBox { val: "hello" }
     let sv = sb.transform()

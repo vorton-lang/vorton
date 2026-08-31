@@ -1,0 +1,8 @@
+mod tools {
+    pub fn first() -> Int { 1 }
+    pub fn second() -> Int { 2 }
+}
+
+fn main() {
+    print(tools::first() + tools::second())
+}

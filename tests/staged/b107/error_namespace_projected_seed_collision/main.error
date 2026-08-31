@@ -1,10 +1,5 @@
-error[E0707]: Ambiguous value name 'same::Clash': conflicting payloads 'main::same::First_Clash' and 'main::same::Second_Clash'
-error[E0707]: Ambiguous struct name 'same::Handle': conflicting payloads 'main::same::Handle' and 'Handle'
-pub enum Second
+error[E0207]:
+Duplicate definition: 'Handle' is already defined
 pub extern type Handle
-!E0702
-!E0703
-!E0704
-!E0705
-!Ambiguous value name 'Clash'
-!Ambiguous struct name 'Handle'
+!E0707
+!Clash

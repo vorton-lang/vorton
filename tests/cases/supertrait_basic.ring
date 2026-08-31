@@ -28,7 +28,7 @@ fn show_both<T: Printable>(x: T) -> Str {
     "${x.describe()} (${x.label()})"
 }
 
-fn main() with {io} {
+fn main() with {console} {
     let item = Item { name: "widget", value: 42 }
     assert(show_desc(item) == "widget", "describe should work through supertrait")
     assert(show_label(item) == "widget: 42", "label should work directly")

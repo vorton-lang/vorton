@@ -13,13 +13,13 @@ impl<T: Hash> Hash for Wrap<T> {
     }
 }
 
-fn hash_one<T: Hash>(value: T) -> Int {
+fn hash_one<T: Hash>(value: T) -> Int with {} {
     value.hash()
 }
 
 const BAD: fn(Wrap<Float>) -> Int = hash_one
 
-fn plus_one(value: Int) -> Int {
+fn plus_one(value: Int) -> Int with {} {
     value + 1
 }
 

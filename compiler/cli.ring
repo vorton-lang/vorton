@@ -1,13 +1,26 @@
 use ast::{Program}
-use hir::{HProgram}
-use diagnostics::{CollectingSink, Diagnostic, new_collecting_sink}
+use diagnostics::{Diagnostic, new_collecting_sink}
 use formatter::{format_human, format_llm}
 use checker::{CheckResult, check as check_single}
 use codegen_c::{generate_c}
-use compiler_mod::{compile_project, compile_project_c, verify_project_rc}
+use compiler_mod::{compile_project, compile_project_c}
 use parser::{parse}
-use perceus::{perceus_transform, perceus_transform_mutated}
-use verify_rc::{verify_rc_program, rc_fatal_count, format_rc_findings}
+use core_from_hir::{CoreAssemblyResult, CoreDiagnosticProjection,
+    assemble_single_core,
+    core_assembly_result_program,
+    core_assembly_result_diagnostic_projection,
+    mutate_core_unowned_effect_tail}
+use legacy_projection::{assemble_legacy_projection}
+use ownership_pipeline::{
+    OwnershipPipelineOutcome, VerifiedOwnershipProgram,
+    run_ownership_pipeline,
+    ownership_pipeline_outcome_is_verified,
+    ownership_pipeline_outcome_verified,
+    ownership_pipeline_failure_diagnostics,
+    verified_ownership_program_flow}
+use rc_hir_bridge::{MaterializedVerifiedHir, materialize_verified_hir,
+    materialized_verified_hir_program,
+    materialized_verified_hir_effect_ctx_tokens}
 use phase_timing::{
     new_phase_timing,
     PHASE_INPUT_ENTRY_LOAD, PHASE_ENTRY_PARSE,
@@ -133,27 +146,13 @@ pub fn cli_main() {
             exit_process(1)
             return
         }
-        // B-104 D2: static RC leak/UAF verification (post-perceus HIR linear
-        // check; --verify-rc on the `check` command).  Runs the same per-module
-        // perceus_transform as native compilation, then verify_rc_program.
-        if parsed.command == "check" && (parsed.verify_rc || parsed.verify_strict) {
-            let res = verify_project_rc(
-                file_path, parsed.rc_mutate, parsed.verify_strict,
-                parsed.error_format, timing)
-            if res.success == false {
-                eprintln("Compilation failed")
-                timing.finish_command(false)
-                exit_process(1)
-                return
-            }
-            print(res.report)
-            if res.fatal > 0 || (parsed.verify_strict && res.exempt > 0) {
-                timing.finish_command(false)
-                exit_process(1)
-            } else {
-                print("OK")
-                timing.finish_command(true)
-            }
+        if parsed.rc_mutate != "" {
+            eprintln("Error: --rc-mutate has no typed project ownership-pipeline mutation entry")
+            timing.skip_phase(PHASE_PROJECT_MODULE_LOAD_PARSE)
+            timing.skip_phase(PHASE_TYPE_EFFECT_CHECK_LOWER)
+            timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
+            timing.finish_command(false)
+            exit_process(1)
             return
         }
         if parsed.command == "check" {
@@ -241,34 +240,47 @@ pub fn cli_main() {
         }
     }
 
-    // B-104 D2: single-file --verify-rc (see the multi-file branch above).
-    if parsed.command == "check" && (parsed.verify_rc || parsed.verify_strict) {
-        let resource_start = timing.start_phase()
-        let rc_program = perceus_transform_mutated(check_result.program, parsed.rc_mutate)
-        let findings = verify_rc_program(rc_program)
-        let fatal = rc_fatal_count(findings)
-        let exempt = findings.len() - fatal
-        timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
-        print(format_rc_findings(findings, parsed.verify_strict))
-        if fatal > 0 || (parsed.verify_strict && exempt > 0) {
-            timing.finish_command(false)
-            exit_process(1)
-        } else {
-            print("OK")
-            timing.finish_command(true)
-        }
+    if parsed.rc_mutate == "core-unowned-effect-tail" {
+        mutate_core_unowned_effect_tail(match check_result.core_facts {
+            some(value) => value,
+            none => panic("Core mutation: successful check lacks frozen Core facts")
+        })
+    }
+    if parsed.rc_mutate != "" {
+        eprintln("Error: --rc-mutate has no typed ownership-pipeline mutation entry")
+        timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
+        timing.finish_command(false)
+        exit_process(1)
         return
     }
+    let resource_start = timing.start_phase()
+    let core_facts = match check_result.core_facts {
+        some(value) => value,
+        none => panic("ownership pipeline: successful check lacks Core facts")
+    }
+    let assembly = assemble_single_core(core_facts)
+    let ownership = run_ownership_pipeline(
+        core_assembly_result_program(assembly))
+    if !ownership_pipeline_outcome_is_verified(ownership) {
+        report_single_ownership_failure(
+            check_result.prelude_physical_owner_module_key,
+            file_path, source, parsed.error_format,
+            ownership, core_assembly_result_diagnostic_projection(assembly))
+        timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
+        timing.finish_command(false)
+        exit_process(1)
+        return
+    }
+    let rc_artifact = materialize_single_verified_ownership(
+        check_result, assembly,
+        ownership_pipeline_outcome_verified(ownership))
+    timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
 
     if parsed.command == "check" {
-        timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
         print("OK")
         timing.finish_command(true)
     } else {
         if parsed.command == "build" {
-            let resource_start = timing.start_phase()
-            let rc_program = perceus_transform(check_result.program)
-            timing.finish_phase(PHASE_RESOURCE_PLAN_VERIFY, resource_start)
             // Emit <name>.c, then shell out clang -c → <name>.o.
             // --out-dir redirects both artifacts when explicitly given;
             // the default places them next to the source.
@@ -284,7 +296,9 @@ pub fn cli_main() {
                 file_path.replace(".ring", ".o")
             }
             let build_ok = generate_c(
-                rc_program, c_path, o_path, parsed.c_lines,
+                materialized_verified_hir_program(rc_artifact),
+                materialized_verified_hir_effect_ctx_tokens(rc_artifact),
+                c_path, o_path, parsed.c_lines,
                 parsed.identity_ledger)
             timing.finish_command(build_ok)
             if build_ok == false {
@@ -297,6 +311,47 @@ pub fn cli_main() {
             exit_process(1)
         }
     }
+}
+
+fn report_single_ownership_failure(
+    module_key: Str, file_path: Str, source: Str, error_format: Str,
+    outcome: OwnershipPipelineOutcome,
+    projection: CoreDiagnosticProjection
+) {
+    let mut sink = new_collecting_sink()
+    for projected in ownership_pipeline_failure_diagnostics(
+            outcome, projection) {
+        let (finding_module_key, diagnostic) = projected
+        if finding_module_key != module_key ||
+           diagnostic.span.file != file_path {
+            panic("ownership diagnostic: single-file projection crosses module")
+        }
+        sink.report(diagnostic)
+    }
+    if !sink.has_errors() {
+        panic("ownership diagnostic: failed single-file plan emitted no error")
+    }
+    if error_format == "llm" {
+        print(format_llm(sink.diagnostics(), file_path))
+    } else {
+        eprintln(format_human(sink.diagnostics(), source))
+    }
+}
+
+fn materialize_single_verified_ownership(
+    result: CheckResult, assembly: CoreAssemblyResult,
+    verified: VerifiedOwnershipProgram
+) -> MaterializedVerifiedHir {
+    let legacy_facts = match result.legacy_facts {
+        some(value) => value,
+        none => panic("ownership pipeline: successful check lacks legacy facts")
+    }
+    let projection = assemble_legacy_projection(
+        [legacy_facts], assembly,
+        verified_ownership_program_flow(verified))
+    materialize_verified_hir(
+        result.prelude_physical_owner_module_key,
+        result.program, verified, projection)
 }
 
 // ============================================================
@@ -379,8 +434,7 @@ fn parse_cli_args(raw_args: List<Str>) -> CliArgs {
                         identity_ledger = true
                     } else {
                     if arg.starts_with("--rc-mutate=") {
-                        // TEST-ONLY (B-104 D2 negative tests): degrade the RC
-                        // pipeline so the verifier's detection can be asserted.
+                        // TEST-ONLY: select a typed ownership-pipeline mutation.
                         rc_mutate = arg.slice(12, arg.len())
                     } else {
                         if arg.starts_with("--phase-timing=") {
@@ -458,6 +512,6 @@ fn usage() {
     print("  --out-dir=<path>          Output directory (default: dist)")
     print("  --target=c                Code generation target (default: c)")
     print("  --no-c-lines              Omit #line directives from the generated C")
-    print("  --verify-rc               (check) static RC leak/UAF verification of the post-RC HIR")
-    print("  --verify-rc-strict        like --verify-rc, but documented-exempt findings also fail")
+    print("  --verify-rc               compatibility alias; ownership verification is always on")
+    print("  --verify-rc-strict        compatibility alias; ownership verification is always strict")
 }

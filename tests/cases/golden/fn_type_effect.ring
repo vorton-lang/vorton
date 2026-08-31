@@ -2,11 +2,11 @@
 // effect annotations as arguments, calling them, and verifying that the
 // evidence threading is correct.
 
-fn apply_io(f: fn(Int) -> Str with {io}, x: Int) -> Str with {io} {
+fn apply_io(f: fn(Int) -> Str with {console}, x: Int) -> Str with {console} {
     f(x)
 }
 
-fn format_with_print(n: Int) -> Str with {io} {
+fn format_with_print(n: Int) -> Str with {console} {
     print("formatting ${n.to_str()}")
     "val=${n.to_str()}"
 }
@@ -15,7 +15,7 @@ fn apply_pure(f: fn(Int) -> Int, x: Int) -> Int {
     f(x)
 }
 
-fn double(x: Int) -> Int {
+fn double(x: Int) -> Int with {} {
     x * 2
 }
 
@@ -28,16 +28,16 @@ fn checked_div(x: Int) -> Int with {fail<Str>} {
     100 / x
 }
 
-fn compose_io(f: fn(Str) -> Str with {io}, g: fn(Str) -> Str with {io}, x: Str) -> Str with {io} {
+fn compose_io(f: fn(Str) -> Str with {console}, g: fn(Str) -> Str with {console}, x: Str) -> Str with {console} {
     g(f(x))
 }
 
-fn prepend_tag(s: Str) -> Str with {io} {
+fn prepend_tag(s: Str) -> Str with {console} {
     print("prepend")
     "tag:${s}"
 }
 
-fn append_end(s: Str) -> Str with {io} {
+fn append_end(s: Str) -> Str with {console} {
     print("append")
     "${s}:end"
 }

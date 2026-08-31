@@ -113,7 +113,7 @@ class ProvenanceBContractTests(unittest.TestCase):
                 self.assertIn("initially empty", error or "")
 
     def test_missing_evidence_root_stops_before_candidate_call(self) -> None:
-        verify = mock.Mock(side_effect=AssertionError("candidate invoked"))
+        candidate_gate = mock.Mock(side_effect=AssertionError("candidate invoked"))
         with (
             mock.patch.dict(os.environ, {}, clear=True),
             mock.patch.object(runner, "identity_checkpoint_source_errors", return_value=[]),
@@ -123,7 +123,7 @@ class ProvenanceBContractTests(unittest.TestCase):
                 return_value=(str(Path(sys.executable).resolve()), "a" * 64, None),
             ),
             mock.patch.object(
-                runner, "identity_candidate_verify_rc_errors", verify),
+                runner, "callable_identity_generated_c_errors", candidate_gate),
         ):
             errors, detail = runner.identity_checkpoint_errors()
         self.assertEqual(
@@ -131,10 +131,10 @@ class ProvenanceBContractTests(unittest.TestCase):
             [f"{runner.IDENTITY_EVIDENCE_ROOT_ENV} is required with candidate"],
         )
         self.assertIn("RING_IDENTITY_EVIDENCE_ROOT=invalid", detail)
-        verify.assert_not_called()
+        candidate_gate.assert_not_called()
 
     def test_invalid_evidence_root_stops_before_candidate_call(self) -> None:
-        verify = mock.Mock(side_effect=AssertionError("candidate invoked"))
+        candidate_gate = mock.Mock(side_effect=AssertionError("candidate invoked"))
         with (
             mock.patch.dict(
                 os.environ,
@@ -148,14 +148,14 @@ class ProvenanceBContractTests(unittest.TestCase):
                 return_value=(str(Path(sys.executable).resolve()), "b" * 64, None),
             ),
             mock.patch.object(
-                runner, "identity_candidate_verify_rc_errors", verify),
+                runner, "callable_identity_generated_c_errors", candidate_gate),
         ):
             errors, _detail = runner.identity_checkpoint_errors()
         self.assertEqual(
             errors,
             [f"{runner.IDENTITY_EVIDENCE_ROOT_ENV} must be an absolute path"],
         )
-        verify.assert_not_called()
+        candidate_gate.assert_not_called()
 
     def test_child_failure_retains_raw_audit_and_archive(self) -> None:
         def failed_child(spec, *, result_validator=None):
@@ -247,7 +247,7 @@ class ProvenanceBContractTests(unittest.TestCase):
             with mock.patch.object(
                 runner, "run_identity_candidate_mode", side_effect=completed_mode
             ):
-                errors = runner.default_body_identity_generated_c_errors(
+                errors = runner.callable_identity_generated_c_errors(
                     sys.executable, evidence_root, evidence_log)
             self.assertIn("identity ledger changed off/on1 C bytes", errors)
             for case_name in ("off", "on1", "on2"):

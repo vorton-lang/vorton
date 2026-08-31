@@ -8,16 +8,28 @@
 //     [rc:u32 | typeid:u32] header at ptr-8 (Perceus RC)
 //   * ring_runtime.cpp C ABI functions are called directly by name.
 
-use types::{Type, EffectRow}
+use types::{Type}
 use ast::{Span}
-use hir::{HDictDef, TraitBound, HEffectOp, CHECKER_ONLY_EXTERN_CALLABLES}
+use hir::{TraitBound, trait_dict_name}
+use hir_exact::{exact_dict_physical_key}
+use ir_identity::{
+    SlotRef, ImplOwnerRef, ImplMethodRef, VariantRef,
+    slot_ref_stable_key, impl_owner_ref_same, impl_method_ref_same,
+    impl_owner_ref_target, impl_owner_ref_provider, impl_owner_ref_trait,
+    impl_provider_ref_kind, impl_provider_kind_builtin,
+    impl_provider_kind_same, symbol_ref_canonical_payload,
+    impl_method_ref_owner, impl_method_ref_callable_slot_index,
+    impl_method_ref_stable_key}
+use ir_inventory::{ExactDictRef, make_exact_static_dict_ref}
+use legacy_projection::{LegacyEffectCtxToken}
 
 // Per-function registration info (forward-declare pass).
-// total_params = ring params + trait-bound dict params + evidence params —
-// the exact C prototype arity (clang enforces call-site arity for us).
+// Exact C prototype arity. Ring callables include one trailing EffectCtx*;
+// backend-only helpers do not.
 pub struct CFnInfo {
     pub c_name: Str,
-    pub total_params: Int
+    pub total_params: Int,
+    pub takes_effect_ctx: Bool
 }
 
 // Struct field layout registration (field ORDER is the C struct layout:
@@ -36,6 +48,7 @@ pub struct CStructInfo {
 // field_rc_skip: same extern-containment flags as CStructInfo, per payload
 // field — consumed by emit_c_drop_functions.
 pub struct CEnumVariantInfo {
+    pub variant_ref: VariantRef,
     pub tag: Int,
     pub field_count: Int,
     pub field_names: List<Str>,
@@ -47,13 +60,19 @@ pub struct CEnumInfo {
     pub max_fields: Int
 }
 
-// One enclosing handle-expr / try-catch scope.  A `return` inside the body must pop the
-// catch frame and drop the handler evidence structs before returning (#173);
-// ev_drop_vars holds the hoisted C variable names (unique per handle — no
-// name-based double free on nested handles for the same effect).
+// One enclosing handle/try scope. Resource cleanup is explicit RcHIR; this
+// stack only tracks control frames that an early return must pop.
 pub struct CHandleCleanup {
-    pub needs_catch_pop: Bool,
-    pub ev_drop_vars: List<Str>
+    pub needs_catch_pop: Bool
+}
+
+// Backend-local relation from the exact Core-issued method identity to its
+// projected physical/C identity and complete C ABI shape.  No target/member
+// spelling participates in lookup.
+pub struct CMethodInfo {
+    method: ImplMethodRef,
+    physical_identity: Str,
+    fn_info: CFnInfo
 }
 
 // H+T final-emission authority. Exact and backend name-only registrations
@@ -74,7 +93,6 @@ pub enum CRefKind {
     Exact { source_name: Str, def_id: Int },
     NameOnly { canonical_key: Str },
     Static { canonical_key: Str },
-    DefaultEvidence { canonical_key: Str },
     Computed { producer: Str },
     Fresh { producer: Str }
 }
@@ -140,19 +158,22 @@ pub struct CCtx {
     pub name_only_slots: Map<Str, CNameOnlySlotRef>,
     // Cleanup-visible HIR identity -> exact C slot and declared spelling.
     pub value_slots_by_def_id: Map<Int, CExactSlotRef>,
+    // Semantic/synthetic SlotRef identity is independent from legacy DefId.
+    pub value_slots_by_slot_key: Map<Str, CExactSlotRef>,
     pub functions: Map<Str, CFnInfo>,          // C mangled name -> info
-    pub fn_evidence_params: Map<Str, List<Str>>, // C mangled name -> evidence param names
-    pub local_fn_effects: Map<Str, EffectRow>,
+    pub method_index: List<CMethodInfo>,
+    method_exact_by_physical: Map<Str, Str>,
+    emitted_method_keys: Set<Str>,
     pub fn_mut_params: Map<Str, List<Bool>>,
     pub struct_types: Map<Str, CStructInfo>,
     pub enum_types: Map<Str, CEnumInfo>,
+    pub nominal_exact_by_physical: Map<Str, Str>,
+    pub drop_method_by_nominal_exact: Map<Str, ImplMethodRef>,
     pub rt_protos: Map<Str, Str>,              // runtime fn name -> full C prototype line
     pub cstr_cache: Map<Str, Str>,             // interned message -> global cstr name
-    // C names whose definition has been emitted.  First definition wins:
-    // duplicate mangled names (user `enum Result` impl methods colliding with
-    // the prelude's `Result` impl) are a single LLVM module symbol there
-    // (LLVM auto-uniques; the later body lands in a dead block) — in C a
-    // second definition is a hard clang error, so later bodies are skipped.
+    // C names whose definition has been emitted. Exact impl methods have a
+    // separate identity-keyed ledger; this set only protects the final C
+    // symbol namespace used by ordinary functions and backend helpers.
     pub emitted_fns: Set<Str>,
     // Synthetic derive methods registered before any member of their SCC is
     // emitted. Kept separate from ordinary declarations so a predeclared
@@ -171,6 +192,9 @@ pub struct CCtx {
     // stays canonical through HIR; only a proven genuine extern call consults
     // this map and crosses back to the ABI leaf.
     pub extern_abi_names: Map<Str, Str>,
+    // One project-wide Core/Rc-issued dense token table. C preserves upstream
+    // ordinals verbatim and never interns typed instances itself.
+    pub effect_ctx_tokens: List<LegacyEffectCtxToken>,
     pub boxed_vars: Set<Int>,
     pub type_to_typeid: Map<Str, Int>,
     pub next_user_typeid: Int,
@@ -190,19 +214,17 @@ pub struct CCtx {
     // per-backend registry).
     pub trait_method_order: Map<Str, List<Str>>,
     pub trait_supertraits: Map<Str, List<Str>>,
-    // B-104 D4 static dict singleton definitions (HProgram.static_dicts).
-    pub static_dict_defs: Map<Str, HDictDef>,
-    // Dict names whose ring_dict_build_<name> build fn exists (impl trait
-    // dicts pre-registered in the forward pass + derived trait dicts) — the
-    // memoised getter routes through the build fn instead of the runtime
-    // builtin fallback.  Pre-registration makes getter contents independent
-    // of decl order (the LLVM backend's lazy variant is order-sensitive).
+    // Exact physical keys whose trait-dictionary build fn exists. Impl trait
+    // dictionaries are pre-registered in the forward pass so a memoised
+    // getter is independent of declaration order.
     pub dict_build_fns: Set<Str>,
-    // Dict names whose memoised getter ring_dict_init_<name> was emitted.
-    pub dict_getters: Set<Str>,
+    // The exact owner/tree beside every backend key remains mandatory for
+    // lookup validation; no target/trait spelling is a non-builtin authority.
+    pub dict_build_owners: Map<Str, ImplOwnerRef>,
+    pub dict_getters: Map<Str, ExactDictRef>,
     // Function-value dict ABI invariant: the checker must attach exactly one
     // DictRef per bound.  Codegen keeps the declared bounds only to reject a
-    // missing/partial closure-evidence list; it never re-resolves types.
+    // missing/partial dictionary list; it never re-resolves types.
     pub fn_trait_bounds: Map<Str, List<TraitBound>>,
     // Module-wide counters for synthesised functions (deterministic order).
     pub lambda_counter: Int,
@@ -216,13 +238,7 @@ pub struct CCtx {
     pub identity_edge_counter: Int,
     pub identity_load_counter: Int,
 
-    // ---- step 6: effect handler / catch state ----
-    // Effect op declarations (slot-order contract, hir::effect_op_slot).
-    pub effect_ops: Map<Str, List<HEffectOp>>,
-    // B-097 default evidence: effect name -> C global variable name (a
-    // `static void*` initialised by __ring_default_evidence_init before
-    // ring_main runs).  c_lookup_evidence falls back to it off handle scope.
-    pub default_evidence: Map<Str, Str>,
+    // ---- effect handler / catch state ----
     // Enclosing handle/try scopes for `return`-path cleanup (#173).
     pub handle_cleanup_stack: List<CHandleCleanup>,
 
@@ -231,6 +247,9 @@ pub struct CCtx {
     // "continue;" for while loops (cond re-evaluated at the top) or
     // "goto <incr label>;" for for-loops (increment/drop sequence first).
     pub loop_continue_stmt: Str,
+    // Cleanup-stack depth at which the innermost loop target was entered.
+    // break/continue pop only catch frames created inside that loop.
+    pub loop_cleanup_depth: Int,
     pub in_loop: Bool,
 
     // ---- #line directives (--no-c-lines disables) ----
@@ -262,12 +281,6 @@ pub struct CCtx {
 pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
     let mut extern_callable_names: Set<Str> = set_new()
     let mut extern_abi_names: Map<Str, Str> = map_new()
-    // Checker-only builtins have no HDecl to discover in the forward pass.
-    for name in (CHECKER_ONLY_EXTERN_CALLABLES) {
-        let key = c_mangle_fn(name)
-        extern_callable_names.insert(key)
-        extern_abi_names.insert(key, name)
-    }
     CCtx {
         globals: [],
         fn_protos: [],
@@ -285,12 +298,16 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         named_values: map_new(),
         name_only_slots: map_new(),
         value_slots_by_def_id: map_new(),
+        value_slots_by_slot_key: map_new(),
         functions: map_new(),
-        fn_evidence_params: map_new(),
-        local_fn_effects: map_new(),
+        method_index: [],
+        method_exact_by_physical: map_new(),
+        emitted_method_keys: set_new(),
         fn_mut_params: map_new(),
         struct_types: map_new(),
         enum_types: map_new(),
+        nominal_exact_by_physical: map_new(),
+        drop_method_by_nominal_exact: map_new(),
         rt_protos: map_new(),
         cstr_cache: map_new(),
         emitted_fns: set_new(),
@@ -299,6 +316,7 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         ring_callable_names: set_new(),
         extern_callable_names: extern_callable_names,
         extern_abi_names: extern_abi_names,
+        effect_ctx_tokens: [],
         boxed_vars: set_new(),
         type_to_typeid: map_new(),
         next_user_typeid: 64,
@@ -306,9 +324,9 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         drop_registrations: [],
         trait_method_order: map_new(),
         trait_supertraits: map_new(),
-        static_dict_defs: map_new(),
         dict_build_fns: set_new(),
-        dict_getters: set_new(),
+        dict_build_owners: map_new(),
+        dict_getters: map_new(),
         fn_trait_bounds: map_new(),
         lambda_counter: 0,
         dictwrap_counter: 0,
@@ -317,10 +335,9 @@ pub fn new_c_ctx(emit_lines: Bool) -> CCtx {
         identity_event_counter: 0,
         identity_edge_counter: 0,
         identity_load_counter: 0,
-        effect_ops: map_new(),
-        default_evidence: map_new(),
         handle_cleanup_stack: [],
         loop_continue_stmt: "",
+        loop_cleanup_depth: -1,
         in_loop: false,
         emit_lines: emit_lines,
         last_line: -1,
@@ -407,19 +424,70 @@ pub fn c_symbol_fragment(name: Str) -> Str {
     if name.index_of("$$_").is_some() { c_module_symbol(name) } else { c_sanitize(name) }
 }
 
+fn c_impl_owner_is_builtin(value: ImplOwnerRef) -> Bool {
+    impl_provider_kind_same(
+        impl_provider_ref_kind(impl_owner_ref_provider(value)),
+        impl_provider_kind_builtin())
+}
+
+// Builtin providers alone retain the fixed runtime dictionary ABI spelling.
+// Non-builtin code must not call this adapter or reconstruct a name from
+// target/trait payloads.
+pub fn c_builtin_trait_dict_abi_name(value: ImplOwnerRef) -> Str {
+    if !c_impl_owner_is_builtin(value) {
+        panic("C dictionary key: non-builtin owner requested a runtime ABI name")
+    }
+    let trait_ref = match impl_owner_ref_trait(value) {
+        some(reference) => reference,
+        none => panic("C dictionary key: builtin dictionary owner has no trait")
+    }
+    trait_dict_name(
+        symbol_ref_canonical_payload(impl_owner_ref_target(value)),
+        symbol_ref_canonical_payload(trait_ref))
+}
+
+// One physical registry key per exact trait impl owner. Runtime ABI spelling
+// remains a separate builtin-only leaf adapter above.
+pub fn c_trait_dict_physical_key(value: ImplOwnerRef) -> Str {
+    match impl_owner_ref_trait(value) {
+        some(_) => {},
+        none => panic("C dictionary key: dictionary owner has no trait")
+    }
+    exact_dict_physical_key(make_exact_static_dict_ref(value))
+}
+
+// Backend alias for the neutral HIR exact-tree projector.
+pub fn c_static_dict_physical_key(value: ExactDictRef) -> Str {
+    exact_dict_physical_key(value)
+}
+
+pub fn c_trait_dict_build_symbol(value: ImplOwnerRef) -> Str {
+    let key = c_trait_dict_physical_key(value)
+    c_module_symbol("ring-dict-build/${key}")
+}
+
+pub fn c_static_dict_getter_symbol(value: ExactDictRef) -> Str {
+    let key = c_static_dict_physical_key(value)
+    c_module_symbol("ring-dict-init/${key}")
+}
+
+pub fn c_static_dict_global_symbol(value: ExactDictRef) -> Str {
+    let key = c_static_dict_physical_key(value)
+    c_module_symbol("ring-dict-global/${key}")
+}
+
+pub fn c_effect_ctx_token_symbol(ordinal: Int) -> Str {
+    if ordinal < 0 {
+        panic("C codegen: negative upstream EffectCtx token ordinal")
+    }
+    "__ring_effect_ctx_token_${ordinal}"
+}
+
 pub fn c_mangle_fn(name: Str) -> Str {
     if name.index_of("$$_").is_some() {
         "ring_${name}"
     } else {
         "ring_${c_sanitize(name)}"
-    }
-}
-
-pub fn c_mangle_method(type_name: Str, method_name: Str) -> Str {
-    if type_name.index_of("$$_").is_some() {
-        c_module_symbol("ring_${type_name}_${method_name}")
-    } else {
-        "ring_${c_sanitize(type_name)}_${c_sanitize(method_name)}"
     }
 }
 
@@ -495,6 +563,136 @@ pub fn fresh_tmp(mut ctx: CCtx) -> Str {
     ctx.tmp_counter = n + 1
     let name = "t${n}"
     ctx.cur_decls.push("    void* ${name};")
+    name
+}
+
+pub fn c_register_exact_method(
+    mut ctx: CCtx, method: ImplMethodRef, physical_identity: Str,
+    c_name: Str, total_params: Int
+) -> CMethodInfo {
+    if physical_identity == "" || c_name == "" || total_params < 1 {
+        panic("C method index: invalid physical identity/ABI")
+    }
+    let exact_key = impl_method_ref_stable_key(method)
+    for existing in ctx.method_index {
+        if impl_method_ref_same(existing.method, method) {
+            if existing.physical_identity != physical_identity ||
+               existing.fn_info.c_name != c_name ||
+               existing.fn_info.total_params != total_params ||
+               !existing.fn_info.takes_effect_ctx {
+                panic("C method index: duplicate exact method has different physical identity/ABI")
+            }
+            return existing
+        }
+    }
+    match ctx.method_exact_by_physical.get(physical_identity) {
+        some(existing_key) => if existing_key != exact_key {
+            panic("C method index: physical identity names multiple exact methods")
+        },
+        none => ctx.method_exact_by_physical.insert(
+            physical_identity, exact_key)
+    }
+    let info = CMethodInfo {
+        method: method, physical_identity: physical_identity,
+        fn_info: CFnInfo {
+            c_name: c_name, total_params: total_params,
+            takes_effect_ctx: true
+        }
+    }
+    ctx.method_index.push(info)
+    info
+}
+
+pub fn c_exact_method_info(
+    ctx: CCtx, method: ImplMethodRef
+) -> CMethodInfo {
+    let mut found: CMethodInfo? = none
+    for info in ctx.method_index {
+        if impl_method_ref_same(info.method, method) {
+            if found.is_some() {
+                panic("C method index: exact method is duplicated")
+            }
+            found = some(info)
+        }
+    }
+    match found {
+        some(info) => info,
+        none => panic("C method index: exact method is absent")
+    }
+}
+
+pub fn c_exact_method_for_owner_slot(
+    ctx: CCtx, owner: ImplOwnerRef, slot: Int
+) -> CMethodInfo {
+    if slot < 0 { panic("C method index: negative callable slot") }
+    let mut found: CMethodInfo? = none
+    for info in ctx.method_index {
+        if impl_owner_ref_same(impl_method_ref_owner(info.method), owner) &&
+           impl_method_ref_callable_slot_index(info.method) == slot {
+            if found.is_some() {
+                panic("C method index: owner/callable slot is duplicated")
+            }
+            found = some(info)
+        }
+    }
+    match found {
+        some(info) => info,
+        none => panic("C method index: owner/callable slot is absent")
+    }
+}
+
+pub fn c_exact_method_count_for_owner(
+    ctx: CCtx, owner: ImplOwnerRef
+) -> Int {
+    let mut count = 0
+    for info in ctx.method_index {
+        if impl_owner_ref_same(impl_method_ref_owner(info.method), owner) {
+            count = count + 1
+        }
+    }
+    let mut slot = 0
+    while slot < count {
+        let _ = c_exact_method_for_owner_slot(ctx, owner, slot)
+        slot = slot + 1
+    }
+    count
+}
+
+pub fn c_method_info_physical_identity(value: CMethodInfo) -> Str {
+    value.physical_identity
+}
+pub fn c_method_info_fn(value: CMethodInfo) -> CFnInfo { value.fn_info }
+
+// Returns true exactly once per exact method.  Repeated carriers are allowed
+// only after c_register_exact_method has proved identical physical/ABI shape.
+pub fn c_mark_exact_method_emitted(
+    mut ctx: CCtx, method: ImplMethodRef
+) -> Bool {
+    let key = impl_method_ref_stable_key(method)
+    if ctx.emitted_method_keys.contains(key) { return false }
+    ctx.emitted_method_keys.insert(key)
+    true
+}
+
+pub fn fresh_effect_ctx_token_array(mut ctx: CCtx, count: Int) -> Str {
+    if count <= 0 {
+        panic("C codegen: EffectCtx token array must be non-empty")
+    }
+    let n = ctx.tmp_counter
+    ctx.tmp_counter = n + 1
+    let name = "effect_tokens_${n}"
+    ctx.cur_decls.push("    const void* ${name}[${count}];")
+    name
+}
+
+pub fn fresh_effect_ctx_evidence_array(mut ctx: CCtx, count: Int) -> Str {
+    if count <= 0 {
+        panic("C codegen: EffectCtx evidence array must be non-empty")
+    }
+    let n = ctx.tmp_counter
+    ctx.tmp_counter = n + 1
+    let name = "effect_evidence_${n}"
+    ctx.cur_decls.push("    void* ${name}[${count}];")
     name
 }
 
@@ -650,6 +848,84 @@ pub fn c_exact_value_slot(
     }
 }
 
+fn c_register_semantic_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str, parameter: Bool,
+    c_type: Str
+) -> CExactSlotRef {
+    let key = slot_ref_stable_key(slot)
+    if ctx.value_slots_by_slot_key.contains_key(key) {
+        panic("C codegen: duplicate semantic SlotRef")
+    }
+    let cname = c_unique_local(ctx, suggested_name)
+    if !parameter {
+        ctx.cur_decls.push("    ${c_type} ${cname} = NULL;")
+    }
+    let result = CExactSlotRef {
+        c_name: cname, source_name: key, def_id: -2
+    }
+    ctx.value_slots_by_slot_key.insert(key, result)
+    result
+}
+
+pub fn c_local_semantic_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str
+) -> CExactSlotRef {
+    c_register_semantic_slot(ctx, slot, suggested_name, false, "void*")
+}
+
+pub fn c_param_semantic_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str
+) -> CExactSlotRef {
+    c_register_semantic_slot(ctx, slot, suggested_name, true, "void*")
+}
+
+pub fn c_local_effect_ctx_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str
+) -> CExactSlotRef {
+    c_register_semantic_slot(
+        ctx, slot, suggested_name, false, "EffectCtx*")
+}
+
+pub fn c_param_effect_ctx_slot(
+    mut ctx: CCtx, slot: SlotRef, suggested_name: Str
+) -> CExactSlotRef {
+    c_register_semantic_slot(
+        ctx, slot, suggested_name, true, "EffectCtx*")
+}
+
+pub fn c_semantic_value_slot(
+    ctx: CCtx, slot: SlotRef
+) -> CExactSlotRef? {
+    ctx.value_slots_by_slot_key.get(slot_ref_stable_key(slot))
+}
+
+pub fn c_bind_semantic_value_slot(
+    mut ctx: CCtx, slot: SlotRef, exact: CExactSlotRef
+) {
+    let key = slot_ref_stable_key(slot)
+    match ctx.value_slots_by_slot_key.get(key) {
+        some(existing) => if existing.c_name != exact.c_name ||
+                existing.def_id != exact.def_id {
+            panic("C codegen: semantic SlotRef changed exact storage")
+        },
+        none => { ctx.value_slots_by_slot_key.insert(key, exact) }
+    }
+}
+
+pub fn c_local_semantic_def_slot(
+    mut ctx: CCtx, slot: SlotRef, name: Str, def_id: Int
+) -> CExactSlotRef {
+    let exact = c_local_def_ref(ctx, name, some(def_id))
+    c_bind_semantic_value_slot(ctx, slot, exact)
+    exact
+}
+
+pub fn c_semantic_value_slot_key(
+    ctx: CCtx, key: Str
+) -> CExactSlotRef? {
+    ctx.value_slots_by_slot_key.get(key)
+}
+
 pub fn c_register_name_only_ref(
     mut ctx: CCtx, name: Str, c_name: Str
 ) -> CNameOnlySlotRef {
@@ -694,8 +970,7 @@ fn validate_identity_domain_shape(
             panic("C identity: malformed Exact domain shape")
         }
     } else {
-        if domain == "name-only" || domain == "static" ||
-           domain == "default-evidence" {
+        if domain == "name-only" || domain == "static" {
             if def_id != -1 || canonical_key == "" || producer != "" {
                 panic("C identity: malformed keyed domain shape '${domain}'")
             }
@@ -722,9 +997,6 @@ fn validate_c_typed_ref(reference: CTypedRef) -> CTypedRef {
             validate_identity_domain_shape("name-only", -1, canonical_key, ""),
         CRefKind::Static { canonical_key } =>
             validate_identity_domain_shape("static", -1, canonical_key, ""),
-        CRefKind::DefaultEvidence { canonical_key } =>
-            validate_identity_domain_shape(
-                "default-evidence", -1, canonical_key, ""),
         CRefKind::Computed { producer } =>
             validate_identity_domain_shape("computed", -1, "", producer),
         CRefKind::Fresh { producer } =>
@@ -755,14 +1027,6 @@ pub fn c_ref_static(c_name: Str, canonical_key: Str) -> CTypedRef {
     validate_c_typed_ref(CTypedRef {
         c_name: c_name,
         kind: CRefKind::Static { canonical_key: canonical_key },
-        load_id: 0
-    })
-}
-
-pub fn c_ref_default_evidence(c_name: Str, canonical_key: Str) -> CTypedRef {
-    validate_c_typed_ref(CTypedRef {
-        c_name: c_name,
-        kind: CRefKind::DefaultEvidence { canonical_key: canonical_key },
         load_id: 0
     })
 }
@@ -800,7 +1064,6 @@ pub fn c_ref_domain(reference: CTypedRef) -> Str {
         CRefKind::Exact { .. } => "exact",
         CRefKind::NameOnly { .. } => "name-only",
         CRefKind::Static { .. } => "static",
-        CRefKind::DefaultEvidence { .. } => "default-evidence",
         CRefKind::Computed { .. } => "computed",
         CRefKind::Fresh { .. } => "fresh"
     }
@@ -818,7 +1081,6 @@ pub fn c_ref_key(reference: CTypedRef) -> Str {
         CRefKind::Exact { source_name, .. } => source_name,
         CRefKind::NameOnly { canonical_key } => canonical_key,
         CRefKind::Static { canonical_key } => canonical_key,
-        CRefKind::DefaultEvidence { canonical_key } => canonical_key,
         _ => ""
     }
 }
@@ -987,7 +1249,6 @@ fn validate_identity_event_shape(event: CIdentityEvent) {
     }
     if event.kind == "effect-receiver-load" {
         if event.domain != "name-only" &&
-           event.domain != "default-evidence" &&
            event.domain != "computed" {
             panic("C identity ledger: effect receiver has forbidden '${event.domain}' domain")
         }
@@ -1275,11 +1536,13 @@ pub struct CEmitState {
     pub named_values: Map<Str, Str>,
     pub name_only_slots: Map<Str, CNameOnlySlotRef>,
     pub value_slots_by_def_id: Map<Int, CExactSlotRef>,
+    pub value_slots_by_slot_key: Map<Str, CExactSlotRef>,
     pub indent: Int,
     pub in_function: Bool,
     pub current_fn_name: Str,
     pub in_loop: Bool,
     pub loop_continue_stmt: Str,
+    pub loop_cleanup_depth: Int,
     pub last_line: Int,
     pub last_file: Str,
     // Step 6: a nested function is a fresh C frame — a `return` inside a
@@ -1298,11 +1561,13 @@ pub fn c_push_fn(mut ctx: CCtx, fn_name: Str) -> CEmitState {
         named_values: ctx.named_values,
         name_only_slots: ctx.name_only_slots,
         value_slots_by_def_id: ctx.value_slots_by_def_id,
+        value_slots_by_slot_key: ctx.value_slots_by_slot_key,
         indent: ctx.indent,
         in_function: ctx.in_function,
         current_fn_name: ctx.current_fn_name,
         in_loop: ctx.in_loop,
         loop_continue_stmt: ctx.loop_continue_stmt,
+        loop_cleanup_depth: ctx.loop_cleanup_depth,
         last_line: ctx.last_line,
         last_file: ctx.last_file,
         handle_cleanup_stack: ctx.handle_cleanup_stack
@@ -1313,11 +1578,13 @@ pub fn c_push_fn(mut ctx: CCtx, fn_name: Str) -> CEmitState {
     ctx.named_values = map_new()
     ctx.name_only_slots = map_new()
     ctx.value_slots_by_def_id = map_new()
+    ctx.value_slots_by_slot_key = map_new()
     ctx.indent = 1
     ctx.in_function = true
     ctx.current_fn_name = fn_name
     ctx.in_loop = false
     ctx.loop_continue_stmt = ""
+    ctx.loop_cleanup_depth = -1
     ctx.last_line = -1
     ctx.last_file = ""
     ctx.handle_cleanup_stack = []
@@ -1339,11 +1606,13 @@ pub fn c_pop_fn(mut ctx: CCtx, c_name: Str, params_str: Str, saved: CEmitState) 
     ctx.named_values = saved.named_values
     ctx.name_only_slots = saved.name_only_slots
     ctx.value_slots_by_def_id = saved.value_slots_by_def_id
+    ctx.value_slots_by_slot_key = saved.value_slots_by_slot_key
     ctx.indent = saved.indent
     ctx.in_function = saved.in_function
     ctx.current_fn_name = saved.current_fn_name
     ctx.in_loop = saved.in_loop
     ctx.loop_continue_stmt = saved.loop_continue_stmt
+    ctx.loop_cleanup_depth = saved.loop_cleanup_depth
     ctx.last_line = saved.last_line
     ctx.last_file = saved.last_file
     ctx.handle_cleanup_stack = saved.handle_cleanup_stack
@@ -1528,14 +1797,15 @@ pub fn rt_known_arity(name: Str) -> Int? {
 
 fn ctype_of(ch: Str) -> Str {
     if ch == "p" { "void*" }
+    else if ch == "e" { "EffectCtx*" }
     else if ch == "i" { "int64_t" }
     else if ch == "d" { "double" }
     else if ch == "c" { "const char*" }
     else { "void" }
 }
 
-// sig encoding: "<params>><ret>", one char per param: p=void* i=int64_t
-// d=double c=const char*; ret additionally v=void.
+// sig encoding: "<params>><ret>", one char per param: p=void*,
+// e=EffectCtx*, i=int64_t, d=double, c=const char*; ret additionally v=void.
 fn sig_to_proto(name: Str, enc: Str) -> Str {
     let sep = match enc.index_of(">") {
         some(i) => i,
@@ -1615,6 +1885,7 @@ fn rt_sig(name: Str) -> Str? {
     if name == "ring_register_never_drop" { return some("i>v") }
     if name == "ring_const_intern" { return some("p>p") }
     if name == "ring_unit_intern" { return some("p>p") }
+    if name == "ring_effect_ctx_empty" { return some(">e") }
     // List
     if name == "ring_list_new" { return some(">p") }
     if name == "ring_list_push" { return some("pp>p") }
@@ -1624,7 +1895,8 @@ fn rt_sig(name: Str) -> Str? {
     if name == "ring_list_concat" { return some("pp>p") }
     if name == "ring_list_slice" { return some("pii>p") }
     if name == "ring_list_reverse" { return some("p>p") }
-    if name == "ring_list_sort" { return some("pp>p") }
+    if name == "ring_list_sort" { return some("ppe>p") }
+    if name == "ring_list_sort_bridge" { return some("ppe>p") }
     if name == "ring_list_pop" { return some("p>p") }
     if name == "ring_list_is_empty" { return some("p>i") }
     if name == "ring_list_first" { return some("p>p") }
@@ -1667,22 +1939,34 @@ fn rt_sig(name: Str) -> Str? {
     if name == "ring_match_fail" { return some("piip>p") }
     // Trait dicts (step 5)
     if name == "ring_get_builtin_dict" { return some("p>p") }
-    if name == "ring_cl_cmp_str" { return some("ppp>p") }
+    if name == "ring_cl_eq_int" || name == "ring_cl_eq_float" ||
+       name == "ring_cl_eq_str" || name == "ring_cl_eq_bool" ||
+       name == "ring_cl_cmp_int" || name == "ring_cl_cmp_float" ||
+       name == "ring_cl_cmp_str" || name == "ring_cl_cmp_bool" {
+        return some("pppe>p")
+    }
+    if name == "ring_cl_debug_int" || name == "ring_cl_debug_float" ||
+       name == "ring_cl_debug_str" || name == "ring_cl_debug_bool" ||
+       name == "ring_cl_hash_int_export" ||
+       name == "ring_cl_hash_str_export" ||
+       name == "ring_cl_hash_bool_export" {
+        return some("ppe>p")
+    }
     // Option
     if name == "ring_Option_unwrap_or" { return some("pp>p") }
     if name == "ring_Option_unwrap" { return some("p>p") }
     if name == "ring_Option_is_some" { return some("p>i") }
     if name == "ring_Option_is_none" { return some("p>i") }
-    if name == "ring_Option_map" { return some("pp>p") }
-    if name == "ring_Option_and_then" { return some("pp>p") }
-    if name == "ring_Option_unwrap_or_else" { return some("pp>p") }
+    if name == "ring_Option_map" { return some("ppe>p") }
+    if name == "ring_Option_and_then" { return some("ppe>p") }
+    if name == "ring_Option_unwrap_or_else" { return some("ppe>p") }
     if name == "ring_Option_to_fail" { return some("pp>p") }
     if name == "ring_Option_none" { return some(">p") }
     // Cell
     if name == "ring_Cell_new" { return some("p>p") }
     if name == "ring_Cell_get" { return some("p>p") }
     if name == "ring_Cell_set" { return some("pp>p") }
-    if name == "ring_Cell_update" { return some("pp>p") }
+    if name == "ring_Cell_update" { return some("ppe>p") }
     // B-125 Ptr<T> primitives
     if name == "ring_raw_alloc" { return some("p>p") }
     if name == "ring_raw_dealloc" { return some("pp>v") }

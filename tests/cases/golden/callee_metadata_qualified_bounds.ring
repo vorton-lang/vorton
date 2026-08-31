@@ -38,11 +38,11 @@ pub mod bounded_facade {
 }
 
 pub mod foreign_origin {
-    pub extern fn print<T: Hash>(value: T) -> Unit with {io}
+    pub extern fn ring_print<T: Hash>(value: T) -> Unit with {console}
 }
 
 pub mod foreign_middle {
-    pub use super::foreign_origin::print as relay
+    pub use super::foreign_origin::ring_print as relay
 }
 
 pub mod foreign_facade {
@@ -67,14 +67,14 @@ fn local_shadow(fingerprint: fn(Float) -> Int) -> Int {
     fingerprint(1.5)
 }
 
-fn seven(_value: Float) -> Int {
+fn seven(_value: Float) -> Int with {} {
     7
 }
 
 fn call_emit(
-    emit: fn(Int) -> Unit with {io},
-    value: Int
-) -> Unit with {io} {
+    emit: fn(Str) -> Unit with {console},
+    value: Str
+) -> Unit with {console} {
     emit(value)
 }
 
@@ -99,7 +99,7 @@ fn main() {
 
     // Extern bounds are checked statically, but neither direct nor first-class
     // foreign calls may carry a Ring dictionary argument.
-    foreign_facade::emit(107)
-    call_emit(foreign_facade::emit, 108)
+    foreign_facade::emit("107")
+    call_emit(foreign_facade::emit, "108")
     print("callee metadata qualified bounds: all ok")
 }

@@ -4,22 +4,118 @@ use types::{Type, Effect, EffectRow, RecordField, StructField,
     row_merge, effects_match_kind}
 use ast::{Span, Pattern, TypeExpr, RecordTypeField, NamedPatternField, span_zero, EffectExpr,
     UseDecl, UseImport}
-use hir::{HExpr, HStmt, HParam, DictRef, ValueBindingKind,
+use hir::{HExpr, HStmt, HParam, ValueBindingKind,
+    HCallableTypeActual, HCallableEffectActual,
+    HCallableEffectInstantiation, HCallableValueInstantiation,
+    HPatternBinding, HPatternPlan, HPatternFieldPlan,
+    h_pattern_wildcard, h_pattern_binding, h_pattern_literal,
+    h_pattern_tuple, h_pattern_struct, h_pattern_variant, h_pattern_or,
+    make_h_pattern_field_plan, h_tuple_projection,
+    h_nominal_projection, h_variant_projection,
     trait_dict_name, trait_bound_param_name,
-    BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL, BUILTIN_OPTION, compare_by_first}
-use diagnostics::{DiagnosticContext, DiagnosticNote, Diagnostic, CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
+    BUILTIN_INT, BUILTIN_FLOAT, BUILTIN_STR, BUILTIN_BOOL,
+    BUILTIN_OPTION, BUILTIN_LIST, BUILTIN_MAP, BUILTIN_SET,
+    compare_by_first}
+use hir_exact::{
+    DictRef, dict_ref_exact,
+    make_simple_dict_ref, make_static_dict_ref, make_wrapped_dict_ref
+}
+use diagnostics::{CompileError, DiagnosticContext, DiagnosticNote, Diagnostic,
+    CollectingSink, Severity, Suggestion, make_diag, make_diagnostic}
 use codes::{E0201, E0204, E0301, E0302, E0407, E0503, E0511, E0512, E0513, E0705, E0707}
 use union_find::{UnionFind, new_union_find, uf_find}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry,
-    StructDef, EnumDef, TypeAliasDef, EffectDef, EffectAliasDef, TraitDef, SigDef,
+    EffectFactCheckpoint, EffectFactBatch,
+    StructDef, EnumDef, TypeAliasDef, EffectDef, EffectAliasDef, TraitDef,
+    ImplEntry, ImplMethodSchemeCore, ImplAssocPredicate,
     new_type_env, mono,
-    apply_subst, apply_subst_row, apply_subst_map, find_impl, lookup_variant,
-    exact_scheme_value_origin, build_scheme_var_map,
-    instantiate_impl_dict_requirements}
+    apply_subst, apply_subst_row, apply_subst_map,
+    instantiate_effect_header_schema,
+    define_effect_header_schema, publish_effect_header_schema,
+    validate_effect_header_schema,
+    effect_fact_checkpoint, rollback_effect_facts,
+    detach_effect_fact_suffix, filter_effect_fact_batch_for_owner_scope,
+    remap_effect_fact_batch,
+    remap_type_to_canonical_ids,
+    stage_effect_header_in_batch, stage_callable_effect_in_batch,
+    try_project_effect_header_from_batch,
+    try_project_existing_effect_header_schema,
+    preflight_effect_fact_batches, publish_effect_fact_batches,
+    register_callable_effect_header,
+    instantiate_type_alias_schema, find_impl, lookup_variant,
+    exact_scheme_value_origin,
+    ordered_effect_tail_vars, scheme_value_type_vars,
+    impl_method_core_as_scheme, frozen_impl_predicates,
+    impl_method_core_type, impl_method_core_type_vars,
+    impl_method_core_effect_schema,
+    impl_predicate_subject_type_var, impl_predicate_trait_name,
+    impl_predicate_assoc_constraints, impl_assoc_predicate_name,
+    impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
+    registered_trait_contract_owner, compiler_owned_extern_symbol}
 use unify::{UnificationError, empty_subst, unify, occurs_in, unify_effect_params}
 use resolver::{ResolvedNamespacePlan, ModuleFramePlan, ResolvedNamespaceBinding,
-    NamespaceKind}
-
+    StructIdentityFact, TraitIdentityFact, EnumVariantFactGroup,
+    EffectIdentityFact,
+    SourceImplProviderFact,
+    NominalDerivedProviderPlanFact, NamespaceKind}
+use ir_identity::{SymbolRef, SlotRef, PathRef, PathRole, HandledEffectRef,
+    OriginRef,
+    symbol_ref_canonical_payload,
+    symbol_ref_origin_module_key, symbol_ref_declaration_site_path,
+    symbol_ref_namespace_kind, namespace_kind_same, namespace_value,
+    namespace_nominal,
+    symbol_ref_same, symbol_ref_is_prelude,
+    ImplProviderRef, ImplOwnerRef, ImplMethodRef,
+    impl_provider_ref_same, impl_owner_ref_same,
+    impl_method_ref_member, impl_method_ref_name,
+    intrinsic_ref_symbol,
+    nominal_field_ref_same, trait_method_ref_same,
+    registered_nominal_ref_same, variant_ref_same,
+    variant_field_ref_same,
+    handled_effect_ref_same, system_effect_console, system_effect_fs,
+    system_effect_process,
+    registered_nominal_ref_symbol, registered_trait_ref_symbol,
+    handled_effect_ref_symbol,
+    registered_trait_ref_display_name, registered_trait_ref_same,
+    make_path_ref, make_synthetic_slot_ref, make_module_body_ref,
+    path_owner_for_symbol, path_owner_for_module_body, path_ref_owner,
+    path_ref_normalized_child_path, path_role_child,
+    make_path_origin_ref, make_symbol_origin_ref,
+    path_role_capture, path_role_handler,
+    path_role_synthetic, path_role_declaration,
+    path_role_parameter,
+    slot_domain_lexical, make_source_slot_ref}
+use ir_inventory::{ExecutableRef, ExactDictRef,
+    make_parameter_dict_ref, make_exact_static_dict_ref,
+    make_exact_wrapped_dict_ref,
+    effect_operation_ref_same,
+    EffectOperationRef, effect_operation_ref_member,
+    make_anonymous_executable_ref, make_named_executable_ref,
+    executable_ref_is_named,
+    executable_ref_named_symbol, executable_ref_anonymous_path,
+    executable_ref_same,
+    BinderEntry, BinderKind, make_source_binder_entry, binder_kind_let,
+    binder_kind_var,
+    binder_kind_for, binder_kind_destructure, binder_kind_source_param,
+    EffectCtxRef, EffectCtxParentCapture,
+    make_semantic_effect_ctx_binder, make_effect_ctx_ref,
+    make_effect_ctx_parent_capture, make_effect_ctx_parameter_ref,
+    binder_entry_kind, binder_kind_tag,
+    binder_kind_effect_ctx_local,
+    binder_kind_effect_ctx_parent_capture}
+use effect_contract::{EffectParamRef, TypedEffectHeaderSchema,
+    empty_typed_effect_header_schema,
+    typed_effect_header_schema_bindings,
+    typed_effect_header_binding_raw_tail,
+    typed_effect_header_binding_parameter,
+    effect_param_ref_same,
+    TypedHandledEffectInstance, TypedEffectCtxLayout,
+    TypedCallableEffectCtx, TypedEffectCtxSource, TypedEffectCtxLookup,
+    TypedEffectCtxInstall,
+    typed_handled_effect_instances_from_row,
+    make_typed_effect_ctx_layout, make_typed_callable_effect_ctx,
+    make_empty_effect_ctx_source, make_borrowed_effect_ctx_source,
+    make_typed_effect_ctx_lookup, make_typed_effect_ctx_install}
 // ============================================================
 // InferResult — return type for expression inference
 // ============================================================
@@ -37,7 +133,30 @@ pub struct InferResult {
 pub struct FnBoundsEntry {
     pub type_param_var_id: Int,
     pub trait_name: Str,
-    pub type_param_name: Str
+    pub type_param_name: Str,
+    pub dict_ordinal: Int,
+    pub assoc_constraints: List<AssocConstraintEntry>
+}
+
+pub fn fn_bound_dict_ref(
+    owner: ExecutableRef, value: FnBoundsEntry
+) -> DictRef {
+    if value.dict_ordinal < 0 {
+        panic("dictionary evidence: negative final bound ordinal")
+    }
+    make_simple_dict_ref(
+        trait_bound_param_name(value.type_param_name, value.trait_name),
+        make_parameter_dict_ref(owner, value.dict_ordinal))
+}
+
+pub fn validate_fn_bound_order(values: List<FnBoundsEntry>) {
+    let mut index = 0
+    while index < values.len() {
+        if values.get(index).unwrap().dict_ordinal != index {
+            panic("dictionary evidence: final bound order is not dense")
+        }
+        index = index + 1
+    }
 }
 
 // Checker-only bridge between a function body's fresh associated-type
@@ -58,16 +177,24 @@ pub struct AssocRebindEntry {
 pub enum PendingDictPurpose {
     DirectCallPublish { output_slot: List<DictRef> },
     ExternCallValidate,
-    CallableValueShadow,
-    DefaultCallableValueShadow
+    CallableValueShadow { output_slot: List<DictRef> }
+}
+
+pub enum PendingEvidenceSource {
+    SchemeEvidenceSource(TypeScheme),
+    ImplOwnerEvidenceSource {
+        owner: ImplEntry,
+        method_core: ImplMethodSchemeCore
+    }
 }
 
 pub struct PendingDictObligation {
-    pub scheme: TypeScheme,
-    pub callee_type: Type,
-    pub fn_bounds: List<FnBoundsEntry>,
-    pub span: Span,
-    pub purpose: PendingDictPurpose
+    runtime_owner: ExecutableRef,
+    source: PendingEvidenceSource,
+    receipt: CallableInstantiationReceipt,
+    fn_bounds: List<FnBoundsEntry>,
+    span: Span,
+    purpose: PendingDictPurpose
 }
 
 struct EvidenceFailure {
@@ -90,18 +217,6 @@ enum DictEvidenceResolution {
     Missing { suppress_diagnostic: Bool }
 }
 
-enum DefaultEvidenceSettlement {
-    Valid,
-    Invalid,
-    Pending
-}
-
-// ============================================================
-// CompileError (raised via fail effect, caught at declaration level)
-// ============================================================
-
-pub struct CompileError {}
-
 // ============================================================
 // InferCtx — mutable type inference context
 // ============================================================
@@ -118,7 +233,6 @@ pub enum ProjectNamespaceUndo {
     Effect { name: Str, previous: EffectDef? },
     EffectAlias { name: Str, previous: EffectAliasDef? },
     Trait { name: Str, previous: TraitDef? },
-    Sig { name: Str, previous: SigDef? },
     VariantToEnum { name: Str, previous: Str? },
     FnMutParams { name: Str, previous: List<Bool>? }
 }
@@ -129,7 +243,68 @@ pub struct ProjectNamespaceFrameState {
     pub journal: List<ProjectNamespaceUndo>
 }
 
+struct PendingAnonymousCallableHeader {
+    executable: ExecutableRef,
+    signature: Type
+}
+
+struct PendingCallableProjection {
+    receipt: CallableInstantiationReceipt,
+    target: ExecutableRef,
+    type_args_output: List<HCallableTypeActual>,
+    effect_actuals_output: List<HCallableEffectActual>
+}
+
+struct FinalCallableProjection {
+    type_args_output: List<HCallableTypeActual>,
+    effect_actuals_output: List<HCallableEffectActual>,
+    type_args: List<HCallableTypeActual>,
+    effect_actuals: List<HCallableEffectActual>
+}
+
+pub struct CallableFinalizationHeader {
+    executable: ExecutableRef,
+    final_scheme: TypeScheme
+}
+
+pub struct OwnerBatchCheckpoint {
+    pending_dict_len: Int,
+    pending_anonymous_len: Int,
+    pending_projection_len: Int,
+    local_definition_effect_raw_tail_len: Int,
+    effect_facts: EffectFactCheckpoint
+}
+
+pub struct OwnerInferenceBatch {
+    pending_dicts: List<PendingDictObligation>,
+    pending_anonymous: List<PendingAnonymousCallableHeader>,
+    pending_projections: List<PendingCallableProjection>,
+    local_definition_effect_raw_tails: List<Int>,
+    effect_facts: EffectFactBatch
+}
+
+enum InferMutationUndo {
+    BoxedVar { def_id: Int, was_present: Bool },
+    VarLambdaDepth { def_id: Int, previous: Int? },
+    DefSpan { def_id: Int, previous: Span? },
+    MutableVar { def_id: Int, was_present: Bool },
+    LetDef { def_id: Int, was_present: Bool },
+    MutParamDef { def_id: Int, was_present: Bool },
+    FnMutParams { name: Str, previous: List<Bool>? },
+    VarBounds { type_var: Int, previous: Set<Str>? }
+}
+
 pub struct InferCtx {
+    pub core_module_key: Str,
+    pub core_module_order: Int,
+    pub executable_stack: List<ExecutableRef>,
+    dictionary_evidence_owner_stack: List<ExecutableRef>,
+    anonymous_child_counters: List<Int>,
+    semantic_site_counters: List<Int>,
+    effect_ctx_bindings_stack: List<EffectCtxRef>,
+    effect_ctx_parent_captures_stack: List<EffectCtxParentCapture?>,
+    effect_ctx_active_stack: List<EffectCtxRef>,
+    effect_ctx_active_bases: List<Int>,
     pub env: TypeEnv,
     pub subst: UnionFind,
     pub sink: CollectingSink,
@@ -137,7 +312,10 @@ pub struct InferCtx {
     pub current_fn_return_type: Type?,
     pub current_fn_bounds: List<FnBoundsEntry>,
     pub fn_bounds_stack: List<List<FnBoundsEntry>>,
-    pub pending_dict_obligations: List<PendingDictObligation>,
+    pending_dict_obligations: List<PendingDictObligation>,
+    pending_callable_projections: List<PendingCallableProjection>,
+    infer_mutation_undos: List<InferMutationUndo>,
+    infer_mutation_checkpoints: List<Int>,
     pub loop_depth: Int,
     pub mod_path_stack: List<Str>,
     // Local binding DefId -> canonical value origin.  DefIds are lexical, so
@@ -147,24 +325,35 @@ pub struct InferCtx {
     // as LocalBorrow; neither a FnType nor a spelling may manufacture direct
     // callable/const-getter provenance.
     pub value_binding_kinds: Map<Int, ValueBindingKind>,
+    // Resolver-issued value identity. The payload index is populated from the
+    // namespace plan; registration relates each fresh lexical DefId to that
+    // exact SymbolRef once. Core assembly consumes this map without reminting.
+    pub value_symbols: Map<Int, SymbolRef>,
+    value_symbols_by_payload: Map<Str, SymbolRef>,
     pub boxed_vars: Set<Int>,
     pub lambda_depth: Int,
     pub var_lambda_depth: Map<Int, Int>,
     pub fn_mut_params: Map<Str, List<Bool>>,
     pub file_extern_types: Set<Str>,
-    // Default effect handler dependency graph: effect name -> list of effect names it depends on
-    pub effect_default_deps: Map<Str, List<Str>>,
     // Qualified associated type scope: "T::Item" -> Type
     // Used to disambiguate when multiple type params have same-named associated types
     pub qualified_assoc_scope: Map<Str, Type>,
     // Function identity -> owner-qualified associated-type provenance captured
     // before check_fn_decl restores its transient scopes.
-    pub rebind_assoc_provenance: Map<Str, List<AssocRebindEntry>>,
-    // B-069: Default parameter support
-    // fn_defaults: function name -> list of default-value HExprs (one per default param, in order)
-    pub fn_defaults: Map<Str, List<HExpr>>,
-    // fn_min_arity: function name -> minimum number of required (non-default) params
-    pub fn_min_arity: Map<Str, Int>,
+    // Transient checker protocol for scheduler-owned recursive callable SCCs.
+    // ExecutableRef membership is exact; this state never owns a scheme/schema.
+    active_recursive_callables: List<ExecutableRef>,
+    closed_recursive_callables: List<ExecutableRef>,
+    // H0 is a 0.1 rejection fact, not a future dependency carrier.  A local
+    // named callable may be materialized before A1 closure only when its
+    // source registration header was explicitly and recursively closed.
+    h0_closed_registration_defs: Set<Int>,
+    pending_anonymous_callable_headers:
+        List<PendingAnonymousCallableHeader>,
+    // Transaction-local provenance for definition schemas created by local
+    // lets.  It is consumed by OwnerInferenceBatch filtering and is never a
+    // lookup authority or a TypedHIR carrier.
+    local_definition_effect_raw_tails: List<Int>,
     // B-125: whether the current module context allows unsafe blocks
     pub mod_unsafe_allowed: Bool,
     // B-002p1: types with user `impl Drop` — collected during impl checking
@@ -178,10 +367,42 @@ pub struct InferCtx {
     pub project_namespace_bindings: Map<Int, List<ResolvedNamespaceBinding>>,
     pub project_namespace_ctor_enums: Map<Str, Str>,
     pub project_namespace_frame_stack: List<ProjectNamespaceFrameState>
+    // F2-U1b registration-only structural ledger. It is installed from the
+    // resolver plan, consumed exactly once, and cleared before typed HIR use.
+    struct_identity_file_key: Str?,
+    struct_identity_root_frame: Int?,
+    struct_identity_child_frames: Map<Str, Int>,
+    struct_identity_frame_stack: List<Int>,
+    struct_identity_unconsumed: List<StructIdentityFact>,
+    struct_identity_pending: List<StructIdentityFact>,
+    trait_identity_unconsumed: List<TraitIdentityFact>,
+    enum_identity_unconsumed: List<EnumVariantFactGroup>,
+    effect_identity_unconsumed: List<EffectIdentityFact>,
+    source_impl_provider_unconsumed: List<SourceImplProviderFact>,
+    nominal_derived_provider_unconsumed:
+        List<NominalDerivedProviderPlanFact>,
+    // Registration-issued AST-site index for the repeated effect/main HIR
+    // checks. Values are opaque owner refs; no target/name/span is replayed.
+    impl_check_root_frames: Map<Str, Int>,
+    impl_check_child_frames: Map<Str, Int>,
+    impl_check_frame_stack: List<(Str, Int)>,
+    impl_check_owners: Map<Str, ImplOwnerRef>
 }
 
-pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
+pub fn new_infer_ctx(
+    sink: CollectingSink, module_key: Str, module_order: Int
+) -> InferCtx {
     InferCtx {
+        core_module_key: module_key,
+        core_module_order: module_order,
+        executable_stack: [],
+        dictionary_evidence_owner_stack: [],
+        anonymous_child_counters: [],
+        semantic_site_counters: [],
+        effect_ctx_bindings_stack: [],
+        effect_ctx_parent_captures_stack: [],
+        effect_ctx_active_stack: [],
+        effect_ctx_active_bases: [],
         env: new_type_env(),
         subst: empty_subst(),
         sink: sink,
@@ -190,20 +411,26 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         current_fn_bounds: [],
         fn_bounds_stack: [],
         pending_dict_obligations: [],
+        pending_callable_projections: [],
+        infer_mutation_undos: [],
+        infer_mutation_checkpoints: [],
         loop_depth: 0,
         mod_path_stack: [],
         use_aliases: map_new(),
         value_binding_kinds: map_new(),
+        value_symbols: map_new(),
+        value_symbols_by_payload: map_new(),
         boxed_vars: set_new(),
         lambda_depth: 0,
         var_lambda_depth: map_new(),
         fn_mut_params: map_new(),
         file_extern_types: set_new(),
-        effect_default_deps: map_new(),
         qualified_assoc_scope: map_new(),
-        rebind_assoc_provenance: map_new(),
-        fn_defaults: map_new(),
-        fn_min_arity: map_new(),
+        active_recursive_callables: [],
+        closed_recursive_callables: [],
+        h0_closed_registration_defs: set_new(),
+        pending_anonymous_callable_headers: [],
+        local_definition_effect_raw_tails: [],
         mod_unsafe_allowed: false,
         drop_types: set_new(),
         project_namespace_file_key: none,
@@ -211,7 +438,969 @@ pub fn new_infer_ctx(sink: CollectingSink) -> InferCtx {
         project_namespace_child_frames: map_new(),
         project_namespace_bindings: map_new(),
         project_namespace_ctor_enums: map_new(),
-        project_namespace_frame_stack: []
+        project_namespace_frame_stack: [],
+        struct_identity_file_key: none,
+        struct_identity_root_frame: none,
+        struct_identity_child_frames: map_new(),
+        struct_identity_frame_stack: [],
+        struct_identity_unconsumed: [],
+        struct_identity_pending: [],
+        trait_identity_unconsumed: [],
+        enum_identity_unconsumed: [],
+        effect_identity_unconsumed: [],
+        source_impl_provider_unconsumed: [],
+        nominal_derived_provider_unconsumed: [],
+        impl_check_root_frames: map_new(),
+        impl_check_child_frames: map_new(),
+        impl_check_frame_stack: [],
+        impl_check_owners: map_new()
+    }
+}
+
+fn infer_mutation_journal_active(ctx: InferCtx) -> Bool {
+    ctx.infer_mutation_checkpoints.len() != 0
+}
+
+pub fn begin_infer_mutation_journal(mut ctx: InferCtx) -> Int {
+    if ctx.infer_mutation_checkpoints.len() == 0 &&
+       ctx.infer_mutation_undos.len() != 0 {
+        panic("inference mutation journal: inactive journal is not empty")
+    }
+    let checkpoint = ctx.infer_mutation_undos.len()
+    ctx.infer_mutation_checkpoints.push(checkpoint)
+    checkpoint
+}
+
+fn assert_infer_mutation_checkpoint(
+    ctx: InferCtx, checkpoint: Int
+) {
+    match ctx.infer_mutation_checkpoints.last() {
+        some(active) => if active != checkpoint {
+            panic("inference mutation journal: checkpoint is not active")
+        },
+        none => panic("inference mutation journal: no active checkpoint")
+    }
+}
+
+pub fn commit_infer_mutation_journal(
+    mut ctx: InferCtx, checkpoint: Int
+) {
+    assert_infer_mutation_checkpoint(ctx, checkpoint)
+    ctx.infer_mutation_checkpoints.pop()
+    if ctx.infer_mutation_checkpoints.len() == 0 {
+        ctx.infer_mutation_undos = []
+    }
+}
+
+fn restore_set_membership(
+    mut values: Set<Int>, value: Int, was_present: Bool
+) {
+    if was_present { values.insert(value) } else { values.remove(value) }
+}
+
+pub fn rollback_infer_mutation_journal(
+    mut ctx: InferCtx, checkpoint: Int
+) {
+    assert_infer_mutation_checkpoint(ctx, checkpoint)
+    let mut index = ctx.infer_mutation_undos.len()
+    while index > checkpoint {
+        let undo = ctx.infer_mutation_undos.get(index - 1).unwrap()
+        match undo {
+            InferMutationUndo::BoxedVar { def_id, was_present } =>
+                restore_set_membership(
+                    ctx.boxed_vars, def_id, was_present),
+            InferMutationUndo::VarLambdaDepth { def_id, previous } =>
+                match previous {
+                    some(value) => ctx.var_lambda_depth.insert(def_id, value),
+                    none => { ctx.var_lambda_depth.remove(def_id) }
+                },
+            InferMutationUndo::DefSpan { def_id, previous } =>
+                match previous {
+                    some(value) => ctx.env.scope.def_spans.insert(
+                        def_id, value),
+                    none => { ctx.env.scope.def_spans.remove(def_id) }
+                },
+            InferMutationUndo::MutableVar { def_id, was_present } =>
+                restore_set_membership(
+                    ctx.env.scope.mutable_vars, def_id, was_present),
+            InferMutationUndo::LetDef { def_id, was_present } =>
+                restore_set_membership(
+                    ctx.env.scope.let_defs, def_id, was_present),
+            InferMutationUndo::MutParamDef { def_id, was_present } =>
+                restore_set_membership(
+                    ctx.env.scope.mut_param_defs, def_id, was_present),
+            InferMutationUndo::FnMutParams { name, previous } =>
+                match previous {
+                    some(value) => ctx.fn_mut_params.insert(name, value),
+                    none => { ctx.fn_mut_params.remove(name) }
+                },
+            InferMutationUndo::VarBounds { type_var, previous } =>
+                match previous {
+                    some(value) => ctx.env.scope.var_bounds.insert(
+                        type_var, value),
+                    none => { ctx.env.scope.var_bounds.remove(type_var) }
+                }
+        }
+        index = index - 1
+    }
+    ctx.infer_mutation_undos = ctx.infer_mutation_undos.slice(
+        0, checkpoint)
+    ctx.infer_mutation_checkpoints.pop()
+}
+
+pub fn journal_boxed_var_insert(mut ctx: InferCtx, def_id: Int) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::BoxedVar {
+            def_id: def_id, was_present: ctx.boxed_vars.contains(def_id)
+        })
+    }
+    ctx.boxed_vars.insert(def_id)
+}
+
+pub fn journal_var_lambda_depth_set(
+    mut ctx: InferCtx, def_id: Int, depth: Int
+) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(
+            InferMutationUndo::VarLambdaDepth {
+                def_id: def_id,
+                previous: ctx.var_lambda_depth.get(def_id)
+            })
+    }
+    ctx.var_lambda_depth.insert(def_id, depth)
+}
+
+pub fn journal_record_def_span(
+    mut ctx: InferCtx, def_id: Int, span: Span
+) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::DefSpan {
+            def_id: def_id, previous: ctx.env.scope.def_spans.get(def_id)
+        })
+    }
+    ctx.env.record_def_span(def_id, span)
+}
+
+pub fn journal_mutable_var_insert(mut ctx: InferCtx, def_id: Int) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::MutableVar {
+            def_id: def_id,
+            was_present: ctx.env.scope.mutable_vars.contains(def_id)
+        })
+    }
+    ctx.env.scope.mutable_vars.insert(def_id)
+}
+
+pub fn journal_let_def_insert(mut ctx: InferCtx, def_id: Int) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::LetDef {
+            def_id: def_id,
+            was_present: ctx.env.scope.let_defs.contains(def_id)
+        })
+    }
+    ctx.env.scope.let_defs.insert(def_id)
+}
+
+pub fn journal_mut_param_def_insert(mut ctx: InferCtx, def_id: Int) {
+    if infer_mutation_journal_active(ctx) {
+        ctx.infer_mutation_undos.push(InferMutationUndo::MutParamDef {
+            def_id: def_id,
+            was_present: ctx.env.scope.mut_param_defs.contains(def_id)
+        })
+    }
+    ctx.env.scope.mut_param_defs.insert(def_id)
+}
+
+pub fn journal_fn_mut_params_set(
+    mut ctx: InferCtx, name: Str, value: List<Bool>
+) {
+    if infer_mutation_journal_active(ctx) {
+        let previous = ctx.fn_mut_params.get(name).map(fn(existing) {
+            list_clone(existing)
+        })
+        ctx.infer_mutation_undos.push(InferMutationUndo::FnMutParams {
+            name: name, previous: previous
+        })
+    }
+    ctx.fn_mut_params.insert(name, value)
+}
+
+pub fn journal_fn_mut_params_remove(mut ctx: InferCtx, name: Str) {
+    if infer_mutation_journal_active(ctx) {
+        let previous = ctx.fn_mut_params.get(name).map(fn(existing) {
+            list_clone(existing)
+        })
+        ctx.infer_mutation_undos.push(InferMutationUndo::FnMutParams {
+            name: name, previous: previous
+        })
+    }
+    ctx.fn_mut_params.remove(name)
+}
+
+pub fn journal_var_bounds_set(
+    mut ctx: InferCtx, type_var: Int, value: Set<Str>
+) {
+    if infer_mutation_journal_active(ctx) {
+        let previous = ctx.env.scope.var_bounds.get(type_var).map(
+            fn(existing) { set_from(existing.to_list()) })
+        ctx.infer_mutation_undos.push(InferMutationUndo::VarBounds {
+            type_var: type_var, previous: previous
+        })
+    }
+    ctx.env.scope.var_bounds.insert(type_var, value)
+}
+
+pub fn journal_var_bound_insert(
+    mut ctx: InferCtx, type_var: Int, trait_name: Str
+) {
+    let mut bounds: Set<Str> = match ctx.env.scope.var_bounds.get(type_var) {
+        some(existing) => set_from(existing.to_list()),
+        none => set_new()
+    }
+    bounds.insert(trait_name)
+    journal_var_bounds_set(ctx, type_var, bounds)
+}
+
+fn recursive_callable_list_contains(
+    values: List<ExecutableRef>, wanted: ExecutableRef
+) -> Bool {
+    for value in values {
+        if executable_ref_same(value, wanted) { return true }
+    }
+    false
+}
+
+fn recursive_callable_group_members(
+    executables: List<ExecutableRef>
+) -> List<ExecutableRef> {
+    let mut members: List<ExecutableRef> = []
+    for executable in executables {
+        if !executable_ref_is_named(executable) {
+            panic("recursive callable group: member is not a named executable")
+        }
+        if recursive_callable_list_contains(members, executable) {
+            panic("recursive callable group: duplicate executable")
+        }
+        members.push(executable)
+    }
+    if members.len() == 0 {
+        panic("recursive callable group: empty group")
+    }
+    members
+}
+
+fn recursive_callable_groups_same(
+    left: List<ExecutableRef>, right: List<ExecutableRef>
+) -> Bool {
+    if left.len() != right.len() { return false }
+    for executable in right {
+        if !recursive_callable_list_contains(left, executable) { return false }
+    }
+    true
+}
+
+pub fn recursive_callable_is_active(
+    ctx: InferCtx, executable: ExecutableRef
+) -> Bool {
+    recursive_callable_list_contains(
+        ctx.active_recursive_callables, executable)
+}
+
+pub fn recursive_callable_group_is_active(ctx: InferCtx) -> Bool {
+    ctx.active_recursive_callables.len() != 0
+}
+
+pub fn begin_recursive_callable_group(
+    mut ctx: InferCtx, executables: List<ExecutableRef>
+) {
+    if ctx.active_recursive_callables.len() != 0 {
+        panic("recursive callable group: nested activation")
+    }
+    let members = recursive_callable_group_members(executables)
+    for executable in members {
+        if recursive_callable_list_contains(
+                ctx.closed_recursive_callables, executable) {
+            panic("recursive callable group: closed executable reactivated")
+        }
+    }
+    ctx.active_recursive_callables = members
+}
+
+pub fn end_recursive_callable_group(
+    mut ctx: InferCtx, executables: List<ExecutableRef>
+) {
+    if ctx.active_recursive_callables.len() == 0 {
+        panic("recursive callable group: deactivation without activation")
+    }
+    let members = recursive_callable_group_members(executables)
+    if !recursive_callable_groups_same(
+            ctx.active_recursive_callables, members) {
+        panic("recursive callable group: deactivation membership differs")
+    }
+    ctx.active_recursive_callables = []
+}
+
+pub fn mark_recursive_callable_group_closed(
+    mut ctx: InferCtx, executables: List<ExecutableRef>
+) {
+    if ctx.active_recursive_callables.len() != 0 {
+        panic("recursive callable group: closure before deactivation")
+    }
+    let members = recursive_callable_group_members(executables)
+    // Preflight the whole group before mutating the append-only marker set.
+    for executable in members {
+        if recursive_callable_list_contains(
+                ctx.closed_recursive_callables, executable) {
+            panic("recursive callable group: executable closed twice")
+        }
+    }
+    for executable in members {
+        ctx.closed_recursive_callables.push(executable)
+    }
+}
+
+pub fn recursive_callable_is_closed(
+    ctx: InferCtx, executable: ExecutableRef
+) -> Bool {
+    recursive_callable_list_contains(ctx.closed_recursive_callables, executable)
+}
+
+pub fn record_h0_closed_registration_header(
+    mut ctx: InferCtx, def_id: Int
+) {
+    ctx.h0_closed_registration_defs.insert(def_id)
+}
+
+pub fn h0_registration_header_is_closed(
+    ctx: InferCtx, provider: SymbolRef
+) -> Bool {
+    for entry in ctx.value_symbols.entries() {
+        let (def_id, symbol) = entry
+        if ctx.h0_closed_registration_defs.contains(def_id) &&
+           symbol_ref_same(symbol, provider) {
+            return true
+        }
+    }
+    false
+}
+
+pub fn owner_batch_checkpoint(ctx: InferCtx) -> OwnerBatchCheckpoint {
+    OwnerBatchCheckpoint {
+        pending_dict_len: ctx.pending_dict_obligations.len(),
+        pending_anonymous_len:
+            ctx.pending_anonymous_callable_headers.len(),
+        pending_projection_len:
+            ctx.pending_callable_projections.len(),
+        local_definition_effect_raw_tail_len:
+            ctx.local_definition_effect_raw_tails.len(),
+        effect_facts: effect_fact_checkpoint(ctx.env)
+    }
+}
+
+pub fn rollback_owner_batch(
+    mut ctx: InferCtx, checkpoint: OwnerBatchCheckpoint
+) {
+    if checkpoint.pending_dict_len > ctx.pending_dict_obligations.len() ||
+       checkpoint.pending_anonymous_len >
+            ctx.pending_anonymous_callable_headers.len() ||
+       checkpoint.pending_projection_len >
+            ctx.pending_callable_projections.len() ||
+       checkpoint.local_definition_effect_raw_tail_len >
+            ctx.local_definition_effect_raw_tails.len() {
+        panic("owner batch rollback: checkpoint exceeds pending state")
+    }
+    ctx.pending_dict_obligations = ctx.pending_dict_obligations.slice(
+        0, checkpoint.pending_dict_len)
+    ctx.pending_anonymous_callable_headers =
+        ctx.pending_anonymous_callable_headers.slice(
+            0, checkpoint.pending_anonymous_len)
+    ctx.pending_callable_projections =
+        ctx.pending_callable_projections.slice(
+            0, checkpoint.pending_projection_len)
+    ctx.local_definition_effect_raw_tails =
+        ctx.local_definition_effect_raw_tails.slice(
+            0, checkpoint.local_definition_effect_raw_tail_len)
+    rollback_effect_facts(ctx.env, checkpoint.effect_facts)
+}
+
+pub fn detach_owner_batch(
+    mut ctx: InferCtx, checkpoint: OwnerBatchCheckpoint
+) -> OwnerInferenceBatch {
+    if checkpoint.pending_dict_len > ctx.pending_dict_obligations.len() ||
+       checkpoint.pending_anonymous_len >
+            ctx.pending_anonymous_callable_headers.len() ||
+       checkpoint.pending_projection_len >
+            ctx.pending_callable_projections.len() ||
+       checkpoint.local_definition_effect_raw_tail_len >
+            ctx.local_definition_effect_raw_tails.len() {
+        panic("owner batch detach: checkpoint exceeds pending state")
+    }
+    let effect_facts = detach_effect_fact_suffix(
+        ctx.env, checkpoint.effect_facts)
+    let batch = OwnerInferenceBatch {
+        pending_dicts: ctx.pending_dict_obligations.slice(
+            checkpoint.pending_dict_len,
+            ctx.pending_dict_obligations.len()),
+        pending_anonymous:
+            ctx.pending_anonymous_callable_headers.slice(
+                checkpoint.pending_anonymous_len,
+                ctx.pending_anonymous_callable_headers.len()),
+        pending_projections: ctx.pending_callable_projections.slice(
+            checkpoint.pending_projection_len,
+            ctx.pending_callable_projections.len()),
+        local_definition_effect_raw_tails:
+            ctx.local_definition_effect_raw_tails.slice(
+                checkpoint.local_definition_effect_raw_tail_len,
+                ctx.local_definition_effect_raw_tails.len()),
+        effect_facts: effect_facts
+    }
+    ctx.pending_dict_obligations = ctx.pending_dict_obligations.slice(
+        0, checkpoint.pending_dict_len)
+    ctx.pending_anonymous_callable_headers =
+        ctx.pending_anonymous_callable_headers.slice(
+            0, checkpoint.pending_anonymous_len)
+    ctx.pending_callable_projections =
+        ctx.pending_callable_projections.slice(
+            0, checkpoint.pending_projection_len)
+    ctx.local_definition_effect_raw_tails =
+        ctx.local_definition_effect_raw_tails.slice(
+            0, checkpoint.local_definition_effect_raw_tail_len)
+    batch
+}
+
+pub fn pending_anonymous_callable_checkpoint(ctx: InferCtx) -> Int {
+    ctx.pending_anonymous_callable_headers.len()
+}
+
+pub fn record_pending_anonymous_callable_header(
+    mut ctx: InferCtx, executable: ExecutableRef, signature: Type,
+    carrier: Str, span: Span
+) {
+    let _ = carrier
+    let _ = span
+    if executable_ref_is_named(executable) {
+        panic("anonymous callable header: executable is named")
+    }
+    match signature {
+        Type::FnType { .. } => {},
+        _ => panic("anonymous callable header: signature is not callable")
+    }
+    for pending in ctx.pending_anonymous_callable_headers {
+        if executable_ref_same(pending.executable, executable) {
+            panic("anonymous callable header: executable recorded twice")
+        }
+    }
+    ctx.pending_anonymous_callable_headers.push(
+        PendingAnonymousCallableHeader {
+            executable: executable, signature: signature
+        })
+}
+
+pub fn rollback_pending_anonymous_callable_headers(
+    mut ctx: InferCtx, checkpoint: Int
+) {
+    if checkpoint < 0 ||
+       checkpoint > ctx.pending_anonymous_callable_headers.len() {
+        panic("anonymous callable header: invalid checkpoint")
+    }
+    ctx.pending_anonymous_callable_headers =
+        ctx.pending_anonymous_callable_headers.slice(0, checkpoint)
+}
+
+pub fn drain_representable_pending_anonymous(
+    mut ctx: InferCtx, checkpoint: Int,
+    owner_schema: TypedEffectHeaderSchema, final_subst: UnionFind
+) {
+    if checkpoint < 0 ||
+       checkpoint > ctx.pending_anonymous_callable_headers.len() {
+        panic("anonymous callable header: invalid selective checkpoint")
+    }
+    publish_effect_header_schema(ctx.env, owner_schema)
+    let _ = final_subst
+    // Per-statement drain publishes only the owner's already-selected formal
+    // schema. Anonymous callable headers stay pending until the enclosing
+    // executable's frozen-subst OwnerInferenceBatch stages them atomically.
+}
+
+pub struct CallableInstantiationReceipt {
+    ty: Type,
+    source_to_actual: Map<Int, Type>,
+    type_args: List<HCallableTypeActual>,
+    effect_instantiation: HCallableEffectInstantiation?
+}
+
+pub fn callable_receipt_type(value: CallableInstantiationReceipt) -> Type {
+    value.ty
+}
+
+pub fn callable_receipt_type_args(
+    value: CallableInstantiationReceipt
+) -> List<HCallableTypeActual> {
+    value.type_args
+}
+
+pub fn callable_receipt_effects(
+    value: CallableInstantiationReceipt
+) -> HCallableEffectInstantiation? {
+    value.effect_instantiation
+}
+
+pub fn error_callable_receipt() -> CallableInstantiationReceipt {
+    CallableInstantiationReceipt {
+        ty: Type::ErrorType, source_to_actual: map_new(),
+        type_args: [], effect_instantiation: none
+    }
+}
+
+fn callable_receipt_actual(
+    value: CallableInstantiationReceipt, source: Int
+) -> Type? {
+    value.source_to_actual.get(source)
+}
+
+fn assert_callable_receipt_sources(
+    value: CallableInstantiationReceipt, expected: List<Int>
+) {
+    if value.source_to_actual.len() != expected.len() {
+        panic("callable receipt: source formal census differs")
+    }
+    for source in expected {
+        if !value.source_to_actual.contains_key(source) {
+            panic("callable receipt: expected source formal is absent")
+        }
+    }
+}
+
+fn identity_instantiation_mapping(ids: List<Int>) -> Map<Int, Type> {
+    let mut mapping: Map<Int, Type> = map_new()
+    for id in ids {
+        if mapping.contains_key(id) {
+            panic("callable instantiation: source formal repeats")
+        }
+        mapping.insert(id, Type::TypeVar { id: id, name: none })
+    }
+    mapping
+}
+
+fn pending_callable_receipt(
+    mut ctx: InferCtx, target: ExecutableRef,
+    ty: Type, mapping: Map<Int, Type>
+) -> CallableInstantiationReceipt {
+    let type_args_output: List<HCallableTypeActual> = []
+    let effect_actuals_output: List<HCallableEffectActual> = []
+    let receipt = CallableInstantiationReceipt {
+        ty: ty, source_to_actual: mapping,
+        type_args: type_args_output,
+        effect_instantiation: some(HCallableEffectInstantiation {
+            substitutions: effect_actuals_output
+        })
+    }
+    ctx.pending_callable_projections.push(PendingCallableProjection {
+        receipt: receipt,
+        target: target,
+        type_args_output: type_args_output,
+        effect_actuals_output: effect_actuals_output
+    })
+    receipt
+}
+
+fn declared_callable_type_vars(scheme: TypeScheme) -> List<Int> {
+    let effect_tails = ordered_effect_tail_vars(scheme.ty)
+    scheme.type_vars.filter(fn(id) { !effect_tails.contains(id) })
+}
+
+fn callable_type_actuals_from_mapping(
+    owner: SymbolRef, scheme: TypeScheme, declared: List<Int>,
+    mapping: Map<Int, Type>
+) -> List<HCallableTypeActual> {
+    let mut result: List<HCallableTypeActual> = []
+    for formal in scheme_value_type_vars(scheme) {
+        if declared.contains(formal) {
+            let mut ordinal: Int? = none
+            let mut index = 0
+            while index < declared.len() {
+                if declared.get(index).unwrap() == formal {
+                    ordinal = some(index)
+                }
+                index = index + 1
+            }
+            result.push(HCallableTypeActual {
+                owner: owner,
+                ordinal: match ordinal {
+                    some(value) => value,
+                    none => panic(
+                        "callable instantiation: type formal has no ordinal")
+                },
+                arity: declared.len(),
+                actual: match mapping.get(formal) {
+                    some(actual) => actual,
+                    none => panic(
+                        "callable instantiation: type formal mapping is absent")
+                }
+            })
+        }
+    }
+    result
+}
+
+fn callable_effect_actuals_from_mapping(
+    schema: TypedEffectHeaderSchema, mapping: Map<Int, Type>
+) -> HCallableEffectInstantiation {
+    let mut substitutions: List<HCallableEffectActual> = []
+    let mut raw_tails: List<Int> = []
+    for binding in typed_effect_header_schema_bindings(schema) {
+        let raw_tail = typed_effect_header_binding_raw_tail(binding)
+        let source = typed_effect_header_binding_parameter(binding)
+        if raw_tails.contains(raw_tail) {
+            panic("callable effect instantiation: raw formal repeats")
+        }
+        for existing in substitutions {
+            if effect_param_ref_same(existing.source, source) {
+                panic("callable effect instantiation: source formal repeats")
+            }
+        }
+        let mapped = match mapping.get(raw_tail) {
+            some(actual) => actual,
+            none => panic(
+                "callable effect instantiation: formal mapping is absent")
+        }
+        let actual = match mapped {
+            Type::TypeVar { id, .. } => EffectRow {
+                effects: [], tail: some(id)
+            },
+            _ => panic(
+                "callable effect instantiation: formal did not map to fresh tail")
+        }
+        raw_tails.push(raw_tail)
+        substitutions.push(HCallableEffectActual {
+            source: source, actual: actual
+        })
+    }
+
+    HCallableEffectInstantiation { substitutions: substitutions }
+}
+
+fn callable_instantiation_from_mapping(
+    owner: SymbolRef, scheme: TypeScheme, declared: List<Int>,
+    mapping: Map<Int, Type>
+) -> HCallableValueInstantiation {
+    if mapping.len() != scheme.type_vars.len() {
+        panic("callable instantiation: mapping census differs")
+    }
+    for source in scheme.type_vars {
+        if !mapping.contains_key(source) {
+            panic("callable instantiation: source formal mapping is absent")
+        }
+    }
+    HCallableValueInstantiation {
+        type_args: callable_type_actuals_from_mapping(
+            owner, scheme, declared, mapping),
+        effects: some(callable_effect_actuals_from_mapping(
+            scheme.effect_schema, mapping))
+    }
+}
+
+pub fn make_callable_finalization_header(
+    executable: ExecutableRef, final_scheme: TypeScheme
+) -> CallableFinalizationHeader {
+    if !executable_ref_is_named(executable) {
+        panic("callable finalization header: executable is anonymous")
+    }
+    match final_scheme.ty {
+        Type::FnType { .. } => {},
+        _ => panic("callable finalization header: scheme is not callable")
+    }
+    CallableFinalizationHeader {
+        executable: executable, final_scheme: final_scheme
+    }
+}
+
+fn finalization_header_for_target(
+    headers: List<CallableFinalizationHeader>, target: ExecutableRef
+) -> CallableFinalizationHeader {
+    let mut found: CallableFinalizationHeader? = none
+    for header in headers {
+        if executable_ref_same(header.executable, target) {
+            if found.is_some() {
+                panic("callable receipt projection: target header repeats")
+            }
+            found = some(header)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("callable receipt projection: target header is absent")
+    }
+}
+
+pub fn project_owner_batch_receipts(
+    mut batch: OwnerInferenceBatch,
+    headers: List<CallableFinalizationHeader>
+) -> OwnerInferenceBatch {
+    let mut left = 0
+    while left < headers.len() {
+        let left_header = headers.get(left).unwrap()
+        let mut right = left + 1
+        while right < headers.len() {
+            if executable_ref_same(
+                    left_header.executable,
+                    headers.get(right).unwrap().executable) {
+                panic("callable receipt projection: header target repeats")
+            }
+            right = right + 1
+        }
+        left = left + 1
+    }
+
+    let mut finalized: List<FinalCallableProjection> = []
+    for pending in batch.pending_projections {
+        if pending.type_args_output.len() != 0 ||
+           pending.effect_actuals_output.len() != 0 {
+            panic("callable receipt projection: output alias is not empty")
+        }
+        let header = finalization_header_for_target(
+            headers, pending.target)
+        let mut final_mapping: Map<Int, Type> = map_new()
+        for source in header.final_scheme.type_vars {
+            if final_mapping.contains_key(source) {
+                panic("callable receipt projection: final formal repeats")
+            }
+            match pending.receipt.source_to_actual.get(source) {
+                some(Type::TypeVar { id, .. }) => {
+                    if id != source {
+                        panic("callable receipt projection: active mapping is not identity")
+                    }
+                    final_mapping.insert(source, Type::TypeVar {
+                        id: source, name: none
+                    })
+                },
+                some(_) => panic(
+                    "callable receipt projection: active actual is not raw var"),
+                none => final_mapping.insert(source, Type::TypeVar {
+                    id: source, name: none
+                })
+            }
+        }
+        let exact = callable_instantiation_from_mapping(
+            executable_ref_named_symbol(header.executable),
+            header.final_scheme,
+            declared_callable_type_vars(header.final_scheme),
+            final_mapping)
+        let effect_actuals = match exact.effects {
+            some(value) => value.substitutions,
+            none => panic(
+                "callable receipt projection: effect projection is absent")
+        }
+        finalized.push(FinalCallableProjection {
+            type_args_output: pending.type_args_output,
+            effect_actuals_output: pending.effect_actuals_output,
+            type_args: exact.type_args,
+            effect_actuals: effect_actuals
+        })
+    }
+
+    for projection in finalized {
+        for actual in projection.type_args {
+            projection.type_args_output.push(actual)
+        }
+        for actual in projection.effect_actuals {
+            projection.effect_actuals_output.push(actual)
+        }
+    }
+    batch.pending_projections = []
+    batch
+}
+
+fn install_monomorphic_scheme_bounds(
+    mut ctx: InferCtx, scheme: TypeScheme
+) {
+    for bound in scheme.bounds {
+        if !scheme.type_vars.contains(bound.type_var) {
+            panic("recursive callable scheme: bound subject is not quantified")
+        }
+        journal_var_bound_insert(
+            ctx, bound.type_var, bound.trait_name)
+    }
+}
+
+fn instantiate_scheme_with_receipt_mapping(
+    mut ctx: InferCtx, scheme: TypeScheme
+) -> (Type, Map<Int, Type>) {
+    let mut mapping: Map<Int, Type> = map_new()
+    for source in scheme.type_vars {
+        if mapping.contains_key(source) {
+            panic("callable instantiation: scheme formal repeats")
+        }
+        mapping.insert(source, ctx.env.fresh_var())
+    }
+    for bound in scheme.bounds {
+        match mapping.get(bound.type_var) {
+            some(Type::TypeVar { id, .. }) =>
+                journal_var_bound_insert(ctx, id, bound.trait_name),
+            _ => panic(
+                "callable instantiation: bound subject is not quantified")
+        }
+    }
+    (apply_subst_map(mapping, scheme.ty), mapping)
+}
+
+pub fn instantiate_callable_scheme(
+    mut ctx: InferCtx, scheme: TypeScheme
+) -> CallableInstantiationReceipt {
+    match scheme.ty {
+        Type::FnType { .. } => {},
+        _ => {
+            let instantiated = instantiate_scheme_with_receipt_mapping(
+                ctx, scheme)
+            if instantiated.1.len() != scheme.type_vars.len() {
+                panic("value instantiation: complete mapping is absent")
+            }
+            return CallableInstantiationReceipt {
+                ty: instantiated.0,
+                source_to_actual: instantiated.1,
+                type_args: [], effect_instantiation: none
+            }
+        }
+    }
+    match scheme.def_id {
+        some(def_id) => match ctx.value_symbols.get(def_id) {
+            some(symbol) => if recursive_callable_is_active(
+                    ctx, make_named_executable_ref(symbol)) {
+                install_monomorphic_scheme_bounds(ctx, scheme)
+                let mapping = identity_instantiation_mapping(
+                    scheme.type_vars)
+                return pending_callable_receipt(
+                    ctx, make_named_executable_ref(symbol),
+                    scheme.ty, mapping)
+            },
+            none => {}
+        },
+        none => {}
+    }
+    let instantiated = instantiate_scheme_with_receipt_mapping(ctx, scheme)
+    if instantiated.1.len() != scheme.type_vars.len() {
+        panic("callable instantiation: complete mapping is absent")
+    }
+    let exact = match scheme.def_id {
+        some(def_id) => match ctx.value_symbols.get(def_id) {
+            some(symbol) => {
+                validate_effect_header_schema(
+                    [scheme.ty], scheme.type_vars, scheme.effect_schema)
+                some(callable_instantiation_from_mapping(
+                    symbol, scheme, declared_callable_type_vars(scheme),
+                    instantiated.1))
+            },
+            none => none
+        },
+        none => none
+    }
+    match exact {
+        some(value) => CallableInstantiationReceipt {
+            ty: instantiated.0, source_to_actual: instantiated.1,
+            type_args: value.type_args,
+            effect_instantiation: value.effects
+        },
+        none => CallableInstantiationReceipt {
+            ty: instantiated.0, source_to_actual: instantiated.1,
+            type_args: [], effect_instantiation: none
+        }
+    }
+}
+
+fn install_monomorphic_impl_predicates(
+    mut ctx: InferCtx, owner: ImplEntry, core: ImplMethodSchemeCore
+) {
+    let type_vars = impl_method_core_type_vars(core)
+    for predicate in frozen_impl_predicates(owner.predicates) {
+        let subject = impl_predicate_subject_type_var(predicate)
+        if !type_vars.contains(subject) {
+            panic("recursive impl method: predicate subject is not quantified")
+        }
+        journal_var_bound_insert(
+            ctx, subject, impl_predicate_trait_name(predicate))
+    }
+}
+
+fn instantiate_impl_with_receipt_mapping(
+    mut ctx: InferCtx, owner: ImplEntry, core: ImplMethodSchemeCore
+) -> (Type, Map<Int, Type>) {
+    let mut mapping: Map<Int, Type> = map_new()
+    for source in impl_method_core_type_vars(core) {
+        if mapping.contains_key(source) {
+            panic("impl method instantiation: formal repeats")
+        }
+        mapping.insert(source, ctx.env.fresh_var())
+    }
+    for predicate in frozen_impl_predicates(owner.predicates) {
+        match mapping.get(impl_predicate_subject_type_var(predicate)) {
+            some(Type::TypeVar { id, .. }) => journal_var_bound_insert(
+                ctx, id, impl_predicate_trait_name(predicate)),
+            _ => panic(
+                "impl method instantiation: predicate subject is not quantified")
+        }
+    }
+    (apply_subst_map(
+        mapping, impl_method_core_type(core)), mapping)
+}
+
+pub fn instantiate_callable_impl_method(
+    mut ctx: InferCtx, owner: ImplEntry, core: ImplMethodSchemeCore,
+    method_ref: ImplMethodRef
+) -> CallableInstantiationReceipt {
+    let executable = make_named_executable_ref(
+        impl_method_ref_member(method_ref))
+    if recursive_callable_is_active(ctx, executable) {
+        install_monomorphic_impl_predicates(ctx, owner, core)
+        let mapping = identity_instantiation_mapping(
+            impl_method_core_type_vars(core))
+        return pending_callable_receipt(
+            ctx, executable, impl_method_core_type(core),
+            mapping)
+    }
+    let instantiated = instantiate_impl_with_receipt_mapping(
+        ctx, owner, core)
+    let method_name = impl_method_ref_name(method_ref)
+    let callable_owner = match owner.method_intrinsics.get(method_name) {
+        some(intrinsic) => intrinsic_ref_symbol(intrinsic),
+        none => impl_method_ref_member(method_ref)
+    }
+    let scheme = impl_method_core_as_scheme(core)
+    let effect_tails = ordered_effect_tail_vars(scheme.ty)
+    let declared = scheme.type_vars.filter(fn(id) {
+        !owner.type_param_vars.contains(id) && !effect_tails.contains(id)
+    })
+    let exact = callable_instantiation_from_mapping(
+        callable_owner, scheme, declared, instantiated.1)
+    CallableInstantiationReceipt {
+        ty: instantiated.0,
+        source_to_actual: instantiated.1,
+        type_args: exact.type_args,
+        effect_instantiation: exact.effects
+    }
+}
+
+pub fn make_callable_impl_definition_receipt(
+    owner: ImplEntry, core: ImplMethodSchemeCore,
+    method_ref: ImplMethodRef
+) -> CallableInstantiationReceipt {
+    let scheme = impl_method_core_as_scheme(core)
+    let mapping = identity_instantiation_mapping(scheme.type_vars)
+    let method_name = impl_method_ref_name(method_ref)
+    let callable_owner = match owner.method_intrinsics.get(method_name) {
+        some(intrinsic) => intrinsic_ref_symbol(intrinsic),
+        none => impl_method_ref_member(method_ref)
+    }
+    let effect_tails = ordered_effect_tail_vars(scheme.ty)
+    let declared = scheme.type_vars.filter(fn(id) {
+        !owner.type_param_vars.contains(id) && !effect_tails.contains(id)
+    })
+    let exact = callable_instantiation_from_mapping(
+        callable_owner, scheme, declared, mapping)
+    CallableInstantiationReceipt {
+        ty: scheme.ty,
+        source_to_actual: mapping,
+        type_args: exact.type_args,
+        effect_instantiation: exact.effects
     }
 }
 
@@ -227,10 +1416,11 @@ fn project_binding_key(binding: ResolvedNamespaceBinding) -> Str {
         NamespaceKind::TypeAlias => "type-alias",
         NamespaceKind::Effect => "effect",
         NamespaceKind::EffectAlias => "effect-alias",
-        NamespaceKind::Trait => "trait",
-        NamespaceKind::Sig => "sig"
+        NamespaceKind::Trait => "trait"
     }
-    "${namespace}|${binding.exposed_name}|${binding.payload}"
+    // This is only an application bucket for one already-resolved target
+    // frame.  Resolver SymbolRef remains the sole origin authority.
+    "${namespace}|${binding.exposed_name}"
 }
 
 fn current_scope_value(ctx: InferCtx, name: Str) -> TypeScheme? {
@@ -263,7 +1453,9 @@ fn apply_project_value_binding(
     binding: ResolvedNamespaceBinding,
     mut state: ProjectNamespaceFrameState
 ) -> Bool {
-    match ctx.env.lookup(binding.payload) {
+    let canonical_payload =
+        symbol_ref_canonical_payload(binding.symbol)
+    match ctx.env.lookup(canonical_payload) {
         none => false,
         some(source_scheme) => {
             let previous = current_scope_value(ctx, binding.exposed_name)
@@ -277,21 +1469,19 @@ fn apply_project_value_binding(
                 ty: source_scheme.ty,
                 type_vars: source_scheme.type_vars,
                 bounds: source_scheme.bounds,
+                effect_schema: source_scheme.effect_schema,
                 def_id: some(new_def_id)
             })
 
             let ultimate = exact_scheme_value_origin(
-                ctx.use_aliases, source_scheme, binding.payload)
+                ctx.use_aliases, source_scheme, canonical_payload)
             ctx.use_aliases.insert(new_def_id, ultimate)
             ctx.value_binding_kinds.insert(
                 new_def_id, value_binding_kind(ctx, source_scheme.def_id))
-            match variant_ctor_origin(ctx, source_scheme) {
-                some(origin) => {
-                    ctx.env.types.variant_ctor_origins.insert(new_def_id, origin)
-                },
-                none => {}
-            }
-
+            // The resolver binding already owns the exact value identity.
+            // Relate the fresh lexical DefId directly; constructors must not
+            // recover this fact from their legacy codegen spelling.
+            ctx.value_symbols.insert(new_def_id, binding.symbol)
             // Spelling-keyed metadata is part of the lexical overlay too.
             // Absence on the canonical source removes any parent-frame entry,
             // preventing stale metadata from leaking through shadowing.
@@ -301,7 +1491,7 @@ fn apply_project_value_binding(
                 name: binding.exposed_name,
                 previous: previous_variant
             })
-            match ctx.project_namespace_ctor_enums.get(binding.payload) {
+            match ctx.project_namespace_ctor_enums.get(canonical_payload) {
                 some(enum_payload) => {
                     ctx.env.types.variant_to_enum.insert(
                         binding.exposed_name, enum_payload)
@@ -314,13 +1504,15 @@ fn apply_project_value_binding(
                 name: binding.exposed_name,
                 previous: previous_mut
             })
-            let source_mut = match ctx.fn_mut_params.get(binding.payload) {
+            let source_mut = match ctx.fn_mut_params.get(canonical_payload) {
                 some(flags) => some(flags),
                 none => ctx.fn_mut_params.get(ultimate)
             }
             match source_mut {
-                some(flags) => { ctx.fn_mut_params.insert(binding.exposed_name, flags) },
-                none => { ctx.fn_mut_params.remove(binding.exposed_name) }
+                some(flags) => journal_fn_mut_params_set(
+                    ctx, binding.exposed_name, flags),
+                none => journal_fn_mut_params_remove(
+                    ctx, binding.exposed_name)
             }
             true
         }
@@ -332,16 +1524,23 @@ fn apply_project_namespace_binding(
     binding: ResolvedNamespaceBinding,
     mut state: ProjectNamespaceFrameState
 ) -> Bool {
+    let canonical_payload =
+        symbol_ref_canonical_payload(binding.symbol)
     match binding.namespace {
         NamespaceKind::Value => apply_project_value_binding(ctx, binding, state),
         NamespaceKind::Struct => {
-            let source = match ctx.env.types.extern_structs.get(binding.payload) {
+            let source = match ctx.env.types.extern_structs.get(canonical_payload) {
                 some(def) => some(def),
-                none => ctx.env.types.structs.get(binding.payload)
+                none => ctx.env.types.structs.get(canonical_payload)
             }
             match source {
                 none => false,
                 some(def) => {
+                    if !symbol_ref_same(
+                            binding.symbol,
+                            registered_nominal_ref_symbol(def.owner_ref)) {
+                        panic("project hydration: struct owner identity mismatch")
+                    }
                     state.journal.push(ProjectNamespaceUndo::Struct {
                         name: binding.exposed_name,
                         previous: ctx.env.types.structs.get(binding.exposed_name)
@@ -351,9 +1550,14 @@ fn apply_project_namespace_binding(
                 }
             }
         },
-        NamespaceKind::Enum => match ctx.env.types.enums.get(binding.payload) {
+        NamespaceKind::Enum => match ctx.env.types.enums.get(canonical_payload) {
             none => false,
             some(def) => {
+                if !symbol_ref_same(
+                        binding.symbol,
+                        registered_nominal_ref_symbol(def.owner_ref)) {
+                    panic("project hydration: enum owner identity mismatch")
+                }
                 state.journal.push(ProjectNamespaceUndo::Enum {
                     name: binding.exposed_name,
                     previous: ctx.env.types.enums.get(binding.exposed_name)
@@ -362,9 +1566,12 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::TypeAlias => match ctx.env.types.type_aliases.get(binding.payload) {
+        NamespaceKind::TypeAlias => match ctx.env.types.type_aliases.get(canonical_payload) {
             none => false,
             some(def) => {
+                if !symbol_ref_same(binding.symbol, def.owner_ref) {
+                    panic("project hydration: type alias owner identity mismatch")
+                }
                 state.journal.push(ProjectNamespaceUndo::TypeAlias {
                     name: binding.exposed_name,
                     previous: ctx.env.types.type_aliases.get(binding.exposed_name)
@@ -373,9 +1580,18 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::Effect => match ctx.env.types.effects.get(binding.payload) {
+        NamespaceKind::Effect => match ctx.env.types.effects.get(canonical_payload) {
             none => false,
             some(def) => {
+                match def.owner_ref {
+                    some(owner) => if !symbol_ref_same(
+                            binding.symbol, owner) ||
+                            def.handled_ref.is_none() {
+                        panic("project hydration: effect owner identity mismatch")
+                    },
+                    none => panic(
+                        "project hydration: source effect has no exact owner")
+                }
                 state.journal.push(ProjectNamespaceUndo::Effect {
                     name: binding.exposed_name,
                     previous: ctx.env.types.effects.get(binding.exposed_name)
@@ -384,7 +1600,7 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::EffectAlias => match ctx.env.types.effect_aliases.get(binding.payload) {
+        NamespaceKind::EffectAlias => match ctx.env.types.effect_aliases.get(canonical_payload) {
             none => false,
             some(def) => {
                 state.journal.push(ProjectNamespaceUndo::EffectAlias {
@@ -395,25 +1611,24 @@ fn apply_project_namespace_binding(
                 true
             }
         },
-        NamespaceKind::Trait => match ctx.env.trait_reg.traits.get(binding.payload) {
+        NamespaceKind::Trait => match ctx.env.trait_reg.traits.get(canonical_payload) {
             none => false,
             some(def) => {
+                if !symbol_ref_same(
+                        binding.symbol,
+                        registered_trait_ref_symbol(def.owner_ref)) ||
+                   registered_trait_ref_display_name(def.owner_ref) !=
+                        def.name || def.name != canonical_payload ||
+                   !registered_trait_ref_same(
+                        registered_trait_contract_owner(def.contract),
+                        def.owner_ref) {
+                    panic("project hydration: trait owner identity mismatch")
+                }
                 state.journal.push(ProjectNamespaceUndo::Trait {
                     name: binding.exposed_name,
                     previous: ctx.env.trait_reg.traits.get(binding.exposed_name)
                 })
                 ctx.env.trait_reg.traits.insert(binding.exposed_name, def)
-                true
-            }
-        },
-        NamespaceKind::Sig => match ctx.env.types.sigs.get(binding.payload) {
-            none => false,
-            some(def) => {
-                state.journal.push(ProjectNamespaceUndo::Sig {
-                    name: binding.exposed_name,
-                    previous: ctx.env.types.sigs.get(binding.exposed_name)
-                })
-                ctx.env.types.sigs.insert(binding.exposed_name, def)
                 true
             }
         }
@@ -429,7 +1644,6 @@ fn restore_project_namespace_undo(mut ctx: InferCtx, undo: ProjectNamespaceUndo)
             }
             ctx.use_aliases.remove(new_def_id)
             ctx.value_binding_kinds.remove(new_def_id)
-            ctx.env.types.variant_ctor_origins.remove(new_def_id)
         },
         ProjectNamespaceUndo::Struct { name, previous } => match previous {
             some(def) => { ctx.env.types.structs.insert(name, def) },
@@ -455,17 +1669,13 @@ fn restore_project_namespace_undo(mut ctx: InferCtx, undo: ProjectNamespaceUndo)
             some(def) => { ctx.env.trait_reg.traits.insert(name, def) },
             none => { ctx.env.trait_reg.traits.remove(name) }
         },
-        ProjectNamespaceUndo::Sig { name, previous } => match previous {
-            some(def) => { ctx.env.types.sigs.insert(name, def) },
-            none => { ctx.env.types.sigs.remove(name) }
-        },
         ProjectNamespaceUndo::VariantToEnum { name, previous } => match previous {
             some(enum_name) => { ctx.env.types.variant_to_enum.insert(name, enum_name) },
             none => { ctx.env.types.variant_to_enum.remove(name) }
         },
         ProjectNamespaceUndo::FnMutParams { name, previous } => match previous {
-            some(flags) => { ctx.fn_mut_params.insert(name, flags) },
-            none => { ctx.fn_mut_params.remove(name) }
+            some(flags) => journal_fn_mut_params_set(ctx, name, flags),
+            none => journal_fn_mut_params_remove(ctx, name)
         }
     }
 }
@@ -506,10 +1716,14 @@ pub fn install_project_namespace_plan(
             }
         }
     }
-    for entry in plan.enum_variant_facts.entries() {
-        let (enum_payload, ctor_facts) = entry
-        for ctor in ctor_facts {
-            ctx.project_namespace_ctor_enums.insert(ctor.payload, enum_payload)
+    for group in plan.enum_variant_facts {
+        let enum_payload =
+            symbol_ref_canonical_payload(group.enum_symbol)
+        for ctor in group.constructors {
+            let ctor_payload =
+                symbol_ref_canonical_payload(ctor.symbol)
+            ctx.project_namespace_ctor_enums.insert(
+                ctor_payload, enum_payload)
         }
     }
     ctx.project_namespace_root_frame.is_some()
@@ -748,6 +1962,15 @@ fn infer_suggestion(code: Str, message: Str, context: DiagnosticContext) -> List
             },
             _ => {}
         }
+    }
+
+    if code == "E0404" &&
+       message.starts_with("Runtime handled effect instance in '") {
+        suggestions.push(Suggestion {
+            message: "Instantiate the custom effect with fully closed type arguments before perform or handle",
+            replacement: none,
+            span: none
+        })
     }
 
     // Effect mismatch — suggest handler when effects leak into pure context
@@ -1090,7 +2313,8 @@ pub fn generalize(env: TypeEnv, t: Type, subst: UnionFind) -> TypeScheme {
             none => {}
         }
     }
-    TypeScheme { ty: resolved, type_vars: type_vars, bounds: bounds, def_id: none }
+    TypeScheme { ty: resolved, type_vars: type_vars, bounds: bounds,
+        effect_schema: empty_typed_effect_header_schema(), def_id: none }
 }
 
 // ============================================================
@@ -1124,33 +2348,8 @@ pub fn record_value_origin(mut ctx: InferCtx, local_name: Str, origin: Str) {
     }
 }
 
-// Constructor identity must follow the binding, not its spelling: enum
-// variants may be imported or aliased, while a local with the same name must
-// remain an ordinary value. The map covers fieldless and positional-payload
-// constructors; named-field construction has its own HIR node.
-pub fn record_variant_ctor_origin(mut ctx: InferCtx, local_name: Str, origin: Str) {
-    match ctx.env.lookup(local_name) {
-        some(scheme) => match scheme.def_id {
-            some(def_id) => { ctx.env.types.variant_ctor_origins.insert(def_id, origin) },
-            none => {}
-        },
-        none => {}
-    }
-}
-
-pub fn variant_ctor_origin(ctx: InferCtx, scheme: TypeScheme) -> Str? {
-    match scheme.def_id {
-        some(def_id) => ctx.env.types.variant_ctor_origins.get(def_id),
-        none => none
-    }
-}
-
-pub fn has_variant_ctor_origin_def_id(ctx: InferCtx, def_id: Int) -> Bool {
-    ctx.env.types.variant_ctor_origins.contains_key(def_id)
-}
-
 fn resolve_fn_bound_dict_ref(
-    current_fn_bounds: List<FnBoundsEntry>,
+    runtime_owner: ExecutableRef, current_fn_bounds: List<FnBoundsEntry>,
     id: Int, s: UnionFind, trait_name: Str
 ) -> DictRef? {
     let matching = current_fn_bounds.find(fn(fb) {
@@ -1169,8 +2368,7 @@ fn resolve_fn_bound_dict_ref(
         }
     })
     match matching {
-        some(fb) => some(DictRef::Simple(
-            trait_bound_param_name(fb.type_param_name, fb.trait_name))),
+        some(fb) => some(fn_bound_dict_ref(runtime_owner, fb)),
         none => none
     }
 }
@@ -1178,11 +2376,629 @@ fn resolve_fn_bound_dict_ref(
 pub fn record_value_binding_kind(mut ctx: InferCtx, local_name: Str, kind: ValueBindingKind) {
     match ctx.env.lookup(local_name) {
         some(scheme) => match scheme.def_id {
-            some(def_id) => { ctx.value_binding_kinds.insert(def_id, kind) },
+            some(def_id) => {
+                ctx.value_binding_kinds.insert(def_id, kind)
+                let payload = match ctx.use_aliases.get(def_id) {
+                    some(origin) => origin,
+                    none => local_name
+                }
+                match ctx.value_symbols_by_payload.get(payload) {
+                    some(symbol) => {
+                        match ctx.value_symbols.get(def_id) {
+                            some(existing) => if !symbol_ref_same(
+                                    existing, symbol) {
+                                panic("value identity: DefId was rebound to another SymbolRef")
+                            },
+                            none => ctx.value_symbols.insert(def_id, symbol)
+                        }
+                    },
+                    none => {}
+                }
+            },
             none => {}
         },
         none => {}
     }
+}
+
+pub fn value_symbol_ref(ctx: InferCtx, def_id: Int) -> SymbolRef {
+    let source = match ctx.value_symbols.get(def_id) {
+        some(symbol) => symbol,
+        none => panic("value identity: callable DefId has no resolver SymbolRef")
+    }
+    match compiler_owned_extern_symbol(ctx.env, source) {
+        some(exact) => exact,
+        none => source
+    }
+}
+
+pub fn record_value_symbol_ref(
+    mut ctx: InferCtx, local_name: Str, symbol: SymbolRef
+) {
+    match ctx.env.lookup(local_name) {
+        some(scheme) => match scheme.def_id {
+            some(def_id) => match ctx.value_symbols.get(def_id) {
+                some(existing) => if !symbol_ref_same(existing, symbol) {
+                    panic("value identity: explicit SymbolRef changed")
+                },
+                none => ctx.value_symbols.insert(def_id, symbol)
+            },
+            none => panic("value identity: explicit callable has no DefId")
+        },
+        none => panic("value identity: explicit callable is not registered")
+    }
+}
+
+pub fn source_value_symbol_for_decl(
+    ctx: InferCtx, decl_index: Int
+) -> SymbolRef {
+    if decl_index < 0 {
+        panic("value identity: declaration index is negative")
+    }
+    let file_key = match ctx.struct_identity_file_key {
+        some(value) => value,
+        none => panic("value identity: resolver ledger is absent")
+    }
+    let frame_index = match ctx.struct_identity_frame_stack.get(
+            ctx.struct_identity_frame_stack.len() - 1) {
+        some(value) => value,
+        none => panic("value identity: registration frame is absent")
+    }
+    let site_path = "frame:${frame_index}|item:${decl_index}"
+    let mut found: SymbolRef? = none
+    for entry in ctx.value_symbols_by_payload.entries() {
+        let symbol = entry.1
+        if symbol_ref_origin_module_key(symbol) == file_key &&
+           namespace_kind_same(
+                symbol_ref_namespace_kind(symbol), namespace_value()) &&
+           symbol_ref_declaration_site_path(symbol) == site_path {
+            if found.is_some() {
+                panic("value identity: declaration site has two value symbols")
+            }
+            found = some(symbol)
+        }
+    }
+    match found {
+        some(symbol) => symbol,
+        none => panic("value identity: declaration site has no resolver symbol")
+    }
+}
+
+pub fn source_type_alias_symbol_for_decl(
+    ctx: InferCtx, decl_index: Int
+) -> SymbolRef {
+    if decl_index < 0 {
+        panic("type alias identity: declaration index is negative")
+    }
+    let file_key = match ctx.struct_identity_file_key {
+        some(value) => value,
+        none => panic("type alias identity: resolver ledger is absent")
+    }
+    let frame_index = match ctx.struct_identity_frame_stack.get(
+            ctx.struct_identity_frame_stack.len() - 1) {
+        some(value) => value,
+        none => panic("type alias identity: registration frame is absent")
+    }
+    let site_path = "frame:${frame_index}|item:${decl_index}"
+    let mut found: SymbolRef? = none
+    match ctx.project_namespace_bindings.get(frame_index) {
+        some(bindings) => {
+            for binding in bindings {
+                match binding.namespace {
+                    NamespaceKind::TypeAlias => {
+                        let symbol = binding.symbol
+                        if binding.file_key == file_key &&
+                           binding.frame_index == frame_index &&
+                           symbol_ref_origin_module_key(symbol) == file_key &&
+                           namespace_kind_same(
+                               symbol_ref_namespace_kind(symbol),
+                               namespace_nominal()) &&
+                           symbol_ref_declaration_site_path(symbol) == site_path {
+                            if found.is_some() {
+                                panic(
+                                    "type alias identity: declaration site has two symbols")
+                            }
+                            found = some(symbol)
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        },
+        none => {}
+    }
+    match found {
+        some(symbol) => symbol,
+        none => panic(
+            "type alias identity: declaration site has no resolver symbol")
+    }
+}
+
+pub fn commit_final_prelude_value_symbol_ref(
+    mut ctx: InferCtx, local_name: Str, symbol: SymbolRef
+) {
+    match ctx.env.lookup(local_name) {
+        some(scheme) => match scheme.def_id {
+            some(def_id) => {
+                match ctx.value_symbols.get(def_id) {
+                    some(existing) => if !symbol_ref_same(existing, symbol) &&
+                            !symbol_ref_is_prelude(existing) {
+                        panic("value identity: final prelude DefId has non-prelude source")
+                    },
+                    none => {}
+                }
+                ctx.value_symbols.insert(def_id, symbol)
+            },
+            none => panic("value identity: final prelude callable has no DefId")
+        },
+        none => panic("value identity: final prelude callable is not registered")
+    }
+}
+
+pub fn current_identity_file_key(ctx: InferCtx) -> Str {
+    match ctx.impl_check_frame_stack.get(
+            ctx.impl_check_frame_stack.len() - 1) {
+        some(frame) => frame.0,
+        none => match ctx.struct_identity_file_key {
+            some(file_key) => file_key,
+            none => panic("value identity: no active resolver/check file")
+        }
+    }
+}
+
+pub fn current_impl_check_site(ctx: InferCtx) -> (Str, Int) {
+    match ctx.impl_check_frame_stack.get(
+            ctx.impl_check_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("executable identity: declaration outside check frame")
+    }
+}
+
+fn enter_effect_ctx_owner(
+    mut ctx: InferCtx, value: ExecutableRef,
+    parent: EffectCtxRef?
+) {
+    ctx.effect_ctx_active_bases.push(ctx.effect_ctx_active_stack.len())
+    ctx.executable_stack.push(value)
+    ctx.dictionary_evidence_owner_stack.push(value)
+    ctx.anonymous_child_counters.push(0)
+    ctx.semantic_site_counters.push(0)
+    let binding = match parent {
+        some(_) => make_effect_ctx_for_executable(
+            value, binder_kind_effect_ctx_parent_capture(),
+            "effect-ctx-parent", 0, path_role_capture()),
+        none => make_effect_ctx_parameter_ref(value)
+    }
+    let capture = parent.map(fn(source) {
+        make_effect_ctx_parent_capture(source, binding)
+    })
+    ctx.effect_ctx_bindings_stack.push(binding)
+    ctx.effect_ctx_parent_captures_stack.push(capture)
+    ctx.effect_ctx_active_stack.push(binding)
+}
+
+pub fn enter_executable_owner(mut ctx: InferCtx, value: ExecutableRef) {
+    enter_effect_ctx_owner(ctx, value, none)
+}
+
+pub fn enter_handler_executable_owner(
+    mut ctx: InferCtx, value: ExecutableRef, parent: EffectCtxRef
+) {
+    enter_effect_ctx_owner(ctx, value, some(parent))
+}
+
+pub fn exit_executable_owner(mut ctx: InferCtx) {
+    if ctx.executable_stack.pop().is_none() ||
+       ctx.dictionary_evidence_owner_stack.pop().is_none() ||
+       ctx.anonymous_child_counters.pop().is_none() {
+        panic("executable identity: owner stack underflow")
+    }
+    if ctx.semantic_site_counters.pop().is_none() {
+        panic("semantic identity: site stack underflow")
+    }
+    if ctx.effect_ctx_bindings_stack.pop().is_none() ||
+       ctx.effect_ctx_parent_captures_stack.pop().is_none() {
+        panic("effect context: executable stack underflow")
+    }
+    let active_base = match ctx.effect_ctx_active_bases.pop() {
+        some(value) => value,
+        none => panic("effect context: active base underflow")
+    }
+    while ctx.effect_ctx_active_stack.len() > active_base {
+        ctx.effect_ctx_active_stack.pop()
+    }
+}
+
+pub fn current_executable_owner(ctx: InferCtx) -> ExecutableRef {
+    match ctx.executable_stack.last() {
+        some(value) => value,
+        none => panic("executable identity: no current body owner")
+    }
+}
+
+pub fn executable_effect_origin(value: ExecutableRef) -> OriginRef {
+    if executable_ref_is_named(value) {
+        make_symbol_origin_ref(executable_ref_named_symbol(value))
+    } else {
+        make_path_origin_ref(executable_ref_anonymous_path(value))
+    }
+}
+
+pub fn local_effect_header_origin(ctx: InferCtx, def_id: Int) -> OriginRef {
+    if def_id < 0 {
+        panic("effect header registry: local DefId is synthetic")
+    }
+    let owner = path_owner_for_module_body(make_module_body_ref(
+        current_identity_file_key(ctx), "typed-effect-locals"))
+    make_path_origin_ref(make_path_ref(
+        owner, ["def:${def_id.to_str()}"], path_role_declaration()))
+}
+
+pub fn define_exact_effect_header(
+    mut ctx: InferCtx, owner: OriginRef, headers: List<Type>,
+    quantified: List<Int>
+) -> TypedEffectHeaderSchema {
+    let schema = define_effect_header_schema(
+        ctx.env, owner, headers, quantified)
+    for binding in typed_effect_header_schema_bindings(schema) {
+        let raw_tail = typed_effect_header_binding_raw_tail(binding)
+        if ctx.local_definition_effect_raw_tails.contains(raw_tail) {
+            panic("local effect header: raw tail was defined twice")
+        }
+        ctx.local_definition_effect_raw_tails.push(raw_tail)
+    }
+    schema
+}
+
+pub fn publish_exact_callable_effect_header(
+    mut ctx: InferCtx, executable: ExecutableRef, signature: Type,
+    schema: TypedEffectHeaderSchema
+) {
+    publish_effect_header_schema(ctx.env, schema)
+    match signature {
+        Type::FnType { effects, .. } => register_callable_effect_header(
+            ctx.env, executable, effects),
+        _ => panic("effect header registry: callable header is not FnType")
+    }
+}
+
+pub fn current_dictionary_evidence_owner(ctx: InferCtx) -> ExecutableRef {
+    match ctx.dictionary_evidence_owner_stack.last() {
+        some(value) => value,
+        none => panic("dictionary evidence: no current runtime owner")
+    }
+}
+
+pub fn inherit_dictionary_evidence_owner(
+    mut ctx: InferCtx, value: ExecutableRef
+) {
+    let index = ctx.dictionary_evidence_owner_stack.len() - 1
+    if index < 0 {
+        panic("dictionary evidence: no executable frame to inherit")
+    }
+    ctx.dictionary_evidence_owner_stack.set(index, value)
+}
+
+pub fn current_effect_ctx_binding(ctx: InferCtx) -> EffectCtxRef {
+    match ctx.effect_ctx_bindings_stack.last() {
+        some(value) => value,
+        none => panic("effect context: no current callable binding")
+    }
+}
+
+pub fn current_effect_ctx_parent_capture(
+    ctx: InferCtx
+) -> EffectCtxParentCapture {
+    match ctx.effect_ctx_parent_captures_stack.last() {
+        some(some(value)) => value,
+        some(none) => panic("effect context: ordinary callable has no parent capture"),
+        none => panic("effect context: no current callable")
+    }
+}
+
+pub fn current_effect_ctx(ctx: InferCtx) -> EffectCtxRef {
+    match ctx.effect_ctx_active_stack.last() {
+        some(value) => value,
+        none => panic("effect context: no active context")
+    }
+}
+
+fn effect_ctx_site(
+    executable: ExecutableRef, label: Str, ordinal: Int, role: PathRole
+) -> PathRef {
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("${label}:${ordinal.to_str()}")
+    make_path_ref(owner, child_path, role)
+}
+
+fn make_effect_ctx_for_executable(
+    executable: ExecutableRef, kind: BinderKind,
+    label: Str, path_ordinal: Int, role: PathRole
+) -> EffectCtxRef {
+    let site = effect_ctx_site(executable, label, path_ordinal, role)
+    make_effect_ctx_ref(
+        make_semantic_effect_ctx_binder(
+            make_synthetic_slot_ref(site), executable, kind, site),
+        executable)
+}
+
+fn typed_effect_ctx_formal_for_tail(
+    schema: TypedEffectHeaderSchema, raw_tail: Int
+) -> EffectParamRef {
+    let mut found: EffectParamRef? = none
+    for binding in typed_effect_header_schema_bindings(schema) {
+        if typed_effect_header_binding_raw_tail(binding) == raw_tail {
+            let parameter = typed_effect_header_binding_parameter(binding)
+            match found {
+                some(existing) => if !effect_param_ref_same(
+                        existing, parameter) {
+                    panic("typed effect context: raw tail maps twice")
+                },
+                none => { found = some(parameter) }
+            }
+        }
+    }
+    match found {
+        some(parameter) => parameter,
+        none => panic("typed effect context: stable formal is absent")
+    }
+}
+
+pub fn typed_effect_ctx_layout_for_row(
+    row: EffectRow, schema: TypedEffectHeaderSchema
+) -> TypedEffectCtxLayout {
+    make_typed_effect_ctx_layout(
+        typed_handled_effect_instances_from_row(row),
+        row.tail.map(fn(raw_tail) {
+            typed_effect_ctx_formal_for_tail(schema, raw_tail)
+        }))
+}
+
+pub fn current_typed_callable_effect_ctx(
+    ctx: InferCtx, row: EffectRow, schema: TypedEffectHeaderSchema
+) -> TypedCallableEffectCtx {
+    make_typed_callable_effect_ctx(
+        current_effect_ctx_binding(ctx),
+        typed_effect_ctx_layout_for_row(row, schema))
+}
+
+// Inference constructs nested callable bodies before the owner batch publishes
+// their final header schema.  This draft carries only the already-known fixed
+// entries; finalization must replace it from that exact batch before HIR
+// validation.  No raw tail is stored or exposed as semantic identity.
+pub fn current_draft_callable_effect_ctx(
+    ctx: InferCtx, row: EffectRow
+) -> TypedCallableEffectCtx {
+    make_typed_callable_effect_ctx(
+        current_effect_ctx_binding(ctx),
+        make_typed_effect_ctx_layout(
+            typed_handled_effect_instances_from_row(row), none))
+}
+
+pub fn typed_effect_ctx_layout_from_owner_batch(
+    ctx: InferCtx, batch: OwnerInferenceBatch, row: EffectRow
+) -> TypedEffectCtxLayout {
+    let signature = Type::EffectRowType {
+        effects: row.effects, tail: row.tail
+    }
+    let schema = match try_project_effect_header_from_batch(
+            ctx.env, batch.effect_facts, signature) {
+        some(value) => value,
+        none => panic("typed effect context: owner batch schema is absent")
+    }
+    typed_effect_ctx_layout_for_row(row, schema)
+}
+
+pub fn typed_effect_ctx_layout_from_published_schema(
+    ctx: InferCtx, row: EffectRow
+) -> TypedEffectCtxLayout {
+    let signature = Type::EffectRowType {
+        effects: row.effects, tail: row.tail
+    }
+    let schema = match try_project_existing_effect_header_schema(
+            ctx.env, signature) {
+        some(value) => value,
+        none => panic("typed effect context: published schema is absent")
+    }
+    typed_effect_ctx_layout_for_row(row, schema)
+}
+
+pub fn current_typed_callable_effect_ctx_from_owner_batch(
+    ctx: InferCtx, batch: OwnerInferenceBatch, row: EffectRow
+) -> TypedCallableEffectCtx {
+    make_typed_callable_effect_ctx(
+        current_effect_ctx_binding(ctx),
+        typed_effect_ctx_layout_from_owner_batch(ctx, batch, row))
+}
+
+pub fn effect_ctx_source_for_callable(
+    ctx: InferCtx, callable: Type
+) -> TypedEffectCtxSource {
+    match callable {
+        Type::FnType { effects, .. } => {
+            let has_fixed = typed_handled_effect_instances_from_row(
+                effects).len() != 0
+            if !has_fixed && effects.tail.is_none() {
+                make_empty_effect_ctx_source()
+            } else {
+                make_borrowed_effect_ctx_source(current_effect_ctx(ctx))
+            }
+        },
+        _ => panic("typed effect context: call target is not callable")
+    }
+}
+
+pub fn effect_ctx_lookup_for_instance(
+    ctx: InferCtx, instance: TypedHandledEffectInstance
+) -> TypedEffectCtxLookup {
+    make_typed_effect_ctx_lookup(current_effect_ctx(ctx), instance)
+}
+
+pub struct EffectCtxInstallSeed {
+    parent: EffectCtxRef,
+    child: EffectCtxRef
+}
+
+pub fn begin_effect_ctx_install(mut ctx: InferCtx) -> EffectCtxInstallSeed {
+    let parent = current_effect_ctx(ctx)
+    let counter_index = ctx.semantic_site_counters.len() - 1
+    if counter_index < 0 {
+        panic("effect context: install is outside executable")
+    }
+    let ordinal = ctx.semantic_site_counters.get(counter_index).unwrap()
+    ctx.semantic_site_counters.set(counter_index, ordinal + 1)
+    let child = make_effect_ctx_for_executable(
+        current_executable_owner(ctx), binder_kind_effect_ctx_local(),
+        "effect-ctx-local", ordinal, path_role_handler())
+    ctx.effect_ctx_active_stack.push(child)
+    EffectCtxInstallSeed { parent: parent, child: child }
+}
+
+pub fn finish_effect_ctx_install(
+    value: EffectCtxInstallSeed,
+    entries: List<TypedHandledEffectInstance>
+) -> TypedEffectCtxInstall {
+    make_typed_effect_ctx_install(value.parent, value.child, entries)
+}
+
+pub fn uninstall_effect_ctx(mut ctx: InferCtx) {
+    let base = ctx.effect_ctx_active_bases.last().unwrap()
+    if ctx.effect_ctx_active_stack.len() <= base + 1 {
+        panic("effect context: no owned child install")
+    }
+    let _ = ctx.effect_ctx_active_stack.pop()
+}
+pub fn fresh_child_executable(
+    mut ctx: InferCtx, label: Str, role: PathRole
+) -> ExecutableRef {
+    if label.len() == 0 { panic("executable identity: empty child label") }
+    let parent = current_executable_owner(ctx)
+    let counter_index = ctx.anonymous_child_counters.len() - 1
+    let ordinal = ctx.anonymous_child_counters.get(
+        counter_index).unwrap_or(0)
+    ctx.anonymous_child_counters.set(counter_index, ordinal + 1)
+    let (owner, prefix) = if executable_ref_is_named(parent) {
+        (path_owner_for_symbol(executable_ref_named_symbol(parent)), [])
+    } else {
+        let path = executable_ref_anonymous_path(parent)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("${label}:${ordinal}")
+    make_anonymous_executable_ref(make_path_ref(
+        owner, child_path, role))
+}
+
+pub fn executable_capture_slot(
+    executable: ExecutableRef, capture_ordinal: Int
+) -> SlotRef {
+    if capture_ordinal < 0 {
+        panic("executable identity: negative capture ordinal")
+    }
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("capture:${capture_ordinal}")
+    make_synthetic_slot_ref(make_path_ref(
+        owner, child_path, path_role_capture()))
+}
+
+fn semantic_declaration_binder(
+    ctx: InferCtx, def_id: Int, kind: BinderKind, label: Str
+) -> BinderEntry {
+    if label.len() == 0 {
+        panic("semantic binder: empty role label")
+    }
+    let executable = current_executable_owner(ctx)
+    let slot = make_source_slot_ref(
+        current_identity_file_key(ctx), slot_domain_lexical(), def_id)
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("semantic:${label}:${def_id.to_str()}")
+    let site = make_path_ref(owner, child_path, path_role_declaration())
+    make_source_binder_entry(slot, executable, kind, site)
+}
+
+pub fn fresh_semantic_let_binder(
+    mut ctx: InferCtx, label: Str
+) -> BinderEntry {
+    let def_id = ctx.env.fresh_def_id()
+    semantic_declaration_binder(ctx, def_id, binder_kind_let(), label)
+}
+
+pub fn fresh_semantic_var_binder(
+    mut ctx: InferCtx, label: Str
+) -> BinderEntry {
+    let def_id = ctx.env.fresh_def_id()
+    semantic_declaration_binder(ctx, def_id, binder_kind_var(), label)
+}
+
+pub fn semantic_for_binder(
+    ctx: InferCtx, def_id: Int, label: Str
+) -> BinderEntry {
+    semantic_declaration_binder(ctx, def_id, binder_kind_for(), label)
+}
+
+pub fn semantic_destructure_binder(
+    ctx: InferCtx, def_id: Int, label: Str
+) -> BinderEntry {
+    semantic_declaration_binder(
+        ctx, def_id, binder_kind_destructure(), label)
+}
+
+pub fn semantic_parameter_binder(
+    ctx: InferCtx, executable: ExecutableRef,
+    def_id: Int, index: Int, label: Str
+) -> BinderEntry {
+    if index < 0 || label.len() == 0 {
+        panic("semantic parameter binder: invalid index/label")
+    }
+    let slot = make_source_slot_ref(
+        current_identity_file_key(ctx), slot_domain_lexical(), def_id)
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("parameter:${label}:${index.to_str()}")
+    make_source_binder_entry(
+        slot, executable, binder_kind_source_param(),
+        make_path_ref(owner, child_path, path_role_parameter()))
+}
+
+pub fn fresh_semantic_path(mut ctx: InferCtx, label: Str) -> PathRef {
+    if label.len() == 0 { panic("semantic identity: empty site label") }
+    let executable = current_executable_owner(ctx)
+    let counter_index = ctx.semantic_site_counters.len() - 1
+    let ordinal = ctx.semantic_site_counters.get(
+        counter_index).unwrap_or(0)
+    ctx.semantic_site_counters.set(counter_index, ordinal + 1)
+    let (owner, prefix) = if executable_ref_is_named(executable) {
+        (path_owner_for_symbol(executable_ref_named_symbol(executable)), [])
+    } else {
+        let path = executable_ref_anonymous_path(executable)
+        (path_ref_owner(path), path_ref_normalized_child_path(path))
+    }
+    let mut child_path = prefix.map(fn(value) { value })
+    child_path.push("semantic:${label}:${ordinal.to_str()}")
+    make_path_ref(owner, child_path, path_role_synthetic())
 }
 
 pub fn value_binding_kind(ctx: InferCtx, def_id: Int?) -> ValueBindingKind {
@@ -1257,6 +3073,7 @@ fn type_has_error(t: Type) -> Bool {
 }
 
 fn resolve_named_impl_dict_evidence(
+    runtime_owner: ExecutableRef,
     env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
     name: Str, type_params: List<Type>, s: UnionFind, trait_name: Str
 ) -> DictEvidenceResolution {
@@ -1271,19 +3088,23 @@ fn resolve_named_impl_dict_evidence(
             }
         },
         some(impl_entry) => {
-            let dict_name = trait_dict_name(name, trait_name)
-            if impl_entry.dict_bounds.len() == 0 {
-                return DictEvidenceResolution::Resolved {
-                    dict_ref: DictRef::Static(dict_name)
-                }
+            let impl_owner = match impl_entry.owner_ref {
+                some(value) => value,
+                none => panic("dictionary evidence: impl owner is absent")
             }
-
-            let requirements = match instantiate_impl_dict_requirements(
+            let dict_name = trait_dict_name(name, trait_name)
+            let requirements = match instantiate_impl_runtime_requirements(
                 impl_entry, type_params
             ) {
                 some(resolved) => resolved,
                 none => return DictEvidenceResolution::Missing {
                     suppress_diagnostic: false
+                }
+            }
+            if requirements.len() == 0 {
+                return DictEvidenceResolution::Resolved {
+                    dict_ref: make_static_dict_ref(
+                        dict_name, make_exact_static_dict_ref(impl_owner))
                 }
             }
 
@@ -1293,11 +3114,31 @@ fn resolve_named_impl_dict_evidence(
             let mut suppress_missing = true
             for requirement in requirements {
                 match resolve_dict_evidence_for_type(
-                    env, current_fn_bounds, requirement.type_arg, s,
-                    requirement.trait_name
+                    runtime_owner, env, current_fn_bounds,
+                    requirement.subject_type, s,
+                    requirement.canonical_trait_name
                 ) {
-                    DictEvidenceResolution::Resolved { dict_ref } =>
-                        inner_dicts.push(dict_ref),
+                    DictEvidenceResolution::Resolved { dict_ref } => {
+                        let assoc_valid = match find_matching_fn_bound(
+                            current_fn_bounds, requirement.subject_type, s,
+                            requirement.canonical_trait_name
+                        ) {
+                            some(bound) => impl_assoc_constraints_match_fn_bound(
+                                requirement.assoc_constraints, bound,
+                                map_new(), s),
+                            none => impl_assoc_constraints_match_concrete(
+                                env, requirement.subject_type,
+                                requirement.canonical_trait_name,
+                                requirement.assoc_constraints,
+                                map_new(), s)
+                        }
+                        if assoc_valid {
+                            inner_dicts.push(dict_ref)
+                        } else {
+                            has_missing = true
+                            suppress_missing = false
+                        }
+                    },
                     DictEvidenceResolution::Pending => {
                         has_pending = true
                     },
@@ -1313,23 +3154,31 @@ fn resolve_named_impl_dict_evidence(
                 }
             }
             if has_pending { return DictEvidenceResolution::Pending }
-            DictEvidenceResolution::Resolved { dict_ref: DictRef::Wrapped {
-                dict: dict_name,
-                trait_name: trait_name,
-                inner_dicts: inner_dicts
-            } }
+            let trait_ref = match env.trait_reg.traits.get(trait_name) {
+                some(definition) => registered_trait_ref_symbol(
+                    definition.owner_ref),
+                none => panic("dictionary evidence: exact trait owner is absent")
+            }
+            DictEvidenceResolution::Resolved { dict_ref:
+                make_wrapped_dict_ref(
+                    dict_name, trait_ref, inner_dicts,
+                    make_exact_wrapped_dict_ref(
+                        impl_owner, inner_dicts.map(fn(value) {
+                            dict_ref_exact(value)
+                        }))) }
         }
     }
 }
 
 fn resolve_dict_evidence_for_type(
+    runtime_owner: ExecutableRef,
     env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
     t: Type, s: UnionFind, trait_name: Str
 ) -> DictEvidenceResolution {
     let concrete = apply_subst(s, t)
     match concrete {
         Type::TypeVar { id, .. } => match resolve_fn_bound_dict_ref(
-            current_fn_bounds, id, s, trait_name
+            runtime_owner, current_fn_bounds, id, s, trait_name
         ) {
             some(dict_ref) => DictEvidenceResolution::Resolved {
                 dict_ref: dict_ref
@@ -1338,10 +3187,12 @@ fn resolve_dict_evidence_for_type(
         },
         Type::StructType { name, type_params, .. } =>
             resolve_named_impl_dict_evidence(
-                env, current_fn_bounds, name, type_params, s, trait_name),
+                runtime_owner, env, current_fn_bounds,
+                name, type_params, s, trait_name),
         Type::EnumType { name, type_params, .. } =>
             resolve_named_impl_dict_evidence(
-                env, current_fn_bounds, name, type_params, s, trait_name),
+                runtime_owner, env, current_fn_bounds,
+                name, type_params, s, trait_name),
         Type::ErrorType => DictEvidenceResolution::Missing {
             suppress_diagnostic: true
         },
@@ -1349,9 +3200,16 @@ fn resolve_dict_evidence_for_type(
             match type_to_builtin_name(concrete) {
                 some(builtin_name) => {
                     match find_impl(env.trait_reg, builtin_name, trait_name) {
-                        some(_) => DictEvidenceResolution::Resolved {
-                            dict_ref: DictRef::Static(
-                                trait_dict_name(builtin_name, trait_name))
+                        some(impl_entry) => {
+                            let impl_owner = match impl_entry.owner_ref {
+                                some(value) => value,
+                                none => panic("dictionary evidence: builtin impl owner is absent")
+                            }
+                            DictEvidenceResolution::Resolved {
+                                dict_ref: make_static_dict_ref(
+                                    trait_dict_name(builtin_name, trait_name),
+                                    make_exact_static_dict_ref(impl_owner))
+                            }
                         },
                         none => DictEvidenceResolution::Missing {
                             suppress_diagnostic: type_has_error(concrete)
@@ -1370,11 +3228,12 @@ fn resolve_dict_evidence_for_type(
 // propagated to the caller so diagnostics can be emitted at the use site;
 // this function never fabricates a base or "__unknown" dictionary.
 pub fn resolve_dict_ref_for_type(
+    runtime_owner: ExecutableRef,
     env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
     t: Type, s: UnionFind, trait_name: Str
 ) -> DictRef? {
     match resolve_dict_evidence_for_type(
-        env, current_fn_bounds, t, s, trait_name
+        runtime_owner, env, current_fn_bounds, t, s, trait_name
     ) {
         DictEvidenceResolution::Resolved { dict_ref } => some(dict_ref),
         DictEvidenceResolution::Pending => none,
@@ -1383,17 +3242,20 @@ pub fn resolve_dict_ref_for_type(
 }
 
 fn resolve_scheme_evidence(
+    runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     current_fn_bounds: List<FnBoundsEntry>,
-    scheme: TypeScheme, callee_type: Type, s: UnionFind, span: Span,
+    scheme: TypeScheme, receipt: CallableInstantiationReceipt,
+    s: UnionFind, span: Span,
     report_assoc_mismatch: Bool
 ) -> SchemeEvidenceResolution {
+    assert_callable_receipt_sources(receipt, scheme.type_vars)
     if scheme.bounds.len() == 0 {
         return SchemeEvidenceResolution::Resolved {
             dicts: [], assoc_mismatch: false
         }
     }
-    let var_map = build_scheme_var_map(scheme, callee_type)
+    let var_map = receipt.source_to_actual
     let mut resolved_dicts: List<DictRef> = []
     let mut pending_failures: List<EvidenceFailure> = []
     let mut missing_failures: List<EvidenceFailure> = []
@@ -1403,7 +3265,8 @@ fn resolve_scheme_evidence(
             some(fresh_var) => {
                 let concrete = apply_subst(s, fresh_var)
                 match resolve_dict_evidence_for_type(
-                    env, current_fn_bounds, concrete, s, bound.trait_name
+                    runtime_owner, env, current_fn_bounds,
+                    concrete, s, bound.trait_name
                 ) {
                     DictEvidenceResolution::Resolved { dict_ref } => {
                         resolved_dicts.push(dict_ref)
@@ -1476,11 +3339,7 @@ fn purpose_reports_assoc_mismatch(purpose: PendingDictPurpose) -> Bool {
     match purpose {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
-        PendingDictPurpose::CallableValueShadow => false,
-        // A default is shared definition metadata.  Its nested settlement is
-        // the sole definition-time owner, so it must report concrete assoc
-        // mismatches even when no caller ever omits the argument.
-        PendingDictPurpose::DefaultCallableValueShadow => true
+        PendingDictPurpose::CallableValueShadow { .. } => false
     }
 }
 
@@ -1488,10 +3347,46 @@ fn purpose_reports_drain_failure(purpose: PendingDictPurpose) -> Bool {
     match purpose {
         PendingDictPurpose::DirectCallPublish { .. } => true,
         PendingDictPurpose::ExternCallValidate => true,
-        PendingDictPurpose::CallableValueShadow => false,
-        // Default shadows are normally consumed by their nested settlement
-        // boundary.  Fail closed if one ever reaches the outer owner drain.
-        PendingDictPurpose::DefaultCallableValueShadow => true
+        PendingDictPurpose::CallableValueShadow { .. } => true
+    }
+}
+
+fn purpose_is_callable_value(purpose: PendingDictPurpose) -> Bool {
+    match purpose {
+        PendingDictPurpose::CallableValueShadow { .. } => true,
+        _ => false
+    }
+}
+
+fn report_callable_value_assoc_mismatch(
+    sink: CollectingSink, source: PendingEvidenceSource, span: Span
+) {
+    let trait_name = match source {
+        PendingEvidenceSource::SchemeEvidenceSource(scheme) =>
+            match scheme.bounds.find(fn(bound) {
+                    bound.assoc_constraints.len() != 0
+                }) {
+                some(bound) => bound.trait_name,
+                none => panic(
+                    "callable value evidence: assoc mismatch has no bound")
+            },
+        PendingEvidenceSource::ImplOwnerEvidenceSource { .. } => panic(
+            "callable value evidence: impl source is unsupported")
+    }
+    report_evidence_failures(sink, [EvidenceFailure {
+        trait_name: trait_name, suppress_diagnostic: false
+    }], span)
+}
+
+fn publish_resolved_evidence(
+    sink: CollectingSink, source: PendingEvidenceSource,
+    purpose: PendingDictPurpose, dicts: List<DictRef>,
+    assoc_mismatch: Bool, span: Span
+) {
+    if assoc_mismatch && purpose_is_callable_value(purpose) {
+        report_callable_value_assoc_mismatch(sink, source, span)
+    } else {
+        publish_resolved_dicts(purpose, dicts)
     }
 }
 
@@ -1507,18 +3402,26 @@ fn publish_resolved_dicts(
             for dict_ref in dicts { output.push(dict_ref) }
         },
         PendingDictPurpose::ExternCallValidate => {},
-        PendingDictPurpose::CallableValueShadow => {},
-        PendingDictPurpose::DefaultCallableValueShadow => {}
+        PendingDictPurpose::CallableValueShadow { output_slot: output } => {
+            if output.len() != 0 {
+                panic("unreachable: callable value dictionaries filled twice")
+            }
+            for dict_ref in dicts { output.push(dict_ref) }
+        }
     }
 }
 
-pub fn resolve_dicts_from_scheme(
+pub fn resolve_immediate_impl_owner_dicts(
+    runtime_owner: ExecutableRef,
     sink: CollectingSink, env: TypeEnv,
     current_fn_bounds: List<FnBoundsEntry>,
-    scheme: TypeScheme, callee_type: Type, s: UnionFind, span: Span
+    owner: ImplEntry, method_core: ImplMethodSchemeCore,
+    receipt: CallableInstantiationReceipt,
+    s: UnionFind, span: Span
 ) -> List<DictRef> {
-    match resolve_scheme_evidence(
-        sink, env, current_fn_bounds, scheme, callee_type, s, span, true
+    match resolve_impl_owner_evidence(
+        runtime_owner, sink, env, current_fn_bounds,
+        owner, method_core, receipt, s, span, true
     ) {
         SchemeEvidenceResolution::Resolved { dicts, .. } => dicts,
         SchemeEvidenceResolution::Pending { failures } => {
@@ -1536,21 +3439,24 @@ pub fn resolve_dicts_from_scheme(
 // exact same alias is retained by the obligation and populated only after all
 // bounds resolve atomically.
 pub fn resolve_or_defer_dicts_from_scheme(
-    mut ctx: InferCtx, scheme: TypeScheme, callee_type: Type,
+    mut ctx: InferCtx, scheme: TypeScheme,
+    receipt: CallableInstantiationReceipt,
     s: UnionFind, span: Span, purpose: PendingDictPurpose
 ) {
     if scheme.bounds.len() == 0 { return }
     match resolve_scheme_evidence(
+        current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
-        scheme, callee_type, s, span,
+        scheme, receipt, s, span,
         purpose_reports_assoc_mismatch(purpose)
     ) {
         SchemeEvidenceResolution::Resolved { dicts, .. } =>
             publish_resolved_dicts(purpose, dicts),
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
-                scheme: scheme,
-                callee_type: callee_type,
+                runtime_owner: current_dictionary_evidence_owner(ctx),
+                source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
+                receipt: receipt,
                 fn_bounds: list_clone(ctx.current_fn_bounds),
                 span: span,
                 purpose: purpose
@@ -1560,39 +3466,72 @@ pub fn resolve_or_defer_dicts_from_scheme(
     }
 }
 
-// Callable values keep final DictRef attachment in resolve_value_ident.  This
-// shadow participates only in the owner's canonical evidence/associated-type
-// fixed point, so ordinary shadow failures stay silent until final zonk.
-pub fn register_callable_value_shadow(
-    mut ctx: InferCtx, scheme: TypeScheme, callee_type: Type,
-    s: UnionFind, span: Span, is_default: Bool
+pub fn resolve_or_defer_dicts_from_impl_owner(
+    mut ctx: InferCtx, owner: ImplEntry,
+    method_core: ImplMethodSchemeCore,
+    receipt: CallableInstantiationReceipt,
+    s: UnionFind, span: Span, purpose: PendingDictPurpose
 ) {
-    if scheme.bounds.len() == 0 { return }
-    if is_default {
-        ctx.pending_dict_obligations.push(PendingDictObligation {
-            scheme: scheme,
-            callee_type: callee_type,
-            fn_bounds: [],
-            span: span,
-            purpose: PendingDictPurpose::DefaultCallableValueShadow
-        })
-        return
-    }
-
-    match resolve_scheme_evidence(
+    if frozen_impl_predicates(owner.predicates).len() == 0 { return }
+    match resolve_impl_owner_evidence(
+        current_dictionary_evidence_owner(ctx),
         ctx.sink, ctx.env, ctx.current_fn_bounds,
-        scheme, callee_type, s, span, false
+        owner, method_core, receipt, s, span,
+        purpose_reports_assoc_mismatch(purpose)
     ) {
-        SchemeEvidenceResolution::Resolved { .. } => {},
+        SchemeEvidenceResolution::Resolved { dicts, .. } =>
+            publish_resolved_dicts(purpose, dicts),
         SchemeEvidenceResolution::Pending { .. } =>
             ctx.pending_dict_obligations.push(PendingDictObligation {
-                scheme: scheme,
-                callee_type: callee_type,
+                runtime_owner: current_dictionary_evidence_owner(ctx),
+                source: PendingEvidenceSource::ImplOwnerEvidenceSource {
+                    owner: owner, method_core: method_core
+                },
+                receipt: receipt,
                 fn_bounds: list_clone(ctx.current_fn_bounds),
                 span: span,
-                purpose: PendingDictPurpose::CallableValueShadow
+                purpose: purpose
             }),
-        SchemeEvidenceResolution::Missing { .. } => {}
+        SchemeEvidenceResolution::Missing { failures } =>
+            report_evidence_failures(ctx.sink, failures, span)
+    }
+}
+
+// A callable value owns one HIR output alias immediately. If evidence is not
+// yet concrete, the owner batch retains this exact receipt and fills the alias
+// during its single finalizer-time drain.
+pub fn register_callable_value_shadow(
+    mut ctx: InferCtx, scheme: TypeScheme,
+    receipt: CallableInstantiationReceipt,
+    s: UnionFind, span: Span, output_slot: List<DictRef>
+) {
+    if scheme.bounds.len() == 0 { return }
+    let purpose = PendingDictPurpose::CallableValueShadow {
+        output_slot: output_slot
+    }
+    match resolve_scheme_evidence(
+        current_dictionary_evidence_owner(ctx),
+        ctx.sink, ctx.env, ctx.current_fn_bounds,
+        scheme, receipt, s, span,
+        purpose_reports_assoc_mismatch(purpose)
+    ) {
+        SchemeEvidenceResolution::Resolved {
+            dicts, assoc_mismatch
+        } => publish_resolved_evidence(
+            ctx.sink,
+            PendingEvidenceSource::SchemeEvidenceSource(scheme),
+            purpose, dicts, assoc_mismatch, span),
+        SchemeEvidenceResolution::Pending { .. } =>
+            ctx.pending_dict_obligations.push(PendingDictObligation {
+                runtime_owner: current_dictionary_evidence_owner(ctx),
+                source: PendingEvidenceSource::SchemeEvidenceSource(scheme),
+                receipt: receipt,
+                fn_bounds: list_clone(ctx.current_fn_bounds),
+                span: span,
+                purpose: purpose
+            }),
+        SchemeEvidenceResolution::Missing { failures } =>
+            report_evidence_failures(ctx.sink, failures, span)
     }
 }
 
@@ -1631,41 +3570,49 @@ fn pending_evidence_attempt_budget(
 ) -> Int {
     let mut evidence_sites = 0
     for obligation in obligations {
-        for bound in obligation.scheme.bounds {
-            evidence_sites = evidence_sites + 1
-            evidence_sites = evidence_sites + bound.assoc_constraints.len()
+        match obligation.source {
+            PendingEvidenceSource::SchemeEvidenceSource(scheme) => {
+                for bound in scheme.bounds {
+                    evidence_sites = evidence_sites + 1
+                    evidence_sites = evidence_sites +
+                        bound.assoc_constraints.len()
+                }
+            },
+            PendingEvidenceSource::ImplOwnerEvidenceSource { owner, .. } => {
+                for predicate in frozen_impl_predicates(owner.predicates) {
+                    evidence_sites = evidence_sites + 1
+                    evidence_sites = evidence_sites +
+                        impl_predicate_assoc_constraints(predicate).len()
+                }
+            }
         }
     }
     if evidence_sites == 0 { 1 } else { evidence_sites + 1 }
 }
 
-// Drain exactly one declaration owner's suffix to the finite evidence-site
-// fixed point before diagnosing call/extern failures.  Callable-value shadows
-// stay silent here; final zonk remains their diagnostic and attachment owner.
-pub fn drain_pending_dicts(
-    mut ctx: InferCtx, checkpoint: Int, s: UnionFind
+fn drain_pending_dict_obligations(
+    mut ctx: InferCtx, obligations: List<PendingDictObligation>,
+    s: UnionFind
 ) {
-    if checkpoint > ctx.pending_dict_obligations.len() {
-        panic("unreachable: invalid pending dictionary checkpoint")
-    }
-    let mut remaining = ctx.pending_dict_obligations.slice(
-        checkpoint, ctx.pending_dict_obligations.len())
-    ctx.pending_dict_obligations =
-        ctx.pending_dict_obligations.slice(0, checkpoint)
-
+    let mut remaining = obligations
     let max_attempts = pending_evidence_attempt_budget(remaining)
     let mut attempt = 0
     while remaining.len() > 0 && attempt < max_attempts {
         let mut next: List<PendingDictObligation> = []
         for obligation in remaining {
-            match resolve_scheme_evidence(
+            match resolve_pending_evidence_source(
+                obligation.runtime_owner,
                 ctx.sink, ctx.env, obligation.fn_bounds,
-                obligation.scheme, obligation.callee_type, s,
+                obligation.source, obligation.receipt, s,
                 obligation.span,
                 purpose_reports_assoc_mismatch(obligation.purpose)
             ) {
-                SchemeEvidenceResolution::Resolved { dicts, .. } =>
-                    publish_resolved_dicts(obligation.purpose, dicts),
+                SchemeEvidenceResolution::Resolved {
+                    dicts, assoc_mismatch
+                } => publish_resolved_evidence(
+                    ctx.sink, obligation.source,
+                    obligation.purpose, dicts,
+                    assoc_mismatch, obligation.span),
                 SchemeEvidenceResolution::Missing { failures } => {
                     if purpose_reports_drain_failure(obligation.purpose) {
                         report_evidence_failures(
@@ -1683,14 +3630,19 @@ pub fn drain_pending_dicts(
     // One final observation consumes any resolution made by the last pass;
     // only owners still unresolved here are genuine no-source obligations.
     for obligation in remaining {
-        match resolve_scheme_evidence(
+        match resolve_pending_evidence_source(
+            obligation.runtime_owner,
             ctx.sink, ctx.env, obligation.fn_bounds,
-            obligation.scheme, obligation.callee_type, s,
+            obligation.source, obligation.receipt, s,
             obligation.span,
             purpose_reports_assoc_mismatch(obligation.purpose)
         ) {
-            SchemeEvidenceResolution::Resolved { dicts, .. } =>
-                publish_resolved_dicts(obligation.purpose, dicts),
+            SchemeEvidenceResolution::Resolved {
+                dicts, assoc_mismatch
+            } => publish_resolved_evidence(
+                ctx.sink, obligation.source,
+                obligation.purpose, dicts,
+                assoc_mismatch, obligation.span),
             SchemeEvidenceResolution::Missing { failures } => {
                 if purpose_reports_drain_failure(obligation.purpose) {
                     report_evidence_failures(
@@ -1707,156 +3659,212 @@ pub fn drain_pending_dicts(
     }
 }
 
-fn dict_ref_is_dynamic(dict_ref: DictRef) -> Bool {
-    match dict_ref {
-        DictRef::Simple(_) => true,
-        DictRef::Wrapped { inner_dicts, .. } => {
-            for inner in inner_dicts {
-                if dict_ref_is_dynamic(inner) { return true }
-            }
-            false
-        },
-        DictRef::Static(_) => false
-    }
-}
-
-fn settle_default_obligation(
-    mut ctx: InferCtx, obligation: PendingDictObligation,
-    s: UnionFind
-) -> DefaultEvidenceSettlement {
-    match resolve_scheme_evidence(
-        ctx.sink, ctx.env, obligation.fn_bounds,
-        obligation.scheme, obligation.callee_type, s,
-        obligation.span,
-        purpose_reports_assoc_mismatch(obligation.purpose)
-    ) {
-        SchemeEvidenceResolution::Resolved { dicts, assoc_mismatch } => {
-            if assoc_mismatch {
-                return DefaultEvidenceSettlement::Invalid
-            }
-            let mut has_dynamic = false
-            let mut i = 0
-            for dict_ref in dicts {
-                if dict_ref_is_dynamic(dict_ref) {
-                    has_dynamic = true
-                    match obligation.scheme.bounds.get(i) {
-                        some(bound) => {
-                            let trait_display =
-                                nominal_display_name(bound.trait_name)
-                            let _ = type_error(ctx.sink, E0503,
-                                "Generic default value requires caller-specific '${trait_display}' evidence, which is not supported",
-                                obligation.span,
-                                DiagnosticContext::TraitError {
-                                    detail: "bound-dependent evidence in generic defaults is unsupported"
-                                })
-                        },
-                        none => {}
-                    }
-                }
-                i = i + 1
-            }
-            if !has_dynamic {
-                publish_resolved_dicts(obligation.purpose, dicts)
-                DefaultEvidenceSettlement::Valid
-            } else {
-                DefaultEvidenceSettlement::Invalid
-            }
-        },
-        SchemeEvidenceResolution::Missing { failures } => {
-            report_evidence_failures(ctx.sink, failures, obligation.span)
-            DefaultEvidenceSettlement::Invalid
-        },
-        SchemeEvidenceResolution::Pending { .. } =>
-            DefaultEvidenceSettlement::Pending
-    }
-}
-
-fn report_default_pending_failures(
-    sink: CollectingSink, failures: List<EvidenceFailure>, span: Span
-) {
-    for failure in failures {
-        if !failure.suppress_diagnostic {
-            let trait_display = nominal_display_name(failure.trait_name)
-            let _ = type_error(sink, E0503,
-                "Generic default value requires caller-specific '${trait_display}' evidence, which is not supported",
-                span, DiagnosticContext::TraitError {
-                    detail: "bound-dependent evidence in generic defaults is unsupported"
-                })
-        }
-    }
-}
-
-// Default expressions are copied into fn_defaults and later reused by many
-// callers.  Ground/static pending evidence may be settled after the parameter
-// annotation, but caller-specific dynamic evidence must fail closed instead
-// of publishing a shared mutable output slot into that metadata.
-pub fn settle_default_pending_dicts(
+// Legacy acyclic owner entry now delegates to the same receipt-backed drain.
+// A1 recursive finalization detaches first and uses the opaque batch API.
+pub fn drain_pending_dicts(
     mut ctx: InferCtx, checkpoint: Int, s: UnionFind
-) -> Bool {
+) {
     if checkpoint > ctx.pending_dict_obligations.len() {
         panic("unreachable: invalid pending dictionary checkpoint")
     }
-    let mut remaining = ctx.pending_dict_obligations.slice(
+    let obligations = ctx.pending_dict_obligations.slice(
         checkpoint, ctx.pending_dict_obligations.len())
     ctx.pending_dict_obligations =
         ctx.pending_dict_obligations.slice(0, checkpoint)
-    let max_attempts = pending_evidence_attempt_budget(remaining)
-    let mut attempt = 0
-    let mut valid = true
-    while remaining.len() > 0 && attempt < max_attempts {
-        let mut next: List<PendingDictObligation> = []
-        for obligation in remaining {
-            match settle_default_obligation(ctx, obligation, s) {
-                DefaultEvidenceSettlement::Valid => {},
-                DefaultEvidenceSettlement::Invalid => { valid = false },
-                DefaultEvidenceSettlement::Pending => next.push(obligation)
-            }
-        }
-        remaining = next
-        attempt = attempt + 1
+    drain_pending_dict_obligations(ctx, obligations, s)
+}
+
+fn preflight_pending_dict_obligation(value: PendingDictObligation) {
+    validate_fn_bound_order(value.fn_bounds)
+    match value.source {
+        PendingEvidenceSource::SchemeEvidenceSource(scheme) =>
+            assert_callable_receipt_sources(
+                value.receipt, scheme.type_vars),
+        PendingEvidenceSource::ImplOwnerEvidenceSource {
+            method_core, ..
+        } => assert_callable_receipt_sources(
+            value.receipt, impl_method_core_type_vars(method_core))
     }
-    for obligation in remaining {
-        match resolve_scheme_evidence(
-            ctx.sink, ctx.env, obligation.fn_bounds,
-            obligation.scheme, obligation.callee_type, s,
-            obligation.span,
-            purpose_reports_assoc_mismatch(obligation.purpose)
-        ) {
-            SchemeEvidenceResolution::Resolved { assoc_mismatch, .. } => {
-                // This can only happen if the last pass's associated
-                // constraints unlocked the obligation.
-                if assoc_mismatch {
-                    // resolve_scheme_evidence has already emitted the single
-                    // authoritative E0513 for this definition owner.
-                    valid = false
-                } else {
-                    match settle_default_obligation(ctx, obligation, s) {
-                        DefaultEvidenceSettlement::Valid => {},
-                        DefaultEvidenceSettlement::Invalid => { valid = false },
-                        DefaultEvidenceSettlement::Pending => {
-                            panic("unreachable: resolved default became pending")
-                        }
-                    }
-                }
+    match value.purpose {
+        PendingDictPurpose::DirectCallPublish { output_slot } =>
+            if output_slot.len() != 0 {
+                panic("owner batch dictionary preflight: output is not empty")
             },
-            SchemeEvidenceResolution::Missing { failures } => {
-                report_evidence_failures(
-                    ctx.sink, failures, obligation.span)
-                valid = false
+        PendingDictPurpose::CallableValueShadow { output_slot } =>
+            if output_slot.len() != 0 {
+                panic("owner batch dictionary preflight: output is not empty")
             },
-            SchemeEvidenceResolution::Pending { failures } => {
-                report_default_pending_failures(
-                    ctx.sink, failures, obligation.span)
-                valid = false
-            }
+        PendingDictPurpose::ExternCallValidate => {}
+    }
+}
+
+pub fn drain_owner_batch_dictionary_group(
+    mut ctx: InferCtx, mut batches: List<OwnerInferenceBatch>,
+    frozen_subst: UnionFind
+) -> List<OwnerInferenceBatch> {
+    let mut obligations: List<PendingDictObligation> = []
+    for batch in batches {
+        for obligation in batch.pending_dicts {
+            preflight_pending_dict_obligation(obligation)
+            obligations.push(obligation)
         }
     }
-    valid
+    // Clear only after every batch and obligation has passed preflight and the
+    // deterministic draft/order concatenation is complete.
+    let mut batch_index = 0
+    while batch_index < batches.len() {
+        let mut batch = batches.get(batch_index).unwrap()
+        batch.pending_dicts = []
+        batches.set(batch_index, batch)
+        batch_index = batch_index + 1
+    }
+    drain_pending_dict_obligations(ctx, obligations, frozen_subst)
+    batches
+}
+
+pub fn drain_owner_batch_dictionaries(
+    mut ctx: InferCtx, batch: OwnerInferenceBatch,
+    frozen_subst: UnionFind
+) -> OwnerInferenceBatch {
+    let drained = drain_owner_batch_dictionary_group(
+        ctx, [batch], frozen_subst)
+    drained.first().unwrap_or_else(fn() {
+        panic("owner batch dictionary drain: singleton result is absent")
+    })
+}
+
+pub fn stage_owner_batch_facts(
+    ctx: InferCtx, mut batch: OwnerInferenceBatch,
+    owner_executable: ExecutableRef, final_owner_signature: Type,
+    owner_schema: TypedEffectHeaderSchema, frozen_subst: UnionFind,
+    canonical_ids: Map<Int, Int>
+) -> OwnerInferenceBatch {
+    if batch.pending_dicts.len() != 0 {
+        panic("owner batch stage: dictionary obligations are not drained")
+    }
+    let mut formal_owners: List<OriginRef> = [
+        executable_effect_origin(owner_executable)
+    ]
+    let mut callable_owners: List<ExecutableRef> = [owner_executable]
+    for pending in batch.pending_anonymous {
+        formal_owners.push(executable_effect_origin(pending.executable))
+        callable_owners.push(pending.executable)
+    }
+    batch.effect_facts = filter_effect_fact_batch_for_owner_scope(
+        batch.effect_facts, formal_owners,
+        batch.local_definition_effect_raw_tails, callable_owners)
+    batch.local_definition_effect_raw_tails = []
+    let mut facts = remap_effect_fact_batch(
+        batch.effect_facts, frozen_subst, canonical_ids)
+    facts = stage_effect_header_in_batch(ctx.env, facts, owner_schema)
+    if !types_equal(
+            final_owner_signature,
+            remap_type_to_canonical_ids(
+                final_owner_signature, canonical_ids)) {
+        panic("owner batch stage: owner signature is not canonical")
+    }
+    let owner_effects = match final_owner_signature {
+        Type::FnType { effects, .. } => effects,
+        _ => panic("owner batch stage: owner signature is not callable")
+    }
+    facts = stage_callable_effect_in_batch(
+        ctx.env, facts, owner_executable, owner_effects)
+
+    for pending in batch.pending_anonymous {
+        let signature = remap_type_to_canonical_ids(
+            apply_subst(frozen_subst, pending.signature), canonical_ids)
+        let schema = match try_project_effect_header_from_batch(
+                ctx.env, facts, signature) {
+            some(value) => value,
+            none => panic(
+                "owner batch stage: anonymous callable has orphan effect tail")
+        }
+        facts = stage_effect_header_in_batch(ctx.env, facts, schema)
+        let effects = match signature {
+            Type::FnType { effects, .. } => effects,
+            _ => panic(
+                "owner batch stage: anonymous signature is not callable")
+        }
+        facts = stage_callable_effect_in_batch(
+            ctx.env, facts, pending.executable, effects)
+    }
+    batch.pending_anonymous = []
+    batch.effect_facts = facts
+    batch
+}
+
+pub fn preflight_owner_batches(
+    ctx: InferCtx, batches: List<OwnerInferenceBatch>
+) {
+    let mut facts: List<EffectFactBatch> = []
+    for batch in batches {
+        if batch.pending_dicts.len() != 0 ||
+           batch.pending_anonymous.len() != 0 ||
+           batch.pending_projections.len() != 0 ||
+           batch.local_definition_effect_raw_tails.len() != 0 {
+            panic("owner batch preflight: batch is not finalized")
+        }
+        facts.push(batch.effect_facts)
+    }
+    preflight_effect_fact_batches(ctx.env, facts)
+}
+
+pub fn publish_owner_batches(
+    mut ctx: InferCtx, batches: List<OwnerInferenceBatch>
+) {
+    preflight_owner_batches(ctx, batches)
+    let mut facts: List<EffectFactBatch> = []
+    for batch in batches { facts.push(batch.effect_facts) }
+    publish_effect_fact_batches(ctx.env, facts)
+}
+
+pub fn instantiate_assoc_type_from_callable_receipt(
+    receipt: CallableInstantiationReceipt,
+    value: Type, subst: UnionFind
+) -> Type {
+    apply_subst(subst, apply_subst_map(
+        receipt.source_to_actual, value))
 }
 
 // Check associated type constraints on a bound against an impl entry's actual
 // assoc types.  var_map maps scheme TypeVar ids to instantiation-fresh TypeVars
 // so that ac.ty (a scheme-level TypeVar) can be resolved to the call-site var.
+fn instantiate_impl_assoc_header(
+    mut env: TypeEnv, entry: ImplEntry, name: Str, ty: Type
+) -> Type {
+    let schema = match entry.assoc_type_effect_schemas.get(name) {
+        some(value) => value,
+        none => panic("impl assoc effect schema: exact schema is absent")
+    }
+    instantiate_effect_header_schema(
+        env, [ty], schema).0.get(0).unwrap()
+}
+
+fn instantiate_struct_field_header(
+    mut env: TypeEnv, def: StructDef, field: StructField
+) -> Type {
+    let schema = def.field_effect_schemas.get(
+        field.field_index).unwrap_or_else(fn() {
+        panic("struct effect schema: field schema is absent")
+    })
+    instantiate_effect_header_schema(
+        env, [field.ty], schema).0.get(0).unwrap()
+}
+
+fn instantiate_enum_field_header(
+    mut env: TypeEnv, def: EnumDef,
+    variant_index: Int, field_index: Int, field_type: Type
+) -> Type {
+    let schema = def.variant_field_effect_schemas.get(
+        variant_index).unwrap_or_else(fn() {
+        panic("enum effect schema: variant schema is absent")
+    }).get(field_index).unwrap_or_else(fn() {
+        panic("enum effect schema: field schema is absent")
+    })
+    instantiate_effect_header_schema(
+        env, [field_type], schema).0.get(0).unwrap()
+}
+
 fn check_assoc_constraints(
     sink: CollectingSink, env: TypeEnv,
     bound: SchemeBound, target_type_name: Str,
@@ -1881,7 +3889,9 @@ fn check_assoc_constraints(
                             _ => ac.ty,
                         }
                         let expected_ty = apply_subst(s, mapped_ty)
-                        let actual_resolved = apply_subst(s, actual_ty)
+                        let actual_resolved = apply_subst(
+                            s, instantiate_impl_assoc_header(
+                                env, entry, ac.name, actual_ty))
                         match expected_ty {
                             Type::TypeVar { .. } => {
                                 // Implicit assoc type var — unify with the impl's
@@ -2097,7 +4107,30 @@ fn resolve_assoc_type(mut ctx: InferCtx, type_param_name: Str, assoc_name: Str, 
 }
 
 pub fn resolve_effect_expr(mut ctx: InferCtx, eff: EffectExpr) -> Effect {
-    if eff.name == "io" { return Effect::IoEffect }
+    if eff.name == "console" || eff.name == "fs" || eff.name == "process" {
+        if eff.type_args.len() != 0 {
+            let _ = type_error(ctx.sink, E0407,
+                "System effect '${eff.name}' does not accept type arguments",
+                eff.span, DiagnosticContext::OtherContext {
+                    detail: some("system effect is a closed capability atom") })
+            fail.raise(CompileError {})
+        }
+        let reference = if eff.name == "console" {
+            system_effect_console()
+        } else if eff.name == "fs" {
+            system_effect_fs()
+        } else {
+            system_effect_process()
+        }
+        return Effect::SystemEffect { reference: reference }
+    }
+    if eff.name == "io" {
+        let _ = type_error(ctx.sink, E0407,
+            "Unknown effect 'io'; use exact system effects console, fs, or process",
+            eff.span, DiagnosticContext::OtherContext {
+                detail: some("broad io effect was removed from Ring 0.1") })
+        fail.raise(CompileError {})
+    }
     if eff.name == "unsafe" { return Effect::UnsafeEffect }
     if eff.name == "mut" {
         let mut_state = if eff.type_args.len() > 0 {
@@ -2122,20 +4155,30 @@ pub fn resolve_effect_expr(mut ctx: InferCtx, eff: EffectExpr) -> Effect {
         return Effect::FailEffect { error_type: err_type }
     }
     // Custom effects: resolve to canonical name from EffectDef
-    let canonical_name = match ctx.env.types.effects.get(eff.name) {
-        some(edef) => edef.name,
+    let (canonical_name, handled_ref) = match ctx.env.types.effects.get(eff.name) {
+        some(edef) => match edef.handled_ref {
+            some(reference) => (edef.name, reference),
+            none => {
+                let _ = type_error(ctx.sink, E0407,
+                    "Effect '${eff.name}' is not a handled custom effect",
+                    eff.span, DiagnosticContext::OtherContext {
+                        detail: some("effect class cannot enter handled evidence") })
+                fail.raise(CompileError {})
+            }
+        },
         none => {
             let _ = type_error(ctx.sink, E0407,
                 "Unknown effect '${eff.name}'", eff.span,
                 DiagnosticContext::OtherContext { detail: some("unknown effect") })
-            eff.name
+            fail.raise(CompileError {})
         }
     }
     let mut resolved_args: List<Type> = []
     for ta in eff.type_args {
         resolved_args.push(resolve_type_expr(ctx, ta))
     }
-    Effect::CustomEffect { name: canonical_name, type_args: resolved_args }
+    Effect::CustomEffect { reference: handled_ref,
+        name: canonical_name, type_args: resolved_args }
 }
 
 pub fn resolve_self_type(mut ctx: InferCtx, name: Str) -> Type {
@@ -2248,20 +4291,17 @@ pub fn resolve_named_type(mut ctx: InferCtx, name: Str, type_args: List<TypeExpr
                         expression: none
                     })
             }
-            if alias.type_param_vars.len() == 0 { return alias.ty }
             let mut resolved_args: List<Type> = []
-            for a in type_args { resolved_args.push(resolve_type_expr(ctx, a)) }
-            let mut mapping: Map<Int, Type> = map_new()
-            let mut i = 0
-            let limit = if alias.type_param_vars.len() < resolved_args.len() { alias.type_param_vars.len() } else { resolved_args.len() }
-            while i < limit {
-                match (alias.type_param_vars.get(i), resolved_args.get(i)) {
-                    (some(var_id), some(arg)) => { mapping.insert(var_id, arg) },
-                    _ => {}
+            // Preserve nullary-alias E0301 recovery: extra syntactic arguments
+            // were not recursively diagnosed before. The schema itself is
+            // still fully freshened below.
+            if alias.type_param_vars.len() > 0 {
+                for a in type_args {
+                    resolved_args.push(resolve_type_expr(ctx, a))
                 }
-                i = i + 1
             }
-            return apply_subst_map(mapping, alias.ty)
+            return instantiate_type_alias_schema(
+                ctx.env, alias, resolved_args)
         },
         none => {}
     }
@@ -2347,10 +4387,13 @@ fn bind_pattern_recovery(mut ctx: InferCtx, pattern: Pattern) {
     match pattern {
         Pattern::Wildcard { .. } => {},
         Pattern::Binding { name, span } => {
+            if name == "_" {
+                panic("typed pattern binding: wildcard crossed as binding")
+            }
             ctx.env.bind_mono(name, Type::ErrorType)
             match ctx.env.lookup(name) {
                 some(scheme) => match scheme.def_id {
-                    some(did) => ctx.env.record_def_span(did, span),
+                    some(did) => journal_record_def_span(ctx, did, span),
                     none => {}
                 },
                 none => {}
@@ -2390,10 +4433,13 @@ pub fn bind_pattern(mut ctx: InferCtx, pattern: Pattern, expected_type: Type, su
     match pattern {
         Pattern::Wildcard { .. } => subst,
         Pattern::Binding { name, span } => {
+            if name == "_" {
+                panic("typed pattern binding: wildcard crossed as binding")
+            }
             ctx.env.bind_mono(name, apply_subst(subst, expected_type))
             match ctx.env.lookup(name) {
                 some(scheme) => match scheme.def_id {
-                    some(did) => ctx.env.record_def_span(did, span),
+                    some(did) => journal_record_def_span(ctx, did, span),
                     none => {}
                 },
                 none => {}
@@ -2564,6 +4610,194 @@ pub fn bind_pattern(mut ctx: InferCtx, pattern: Pattern, expected_type: Type, su
     }
 }
 
+pub fn exact_pattern_plan(
+    ctx: InferCtx, pattern: Pattern, expected_type: Type, subst: UnionFind
+) -> HPatternPlan? {
+    let resolved = apply_subst(subst, expected_type)
+    match pattern {
+        Pattern::Wildcard { .. } => some(h_pattern_wildcard()),
+        Pattern::Literal { .. } => some(h_pattern_literal()),
+        Pattern::Binding { name, .. } => {
+            if name == "_" {
+                panic("typed pattern plan: wildcard crossed as binding")
+            }
+            let scheme = match ctx.env.lookup(name) {
+                some(value) => value,
+                none => return none
+            }
+            let def_id = match scheme.def_id {
+                some(id) => id,
+                none => return none
+            }
+            some(h_pattern_binding(HPatternBinding {
+                name: name, def_id: def_id,
+                slot: make_source_slot_ref(
+                    current_identity_file_key(ctx),
+                    slot_domain_lexical(), def_id),
+                ty: apply_subst(subst, scheme.ty)
+            }))
+        },
+        Pattern::TuplePattern { elements, .. } => {
+            let type_elements = match resolved {
+                Type::TupleType { elements: values } => values,
+                _ => return none
+            }
+            if elements.len() != type_elements.len() { return none }
+            let mut plans: List<HPatternPlan> = []
+            let mut index = 0
+            while index < elements.len() {
+                match exact_pattern_plan(
+                        ctx, elements.get(index).unwrap(),
+                        type_elements.get(index).unwrap(), subst) {
+                    some(plan) => plans.push(plan),
+                    none => return none
+                }
+                index = index + 1
+            }
+            some(h_pattern_tuple(plans))
+        },
+        Pattern::Constructor { name, fields, .. } => {
+            let enum_name = match resolved {
+                Type::EnumType { name: value, .. } => value,
+                _ => return none
+            }
+            let enum_def = match ctx.env.types.enums.get(enum_name) {
+                some(value) => value,
+                none => return none
+            }
+            let variant_index = match enum_def.variant_index.get(name) {
+                some(value) => value,
+                none => return none
+            }
+            let variant = match enum_def.variants.get(variant_index) {
+                some(value) => value,
+                none => return none
+            }
+            let variant_ref = match enum_def.variant_refs.get(variant_index) {
+                some(value) => value,
+                none => return none
+            }
+            let field_refs = match enum_def.variant_field_refs.get(variant_index) {
+                some(value) => value,
+                none => return none
+            }
+            if fields.len() != variant.fields.len() ||
+               fields.len() != field_refs.len() { return none }
+            let inst_map = build_instantiation_map(
+                enum_def.type_param_vars, resolved)
+            let mut plans: List<HPatternFieldPlan> = []
+            let mut index = 0
+            while index < fields.len() {
+                let child = match exact_pattern_plan(
+                        ctx, fields.get(index).unwrap(),
+                        apply_subst_map(
+                            inst_map, variant.fields.get(index).unwrap()),
+                        subst) {
+                    some(value) => value,
+                    none => return none
+                }
+                plans.push(make_h_pattern_field_plan(
+                    h_variant_projection(field_refs.get(index).unwrap()),
+                    child))
+                index = index + 1
+            }
+            some(h_pattern_variant(variant_ref, plans))
+        },
+        Pattern::NamedConstructor { name, fields, .. } => match resolved {
+            Type::EnumType { name: enum_name, .. } => {
+                let enum_def = match ctx.env.types.enums.get(enum_name) {
+                    some(value) => value,
+                    none => return none
+                }
+                let variant_index = match enum_def.variant_index.get(name) {
+                    some(value) => value,
+                    none => return none
+                }
+                let variant = match enum_def.variants.get(variant_index) {
+                    some(value) => value,
+                    none => return none
+                }
+                let variant_ref = match enum_def.variant_refs.get(variant_index) {
+                    some(value) => value,
+                    none => return none
+                }
+                let field_refs = match enum_def.variant_field_refs.get(variant_index) {
+                    some(value) => value,
+                    none => return none
+                }
+                let names = match variant.field_names {
+                    some(values) => values,
+                    none => return none
+                }
+                let inst_map = build_instantiation_map(
+                    enum_def.type_param_vars, resolved)
+                let mut plans: List<HPatternFieldPlan> = []
+                for field in fields {
+                    let index = match names.index_of(field.name) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    let child_type = match variant.fields.get(index) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    let field_ref = match field_refs.get(index) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    let child = match exact_pattern_plan(
+                            ctx, field.pattern,
+                            apply_subst_map(inst_map, child_type), subst) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    plans.push(make_h_pattern_field_plan(
+                        h_variant_projection(field_ref), child))
+                }
+                some(h_pattern_variant(variant_ref, plans))
+            },
+            Type::StructType { name: struct_name, .. } => {
+                let struct_def = match ctx.env.types.structs.get(struct_name) {
+                    some(value) => value,
+                    none => return none
+                }
+                let inst_map = build_instantiation_map(
+                    struct_def.type_param_vars, resolved)
+                let mut plans: List<HPatternFieldPlan> = []
+                for field in fields {
+                    let exact = match struct_def.fields.find(fn(item) {
+                        item.name == field.name
+                    }) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    let child = match exact_pattern_plan(
+                            ctx, field.pattern,
+                            apply_subst_map(inst_map, exact.ty), subst) {
+                        some(value) => value,
+                        none => return none
+                    }
+                    plans.push(make_h_pattern_field_plan(
+                        h_nominal_projection(exact.field_ref),
+                        child))
+                }
+                some(h_pattern_struct(struct_def.owner_ref, plans))
+            },
+            _ => none
+        },
+        Pattern::OrPattern { patterns, .. } => {
+            let mut plans: List<HPatternPlan> = []
+            for alternative in patterns {
+                match exact_pattern_plan(ctx, alternative, resolved, subst) {
+                    some(plan) => plans.push(plan),
+                    none => return none
+                }
+            }
+            if plans.len() < 2 { none } else { some(h_pattern_or(plans)) }
+        }
+    }
+}
+
 fn bind_constructor_pattern(
     ctx: InferCtx, name: Str, qualifier: Str?, fields: List<Pattern>,
     expected_type: Type, subst: UnionFind, span: Span
@@ -2621,7 +4855,13 @@ fn bind_constructor_pattern(
                         while i < fields.len() {
                             match (fields.get(i), v.fields.get(i)) {
                                 (some(fpat), some(ftype)) => {
-                                    let field_type = if inst_map.len() > 0 { apply_subst_map(inst_map, ftype) } else { ftype }
+                                    let variant_index = enum_def.variant_index.get(
+                                        name).unwrap()
+                                    let field_type = instantiate_enum_field_header(
+                                        ctx.env, enum_def, variant_index, i, ftype)
+                                    let field_type = if inst_map.len() > 0 {
+                                        apply_subst_map(inst_map, field_type)
+                                    } else { field_type }
                                     s = bind_pattern(ctx, fpat, field_type, s)
                                 },
                                 (some(fpat), none) => {
@@ -2726,7 +4966,15 @@ fn bind_named_constructor_pattern(
                                 match field_idx {
                                     some(idx) => match v.fields.get(idx) {
                                         some(ftype) => {
-                                            let field_type = if inst_map.len() > 0 { apply_subst_map(inst_map, ftype) } else { ftype }
+                                            let variant_index = enum_def.variant_index.get(
+                                                name).unwrap()
+                                            let field_type = instantiate_enum_field_header(
+                                                ctx.env, enum_def,
+                                                variant_index, idx, ftype)
+                                            let field_type = if inst_map.len() > 0 {
+                                                apply_subst_map(
+                                                    inst_map, field_type)
+                                            } else { field_type }
                                             s = bind_pattern(ctx, field.pattern, field_type, s)
                                         },
                                         none => {
@@ -2803,7 +5051,11 @@ fn bind_struct_pattern_fields(
                 let found = struct_def.fields.find(fn(sf) { sf.name == field.name })
                 match found {
                     some(sf) => {
-                        let field_type = if inst_map.len() > 0 { apply_subst_map(inst_map, sf.ty) } else { sf.ty }
+                        let field_type = instantiate_struct_field_header(
+                            ctx.env, struct_def, sf)
+                        let field_type = if inst_map.len() > 0 {
+                            apply_subst_map(inst_map, field_type)
+                        } else { field_type }
                         s = bind_pattern(ctx, field.pattern, field_type, s)
                     },
                     none => {
@@ -2840,7 +5092,12 @@ fn bind_struct_pattern_fields(
                             let found = sdef.fields.find(fn(sf) { sf.name == field.name })
                             match found {
                                 some(sf) => {
-                                    let field_type = if inst_map.len() > 0 { apply_subst_map(inst_map, sf.ty) } else { sf.ty }
+                                    let field_type = instantiate_struct_field_header(
+                                        ctx.env, sdef, sf)
+                                    let field_type = if inst_map.len() > 0 {
+                                        apply_subst_map(
+                                            inst_map, field_type)
+                                    } else { field_type }
                                     s = bind_pattern(ctx, field.pattern, field_type, s)
                                 },
                                 none => {
@@ -3077,7 +5334,13 @@ pub fn bind_exact_import_alias(
                     none => scheme
                 }
                 let source_kind = value_binding_kind(ctx, scheme.def_id)
-                let ctor_origin = variant_ctor_origin(ctx, scheme)
+                let source_symbol = match scheme.def_id {
+                    some(def_id) => match ctx.value_symbols.get(def_id) {
+                        some(symbol) => some(symbol),
+                        none => ctx.value_symbols_by_payload.get(exact_origin)
+                    },
+                    none => ctx.value_symbols_by_payload.get(exact_origin)
+                }
                 let mut_flags = match ctx.fn_mut_params.get(source_identity) {
                     some(flags) => some(flags),
                     none => ctx.fn_mut_params.get(exact_origin)
@@ -3087,9 +5350,15 @@ pub fn bind_exact_import_alias(
                         ty: live_scheme.ty,
                         type_vars: live_scheme.type_vars,
                         bounds: live_scheme.bounds,
+                        effect_schema: live_scheme.effect_schema,
                         def_id: none
                     })
                     record_value_origin(ctx, alias_name, exact_origin)
+                    match source_symbol {
+                        some(symbol) => record_value_symbol_ref(
+                            ctx, alias_name, symbol),
+                        none => {}
+                    }
                     match source_kind {
                         ValueBindingKind::DirectCallable =>
                             record_value_binding_kind(ctx, alias_name, source_kind),
@@ -3099,14 +5368,9 @@ pub fn bind_exact_import_alias(
                             record_value_binding_kind(ctx, alias_name, source_kind),
                         ValueBindingKind::LocalBorrow => {}
                     }
-                    match ctor_origin {
-                        some(origin) => {
-                            record_variant_ctor_origin(ctx, alias_name, origin)
-                        },
-                        none => {}
-                    }
                     match mut_flags {
-                        some(flags) => { ctx.fn_mut_params.insert(alias_name, flags) },
+                        some(flags) => journal_fn_mut_params_set(
+                            ctx, alias_name, flags),
                         none => {}
                     }
                 }
@@ -3169,16 +5433,1069 @@ pub fn bind_exact_import_alias(
         },
         none => {}
     }
-    match ctx.env.types.sigs.get(source_identity) {
-        some(def) => {
-            if alias_name != source_identity {
-                ctx.env.types.sigs.insert(alias_name, def)
-            }
-            found = true
-        },
-        none => {}
-    }
     found
+}
+
+fn impl_assoc_constraints_match_fn_bound(
+    constraints: List<ImplAssocPredicate>, bound: FnBoundsEntry,
+    var_map: Map<Int, Type>, s: UnionFind
+) -> Bool {
+    for expected in constraints {
+        let expected_ty = apply_subst(s, apply_subst_map(
+            var_map, impl_assoc_predicate_type(expected)))
+        let mut matched = false
+        for actual in bound.assoc_constraints {
+            if actual.name == impl_assoc_predicate_name(expected) {
+                matched = true
+                if !types_equal(expected_ty, apply_subst(s, actual.ty)) {
+                    return false
+                }
+            }
+        }
+        if !matched { return false }
+    }
+    true
+}
+
+fn impl_assoc_constraints_match_concrete(
+    env: TypeEnv, subject: Type, trait_name: Str,
+    constraints: List<ImplAssocPredicate>,
+    var_map: Map<Int, Type>, s: UnionFind
+) -> Bool {
+    if constraints.len() == 0 { return true }
+    let concrete = apply_subst(s, subject)
+    let mut target_name: Str? = none
+    let mut type_args: List<Type> = []
+    match concrete {
+        Type::StructType { name, type_params } => {
+            target_name = some(name)
+            type_args = type_params
+        },
+        Type::EnumType { name, type_params } => {
+            target_name = some(name)
+            type_args = type_params
+        },
+        _ => match type_to_builtin_name(concrete) {
+            some(name) => { target_name = some(name) },
+            none => return false
+        }
+    }
+    let target = match target_name {
+        some(name) => name,
+        none => return false
+    }
+    let entry = match find_impl(env.trait_reg, target, trait_name) {
+        some(found) => found,
+        none => return false
+    }
+    if entry.type_param_vars.len() != type_args.len() { return false }
+    let mut owner_map: Map<Int, Type> = map_new()
+    for index in 0..entry.type_param_vars.len() {
+        match (entry.type_param_vars.get(index), type_args.get(index)) {
+            (some(source), some(actual)) => owner_map.insert(source, actual),
+            _ => return false
+        }
+    }
+    for expected in constraints {
+        match entry.assoc_types.get(impl_assoc_predicate_name(expected)) {
+            some(actual) => {
+                let expected_ty = apply_subst(s, apply_subst_map(
+                    var_map, impl_assoc_predicate_type(expected)))
+                let actual_ty = apply_subst(s, apply_subst_map(
+                    owner_map, instantiate_impl_assoc_header(
+                        env, entry,
+                        impl_assoc_predicate_name(expected), actual)))
+                if !types_equal(expected_ty, actual_ty) { return false }
+            },
+            none => return false
+        }
+    }
+    true
+}
+
+fn find_matching_fn_bound(
+    current_fn_bounds: List<FnBoundsEntry>, subject: Type,
+    s: UnionFind, trait_name: Str
+) -> FnBoundsEntry? {
+    match apply_subst(s, subject) {
+        Type::TypeVar { id, .. } => current_fn_bounds.find(fn(bound) {
+            if bound.trait_name != trait_name { false } else {
+                let resolved = apply_subst(s, Type::TypeVar {
+                    id: bound.type_param_var_id, name: none
+                })
+                match resolved {
+                    Type::TypeVar { id: resolved_id, .. } =>
+                        resolved_id == id || bound.type_param_var_id == id ||
+                            uf_find(s, bound.type_param_var_id) == id,
+                    _ => false
+                }
+            }
+        }),
+        _ => none
+    }
+}
+
+pub fn impl_predicate_constraints_satisfied(
+    env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
+    subject: Type, trait_name: Str,
+    constraints: List<ImplAssocPredicate>, s: UnionFind
+) -> Bool {
+    match find_matching_fn_bound(
+        current_fn_bounds, subject, s, trait_name
+    ) {
+        some(bound) => impl_assoc_constraints_match_fn_bound(
+            constraints, bound, map_new(), s),
+        none => impl_assoc_constraints_match_concrete(
+            env, subject, trait_name, constraints, map_new(), s)
+    }
+}
+
+fn prove_named_dict_evidence(
+    env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
+    name: Str, type_params: List<Type>, s: UnionFind, trait_name: Str
+) -> Bool {
+    let impl_entry = match find_impl(env.trait_reg, name, trait_name) {
+        some(value) => value,
+        none => return false
+    }
+    let requirements = match instantiate_impl_runtime_requirements(
+            impl_entry, type_params) {
+        some(value) => value,
+        none => return false
+    }
+    for requirement in requirements {
+        if !prove_dict_evidence_for_type(
+                env, current_fn_bounds, requirement.subject_type, s,
+                requirement.canonical_trait_name) {
+            return false
+        }
+        let assoc_valid = match find_matching_fn_bound(
+                current_fn_bounds, requirement.subject_type, s,
+                requirement.canonical_trait_name) {
+            some(bound) => impl_assoc_constraints_match_fn_bound(
+                requirement.assoc_constraints, bound, map_new(), s),
+            none => impl_assoc_constraints_match_concrete(
+                env, requirement.subject_type,
+                requirement.canonical_trait_name,
+                requirement.assoc_constraints, map_new(), s)
+        }
+        if !assoc_valid { return false }
+    }
+    true
+}
+
+pub fn prove_dict_evidence_for_type(
+    env: TypeEnv, current_fn_bounds: List<FnBoundsEntry>,
+    source: Type, s: UnionFind, trait_name: Str
+) -> Bool {
+    match apply_subst(s, source) {
+        Type::TypeVar { .. } => find_matching_fn_bound(
+            current_fn_bounds, source, s, trait_name).is_some(),
+        Type::StructType { name, type_params } => prove_named_dict_evidence(
+            env, current_fn_bounds, name, type_params, s, trait_name),
+        Type::EnumType { name, type_params } => prove_named_dict_evidence(
+            env, current_fn_bounds, name, type_params, s, trait_name),
+        Type::ErrorType => false,
+        concrete => match type_to_builtin_name(concrete) {
+            some(name) => find_impl(env.trait_reg, name, trait_name).is_some(),
+            none => false
+        }
+    }
+}
+
+fn resolve_impl_owner_evidence(
+    runtime_owner: ExecutableRef,
+    sink: CollectingSink, env: TypeEnv,
+    current_fn_bounds: List<FnBoundsEntry>,
+    owner: ImplEntry, core: ImplMethodSchemeCore,
+    receipt: CallableInstantiationReceipt, s: UnionFind, span: Span,
+    report_assoc_mismatch: Bool
+) -> SchemeEvidenceResolution {
+    assert_callable_receipt_sources(
+        receipt, impl_method_core_type_vars(core))
+    let predicates = frozen_impl_predicates(owner.predicates)
+    if predicates.len() == 0 {
+        return SchemeEvidenceResolution::Resolved {
+            dicts: [], assoc_mismatch: false
+        }
+    }
+    let var_map = receipt.source_to_actual
+    let mut resolved_dicts: List<DictRef> = []
+    let mut pending_failures: List<EvidenceFailure> = []
+    let mut missing_failures: List<EvidenceFailure> = []
+    let mut assoc_mismatch = false
+    for predicate in predicates {
+        let trait_name = impl_predicate_trait_name(predicate)
+        match var_map.get(impl_predicate_subject_type_var(predicate)) {
+            some(subject) => {
+                match resolve_dict_evidence_for_type(
+                    runtime_owner, env, current_fn_bounds,
+                    subject, s, trait_name
+                ) {
+                    DictEvidenceResolution::Resolved { dict_ref } => {
+                        let constraints = impl_predicate_assoc_constraints(
+                            predicate)
+                        let assoc_valid = match find_matching_fn_bound(
+                            current_fn_bounds, subject, s, trait_name
+                        ) {
+                            some(bound) => impl_assoc_constraints_match_fn_bound(
+                                constraints, bound, var_map, s),
+                            none => impl_assoc_constraints_match_concrete(
+                                env, subject, trait_name,
+                                constraints, var_map, s)
+                        }
+                        if assoc_valid {
+                            resolved_dicts.push(dict_ref)
+                        } else {
+                            assoc_mismatch = true
+                            if report_assoc_mismatch {
+                                let _ = type_error(sink, E0513,
+                                    "Associated type constraint mismatch for impl predicate '${nominal_display_name(trait_name)}'",
+                                    span, DiagnosticContext::TraitError {
+                                        detail: "impl-owner associated predicate mismatch"
+                                    })
+                            }
+                        }
+                    },
+                    DictEvidenceResolution::Pending =>
+                        pending_failures.push(EvidenceFailure {
+                            trait_name: trait_name,
+                            suppress_diagnostic: false
+                        }),
+                    DictEvidenceResolution::Missing { suppress_diagnostic } =>
+                        missing_failures.push(EvidenceFailure {
+                            trait_name: trait_name,
+                            suppress_diagnostic: suppress_diagnostic
+                        })
+                }
+            },
+            none => missing_failures.push(EvidenceFailure {
+                trait_name: trait_name,
+                suppress_diagnostic: false
+            })
+        }
+    }
+    if missing_failures.len() > 0 {
+        SchemeEvidenceResolution::Missing { failures: missing_failures }
+    } else if pending_failures.len() > 0 {
+        SchemeEvidenceResolution::Pending { failures: pending_failures }
+    } else {
+        SchemeEvidenceResolution::Resolved {
+            dicts: resolved_dicts, assoc_mismatch: assoc_mismatch
+        }
+    }
+}
+
+fn resolve_pending_evidence_source(
+    runtime_owner: ExecutableRef,
+    sink: CollectingSink, env: TypeEnv,
+    fn_bounds: List<FnBoundsEntry>, source: PendingEvidenceSource,
+    receipt: CallableInstantiationReceipt, s: UnionFind, span: Span,
+    report_assoc_mismatch: Bool
+) -> SchemeEvidenceResolution {
+    match source {
+        PendingEvidenceSource::SchemeEvidenceSource(scheme) =>
+            resolve_scheme_evidence(
+                runtime_owner, sink, env, fn_bounds,
+                scheme, receipt, s, span,
+                report_assoc_mismatch),
+        PendingEvidenceSource::ImplOwnerEvidenceSource {
+            owner, method_core
+        } =>
+            resolve_impl_owner_evidence(
+            runtime_owner, sink, env, fn_bounds, owner, method_core,
+            receipt, s, span, report_assoc_mismatch)
+    }
+}
+
+pub fn install_struct_identity_ledger(
+    mut ctx: InferCtx, file_key: Str, plan: ResolvedNamespacePlan
+) {
+    if ctx.struct_identity_file_key.is_some() ||
+       ctx.struct_identity_frame_stack.len() != 0 ||
+       ctx.struct_identity_unconsumed.len() != 0 ||
+       ctx.struct_identity_pending.len() != 0 ||
+       ctx.trait_identity_unconsumed.len() != 0 ||
+       ctx.enum_identity_unconsumed.len() != 0 ||
+       ctx.effect_identity_unconsumed.len() != 0 ||
+       ctx.effect_identity_unconsumed.len() != 0 ||
+       ctx.enum_identity_unconsumed.len() != 0 ||
+       ctx.source_impl_provider_unconsumed.len() != 0 ||
+       ctx.nominal_derived_provider_unconsumed.len() != 0 ||
+       ctx.impl_check_frame_stack.len() != 0 {
+        panic("struct identity ledger: prior ledger is still active")
+    }
+    ctx.struct_identity_file_key = some(file_key)
+    ctx.struct_identity_root_frame = none
+    ctx.struct_identity_child_frames = map_new()
+    let retain_registration_bindings =
+        ctx.project_namespace_file_key.is_none()
+    if retain_registration_bindings {
+        // Single-file and prelude checking do not install a project overlay,
+        // but registration still consumes the same resolved binding facts.
+        ctx.project_namespace_bindings = map_new()
+    }
+    for binding in plan.bindings {
+        if retain_registration_bindings && binding.file_key == file_key {
+            match ctx.project_namespace_bindings.get(binding.frame_index) {
+                some(existing) => existing.push(binding),
+                none => ctx.project_namespace_bindings.insert(
+                    binding.frame_index, [binding])
+            }
+        }
+        match binding.namespace {
+            NamespaceKind::Value => {
+                let payload = symbol_ref_canonical_payload(binding.symbol)
+                match ctx.value_symbols_by_payload.get(payload) {
+                    some(existing) => if !symbol_ref_same(
+                            existing, binding.symbol) {
+                        panic("value identity: canonical payload has two SymbolRefs")
+                    },
+                    none => ctx.value_symbols_by_payload.insert(
+                        payload, binding.symbol)
+                }
+            },
+            _ => {}
+        }
+    }
+    // Project dependency hydration precedes installation of this module's
+    // resolver plan. Relate those already-minted alias DefIds now that their
+    // exact delivered SymbolRefs are available.
+    for alias_entry in ctx.use_aliases.entries() {
+        let (def_id, payload) = alias_entry
+        match ctx.value_symbols_by_payload.get(payload) {
+            some(symbol) => ctx.value_symbols.insert(def_id, symbol),
+            none => {}
+        }
+    }
+    for frame in plan.frames {
+        if frame.file_key == file_key {
+            if frame.parent_frame_index < 0 {
+                if ctx.struct_identity_root_frame.is_some() {
+                    panic("struct identity ledger: duplicate root frame")
+                }
+                ctx.struct_identity_root_frame = some(frame.frame_index)
+                if ctx.impl_check_root_frames.contains_key(file_key) {
+                    panic("impl check index: duplicate file root")
+                }
+                ctx.impl_check_root_frames.insert(file_key, frame.frame_index)
+            } else {
+                let key = project_child_site_key(
+                    frame.parent_frame_index, frame.decl_index)
+                if ctx.struct_identity_child_frames.contains_key(key) {
+                    panic("struct identity ledger: duplicate child frame")
+                }
+                ctx.struct_identity_child_frames.insert(key, frame.frame_index)
+                let check_key = "${file_key}|${key}"
+                if ctx.impl_check_child_frames.contains_key(check_key) {
+                    panic("impl check index: duplicate child frame")
+                }
+                ctx.impl_check_child_frames.insert(
+                    check_key, frame.frame_index)
+            }
+        }
+    }
+    for fact in plan.struct_identities {
+        if fact.file_key == file_key {
+            for existing in ctx.struct_identity_unconsumed {
+                if existing.frame_index == fact.frame_index &&
+                   existing.decl_index == fact.decl_index {
+                    panic("struct identity ledger: duplicate declaration site")
+                }
+            }
+            ctx.struct_identity_unconsumed.push(fact)
+        }
+    }
+    for fact in plan.trait_identities {
+        if fact.file_key == file_key {
+            for existing in ctx.trait_identity_unconsumed {
+                if trait_identity_site_same(existing, fact) {
+                    panic("trait identity ledger: duplicate declaration site")
+                }
+            }
+            ctx.trait_identity_unconsumed.push(fact)
+        }
+    }
+    for group in plan.enum_variant_facts {
+        if symbol_ref_origin_module_key(group.enum_symbol) == file_key {
+            for existing in ctx.enum_identity_unconsumed {
+                if symbol_ref_same(
+                        existing.enum_symbol, group.enum_symbol) {
+                    panic("enum identity ledger: duplicate declaration owner")
+                }
+            }
+            ctx.enum_identity_unconsumed.push(group)
+        }
+    }
+    for fact in plan.effect_identities {
+        if fact.file_key == file_key {
+            for existing in ctx.effect_identity_unconsumed {
+                if symbol_ref_same(existing.owner_ref, fact.owner_ref) {
+                    panic("effect identity ledger: duplicate declaration owner")
+                }
+            }
+            ctx.effect_identity_unconsumed.push(fact)
+        }
+    }
+    for fact in plan.source_impl_providers {
+        if fact.file_key == file_key {
+            for existing in ctx.source_impl_provider_unconsumed {
+                if existing.frame_index == fact.frame_index &&
+                   existing.decl_index == fact.decl_index {
+                    panic("impl provider ledger: duplicate source declaration site")
+                }
+            }
+            ctx.source_impl_provider_unconsumed.push(fact)
+        }
+    }
+    for fact in plan.nominal_derived_providers {
+        if fact.file_key == file_key {
+            for existing in ctx.nominal_derived_provider_unconsumed {
+                if existing.frame_index == fact.frame_index &&
+                   existing.decl_index == fact.decl_index {
+                    panic("impl provider ledger: duplicate nominal declaration site")
+                }
+            }
+            ctx.nominal_derived_provider_unconsumed.push(fact)
+        }
+    }
+    if ctx.struct_identity_root_frame.is_none() {
+        panic("struct identity ledger: missing root frame")
+    }
+}
+
+fn trait_identity_site_same(
+    left: TraitIdentityFact, right: TraitIdentityFact
+) -> Bool {
+    left.file_key == right.file_key &&
+        left.frame_index == right.frame_index &&
+        left.decl_index == right.decl_index
+}
+
+pub fn enter_struct_identity_root_frame(mut ctx: InferCtx) {
+    if ctx.struct_identity_frame_stack.len() != 0 {
+        panic("struct identity ledger: root entered while active")
+    }
+    match ctx.struct_identity_root_frame {
+        some(frame) => ctx.struct_identity_frame_stack.push(frame),
+        none => panic("struct identity ledger: missing installed root")
+    }
+}
+
+pub fn enter_struct_identity_child_frame(mut ctx: InferCtx, decl_index: Int) {
+    let parent = match ctx.struct_identity_frame_stack.get(
+        ctx.struct_identity_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("struct identity ledger: child entered without parent")
+    }
+    match ctx.struct_identity_child_frames.get(
+        project_child_site_key(parent, decl_index)) {
+        some(frame) => ctx.struct_identity_frame_stack.push(frame),
+        none => panic("struct identity ledger: missing child frame")
+    }
+}
+
+pub fn exit_struct_identity_frame(mut ctx: InferCtx) {
+    if ctx.struct_identity_frame_stack.pop().is_none() {
+        panic("struct identity ledger: frame exit underflow")
+    }
+}
+
+fn struct_identity_fact_same(
+    left: StructIdentityFact, right: StructIdentityFact
+) -> Bool {
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       left.is_extern != right.is_extern ||
+       !symbol_ref_same(left.owner_ref, right.owner_ref) ||
+       left.fields.len() != right.fields.len() {
+        return false
+    }
+    for field_index in 0..left.fields.len() {
+        match (left.fields.get(field_index), right.fields.get(field_index)) {
+            (some(a), some(b)) => {
+                if a.field_index != b.field_index ||
+                   !nominal_field_ref_same(a.field_ref, b.field_ref) {
+                    return false
+                }
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+pub fn peek_struct_identity_fact(
+    ctx: InferCtx, decl_index: Int,
+    is_extern: Bool, field_count: Int
+) -> StructIdentityFact {
+    let frame_index = match ctx.struct_identity_frame_stack.get(
+        ctx.struct_identity_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("struct identity ledger: declaration outside frame")
+    }
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let mut found: StructIdentityFact? = none
+    for fact in ctx.struct_identity_unconsumed {
+        if fact.file_key == file_key && fact.frame_index == frame_index &&
+           fact.decl_index == decl_index {
+            if found.is_some() {
+                panic("struct identity ledger: duplicate consume match")
+            }
+            found = some(fact)
+        }
+    }
+    let fact = match found {
+        some(value) => value,
+        none => panic("struct identity ledger: missing declaration fact")
+    }
+    if fact.is_extern != is_extern || fact.fields.len() != field_count {
+        panic("struct identity ledger: declaration shape mismatch")
+    }
+    fact
+}
+
+pub fn commit_struct_identity_fact(
+    mut ctx: InferCtx, fact: StructIdentityFact, await_fields: Bool
+) {
+    if await_fields == fact.is_extern {
+        panic("struct identity ledger: invalid completion mode")
+    }
+    let mut matches = 0
+    let mut remaining: List<StructIdentityFact> = []
+    for existing in ctx.struct_identity_unconsumed {
+        if struct_identity_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("struct identity ledger: commit fact mismatch")
+    }
+    if await_fields {
+        for pending in ctx.struct_identity_pending {
+            if symbol_ref_same(pending.owner_ref, fact.owner_ref) {
+                panic("struct identity ledger: duplicate pending owner")
+            }
+        }
+    }
+    ctx.struct_identity_unconsumed = remaining
+    if await_fields { ctx.struct_identity_pending.push(fact) }
+}
+
+// Enum declarations and other fieldless normal nominals close at their
+// resolver-issued declaration site in one step.  They must never enter the
+// struct field-completion queue merely to preserve exact owner identity.
+pub fn commit_complete_nominal_identity_fact(
+    mut ctx: InferCtx, fact: StructIdentityFact
+) {
+    if fact.is_extern || fact.fields.len() != 0 {
+        panic("nominal identity ledger: direct completion shape is invalid")
+    }
+    let mut matches = 0
+    let mut remaining: List<StructIdentityFact> = []
+    for existing in ctx.struct_identity_unconsumed {
+        if struct_identity_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("nominal identity ledger: direct completion mismatch")
+    }
+    ctx.struct_identity_unconsumed = remaining
+}
+
+pub fn peek_struct_identity_completion(
+    ctx: InferCtx, owner_ref: SymbolRef
+) -> StructIdentityFact {
+    let mut found: StructIdentityFact? = none
+    for fact in ctx.struct_identity_pending {
+        if symbol_ref_same(fact.owner_ref, owner_ref) {
+            if found.is_some() {
+                panic("struct identity ledger: duplicate pending completion")
+            }
+            found = some(fact)
+        }
+    }
+    match found {
+        some(value) => value,
+        none => panic("struct identity ledger: missing pending completion")
+    }
+}
+
+pub fn commit_struct_identity_completion(
+    mut ctx: InferCtx, fact: StructIdentityFact
+) {
+    let mut matches = 0
+    let mut remaining: List<StructIdentityFact> = []
+    for pending in ctx.struct_identity_pending {
+        if struct_identity_fact_same(pending, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(pending)
+        }
+    }
+    if matches != 1 {
+        panic("struct identity ledger: completion commit mismatch")
+    }
+    ctx.struct_identity_pending = remaining
+}
+
+fn trait_identity_fact_same(
+    left: TraitIdentityFact, right: TraitIdentityFact
+) -> Bool {
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       !symbol_ref_same(left.owner_ref, right.owner_ref) ||
+       left.methods.len() != right.methods.len() ||
+       left.assoc_members.len() != right.assoc_members.len() {
+        return false
+    }
+    for method_index in 0..left.methods.len() {
+        match (left.methods.get(method_index), right.methods.get(method_index)) {
+            (some(a), some(b)) => if !trait_method_ref_same(a, b) {
+                return false
+            },
+            _ => return false
+        }
+    }
+    for assoc_index in 0..left.assoc_members.len() {
+        if !symbol_ref_same(
+                left.assoc_members.get(assoc_index).unwrap(),
+                right.assoc_members.get(assoc_index).unwrap()) {
+            return false
+        }
+    }
+    true
+}
+
+pub fn peek_trait_identity_fact(
+    ctx: InferCtx, decl_index: Int,
+    method_count: Int, assoc_count: Int
+) -> TraitIdentityFact {
+    let frame_index = match ctx.struct_identity_frame_stack.get(
+        ctx.struct_identity_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("trait identity ledger: declaration outside frame")
+    }
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let mut found: TraitIdentityFact? = none
+    for fact in ctx.trait_identity_unconsumed {
+        if fact.file_key == file_key && fact.frame_index == frame_index &&
+           fact.decl_index == decl_index {
+            if found.is_some() {
+                panic("trait identity ledger: duplicate consume match")
+            }
+            found = some(fact)
+        }
+    }
+    let fact = match found {
+        some(value) => value,
+        none => panic("trait identity ledger: missing declaration fact")
+    }
+    if fact.methods.len() != method_count ||
+       fact.assoc_members.len() != assoc_count {
+        panic("trait identity ledger: declaration shape mismatch")
+    }
+    fact
+}
+
+pub fn commit_trait_identity_fact(
+    mut ctx: InferCtx, fact: TraitIdentityFact
+) {
+    let mut matches = 0
+    let mut remaining: List<TraitIdentityFact> = []
+    for existing in ctx.trait_identity_unconsumed {
+        if trait_identity_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("trait identity ledger: commit fact mismatch")
+    }
+    ctx.trait_identity_unconsumed = remaining
+}
+
+fn enum_identity_group_same(
+    left: EnumVariantFactGroup, right: EnumVariantFactGroup
+) -> Bool {
+    if !symbol_ref_same(left.enum_symbol, right.enum_symbol) ||
+       !registered_nominal_ref_same(left.owner_ref, right.owner_ref) ||
+       left.variants.len() != right.variants.len() {
+        return false
+    }
+    for variant_index in 0..left.variants.len() {
+        let a = left.variants.get(variant_index).unwrap()
+        let b = right.variants.get(variant_index).unwrap()
+        if !variant_ref_same(a.variant_ref, b.variant_ref) ||
+           a.fields.len() != b.fields.len() {
+            return false
+        }
+        for field_index in 0..a.fields.len() {
+            if !variant_field_ref_same(
+                    a.fields.get(field_index).unwrap(),
+                    b.fields.get(field_index).unwrap()) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+pub fn peek_enum_identity_group(
+    ctx: InferCtx, owner_ref: SymbolRef,
+    variant_field_counts: List<Int>
+) -> EnumVariantFactGroup {
+    let mut found: EnumVariantFactGroup? = none
+    for group in ctx.enum_identity_unconsumed {
+        if symbol_ref_same(group.enum_symbol, owner_ref) {
+            if found.is_some() {
+                panic("enum identity ledger: duplicate consume match")
+            }
+            found = some(group)
+        }
+    }
+    let group = match found {
+        some(value) => value,
+        none => panic("enum identity ledger: declaration fact is missing")
+    }
+    if group.variants.len() != variant_field_counts.len() {
+        panic("enum identity ledger: variant census changed")
+    }
+    for index in 0..variant_field_counts.len() {
+        if group.variants.get(index).unwrap().fields.len() !=
+           variant_field_counts.get(index).unwrap_or(-1) {
+            panic("enum identity ledger: payload field census changed")
+        }
+    }
+    group
+}
+
+pub fn commit_enum_identity_group(
+    mut ctx: InferCtx, group: EnumVariantFactGroup
+) {
+    let mut matches = 0
+    let mut remaining: List<EnumVariantFactGroup> = []
+    for existing in ctx.enum_identity_unconsumed {
+        if enum_identity_group_same(existing, group) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("enum identity ledger: commit mismatch")
+    }
+    ctx.enum_identity_unconsumed = remaining
+}
+
+fn effect_identity_fact_same(
+    left: EffectIdentityFact, right: EffectIdentityFact
+) -> Bool {
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       !symbol_ref_same(left.owner_ref, right.owner_ref) ||
+       !handled_effect_ref_same(left.handled_ref, right.handled_ref) ||
+       left.operations.len() != right.operations.len() {
+        return false
+    }
+    for index in 0..left.operations.len() {
+        if !effect_operation_ref_same(
+                left.operations.get(index).unwrap(),
+                right.operations.get(index).unwrap()) {
+            return false
+        }
+    }
+    true
+}
+
+pub fn peek_effect_identity_fact(
+    ctx: InferCtx, decl_index: Int, op_count: Int
+) -> EffectIdentityFact {
+    let frame_index = current_provider_identity_frame(ctx)
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let mut found: EffectIdentityFact? = none
+    for fact in ctx.effect_identity_unconsumed {
+        if fact.file_key == file_key && fact.frame_index == frame_index &&
+           fact.decl_index == decl_index {
+            if found.is_some() {
+                panic("effect identity ledger: duplicate consume match")
+            }
+            found = some(fact)
+        }
+    }
+    let fact = match found {
+        some(value) => value,
+        none => panic("effect identity ledger: declaration fact is missing")
+    }
+    if fact.operations.len() != op_count {
+        panic("effect identity ledger: operation census changed")
+    }
+    fact
+}
+
+pub fn commit_effect_identity_fact(
+    mut ctx: InferCtx, fact: EffectIdentityFact
+) {
+    let mut matches = 0
+    let mut remaining: List<EffectIdentityFact> = []
+    for existing in ctx.effect_identity_unconsumed {
+        if effect_identity_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("effect identity ledger: commit mismatch")
+    }
+    ctx.effect_identity_unconsumed = remaining
+}
+
+fn current_provider_identity_frame(ctx: InferCtx) -> Int {
+    match ctx.struct_identity_frame_stack.get(
+        ctx.struct_identity_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("impl provider ledger: declaration outside frame")
+    }
+}
+
+fn impl_check_site_key(
+    file_key: Str, frame_index: Int, decl_index: Int
+) -> Str {
+    "${file_key}|${frame_index}|${decl_index}"
+}
+
+pub fn publish_impl_check_owner(
+    mut ctx: InferCtx, decl_index: Int, owner_ref: ImplOwnerRef
+) {
+    let frame_index = current_provider_identity_frame(ctx)
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let key = impl_check_site_key(file_key, frame_index, decl_index)
+    match ctx.impl_check_owners.get(key) {
+        some(existing) => if !impl_owner_ref_same(existing, owner_ref) {
+            panic("impl check index: source site changed owner")
+        },
+        none => ctx.impl_check_owners.insert(key, owner_ref)
+    }
+}
+
+pub fn enter_impl_check_root_frame(mut ctx: InferCtx, file_key: Str) {
+    if ctx.impl_check_frame_stack.len() != 0 {
+        panic("impl check index: root entered while active")
+    }
+    match ctx.impl_check_root_frames.get(file_key) {
+        some(frame) => ctx.impl_check_frame_stack.push((file_key, frame)),
+        none => panic("impl check index: root frame is missing")
+    }
+}
+
+pub fn enter_impl_check_child_frame(
+    mut ctx: InferCtx, decl_index: Int
+) {
+    let parent = match ctx.impl_check_frame_stack.get(
+        ctx.impl_check_frame_stack.len() - 1) {
+        some(frame) => frame,
+        none => panic("impl check index: child entered without parent")
+    }
+    match ctx.impl_check_child_frames.get(
+            "${parent.0}|${project_child_site_key(parent.1, decl_index)}") {
+        some(frame) => ctx.impl_check_frame_stack.push((parent.0, frame)),
+        none => panic("impl check index: child frame is missing")
+    }
+}
+
+pub fn exit_impl_check_frame(mut ctx: InferCtx) {
+    if ctx.impl_check_frame_stack.pop().is_none() {
+        panic("impl check index: frame exit underflow")
+    }
+}
+
+pub fn impl_check_owner(
+    ctx: InferCtx, decl_index: Int
+) -> ImplOwnerRef {
+    let frame = match ctx.impl_check_frame_stack.get(
+        ctx.impl_check_frame_stack.len() - 1) {
+        some(value) => value,
+        none => panic("impl check index: declaration outside frame")
+    }
+    match ctx.impl_check_owners.get(
+            impl_check_site_key(frame.0, frame.1, decl_index)) {
+        some(owner) => owner,
+        none => panic("impl check index: source owner is missing")
+    }
+}
+
+fn source_impl_provider_fact_same(
+    left: SourceImplProviderFact, right: SourceImplProviderFact
+) -> Bool {
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       !impl_provider_ref_same(left.provider_ref, right.provider_ref) ||
+       left.methods.len() != right.methods.len() {
+        return false
+    }
+    for index in 0..left.methods.len() {
+        match (left.methods.get(index), right.methods.get(index)) {
+            (some(a), some(b)) => if
+                a.source_member_index != b.source_member_index ||
+                a.callable_slot_index != b.callable_slot_index ||
+                a.name != b.name ||
+                !symbol_ref_same(a.member_ref, b.member_ref) {
+                return false
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+pub fn peek_source_impl_provider_fact(
+    ctx: InferCtx, decl_index: Int
+) -> SourceImplProviderFact {
+    let frame_index = current_provider_identity_frame(ctx)
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let mut found: SourceImplProviderFact? = none
+    for fact in ctx.source_impl_provider_unconsumed {
+        if fact.file_key == file_key && fact.frame_index == frame_index &&
+           fact.decl_index == decl_index {
+            if found.is_some() {
+                panic("impl provider ledger: duplicate source consume match")
+            }
+            found = some(fact)
+        }
+    }
+    match found {
+        some(fact) => fact,
+        none => panic("impl provider ledger: missing source impl fact")
+    }
+}
+
+pub fn commit_source_impl_provider_fact(
+    mut ctx: InferCtx, fact: SourceImplProviderFact
+) {
+    let mut matches = 0
+    let mut remaining: List<SourceImplProviderFact> = []
+    for existing in ctx.source_impl_provider_unconsumed {
+        if source_impl_provider_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("impl provider ledger: source commit mismatch")
+    }
+    ctx.source_impl_provider_unconsumed = remaining
+}
+
+fn nominal_derived_provider_fact_same(
+    left: NominalDerivedProviderPlanFact,
+    right: NominalDerivedProviderPlanFact
+) -> Bool {
+    if left.file_key != right.file_key ||
+       left.frame_index != right.frame_index ||
+       left.decl_index != right.decl_index ||
+       !impl_provider_ref_same(
+            left.implicit_provider_ref, right.implicit_provider_ref) ||
+       left.explicit_providers.len() != right.explicit_providers.len() {
+        return false
+    }
+    for index in 0..left.explicit_providers.len() {
+        match (left.explicit_providers.get(index),
+               right.explicit_providers.get(index)) {
+            (some(a), some(b)) => {
+                if a.attr_index != b.attr_index ||
+                   !impl_provider_ref_same(a.provider_ref, b.provider_ref) {
+                    return false
+                }
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+pub fn peek_nominal_derived_provider_fact(
+    ctx: InferCtx, decl_index: Int, attr_count: Int
+) -> NominalDerivedProviderPlanFact {
+    let frame_index = current_provider_identity_frame(ctx)
+    let file_key = ctx.struct_identity_file_key.unwrap_or("")
+    let mut found: NominalDerivedProviderPlanFact? = none
+    for fact in ctx.nominal_derived_provider_unconsumed {
+        if fact.file_key == file_key && fact.frame_index == frame_index &&
+           fact.decl_index == decl_index {
+            if found.is_some() {
+                panic("impl provider ledger: duplicate nominal consume match")
+            }
+            found = some(fact)
+        }
+    }
+    let fact = match found {
+        some(value) => value,
+        none => panic("impl provider ledger: missing nominal derive fact")
+    }
+    if fact.explicit_providers.len() != attr_count {
+        panic("impl provider ledger: derive attribute count changed")
+    }
+    for index in 0..fact.explicit_providers.len() {
+        match fact.explicit_providers.get(index) {
+            some(explicit) => if explicit.attr_index != index {
+                panic("impl provider ledger: derive attribute order changed")
+            },
+            none => panic("impl provider ledger: derive attribute fact missing")
+        }
+    }
+    fact
+}
+
+pub fn commit_nominal_derived_provider_fact(
+    mut ctx: InferCtx, fact: NominalDerivedProviderPlanFact
+) {
+    let mut matches = 0
+    let mut remaining: List<NominalDerivedProviderPlanFact> = []
+    for existing in ctx.nominal_derived_provider_unconsumed {
+        if nominal_derived_provider_fact_same(existing, fact) {
+            matches = matches + 1
+        } else {
+            remaining.push(existing)
+        }
+    }
+    if matches != 1 {
+        panic("impl provider ledger: nominal derive commit mismatch")
+    }
+    ctx.nominal_derived_provider_unconsumed = remaining
+}
+
+pub fn close_struct_identity_ledger(mut ctx: InferCtx) {
+    if ctx.struct_identity_frame_stack.len() != 0 ||
+       ctx.struct_identity_unconsumed.len() != 0 ||
+       ctx.struct_identity_pending.len() != 0 ||
+       ctx.trait_identity_unconsumed.len() != 0 ||
+       ctx.source_impl_provider_unconsumed.len() != 0 ||
+       ctx.nominal_derived_provider_unconsumed.len() != 0 {
+        panic("struct identity ledger: registration did not close")
+    }
+    ctx.struct_identity_file_key = none
+    ctx.struct_identity_root_frame = none
+    ctx.struct_identity_child_frames = map_new()
+    ctx.struct_identity_frame_stack = []
+    ctx.struct_identity_unconsumed = []
+    ctx.struct_identity_pending = []
+    ctx.trait_identity_unconsumed = []
+    ctx.enum_identity_unconsumed = []
+    ctx.effect_identity_unconsumed = []
+    ctx.source_impl_provider_unconsumed = []
+    ctx.nominal_derived_provider_unconsumed = []
 }
 
 fn bind_raw_extern_type_alias(mut ctx: InferCtx, alias_name: Str, abi_name: Str) -> Bool {

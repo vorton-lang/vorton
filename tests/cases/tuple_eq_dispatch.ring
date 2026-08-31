@@ -27,12 +27,12 @@ fn nested_closure_equal<T: Eq>(
     predicate(candidate)
 }
 
-fn make_left() -> (Int, Int) with {io} {
+fn make_left() -> (Int, Int) with {console} {
     print("left")
     (1, 2)
 }
 
-fn make_right() -> (Int, Int) with {io} {
+fn make_right() -> (Int, Int) with {console} {
     print("right")
     (1, 2)
 }

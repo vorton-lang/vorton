@@ -1,6 +1,6 @@
 struct Point { x: Int, y: Int }
 
-fn main() with {io} {
+fn main() with {console} {
     let a = set_from([Point { x: 1, y: 2 }, Point { x: 3, y: 4 }])
     let b = set_from([Point { x: 3, y: 4 }, Point { x: 5, y: 6 }])
 

@@ -1,30 +1,120 @@
 use types::{Type, Effect, EffectRow, StructField, EnumVariant,
-    EMPTY_ROW, effects_same_kind, type_to_builtin_name, type_to_string, effect_to_string, nominal_display_name}
+    EMPTY_ROW, effects_same_kind, type_to_builtin_name, type_to_string, effect_to_string, nominal_display_name,
+    types_equal}
 use ast::{Decl, Span, TypeParam, Param, TypeExpr, EffectOpDecl, StructFieldDecl,
-    EnumVariantDecl, NamedEnumField, TypeBound, span_zero, EffectExpr, SigMember,
+    EnumVariantDecl, NamedEnumField, TypeBound, span_zero, EffectExpr,
     UseDecl, UseImport, DeriveAttribute}
 use env::{TypeEnv, TypeScheme, SchemeBound, AssocConstraintEntry, StructDef, EnumDef, EffectDef, EffectOpDef,
-    TraitDef, TraitMethodDef, ImplEntry, ImplDictBound, TypeAliasDef, FnBound, SigDef,
-    EffectAliasDef, AssocTypeDef, MethodOrigin, mono, apply_subst, apply_subst_effect_map,
-    apply_subst_map, add_impl, has_impl, find_impl, impl_origin, impl_decl_origin,
-    install_method_scheme, specialize_trait_method_scheme, build_type_var_map}
-use diagnostics::{DiagnosticContext}
-use codes::{E0207, E0406, E0501, E0502, E0503, E0504, E0505, E0506, E0507, E0508, E0509, E0510, E0511, E0513, E0514}
-use hir::{compare_by_first, module_item_identity, variant_ctor_name, ValueBindingKind}
-use infer_ctx::{InferCtx, FnBoundsEntry, CompileError, type_error, resolve_type_expr, resolve_self_type, resolve_effect_expr,
-    record_value_origin, record_variant_ctor_origin, record_value_binding_kind,
-    resolve_dict_ref_for_type,
+    TraitDef, TraitMethodDef, ImplEntry, ImplMethodSchemeCore,
+    RegisteredTraitMethodContract, RegisteredTraitAssocContract,
+    make_registered_trait_method_contract,
+    make_registered_trait_assoc_contract,
+    make_registered_trait_contract,
+    ExplicitDerivedProviderPlan, NominalDerivedProviderPlan,
+    ImplAssocPredicate, TypedImplPredicate, FrozenImplPredicateSet,
+    FnBound,
+    EffectAliasDef, AssocTypeDef, mono, apply_subst, apply_subst_effect_map,
+    apply_subst_map, make_type_alias_def, add_impl, has_impl, find_impl,
+    install_method_core,
+    make_impl_method_scheme_core,
+    impl_method_core_as_scheme,
+    impl_method_core_type, impl_method_core_type_vars,
+    impl_method_core_effect_schema,
+    make_impl_assoc_predicate, make_typed_impl_predicate,
+    direct_impl_predicate_provenance, expanded_impl_predicate_provenance,
+    freeze_impl_predicate_set, empty_frozen_impl_predicate_set,
+    frozen_impl_predicates, impl_predicate_subject_param_index,
+    impl_predicate_subject_type_var, impl_predicate_trait_name,
+    impl_predicate_assoc_constraints, impl_assoc_predicate_name,
+    impl_assoc_predicate_type, instantiate_impl_runtime_requirements,
+    impl_target_symbol,
+    ordered_effect_tail_vars,
+    define_effect_header_schema, publish_effect_header_schema,
+    instantiate_effect_header_schema,
+    register_callable_effect_header}
+use diagnostics::{CompileError, DiagnosticContext}
+use codes::{E0207, E0406, E0501, E0502, E0503, E0504, E0505, E0506,
+    E0510, E0511, E0513, E0514}
+use hir::{compare_by_first, module_item_identity, ValueBindingKind}
+use infer_ctx::{InferCtx, FnBoundsEntry, type_error, resolve_type_expr, resolve_self_type, resolve_effect_expr,
+    validate_fn_bound_order,
+    record_value_origin, record_value_binding_kind,
+    record_value_symbol_ref, source_value_symbol_for_decl,
+    record_h0_closed_registration_header,
+    source_type_alias_symbol_for_decl,
+    prove_dict_evidence_for_type, impl_predicate_constraints_satisfied,
     resolve_mod_uses, bind_exact_import_alias,
     enter_project_root_frame, enter_project_child_frame,
-    refresh_project_namespace_frame, exit_project_namespace_frame}
+    refresh_project_namespace_frame, exit_project_namespace_frame,
+    enter_struct_identity_root_frame, enter_struct_identity_child_frame,
+    exit_struct_identity_frame, peek_struct_identity_fact,
+    commit_struct_identity_fact, peek_struct_identity_completion,
+    commit_struct_identity_completion,
+    commit_complete_nominal_identity_fact,
+    peek_enum_identity_group, commit_enum_identity_group,
+    peek_effect_identity_fact, commit_effect_identity_fact,
+    peek_trait_identity_fact, commit_trait_identity_fact,
+    peek_source_impl_provider_fact, commit_source_impl_provider_fact,
+    publish_impl_check_owner,
+    peek_nominal_derived_provider_fact,
+    commit_nominal_derived_provider_fact,
+    close_struct_identity_ledger,
+    executable_effect_origin}
+use ir_inventory::{effect_operation_ref_callable, make_named_executable_ref}
+use effect_contract::{TypedEffectHeaderSchema,
+    empty_typed_effect_header_schema}
 use infer_helpers::{is_value_type}
+use resolver::{StructIdentityFact, ImplMethodIdentityFact}
+use ir_identity::{make_registered_nominal_ref, make_registered_trait_ref,
+    registered_nominal_ref_symbol, nominal_field_ref_name,
+    nominal_field_ref_index, nominal_field_ref_member, symbol_ref_same,
+    trait_method_ref_trait,
+    trait_method_ref_source_member_index,
+    trait_method_ref_callable_slot_index, trait_method_ref_name,
+    trait_method_ref_member,
+    variant_ref_owner, variant_ref_source_index, variant_ref_member,
+    variant_field_ref_variant, variant_field_ref_index,
+    variant_field_ref_member,
+    registered_nominal_ref_same, variant_ref_same,
+    ImplProviderRef, SymbolRef, ImplOwnerRef, ImplMethodRef,
+    HandledEffectRef, handled_effect_ref_same,
+    make_impl_owner_ref, make_impl_method_ref,
+    impl_provider_ref_site, path_ref_owner, path_ref_normalized_child_path,
+    impl_provider_ref_same,
+    registered_trait_ref_symbol, symbol_ref_canonical_payload,
+    make_symbol_origin_ref, OriginRef, make_path_origin_ref,
+    make_path_ref, path_role_declaration}
 
 // ============================================================
 // Public entry points
 // ============================================================
 
-pub fn register_decl_public(mut ctx: InferCtx, decl: Decl) {
-    register_decl(ctx, decl)
+pub fn register_decl_public(
+    mut ctx: InferCtx, decl: Decl, decl_index: Int,
+    direct_value_payload: Str?
+) {
+    register_decl(ctx, decl, decl_index)
+    match direct_value_payload {
+        some(payload) => match decl {
+            Decl::Fn { name, .. } => {
+                record_value_origin(ctx, name, payload)
+                record_value_binding_kind(
+                    ctx, name, ValueBindingKind::DirectCallable)
+            },
+            Decl::ExternFn { name, .. } => {
+                record_value_origin(ctx, name, payload)
+                record_value_binding_kind(
+                    ctx, name, ValueBindingKind::ExternCallable)
+            },
+            Decl::Const { name, .. } => {
+                record_value_origin(ctx, name, payload)
+                record_value_binding_kind(
+                    ctx, name, ValueBindingKind::ConstGetter)
+            },
+            _ => panic("prelude value identity: payload attached to non-value")
+        },
+        none => {}
+    }
 }
 
 pub fn insert_mod_aliases(mut ctx: InferCtx, mod_name: Str, decls: List<Decl>, guard: Bool) {
@@ -102,15 +192,6 @@ pub fn insert_mod_aliases(mut ctx: InferCtx, mod_name: Str, decls: List<Decl>, g
                     }
                 }
             },
-            Decl::Sig { name, .. } => {
-                let qualified = "${mod_name}::${name}"
-                if !guard || !ctx.env.types.sigs.contains_key(name) {
-                    match ctx.env.types.sigs.get(qualified) {
-                        some(def) => { ctx.env.types.sigs.insert(name, def) },
-                        none => {}
-                    }
-                }
-            },
             _ => {}
         }
     }
@@ -118,10 +199,10 @@ pub fn insert_mod_aliases(mut ctx: InferCtx, mod_name: Str, decls: List<Decl>, g
 
 pub fn prefix_decl_name(mod_name: Str, decl: Decl) -> Decl {
     match decl {
-        Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, is_abstract, span } =>
+        Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span } =>
             Decl::Fn { name: "${mod_name}::${name}", type_params: type_params, params: params,
                        return_type: return_type, declared_effects: declared_effects, body: body,
-                       is_pub: is_pub, is_abstract: is_abstract, span: span },
+                       is_pub: is_pub, span: span },
         Decl::Struct { name, type_params, fields, derive_attrs, is_pub, span } =>
             Decl::Struct { name: "${mod_name}::${name}", type_params: type_params, fields: fields,
                           derive_attrs: derive_attrs, is_pub: is_pub, span: span },
@@ -135,8 +216,6 @@ pub fn prefix_decl_name(mod_name: Str, decl: Decl) -> Decl {
         Decl::Const { name, type_annotation, init, is_pub, span } =>
             Decl::Const { name: "${mod_name}::${name}", type_annotation: type_annotation, init: init,
                          is_pub: is_pub, span: span },
-        Decl::Sig { name, members, is_pub, span } =>
-            Decl::Sig { name: "${mod_name}::${name}", members: members, is_pub: is_pub, span: span },
         Decl::Impl { target_type, type_params, trait_name, methods, span } => {
             let prefixed_target = if target_type.contains("::") {
                 target_type
@@ -174,10 +253,10 @@ pub fn prefix_decl_name(mod_name: Str, decl: Decl) -> Decl {
 // module boundary and cannot collide after backend identifier sanitization.
 pub fn module_prefix_decl_name(module_prefix: Str, decl: Decl) -> Decl {
     match decl {
-        Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, is_abstract, span } =>
+        Decl::Fn { name, type_params, params, return_type, declared_effects, body, is_pub, span } =>
             Decl::Fn { name: module_item_identity(module_prefix, name), type_params: type_params, params: params,
                        return_type: return_type, declared_effects: declared_effects, body: body,
-                       is_pub: is_pub, is_abstract: is_abstract, span: span },
+                       is_pub: is_pub, span: span },
         Decl::Struct { name, type_params, fields, derive_attrs, is_pub, span } =>
             Decl::Struct { name: module_item_identity(module_prefix, name), type_params: type_params, fields: fields,
                           derive_attrs: derive_attrs, is_pub: is_pub, span: span },
@@ -195,8 +274,6 @@ pub fn module_prefix_decl_name(module_prefix: Str, decl: Decl) -> Decl {
         Decl::Const { name, type_annotation, init, is_pub, span } =>
             Decl::Const { name: module_item_identity(module_prefix, name), type_annotation: type_annotation, init: init,
                          is_pub: is_pub, span: span },
-        Decl::Sig { name, members, is_pub, span } =>
-            Decl::Sig { name: module_item_identity(module_prefix, name), members: members, is_pub: is_pub, span: span },
         Decl::Impl { target_type, type_params, trait_name, methods, span } => {
             // Keep the source spelling until registration.  At that point all
             // local/imported aliases are installed, so the target can be
@@ -254,7 +331,7 @@ enum ProjectRegistrationPhase {
     EffectPhase,
     EffectAliasPhase,
     ExternTypePhase,
-    TypeAliasSigPhase,
+    TypeAliasPhase,
     ValuePhase,
 }
 
@@ -282,16 +359,15 @@ fn project_decl_matches_phase(
             Decl::ExternType { .. } => true,
             _ => false
         },
-        ProjectRegistrationPhase::TypeAliasSigPhase => match decl {
-            // Keep aliases and signatures in one source-ordered frame pass.
-            Decl::TypeAlias { .. } | Decl::Sig { .. } => true,
+        ProjectRegistrationPhase::TypeAliasPhase => match decl {
+            Decl::TypeAlias { .. } => true,
             _ => false
         },
         ProjectRegistrationPhase::ValuePhase => match decl {
             Decl::Struct { .. } | Decl::Enum { .. } |
             Decl::Trait { .. } | Decl::Effect { .. } |
             Decl::EffectAlias { .. } | Decl::ExternType { .. } |
-            Decl::TypeAlias { .. } | Decl::Sig { .. } |
+            Decl::TypeAlias { .. } |
             Decl::ModBlock { .. } => false,
             _ => true
         }
@@ -445,17 +521,20 @@ fn register_mod_block_items_legacy(
     let simple_name = segments.get(segments.len() - 1).unwrap_or(mod_name)
     ctx.mod_path_stack.push(simple_name)
     resolve_mod_uses(ctx, mod_uses, false)
+    let indexed = index_decls(mod_decls)
 
     // Pass 1a: register struct/enum types first
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::Struct { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             },
             Decl::Enum { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             },
             _ => {}
         }
@@ -463,11 +542,12 @@ fn register_mod_block_items_legacy(
     // Incremental aliases: struct/enum short names available for trait bounds
     insert_mod_aliases(ctx, mod_name, mod_decls, true)
     // Pass 1b-1: traits -- alias after each so supertraits resolve by short name (#83)
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::Trait { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
                 // Incremental alias: makes this trait's short name available
                 // for subsequent traits' supertrait lookup (#83)
                 insert_mod_aliases(ctx, mod_name, mod_decls, true)
@@ -478,11 +558,12 @@ fn register_mod_block_items_legacy(
     // Pass 1b-2: effects must exist under their short names before effect
     // alias bodies are canonicalized. Otherwise `{Signal}` is stored raw and
     // can later rebind to a consumer's same-spelled effect.
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::Effect { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             },
             _ => {}
         }
@@ -490,40 +571,38 @@ fn register_mod_block_items_legacy(
     insert_mod_aliases(ctx, mod_name, mod_decls, true)
     // Pass 1b-3: effect aliases remain source ordered so an earlier alias may
     // feed a later alias, but every body sees all concrete effects above.
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::EffectAlias { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
                 insert_mod_aliases(ctx, mod_name, mod_decls, true)
             },
             _ => {}
         }
     }
     // Pass 1b-4: opaque extern types.
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::ExternType { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             },
             _ => {}
         }
     }
-    // Pass 1b-5: aliases/signatures must exist before any value declaration
+    // Pass 1b-5: aliases must exist before any value declaration
     // resolves its parameter/return types. Refresh short aliases after each
     // declaration so source-ordered alias chains can feed the next alias;
     // functions remain declaration-order independent from all aliases.
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::TypeAlias { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
-                insert_mod_aliases(ctx, mod_name, mod_decls, true)
-            },
-            Decl::Sig { .. } => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
                 insert_mod_aliases(ctx, mod_name, mod_decls, true)
             },
             _ => {}
@@ -532,8 +611,8 @@ fn register_mod_block_items_legacy(
     // Final aliases: all names available for remaining declarations
     insert_mod_aliases(ctx, mod_name, mod_decls, true)
     // Pass 2: register everything else (functions, impls, consts, etc.)
-    for d in mod_decls {
-        match d {
+    for item in indexed {
+        match item.decl {
             Decl::Struct { .. } => {},
             Decl::Enum { .. } => {},
             Decl::Trait { .. } => {},
@@ -541,17 +620,18 @@ fn register_mod_block_items_legacy(
             Decl::EffectAlias { .. } => {},
             Decl::ExternType { .. } => {},
             Decl::TypeAlias { .. } => {},
-            Decl::Sig { .. } => {},
             Decl::ModBlock { .. } => {},
             _ => {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                let prefixed = prefix_decl_name(mod_name, item.decl)
+                register_mod_item(ctx, prefixed, item.decl_index,
+                    deferred_struct_names, deferred_enum_names)
             }
         }
     }
-    for d in order_inline_mod_blocks(mod_decls) {
-        let prefixed = prefix_decl_name(mod_name, d)
-        register_mod_item(ctx, prefixed, deferred_struct_names, deferred_enum_names)
+    for item in order_indexed_inline_mod_blocks(indexed) {
+        let prefixed = prefix_decl_name(mod_name, item.decl)
+        register_mod_item(ctx, prefixed, item.decl_index,
+            deferred_struct_names, deferred_enum_names)
     }
     let _ = ctx.mod_path_stack.pop()
 }
@@ -565,15 +645,17 @@ fn register_project_mod_local_item(
         // nominals.  The project plan owns every visible spelling; retain only
         // the raw source definition here so frame refresh can install and
         // later remove the exact leaf/display alias.
-        Decl::ExternType { name, type_params, .. } => {
-            register_project_extern_type(ctx, name, type_params)
+        Decl::ExternType { name, type_params, span, .. } => {
+            register_project_extern_type(
+                ctx, name, type_params, span, item.decl_index)
         },
         Decl::ModBlock { .. } =>
             panic("unreachable: project ModBlock reached local phase dispatcher"),
         _ => {
             let prefixed = prefix_decl_name(mod_name, item.decl)
             register_phase1(
-                ctx, prefixed, deferred_struct_names, deferred_enum_names)
+                ctx, prefixed, deferred_struct_names, deferred_enum_names,
+                item.decl_index)
         }
     }
     refresh_project_namespace_frame(ctx)
@@ -592,6 +674,7 @@ fn register_project_mod_block_phase(
     if !enter_project_child_frame(ctx, decl_index) {
         panic("unreachable: resolver plan missing inline registration frame")
     }
+    enter_struct_identity_child_frame(ctx, decl_index)
     project_push_mod_path(ctx, mod_name)
     let indexed = index_decls(mod_decls)
 
@@ -620,6 +703,7 @@ fn register_project_mod_block_phase(
     }
 
     let _ = ctx.mod_path_stack.pop()
+    exit_struct_identity_frame(ctx)
     let _ = exit_project_namespace_frame(ctx)
 }
 
@@ -638,32 +722,65 @@ fn register_mod_block_items(
 // Dispatch a single declaration to the appropriate registration function.
 // When deferred lists are provided, operates in phase1 mode; otherwise in register_decl mode.
 fn register_mod_item(
-    mut ctx: InferCtx, decl: Decl,
+    mut ctx: InferCtx, decl: Decl, decl_index: Int,
     deferred_struct_names: List<Str>?, deferred_enum_names: List<Str>?
 ) {
     match deferred_struct_names {
         some(dsn) => match deferred_enum_names {
-            some(den) => register_phase1(ctx, decl, dsn, den),
-            none => register_decl(ctx, decl)
+            some(den) => register_phase1(ctx, decl, dsn, den, decl_index),
+            none => register_decl(ctx, decl, decl_index)
         },
-        none => register_decl(ctx, decl)
+        none => register_decl(ctx, decl, decl_index)
     }
 }
 
-fn register_phase1(mut ctx: InferCtx, decl: Decl, mut deferred_struct_names: List<Str>, mut deferred_enum_names: List<Str>) {
+fn register_phase1(
+    mut ctx: InferCtx, decl: Decl,
+    mut deferred_struct_names: List<Str>,
+    mut deferred_enum_names: List<Str>, decl_index: Int
+) {
     match decl {
         Decl::Struct { name, type_params, fields, derive_attrs, span, .. } => {
-            preregister_struct(ctx, name, type_params, derive_attrs)
+            preregister_struct(
+                ctx, name, type_params, derive_attrs,
+                span, decl_index, fields.len())
             deferred_struct_names.push(name)
         },
         Decl::Enum { name, type_params, variants, derive_attrs, span, .. } => {
-            preregister_enum(ctx, name, type_params, derive_attrs)
+            preregister_enum(
+                ctx, name, type_params, variants,
+                derive_attrs, span, decl_index)
             deferred_enum_names.push(name)
         },
         Decl::ModBlock { name: mod_name, uses: mod_uses, decls: mod_decls, .. } => {
+            enter_struct_identity_child_frame(ctx, decl_index)
             register_mod_block_items(ctx, mod_name, mod_uses, mod_decls, some(deferred_struct_names), some(deferred_enum_names))
+            exit_struct_identity_frame(ctx)
         },
-        _ => register_decl(ctx, decl)
+        _ => {
+            register_decl(ctx, decl, decl_index)
+            match decl {
+                Decl::Fn { name, .. } => {
+                    let symbol = source_value_symbol_for_decl(ctx, decl_index)
+                    record_value_origin(
+                        ctx, name, symbol_ref_canonical_payload(symbol))
+                    record_value_symbol_ref(ctx, name, symbol)
+                },
+                Decl::ExternFn { name, .. } => {
+                    let symbol = source_value_symbol_for_decl(ctx, decl_index)
+                    record_value_origin(
+                        ctx, name, symbol_ref_canonical_payload(symbol))
+                    record_value_symbol_ref(ctx, name, symbol)
+                },
+                Decl::Const { name, .. } => {
+                    let symbol = source_value_symbol_for_decl(ctx, decl_index)
+                    record_value_origin(
+                        ctx, name, symbol_ref_canonical_payload(symbol))
+                    record_value_symbol_ref(ctx, name, symbol)
+                },
+                _ => {}
+            }
+        }
     }
 }
 
@@ -696,6 +813,7 @@ fn register_phase2_enum(mut ctx: InferCtx, decl: Decl) {
 }
 
 pub fn register_decls_two_phase(mut ctx: InferCtx, decls: List<Decl>) {
+    enter_struct_identity_root_frame(ctx)
     ctx.file_extern_types = set_new()
     for decl in decls {
         match decl {
@@ -706,10 +824,10 @@ pub fn register_decls_two_phase(mut ctx: InferCtx, decls: List<Decl>) {
     let mut deferred_struct_names: List<Str> = []
     let mut deferred_enum_names: List<Str> = []
 
-    for decl in decls {
+    for item in index_decls(decls) {
         let result = some(register_phase1(
-            ctx, decl, deferred_struct_names,
-            deferred_enum_names)) catch { _ => none }
+            ctx, item.decl, deferred_struct_names,
+            deferred_enum_names, item.decl_index)) catch { _ => none }
     }
 
     for decl in decls {
@@ -719,10 +837,8 @@ pub fn register_decls_two_phase(mut ctx: InferCtx, decls: List<Decl>) {
         let result = some(register_phase2_enum(ctx, decl)) catch { _ => none }
     }
 
-    // Phase 3: process delegates (after struct/enum fields are complete)
-    for decl in decls {
-        register_phase3_delegate(ctx, decl)
-    }
+    exit_struct_identity_frame(ctx)
+    close_struct_identity_ledger(ctx)
 }
 
 // Register a resolver file-module under canonical declaration identities while
@@ -737,13 +853,15 @@ fn register_project_root_local_item(
         // module_prefix_decl_name deliberately preserves the raw ABI spelling.
         // Do not route project externs through the legacy visible registry:
         // the root frame installs that spelling transactionally.
-        Decl::ExternType { name, type_params, .. } =>
-            register_project_extern_type(ctx, name, type_params),
+        Decl::ExternType { name, type_params, span, .. } =>
+            register_project_extern_type(
+                ctx, name, type_params, span, item.decl_index),
         Decl::ModBlock { .. } =>
             panic("unreachable: project ModBlock reached root local dispatcher"),
         _ => register_phase1(
             ctx, item.decl,
-            deferred_struct_names, deferred_enum_names)
+            deferred_struct_names, deferred_enum_names,
+            item.decl_index)
     }
     refresh_project_namespace_frame(ctx)
 }
@@ -828,33 +946,7 @@ fn register_project_phase2_enum(
         _ => {
             register_phase2_enum(ctx, item.decl)
             // Enum completion creates canonical constructor schemes; refresh
-            // the current exact frame before any later signature/delegate pass.
-            refresh_project_namespace_frame(ctx)
-        }
-    }
-}
-
-fn register_project_phase3_delegate(
-    mut ctx: InferCtx, item: IndexedDecl
-) {
-    match item.decl {
-        Decl::ModBlock { name, decls, .. } => {
-            if !enter_project_child_frame(ctx, item.decl_index) {
-                panic("unreachable: resolver plan missing phase3 delegate frame")
-            }
-            project_push_mod_path(ctx, name)
-            for child in index_decls(decls) {
-                let qualified_child = IndexedDecl {
-                    decl_index: child.decl_index,
-                    decl: prefix_decl_name(name, child.decl)
-                }
-                register_project_phase3_delegate(ctx, qualified_child)
-            }
-            let _ = ctx.mod_path_stack.pop()
-            let _ = exit_project_namespace_frame(ctx)
-        },
-        _ => {
-            register_phase3_delegate(ctx, item.decl)
+            // the current exact frame before later signature registration.
             refresh_project_namespace_frame(ctx)
         }
     }
@@ -883,6 +975,7 @@ fn register_project_module_decls_two_phase(
     if !enter_project_root_frame(ctx) {
         panic("unreachable: resolver plan missing file root registration frame")
     }
+    enter_struct_identity_root_frame(ctx)
 
     let mut deferred_struct_names: List<Str> = []
     let mut deferred_enum_names: List<Str> = []
@@ -904,7 +997,7 @@ fn register_project_module_decls_two_phase(
         ProjectRegistrationPhase::ExternTypePhase)
     register_project_root_phase(
         ctx, qualified, deferred_struct_names, deferred_enum_names,
-        ProjectRegistrationPhase::TypeAliasSigPhase)
+        ProjectRegistrationPhase::TypeAliasPhase)
     register_project_root_phase(
         ctx, qualified, deferred_struct_names, deferred_enum_names,
         ProjectRegistrationPhase::ValuePhase)
@@ -915,11 +1008,10 @@ fn register_project_module_decls_two_phase(
     for item in qualified {
         register_project_phase2_enum(ctx, item)
     }
-    for item in qualified {
-        register_project_phase3_delegate(ctx, item)
-    }
     refresh_project_namespace_frame(ctx)
+    exit_struct_identity_frame(ctx)
     let _ = exit_project_namespace_frame(ctx)
+    close_struct_identity_ledger(ctx)
 
     let mut result: List<Decl> = []
     for item in qualified { result.push(item.decl) }
@@ -938,8 +1030,14 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
             _ => {}
         }
     }
-    let mut qualified: List<Decl> = []
-    for decl in decls { qualified.push(module_prefix_decl_name(module_prefix, decl)) }
+    let mut qualified: List<IndexedDecl> = []
+    for item in index_decls(decls) {
+        qualified.push(IndexedDecl {
+            decl_index: item.decl_index,
+            decl: module_prefix_decl_name(module_prefix, item.decl)
+        })
+    }
+    enter_struct_identity_root_frame(ctx)
 
     let mut deferred_struct_names: List<Str> = []
     let mut deferred_enum_names: List<Str> = []
@@ -947,10 +1045,10 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
     // Nominal declarations must all exist before any field/payload/signature is
     // resolved.  Their alias keys are display names; StructDef/EnumDef.name is
     // already canonical and therefore drives unification and backend metadata.
-    for decl in qualified {
-        match decl {
-            Decl::Struct { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
-            Decl::Enum { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
+    for item in qualified {
+        match item.decl {
+            Decl::Struct { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
+            Decl::Enum { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
             _ => {}
         }
     }
@@ -958,10 +1056,10 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
 
     // Match inline-module registration ordering: traits first, then effects and
     // opaque/type declarations, then values and impls.
-    for decl in qualified {
-        match decl {
+    for item in qualified {
+        match item.decl {
             Decl::Trait { .. } => {
-                register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
+                register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index)
                 insert_file_module_aliases(ctx, module_prefix, decls, false)
             },
             _ => {}
@@ -970,52 +1068,54 @@ pub fn register_module_decls_two_phase(mut ctx: InferCtx, module_prefix: Str, de
     // Install all concrete effects before canonicalizing any effect-alias body.
     // The alias body must capture this module's exact effect identity rather
     // than retain a raw leaf that a downstream decoy can rebind.
-    for decl in qualified {
-        match decl {
-            Decl::Effect { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
+    for item in qualified {
+        match item.decl {
+            Decl::Effect { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
             _ => {}
         }
     }
     insert_file_module_aliases(ctx, module_prefix, decls, false)
-    for decl in qualified {
-        match decl {
+    for item in qualified {
+        match item.decl {
             Decl::EffectAlias { .. } => {
-                register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
+                register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index)
                 insert_file_module_aliases(ctx, module_prefix, decls, false)
             },
             _ => {}
         }
     }
-    for decl in qualified {
-        match decl {
-            Decl::ExternType { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
-            Decl::TypeAlias { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
-            Decl::Sig { .. } => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names),
+    for item in qualified {
+        match item.decl {
+            Decl::ExternType { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
+            Decl::TypeAlias { .. } => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index),
             _ => {}
         }
     }
     insert_file_module_aliases(ctx, module_prefix, decls, false)
-    for decl in qualified {
-        match decl {
+    for item in qualified {
+        match item.decl {
             Decl::Struct { .. } => {}, Decl::Enum { .. } => {}, Decl::Trait { .. } => {},
             Decl::Effect { .. } => {}, Decl::EffectAlias { .. } => {},
-            Decl::ExternType { .. } => {}, Decl::TypeAlias { .. } => {}, Decl::Sig { .. } => {},
+            Decl::ExternType { .. } => {}, Decl::TypeAlias { .. } => {},
             Decl::ModBlock { .. } => {},
-            _ => register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
+            _ => register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index)
         }
     }
-    for decl in order_inline_mod_blocks(qualified) {
-        register_phase1(ctx, decl, deferred_struct_names, deferred_enum_names)
+    for item in order_indexed_inline_mod_blocks(qualified) {
+        register_phase1(ctx, item.decl, deferred_struct_names, deferred_enum_names, item.decl_index)
     }
 
-    for decl in qualified { register_phase2_struct(ctx, decl) }
-    for decl in qualified { register_phase2_enum(ctx, decl) }
-    for decl in qualified { register_phase3_delegate(ctx, decl) }
+    for item in qualified { register_phase2_struct(ctx, item.decl) }
+    for item in qualified { register_phase2_enum(ctx, item.decl) }
 
     // Value schemes exist only after the final registration pass.  Binding the
     // short alias and recording its canonical origin makes HExpr::Ident exact.
     insert_file_module_aliases(ctx, module_prefix, decls, true)
-    qualified
+    exit_struct_identity_frame(ctx)
+    close_struct_identity_ledger(ctx)
+    let mut result: List<Decl> = []
+    for item in qualified { result.push(item.decl) }
+    result
 }
 
 fn insert_file_module_aliases(mut ctx: InferCtx, module_prefix: Str, decls: List<Decl>, include_values: Bool) {
@@ -1060,12 +1160,6 @@ fn insert_file_module_aliases(mut ctx: InferCtx, module_prefix: Str, decls: List
                 let canonical = module_item_identity(module_prefix, name)
                 match ctx.env.types.type_aliases.get(canonical) {
                     some(def) => { ctx.env.types.type_aliases.insert(name, def) }, none => {}
-                }
-            },
-            Decl::Sig { name, .. } => {
-                let canonical = module_item_identity(module_prefix, name)
-                match ctx.env.types.sigs.get(canonical) {
-                    some(def) => { ctx.env.types.sigs.insert(name, def) }, none => {}
                 }
             },
             Decl::Fn { name, .. } => {
@@ -1190,13 +1284,6 @@ fn insert_inline_display_aliases(
                     }
                 }
             },
-            Decl::Sig { name, .. } => {
-                let display = "${display_mod}::${name}"
-                let canonical = "${canonical_mod}::${name}"
-                match ctx.env.types.sigs.get(canonical) {
-                    some(def) => { ctx.env.types.sigs.insert(display, def) }, none => {}
-                }
-            },
             Decl::Fn { name, .. } => {
                 if include_values {
                     let display = "${display_mod}::${name}"
@@ -1230,108 +1317,169 @@ fn insert_inline_display_aliases(
     }
 }
 
-struct NormalizedImplBounds {
-    scheme_bounds: List<SchemeBound>,
-    dict_bounds: List<ImplDictBound>
-}
-
-// Keep method-scheme evidence and ImplEntry's runtime dictionary requirements
-// in one canonical order. General impl registration retains the legacy shape
-// that cannot carry TypeBound type_args or assoc_constraints; iteration
-// protocol impls reject those predicates before reaching this normalization.
-fn normalize_impl_bounds(
-    ctx: InferCtx, type_params: List<TypeParam>, impl_tv_ids: List<Int>
-) -> NormalizedImplBounds {
-    let mut scheme_bounds: List<SchemeBound> = []
-    let mut dict_bounds: List<ImplDictBound> = []
-    let mut tp_idx = 0
-    for tp in type_params {
-        for b in tp.bounds {
-            if tp_idx < impl_tv_ids.len() {
-                let tv_id = impl_tv_ids.get(tp_idx).unwrap()
-                let bound_trait = resolve_trait_identity(ctx, b.trait_name)
-                scheme_bounds.push(SchemeBound {
-                    type_var: tv_id,
-                    trait_name: bound_trait,
-                    assoc_constraints: []
-                })
-                dict_bounds.push(ImplDictBound {
-                    type_param_index: tp_idx,
-                    trait_name: bound_trait
-                })
-                let supers = collect_all_supertraits(ctx, bound_trait)
-                for st_name in supers {
-                    scheme_bounds.push(SchemeBound {
-                        type_var: tv_id,
-                        trait_name: st_name,
-                        assoc_constraints: []
-                    })
-                    dict_bounds.push(ImplDictBound {
-                        type_param_index: tp_idx,
-                        trait_name: st_name
-                    })
+fn append_expanded_impl_predicates(
+    ctx: InferCtx, subject_index: Int, subject_var: Int,
+    direct_trait: Str, current_trait: Str, path: List<Str>,
+    direct_keys: Set<Str>, mut seen: Set<Str>,
+    mut predicates: List<TypedImplPredicate>, depth: Int
+) {
+    if depth > ctx.env.trait_reg.traits.len() + 1 {
+        panic("impl predicate expansion exceeded finite trait registry")
+    }
+    match ctx.env.trait_reg.traits.get(current_trait) {
+        some(def) => {
+            for parent in def.supertraits {
+                let key = "${subject_index.to_str()}|${parent}"
+                let mut next_path = list_clone(path)
+                next_path.push(parent)
+                if !direct_keys.contains(key) && !seen.contains(key) {
+                    seen.insert(key)
+                    predicates.push(make_typed_impl_predicate(
+                        subject_index, subject_var, parent, [],
+                        expanded_impl_predicate_provenance(next_path)))
+                    append_expanded_impl_predicates(
+                        ctx, subject_index, subject_var,
+                        direct_trait, parent, next_path,
+                        direct_keys, seen, predicates, depth + 1)
                 }
             }
+        },
+        none => {}
+    }
+}
+
+fn freeze_source_impl_predicates(
+    mut ctx: InferCtx, type_params: List<TypeParam>,
+    impl_tv_ids: List<Int>
+) -> FrozenImplPredicateSet {
+    if type_params.len() != impl_tv_ids.len() {
+        panic("impl predicate: owner arity mismatch")
+    }
+    let mut predicates: List<TypedImplPredicate> = []
+    let mut direct_keys: Set<Str> = set_new()
+    let mut subject_index = 0
+    for param in type_params {
+        let subject_var = impl_tv_ids.get(subject_index).unwrap_or(-1)
+        for bound in param.bounds {
+            reject_bound_shape(
+                ctx, bound, BoundShapeContext::ImplOwnerBound, param.span)
+            let trait_name = resolve_trait_identity(ctx, bound.trait_name)
+            let trait_def = match ctx.env.trait_reg.traits.get(trait_name) {
+                some(def) => def,
+                none => {
+                    let display = nominal_display_name(trait_name)
+                    let _ = type_error(ctx.sink, E0501,
+                        "Unknown trait: ${display}", bound.span,
+                        DiagnosticContext::TraitError {
+                            detail: "unknown impl predicate '${display}'"
+                        })
+                    fail.raise(CompileError {})
+                }
+            }
+            let key = "${subject_index.to_str()}|${trait_name}"
+            if direct_keys.contains(key) {
+                let display = nominal_display_name(trait_name)
+                let _ = type_error(ctx.sink, E0503,
+                    "Duplicate impl predicate '${param.name}: ${display}'",
+                    bound.span, DiagnosticContext::TraitError {
+                        detail: "impl predicates must be unique"
+                    })
+                fail.raise(CompileError {})
+            }
+            let mut constraints: List<ImplAssocPredicate> = []
+            let mut constraint_names: Set<Str> = set_new()
+            for constraint in bound.assoc_constraints {
+                if constraint_names.contains(constraint.name) {
+                    let _ = type_error(ctx.sink, E0513,
+                        "Duplicate associated type constraint '${constraint.name}'",
+                        constraint.span, DiagnosticContext::TraitError {
+                            detail: "associated constraints must be unique"
+                        })
+                    fail.raise(CompileError {})
+                }
+                let declared = trait_def.assoc_types.any(fn(assoc) {
+                    assoc.name == constraint.name
+                })
+                if !declared {
+                    let _ = type_error(ctx.sink, E0514,
+                        "Unexpected associated type '${constraint.name}' in impl predicate '${nominal_display_name(trait_name)}'",
+                        constraint.span, DiagnosticContext::TraitError {
+                            detail: "predicate associated type is not declared"
+                        })
+                    fail.raise(CompileError {})
+                }
+                constraint_names.insert(constraint.name)
+                constraints.push(make_impl_assoc_predicate(
+                    constraint.name, resolve_type_expr(ctx, constraint.ty)))
+            }
+            direct_keys.insert(key)
+            predicates.push(make_typed_impl_predicate(
+                subject_index, subject_var, trait_name, constraints,
+                direct_impl_predicate_provenance()))
         }
-        tp_idx = tp_idx + 1
+        subject_index = subject_index + 1
     }
-    NormalizedImplBounds {
-        scheme_bounds: scheme_bounds,
-        dict_bounds: dict_bounds
+
+    let mut seen = set_new()
+    for key in direct_keys { seen.insert(key) }
+    let direct_predicates = list_clone(predicates)
+    for predicate in direct_predicates {
+        let trait_name = impl_predicate_trait_name(predicate)
+        append_expanded_impl_predicates(
+            ctx,
+            impl_predicate_subject_param_index(predicate),
+            impl_predicate_subject_type_var(predicate),
+            trait_name, trait_name, [trait_name],
+            direct_keys, seen, predicates, 0)
     }
-}
-
-fn register_phase3_delegate(mut ctx: InferCtx, decl: Decl) {
-    match decl {
-        Decl::Impl { target_type, type_params, methods, span, .. } => {
-            // Check if any methods are delegates
-            let mut has_delegates = false
-            for m in methods {
-                match m { Decl::Delegate { .. } => { has_delegates = true }, _ => {} }
-            }
-            if has_delegates {
-                // Reconstruct the impl type-parameter scope for registration.
-                let saved = map_clone(ctx.type_param_scope)
-                let mut impl_tv_ids: List<Int> = []
-                for tp in type_params {
-                    let tv = ctx.env.fresh_var()
-                    match tv { Type::TypeVar { id, .. } => { impl_tv_ids.push(id) }, _ => {} }
-                    ctx.type_param_scope.insert(tp.name, tv)
-                }
-
-                let impl_bounds = normalize_impl_bounds(ctx, type_params, impl_tv_ids)
-
-                let canonical_target = resolve_nominal_identity(ctx, target_type)
-                for m in methods {
-                    match m {
-                        Decl::Delegate { field, trait_names, span: dspan } => {
-                            register_delegate(ctx, impl_tv_ids, canonical_target,
-                                field, trait_names, dspan,
-                                impl_bounds.scheme_bounds, impl_bounds.dict_bounds,
-                                type_params)
-                        },
-                        _ => {}
-                    }
-                }
-
-                ctx.type_param_scope = saved
-            }
-        },
-        Decl::ModBlock { name: mod_name, decls: mod_decls, .. } => {
-            for d in mod_decls {
-                let prefixed = prefix_decl_name(mod_name, d)
-                register_phase3_delegate(ctx, prefixed)
-            }
-        },
-        _ => {}
-    }
+    freeze_impl_predicate_set(impl_tv_ids, predicates)
 }
 
 // ============================================================
 // Struct registration
 // ============================================================
 
-fn preregister_struct(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, derive_attrs: List<DeriveAttribute>) {
+fn consume_nominal_derived_provider_plan(
+    mut ctx: InferCtx, decl_index: Int,
+    derive_attrs: List<DeriveAttribute>
+) -> NominalDerivedProviderPlan {
+    let fact = peek_nominal_derived_provider_fact(
+        ctx, decl_index, derive_attrs.len())
+    let mut explicit: List<ExplicitDerivedProviderPlan> = []
+    for attr_index in 0..derive_attrs.len() {
+        let attribute = derive_attrs.get(attr_index).unwrap()
+        let provider = match fact.explicit_providers.get(attr_index) {
+            some(value) => {
+                if value.attr_index != attr_index {
+                    panic("impl provider: explicit derive order changed")
+                }
+                value.provider_ref
+            },
+            none => panic("impl provider: explicit derive provider is missing")
+        }
+        explicit.push(ExplicitDerivedProviderPlan {
+            attribute: attribute,
+            provider_ref: provider
+        })
+    }
+    commit_nominal_derived_provider_fact(ctx, fact)
+    NominalDerivedProviderPlan {
+        implicit_provider_ref: fact.implicit_provider_ref,
+        explicit_providers: explicit
+    }
+}
+
+fn preregister_struct(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    derive_attrs: List<DeriveAttribute>, span: Span, decl_index: Int,
+    field_count: Int
+) {
+    let derived_provider_plan = consume_nominal_derived_provider_plan(
+        ctx, decl_index, derive_attrs)
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
+    let identity = peek_struct_identity_fact(
+        ctx, decl_index, false, field_count)
     let mut tp_names: List<Str> = []
     let mut tp_vars: List<Int> = []
     for tp in type_params {
@@ -1340,13 +1488,26 @@ fn preregister_struct(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>
         match tv { Type::TypeVar { id, .. } => { tp_vars.push(id) }, _ => {} }
         ctx.type_param_scope.insert(tp.name, tv)
     }
-    let def = StructDef { name: name, type_params: tp_names, type_param_vars: tp_vars, fields: [], derive_attrs: derive_attrs, is_extern: false }
+    let def = StructDef { name: name,
+        owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
+        type_params: tp_names, type_param_vars: tp_vars, fields: [],
+        field_effect_schemas: [],
+        derive_attrs: derive_attrs,
+        derived_provider_plan: some(derived_provider_plan),
+        resource_storage_parameter_ordinals: [],
+        is_extern: false }
+    commit_struct_identity_fact(ctx, identity, true)
     ctx.env.types.structs.insert(name, def)
 }
 
 fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructFieldDecl>) {
     match ctx.env.types.structs.get(name) {
         some(def) => {
+            let identity = peek_struct_identity_completion(
+                ctx, registered_nominal_ref_symbol(def.owner_ref))
+            if identity.fields.len() != fields.len() {
+                panic("struct identity ledger: field completion arity mismatch")
+            }
             let saved = map_clone(ctx.type_param_scope)
             let mut i = 0
             while i < def.type_params.len() {
@@ -1357,14 +1518,53 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
                 }
                 i = i + 1
             }
-            for f in fields {
-                def.fields.push(StructField {
-                    name: f.name,
-                    ty: resolve_type_expr(ctx, f.type_annotation),
-                    is_pub: f.is_pub
-                })
+            let mut resolved_fields: List<StructField> = []
+            let mut resolved_field_schemas = []
+            let mut resolution_failed = false
+            for field_index in 0..fields.len() {
+                match (fields.get(field_index), identity.fields.get(field_index)) {
+                    (some(f), some(field_identity)) => {
+                        if field_identity.field_index != field_index ||
+                           nominal_field_ref_index(field_identity.field_ref) !=
+                                field_index ||
+                           nominal_field_ref_name(field_identity.field_ref) !=
+                                f.name {
+                            panic("struct identity ledger: field relation drifted")
+                        }
+                        let resolved = some(resolve_type_expr(
+                            ctx, f.type_annotation)) catch { _ => none }
+                        match resolved {
+                            some(field_type) => {
+                                let schema = define_effect_header_schema(
+                                    ctx.env,
+                                    make_symbol_origin_ref(
+                                        nominal_field_ref_member(
+                                            field_identity.field_ref)),
+                                    [field_type],
+                                    definition_effect_tail_vars(
+                                        [field_type], def.type_param_vars))
+                                resolved_fields.push(StructField {
+                                    name: f.name,
+                                    ty: field_type,
+                                    is_pub: f.is_pub,
+                                    field_ref: field_identity.field_ref,
+                                    field_index: field_index,
+                                    span: f.span
+                                })
+                                resolved_field_schemas.push(schema)
+                            },
+                            none => { resolution_failed = true }
+                        }
+                    },
+                    _ => panic("struct identity ledger: missing field identity")
+                }
             }
             ctx.type_param_scope = saved
+            if resolution_failed { fail.raise(CompileError {}) }
+            let mut committed_def = def
+            commit_struct_identity_completion(ctx, identity)
+            committed_def.fields = resolved_fields
+            committed_def.field_effect_schemas = resolved_field_schemas
         },
         none => {}
     }
@@ -1374,7 +1574,27 @@ fn complete_struct_fields(mut ctx: InferCtx, name: Str, fields: List<StructField
 // Enum registration
 // ============================================================
 
-fn preregister_enum(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, derive_attrs: List<DeriveAttribute>) {
+fn preregister_enum(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    variants: List<EnumVariantDecl>, derive_attrs: List<DeriveAttribute>,
+    span: Span, decl_index: Int
+) {
+    let derived_provider_plan = consume_nominal_derived_provider_plan(
+        ctx, decl_index, derive_attrs)
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
+    let identity = peek_struct_identity_fact(ctx, decl_index, false, 0)
+    let mut variant_field_counts: List<Int> = []
+    for variant in variants {
+        variant_field_counts.push(match variant.named_fields {
+            some(named) => if named.len() > 0 {
+                named.len()
+            } else { variant.fields.len() },
+            none => variant.fields.len()
+        })
+    }
+    let enum_identity = peek_enum_identity_group(
+        ctx, identity.owner_ref, variant_field_counts)
     let mut tp_names: List<Str> = []
     let mut tv_ids: List<Int> = []
     for tp in type_params {
@@ -1383,7 +1603,23 @@ fn preregister_enum(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, 
         match tv { Type::TypeVar { id, .. } => { tv_ids.push(id) }, _ => {} }
         ctx.type_param_scope.insert(tp.name, tv)
     }
-    let def = EnumDef { name: name, type_params: tp_names, type_param_vars: tv_ids, variants: [], derive_attrs: derive_attrs, variant_index: map_new() }
+    let def = EnumDef {
+        name: name,
+        owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
+        type_params: tp_names, type_param_vars: tv_ids,
+        variants: [], derive_attrs: derive_attrs,
+        variant_refs: enum_identity.variants.map(fn(variant) {
+            variant.variant_ref
+        }),
+        variant_field_refs: enum_identity.variants.map(fn(variant) {
+            variant.fields
+        }),
+        variant_field_effect_schemas: [],
+        derived_provider_plan: some(derived_provider_plan),
+        variant_index: map_new()
+    }
+    commit_complete_nominal_identity_fact(ctx, identity)
+    commit_enum_identity_group(ctx, enum_identity)
     ctx.env.types.enums.insert(name, def)
 }
 
@@ -1408,6 +1644,30 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
 
             let mut vi = 0
             for v in variants {
+                let variant_ref = def.variant_refs.get(vi).unwrap()
+                if variant_ref_source_index(variant_ref) != vi ||
+                   !registered_nominal_ref_same(
+                        variant_ref_owner(variant_ref), def.owner_ref) {
+                    panic("enum identity ledger: variant owner/order drifted")
+                }
+                let expected_fields = def.variant_field_refs.get(vi).unwrap()
+                let actual_field_count = match v.named_fields {
+                    some(named) => if named.len() > 0 {
+                        named.len()
+                    } else { v.fields.len() },
+                    none => v.fields.len()
+                }
+                if expected_fields.len() != actual_field_count {
+                    panic("enum identity ledger: variant payload census drifted")
+                }
+                for field_index in 0..expected_fields.len() {
+                    let field_ref = expected_fields.get(field_index).unwrap()
+                    if variant_field_ref_index(field_ref) != field_index ||
+                       !variant_ref_same(
+                            variant_field_ref_variant(field_ref), variant_ref) {
+                        panic("enum identity ledger: payload field order drifted")
+                    }
+                }
                 match v.named_fields {
                     some(nf) => {
                         if nf.len() > 0 {
@@ -1431,61 +1691,89 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
                     }
                 }
                 def.variant_index.insert(v.name, vi)
+                let completed_variant = def.variants.get(vi).unwrap()
+                def.variant_field_effect_schemas.push(
+                    completed_variant.fields.map(fn(_) {
+                        empty_typed_effect_header_schema()
+                    }))
                 vi = vi + 1
             }
 
             let enum_type = Type::EnumType { name: name, type_params: tv_types }
+            let mut header_variant_index = 0
+            while header_variant_index < def.variants.len() {
+                let header_variant = def.variants.get(
+                    header_variant_index).unwrap()
+                let header_refs = def.variant_field_refs.get(
+                    header_variant_index).unwrap()
+                if header_variant.fields.len() != header_refs.len() {
+                    panic("effect header registry: enum field census differs")
+                }
+                let mut field_schemas: List<TypedEffectHeaderSchema> = []
+                let mut header_field_index = 0
+                while header_field_index < header_variant.fields.len() {
+                    let field_type = header_variant.fields.get(
+                        header_field_index).unwrap()
+                    field_schemas.push(define_effect_header_schema(
+                        ctx.env,
+                        make_symbol_origin_ref(variant_field_ref_member(
+                            header_refs.get(header_field_index).unwrap())),
+                        [field_type], definition_effect_tail_vars(
+                            [field_type], def.type_param_vars)))
+                    header_field_index = header_field_index + 1
+                }
+                def.variant_field_effect_schemas.set(
+                    header_variant_index, field_schemas)
+                header_variant_index = header_variant_index + 1
+            }
             let tv_ids = def.type_param_vars
+            let mut ctor_index = 0
             for variant in def.variants {
-                let ctor_payload = variant_ctor_name(name, variant.name)
+                let variant_ref = match def.variant_refs.get(ctor_index) {
+                    some(value) => value,
+                    none => panic("enum identity ledger: constructor VariantRef is missing")
+                }
+                ctor_index = ctor_index + 1
+                let ctor_identity = symbol_ref_canonical_payload(
+                    variant_ref_member(variant_ref))
                 let binding_name = if project_active {
-                    ctor_payload
+                    ctor_identity
                 } else {
                     variant.name
                 }
                 if !project_active {
                     ctx.env.types.variant_to_enum.insert(variant.name, name)
                 }
-                if variant.field_names.is_some() {
-                    bind_variant_constructor(ctx, binding_name, enum_type, tv_ids)
-                } else if variant.fields.len() == 0 {
-                    bind_variant_constructor(ctx, binding_name, enum_type, tv_ids)
-                } else {
-                    let fn_type = Type::FnType { params: variant.fields, return_type: enum_type, effects: EMPTY_ROW }
-                    if tv_ids.len() > 0 {
-                        ctx.env.bind(binding_name, TypeScheme { ty: fn_type, type_vars: tv_ids, bounds: [], def_id: none })
-                    } else {
-                        ctx.env.bind_mono(binding_name, fn_type)
-                    }
-                }
+                bind_variant_constructor(
+                    ctx, binding_name, enum_type, tv_ids)
                 if !project_active {
                     // The single-file pipeline still binds the historical leaf
                     // first. Mirror its exact scheme under the canonical
                     // payload without changing legacy visibility.
                     match ctx.env.lookup(variant.name) {
                         some(scheme) => {
-                            ctx.env.bind(ctor_payload, TypeScheme {
+                            ctx.env.bind(ctor_identity, TypeScheme {
                                 ty: scheme.ty,
                                 type_vars: scheme.type_vars,
                                 bounds: scheme.bounds,
+                                effect_schema: scheme.effect_schema,
                                 def_id: none
                             })
                         },
                         none => {}
                     }
                 }
-                // Bare fieldless variants and positional payload constructors
-                // both lower through Ident/Call codegen and need an exact
-                // canonical constructor symbol. Named-field variants lower via
-                // HExpr::NamedVariantConstruct instead.
-                if variant.field_names.is_none() {
-                    if !project_active {
-                        record_variant_ctor_origin(ctx, variant.name,
-                            ctor_payload)
-                    }
-                    record_variant_ctor_origin(ctx, ctor_payload,
-                        ctor_payload)
+                // Every constructor binding carries the resolver-issued exact
+                // member. Positional/nullary inference consumes it directly;
+                // named-field syntax keeps its dedicated construction path.
+                if !project_active {
+                    record_value_origin(ctx, variant.name, ctor_identity)
+                    record_value_symbol_ref(
+                        ctx, variant.name, variant_ref_member(variant_ref))
                 }
+                record_value_origin(ctx, ctor_identity, ctor_identity)
+                record_value_symbol_ref(
+                    ctx, ctor_identity, variant_ref_member(variant_ref))
             }
 
             ctx.type_param_scope = saved
@@ -1496,7 +1784,9 @@ fn complete_enum_variants(mut ctx: InferCtx, name: Str, type_params: List<TypePa
 
 fn bind_variant_constructor(mut ctx: InferCtx, variant_name: Str, enum_type: Type, tv_ids: List<Int>) {
     if tv_ids.len() > 0 {
-        ctx.env.bind(variant_name, TypeScheme { ty: enum_type, type_vars: tv_ids, bounds: [], def_id: none })
+        ctx.env.bind(variant_name, TypeScheme { ty: enum_type,
+            type_vars: tv_ids, bounds: [],
+            effect_schema: empty_typed_effect_header_schema(), def_id: none })
     } else {
         ctx.env.bind_mono(variant_name, enum_type)
     }
@@ -1506,7 +1796,13 @@ fn bind_variant_constructor(mut ctx: InferCtx, variant_name: Str, enum_type: Typ
 // Effect registration
 // ============================================================
 
-fn register_effect(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, ops: List<EffectOpDecl>) {
+fn register_effect(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    ops: List<EffectOpDecl>, span: Span, decl_index: Int
+) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
+    let identity = peek_effect_identity_fact(ctx, decl_index, ops.len())
     let saved = map_clone(ctx.type_param_scope)
     let mut tp_names: List<Str> = []
     let mut tp_vars: List<Int> = []
@@ -1517,6 +1813,7 @@ fn register_effect(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, o
         ctx.type_param_scope.insert(tp.name, tv)
     }
     let mut effect_ops: List<EffectOpDef> = []
+    let mut op_index = 0
     for op in ops {
         let mut param_types: List<Type> = []
         for p in op.params {
@@ -1526,48 +1823,142 @@ fn register_effect(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, o
             }
         }
         let ret = resolve_type_expr(ctx, op.return_type)
-        let op_has_default = op.body.is_some()
-        effect_ops.push(EffectOpDef { name: op.name, params: param_types, return_type: ret, has_default: op_has_default })
+        let operation = identity.operations.get(op_index).unwrap()
+        let mut operation_header = param_types.map(fn(value) { value })
+        operation_header.push(ret)
+        let operation_schema = define_effect_header_schema(
+            ctx.env,
+            executable_effect_origin(effect_operation_ref_callable(operation)),
+            operation_header,
+            definition_effect_tail_vars(operation_header, tp_vars))
+        let effect_type_args = tp_vars.map(fn(id) {
+            Type::TypeVar { id: id, name: none }
+        })
+        register_callable_effect_header(
+            ctx.env, effect_operation_ref_callable(operation),
+            EffectRow { effects: [Effect::CustomEffect {
+                reference: identity.handled_ref, name: name,
+                type_args: effect_type_args
+            }], tail: none })
+        effect_ops.push(EffectOpDef {
+            name: op.name,
+            operation_ref: some(operation),
+            params: param_types, return_type: ret,
+            effect_schema: operation_schema
+        })
+        op_index = op_index + 1
     }
-    let mut all_defaults = true
-    for eop in effect_ops {
-        if !eop.has_default { all_defaults = false }
-    }
-    if effect_ops.len() == 0 { all_defaults = false }
     ctx.type_param_scope = saved
-    ctx.env.types.effects.insert(name, EffectDef { name: name, type_params: tp_names, type_param_vars: tp_vars, ops: effect_ops, built_in_kind: none, all_have_defaults: all_defaults })
+    commit_effect_identity_fact(ctx, identity)
+    ctx.env.types.effects.insert(name, EffectDef {
+        name: name, owner_ref: some(identity.owner_ref),
+        handled_ref: some(identity.handled_ref),
+        type_params: tp_names, type_param_vars: tp_vars,
+        ops: effect_ops, built_in_kind: none
+    })
 }
 
 // ============================================================
 // Trait registration
 // ============================================================
 
-// Recursively collect all supertraits (transitive closure).
-// For example, if Top: Mid, Mid: Base, then collect_all_supertraits(_, "Top") = ["Mid", "Base"]
-pub fn collect_all_supertraits(ctx: InferCtx, trait_name: Str) -> List<Str> {
-    let mut result: List<Str> = []
-    let mut visited: Set<Str> = set_new()
-    let mut stack: List<Str> = []
-    match ctx.env.trait_reg.traits.get(trait_name) {
-        some(tdef) => {
-            for st in tdef.supertraits { stack.push(st) }
+enum BoundShapeContext {
+    OrdinaryBound,
+    ImplOwnerBound,
+    ImplMethodBound,
+    SupertraitBound,
+    ProtocolImplBound
+}
+
+fn reject_bound_shape(
+    mut ctx: InferCtx, bound: TypeBound,
+    context: BoundShapeContext, owner_span: Span
+) {
+    if bound.type_args.len() > 0 {
+        let display = nominal_display_name(bound.trait_name)
+        let _ = type_error(ctx.sink, E0503,
+            "Trait bound '${display}' uses unsupported type arguments",
+            bound.span, DiagnosticContext::TraitError {
+                detail: "trait-bound type arguments are not representable"
+            })
+        fail.raise(CompileError {})
+    }
+    match context {
+        BoundShapeContext::ImplMethodBound => {
+            let display = nominal_display_name(bound.trait_name)
+            let _ = type_error(ctx.sink, E0503,
+                "Impl method type parameter bound '${display}' is unsupported",
+                bound.span, DiagnosticContext::TraitError {
+                    detail: "impl method predicates are not supported"
+                })
+            fail.raise(CompileError {})
+        },
+        BoundShapeContext::SupertraitBound => {
+            if bound.assoc_constraints.len() > 0 {
+                let display = nominal_display_name(bound.trait_name)
+                let _ = type_error(ctx.sink, E0503,
+                    "Supertrait bound '${display}' uses unsupported associated constraints",
+                    bound.span, DiagnosticContext::TraitError {
+                        detail: "complex supertrait predicates are not supported"
+                    })
+                fail.raise(CompileError {})
+            }
+        },
+        BoundShapeContext::ProtocolImplBound => {
+            if bound.assoc_constraints.len() > 0 {
+                let display = nominal_display_name(bound.trait_name)
+                let _ = type_error(ctx.sink, E0503,
+                    "Iteration protocol impl bound '${display}' uses nested type arguments or associated constraints",
+                    bound.span, DiagnosticContext::TraitError {
+                        detail: "nested iteration protocol predicates remain unsupported"
+                    })
+                fail.raise(CompileError {})
+            }
+        },
+        _ => {}
+    }
+}
+
+fn validate_type_param_bound_shapes(
+    mut ctx: InferCtx, type_params: List<TypeParam>,
+    context: BoundShapeContext, owner_span: Span
+) {
+    for param in type_params {
+        for bound in param.bounds {
+            reject_bound_shape(ctx, bound, context, owner_span)
+        }
+    }
+}
+
+fn collect_supertraits_dfs(
+    ctx: InferCtx, current: Str,
+    mut visited: Set<Str>, mut result: List<Str>, depth: Int
+) {
+    if depth > ctx.env.trait_reg.traits.len() + 1 {
+        panic("supertrait traversal exceeded finite registry")
+    }
+    match ctx.env.trait_reg.traits.get(current) {
+        some(def) => {
+            for parent in def.supertraits {
+                if !visited.contains(parent) {
+                    visited.insert(parent)
+                    result.push(parent)
+                    collect_supertraits_dfs(
+                        ctx, parent, visited, result, depth + 1)
+                }
+            }
         },
         none => {}
     }
-    while stack.len() > 0 {
-        let current = stack.pop().unwrap()
-        if visited.contains(current) { continue }
-        visited.insert(current)
-        result.push(current)
-        match ctx.env.trait_reg.traits.get(current) {
-            some(parent_def) => {
-                for parent_st in parent_def.supertraits {
-                    stack.push(parent_st)
-                }
-            },
-            none => {}
-        }
-    }
+}
+
+// Declaration-order deterministic transitive closure.  The previous LIFO
+// stack reversed sibling order and could not provide stable expansion paths.
+pub fn collect_all_supertraits(ctx: InferCtx, trait_name: Str) -> List<Str> {
+    let mut result: List<Str> = []
+    let mut visited: Set<Str> = set_new()
+    visited.insert(trait_name)
+    collect_supertraits_dfs(ctx, trait_name, visited, result, 0)
     result
 }
 
@@ -1588,7 +1979,55 @@ pub fn resolve_nominal_identity(ctx: InferCtx, type_name: Str) -> Str {
     }
 }
 
-fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, supertraits: List<TypeBound>, methods: List<Decl>, span: Span) {
+fn push_unique_symbol(mut values: List<SymbolRef>, value: SymbolRef) {
+    for existing in values {
+        if symbol_ref_same(existing, value) { return }
+    }
+    values.push(value)
+}
+
+fn register_trait(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    supertraits: List<TypeBound>, methods: List<Decl>, span: Span,
+    decl_index: Int
+) {
+    let mut method_count = 0
+    let mut assoc_count = 0
+    for method in methods {
+        match method {
+            Decl::Fn { .. } => { method_count = method_count + 1 },
+            Decl::AssocType { .. } => { assoc_count = assoc_count + 1 },
+            _ => {}
+        }
+    }
+    let identity = peek_trait_identity_fact(
+        ctx, decl_index, method_count, assoc_count)
+    let mut identity_callable_slot_index = 0
+    for identity_source_member_index in 0..methods.len() {
+        match methods.get(identity_source_member_index) {
+            some(Decl::Fn { name: identity_method_name, .. }) => {
+                let method_ref = match identity.methods.get(
+                    identity_callable_slot_index) {
+                    some(value) => value,
+                    none => panic("trait identity ledger: method slot is missing")
+                }
+                if !symbol_ref_same(
+                        trait_method_ref_trait(method_ref), identity.owner_ref) ||
+                   trait_method_ref_source_member_index(method_ref) !=
+                        identity_source_member_index ||
+                   trait_method_ref_callable_slot_index(method_ref) !=
+                        identity_callable_slot_index ||
+                   trait_method_ref_name(method_ref) != identity_method_name {
+                    panic("trait identity ledger: method relation drifted")
+                }
+                identity_callable_slot_index = identity_callable_slot_index + 1
+            },
+            _ => {}
+        }
+    }
+    commit_trait_identity_fact(ctx, identity)
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     let saved = map_clone(ctx.type_param_scope)
     let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
     let mut tp_names: List<Str> = []
@@ -1603,6 +2042,7 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
     // Validate and collect supertrait names
     let mut supertrait_names: List<Str> = []
     for st in supertraits {
+        reject_bound_shape(ctx, st, BoundShapeContext::SupertraitBound, span)
         if !ctx.env.trait_reg.traits.contains_key(st.trait_name) {
             let trait_display = nominal_display_name(st.trait_name)
             let _ = type_error(ctx.sink, E0501,
@@ -1610,6 +2050,15 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
                 DiagnosticContext::TraitError { detail: "unknown supertrait '${trait_display}'" })
         } else {
             supertrait_names.push(resolve_trait_identity(ctx, st.trait_name))
+        }
+    }
+    let mut dict_obligations: List<SymbolRef> = []
+    for supertrait_name in supertrait_names {
+        match ctx.env.trait_reg.traits.get(supertrait_name) {
+            some(supertrait_def) => push_unique_symbol(
+                dict_obligations,
+                registered_trait_ref_symbol(supertrait_def.owner_ref)),
+            none => {}
         }
     }
 
@@ -1641,9 +2090,14 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
     }
 
     let self_var = ctx.env.fresh_var()
+    let self_type_var_id = match self_var {
+        Type::TypeVar { id, .. } => id,
+        _ => panic("trait registration: Self is not a type variable")
+    }
 
     // Collect associated types first, inject into type_param_scope
     let mut assoc_type_defs: List<AssocTypeDef> = []
+    let mut assoc_slot_index = 0
     for method in methods {
         match method {
             Decl::AssocType { name: aname, bounds: abounds, value: avalue, .. } => {
@@ -1654,16 +2108,41 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
                 ctx.type_param_scope.insert(aname, at_var)
                 let mut bound_names: List<Str> = []
                 for b in abounds {
+                    reject_bound_shape(
+                        ctx, b, BoundShapeContext::SupertraitBound, span)
                     bound_names.push(resolve_trait_identity(ctx, b.trait_name))
                 }
                 let default_ty = match avalue {
                     some(v) => some(resolve_type_expr(ctx, v)),
                     none => none
                 }
-                assoc_type_defs.push(AssocTypeDef { name: aname, bounds: bound_names, default_type: default_ty, var_id: at_var_id })
+                let member_ref = identity.assoc_members.get(
+                    assoc_slot_index).unwrap()
+                let default_effect_schema = default_ty.map(fn(value) {
+                    let mut inherited = list_clone(tp_vars)
+                    inherited.push(self_type_var_id)
+                    for existing_assoc in assoc_type_defs {
+                        inherited.push(existing_assoc.var_id)
+                    }
+                    inherited.push(at_var_id)
+                    define_effect_header_schema(
+                        ctx.env, make_symbol_origin_ref(member_ref),
+                        [value], definition_effect_tail_vars(
+                            [value], inherited))
+                })
+                assoc_type_defs.push(AssocTypeDef {
+                    name: aname, member_ref: member_ref,
+                    bounds: bound_names, default_type: default_ty,
+                    default_effect_schema: default_effect_schema,
+                    var_id: at_var_id
+                })
+                assoc_slot_index = assoc_slot_index + 1
             },
             _ => {}
         }
+    }
+    if assoc_slot_index != identity.assoc_members.len() {
+        panic("trait identity ledger: associated member census drifted")
     }
 
     // Inject Self into type_param_scope so Self::Item resolves in trait method signatures
@@ -1679,9 +2158,32 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
     }
 
     let mut trait_methods: List<TraitMethodDef> = []
-    for method in methods {
+    let mut handled_effect_obligations: List<HandledEffectRef> = []
+    let mut callable_slot_index = 0
+    for source_member_index in 0..methods.len() {
+        let method = methods.get(source_member_index).unwrap()
         match method {
-            Decl::Fn { name: mname, type_params: method_tps, params, return_type, declared_effects, is_abstract, .. } => {
+            Decl::Fn { name: mname, type_params: method_tps, params,
+                       return_type, declared_effects, .. } => {
+                let method_ref = match identity.methods.get(callable_slot_index) {
+                    some(value) => value,
+                    none => panic("trait identity ledger: method slot is missing")
+                }
+                validate_type_param_bound_shapes(
+                    ctx, method_tps,
+                    BoundShapeContext::ImplMethodBound, span)
+                for method_type_param in method_tps {
+                    for bound in method_type_param.bounds {
+                        match ctx.env.trait_reg.traits.get(
+                                resolve_trait_identity(ctx, bound.trait_name)) {
+                            some(bound_trait) => push_unique_symbol(
+                                dict_obligations,
+                                registered_trait_ref_symbol(
+                                    bound_trait.owner_ref)),
+                            none => {}
+                        }
+                    }
+                }
                 let mut param_types: List<Type> = []
                 let mut param_muts: List<Bool> = []
                 for p in params {
@@ -1697,15 +2199,49 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
                 }
                 let ret = match return_type {
                     some(rt) => resolve_type_expr(ctx, rt),
-                    none => ctx.env.fresh_var()
+                    none => Type::UnitType
                 }
-                // #77: Resolve declared effects so delegate forwarding can propagate evidence
                 let method_effects = match declared_effects {
                     some(de) => resolve_declared_effects(ctx, de),
                     none => EMPTY_ROW
                 }
+                for method_effect in method_effects.effects {
+                    match method_effect {
+                        Effect::CustomEffect { reference: effect_ref, .. } => {
+                            let mut seen_effect = false
+                            for existing in handled_effect_obligations {
+                                if handled_effect_ref_same(existing, effect_ref) {
+                                    seen_effect = true
+                                }
+                            }
+                            if !seen_effect {
+                                handled_effect_obligations.push(effect_ref)
+                            }
+                        },
+                        _ => {}
+                    }
+                }
                 let fn_type = Type::FnType { params: param_types, return_type: ret, effects: method_effects }
-                trait_methods.push(TraitMethodDef { name: mname, ty: fn_type, has_default: !is_abstract, param_mutabilities: param_muts, method_type_params: method_tps })
+                let mut inherited = list_clone(tp_vars)
+                inherited.push(self_type_var_id)
+                for assoc in assoc_type_defs { inherited.push(assoc.var_id) }
+                let method_schema = define_effect_header_schema(
+                    ctx.env,
+                    make_symbol_origin_ref(trait_method_ref_member(method_ref)),
+                    [fn_type], definition_effect_tail_vars(
+                        [fn_type], inherited))
+                register_callable_effect_header(
+                    ctx.env,
+                    make_named_executable_ref(
+                        trait_method_ref_member(method_ref)),
+                    method_effects)
+                trait_methods.push(TraitMethodDef {
+                    name: mname, method_ref: method_ref, ty: fn_type,
+                    effect_schema: method_schema,
+                    param_mutabilities: param_muts,
+                    method_type_params: method_tps
+                })
+                callable_slot_index = callable_slot_index + 1
             },
             _ => {}
         }
@@ -1713,12 +2249,72 @@ fn register_trait(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, su
 
     ctx.type_param_scope = saved
     ctx.qualified_assoc_scope = saved_qualified_assoc
-    ctx.env.trait_reg.traits.insert(name, TraitDef { name: name, type_params: tp_names, type_param_vars: tp_vars, methods: trait_methods, supertraits: supertrait_names, assoc_types: assoc_type_defs })
+    let registered_owner = make_registered_trait_ref(identity.owner_ref, name)
+    let mut method_contracts: List<RegisteredTraitMethodContract> = []
+    for method in trait_methods {
+        method_contracts.push(make_registered_trait_method_contract(
+            method.method_ref, method.ty, method.param_mutabilities))
+    }
+    let mut assoc_contracts: List<RegisteredTraitAssocContract> = []
+    for assoc in assoc_type_defs {
+        let mut bound_refs: List<SymbolRef> = []
+        for bound_name in assoc.bounds {
+            match ctx.env.trait_reg.traits.get(bound_name) {
+                some(bound_trait) => push_unique_symbol(
+                    bound_refs,
+                    registered_trait_ref_symbol(bound_trait.owner_ref)),
+                none => {}
+            }
+        }
+        assoc_contracts.push(make_registered_trait_assoc_contract(
+            assoc.member_ref,
+            Type::TypeVar { id: assoc.var_id, name: some(assoc.name) },
+            assoc.default_type, bound_refs))
+    }
+    let contract = make_registered_trait_contract(
+        registered_owner, method_contracts, assoc_contracts,
+        handled_effect_obligations, dict_obligations)
+    ctx.env.trait_reg.traits.insert(name, TraitDef {
+        name: name,
+        owner_ref: registered_owner,
+        type_params: tp_names, type_param_vars: tp_vars,
+        self_type_var_id: self_type_var_id,
+        methods: trait_methods, supertraits: supertrait_names,
+        assoc_types: assoc_type_defs,
+        contract: contract
+    })
 }
 
 // ============================================================
 // Impl registration
 // ============================================================
+
+fn definition_effect_tail_vars(
+    headers: List<Type>, inherited: List<Int>
+) -> List<Int> {
+    let mut result: List<Int> = []
+    for header in headers {
+        for tail in ordered_effect_tail_vars(header) {
+            if !inherited.contains(tail) && !result.contains(tail) {
+                result.push(tail)
+            }
+        }
+    }
+    result
+}
+
+fn impl_assoc_definition_origin(
+    provider: ImplProviderRef, source_member_index: Int
+) -> OriginRef {
+    if source_member_index < 0 {
+        panic("impl assoc effect schema: source index is negative")
+    }
+    let site = impl_provider_ref_site(provider)
+    let mut path = path_ref_normalized_child_path(site)
+    path.push("assoc:${source_member_index.to_str()}")
+    make_path_origin_ref(make_path_ref(
+        path_ref_owner(site), path, path_role_declaration()))
+}
 
 fn reject_unsupported_protocol_impl_bounds(
     mut ctx: InferCtx, trait_name: Str?, type_params: List<TypeParam>
@@ -1732,47 +2328,132 @@ fn reject_unsupported_protocol_impl_bounds(
         for bound in tp.bounds {
             if bound.type_args.len() > 0 || bound.assoc_constraints.len() > 0 {
                 let _ = type_error(ctx.sink, E0503,
-                    "Iteration protocol impl bound '${tp.name}: ${nominal_display_name(bound.trait_name)}' uses nested type arguments or associated constraints that exact dictionary evidence cannot preserve",
+                    "Iteration protocol impl bound '${tp.name}: ${nominal_display_name(bound.trait_name)}' uses nested type arguments or associated constraints that protocol lowering does not yet consume",
                     bound.span, DiagnosticContext::TraitError {
-                        detail: "nested impl predicates are not yet representable in ImplEntry"
+                        detail: "protocol lowering has not consumed nested impl predicates"
                     })
+                fail.raise(CompileError {})
             }
         }
     }
 }
 
-fn register_impl(mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span) {
-    register_impl_canonical(ctx, resolve_nominal_identity(ctx, target_type), type_params, trait_name, methods, span)
+fn reject_unsupported_drop_impl_bounds(
+    mut ctx: InferCtx, trait_name: Str?, type_params: List<TypeParam>
+) {
+    match trait_name {
+        some(name) => if name != "Drop" { return },
+        none => { return }
+    }
+    for tp in type_params {
+        for bound in tp.bounds {
+            let _ = type_error(ctx.sink, E0503,
+                "Drop impl type parameter '${tp.name}' cannot carry trait bounds in Ring 0.1 because drop glue has no runtime evidence",
+                bound.span, DiagnosticContext::TraitError {
+                    detail: "bounded generic Drop has no runtime evidence contract"
+                })
+            fail.raise(CompileError {})
+        }
+    }
 }
 
-fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>, trait_name: Str?, methods: List<Decl>, span: Span) {
+fn exact_trait_ref(ctx: InferCtx, trait_name: Str?) -> SymbolRef? {
+    match trait_name {
+        some(name) => match ctx.env.trait_reg.traits.get(name) {
+            some(def) => some(registered_trait_ref_symbol(def.owner_ref)),
+            none => none
+        },
+        none => none
+    }
+}
+
+fn register_impl(
+    mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
+    trait_name: Str?, methods: List<Decl>, span: Span, decl_index: Int
+) {
+    let provider_fact = peek_source_impl_provider_fact(ctx, decl_index)
+    let mut fact_slot = 0
+    for source_member_index in 0..methods.len() {
+        match methods.get(source_member_index) {
+            some(Decl::Fn { name, .. }) => {
+                let method_fact = match provider_fact.methods.get(fact_slot) {
+                    some(value) => value,
+                    none => panic("impl method identity ledger: method is missing")
+                }
+                if method_fact.source_member_index != source_member_index ||
+                   method_fact.callable_slot_index != fact_slot ||
+                   method_fact.name != name {
+                    panic("impl method identity ledger: source order drifted")
+                }
+                fact_slot = fact_slot + 1
+            },
+            _ => {}
+        }
+    }
+    if fact_slot != provider_fact.methods.len() {
+        panic("impl method identity ledger: extra method fact")
+    }
+    commit_source_impl_provider_fact(ctx, provider_fact)
+    register_impl_canonical(
+        ctx, resolve_nominal_identity(ctx, target_type), type_params,
+        trait_name, methods, span, provider_fact.provider_ref,
+        provider_fact.methods, decl_index)
+}
+
+fn register_impl_canonical(
+    mut ctx: InferCtx, target_type: Str, type_params: List<TypeParam>,
+    trait_name: Str?, methods: List<Decl>, span: Span,
+    provider_ref: ImplProviderRef,
+    method_identity_facts: List<ImplMethodIdentityFact>,
+    decl_index: Int
+) {
+    for source_member in methods {
+        match source_member {
+            Decl::ExternFn { .. } => panic(
+                "impl registration: forbidden extern member crossed parser"),
+            _ => {}
+        }
+    }
     let resolved_trait_name = match trait_name {
         some(name) => some(resolve_trait_identity(ctx, name)), none => none
     }
-    let origin = impl_decl_origin(
-        target_type, resolved_trait_name, type_params, span)
+    let resolved_trait_ref = exact_trait_ref(ctx, resolved_trait_name)
     reject_unsupported_protocol_impl_bounds(ctx, resolved_trait_name, type_params)
+    reject_unsupported_drop_impl_bounds(ctx, resolved_trait_name, type_params)
 
     let saved = map_clone(ctx.type_param_scope)
     let saved_qualified_assoc = map_clone(ctx.qualified_assoc_scope)
     let mut impl_tv_ids: List<Int> = []
     for tp in type_params {
         let tv = ctx.env.fresh_var()
-        match tv { Type::TypeVar { id, .. } => { impl_tv_ids.push(id) }, _ => {} }
+        match tv {
+            Type::TypeVar { id, .. } => { impl_tv_ids.push(id) },
+            _ => {}
+        }
         ctx.type_param_scope.insert(tp.name, tv)
     }
 
-    let impl_bounds = normalize_impl_bounds(ctx, type_params, impl_tv_ids)
+    let frozen_predicates = freeze_source_impl_predicates(
+        ctx, type_params, impl_tv_ids)
 
     // Collect associated type assignments from impl
     let mut assoc_type_map: Map<Str, Type> = map_new()
-    for method in methods {
+    let mut assoc_effect_schema_map:
+        Map<Str, TypedEffectHeaderSchema> = map_new()
+    for source_member_index in 0..methods.len() {
+        let method = methods.get(source_member_index).unwrap()
         match method {
             Decl::AssocType { name: aname, value: avalue, span: aspan, .. } => {
                 match avalue {
                     some(v) => {
                         let resolved_ty = resolve_type_expr(ctx, v)
                         assoc_type_map.insert(aname, resolved_ty)
+                        assoc_effect_schema_map.insert(
+                            aname, define_effect_header_schema(
+                                ctx.env, impl_assoc_definition_origin(
+                                    provider_ref, source_member_index),
+                                [resolved_ty], definition_effect_tail_vars(
+                                    [resolved_ty], impl_tv_ids)))
                         // Also inject into type_param_scope so method signatures can reference it
                         ctx.type_param_scope.insert(aname, resolved_ty)
                     },
@@ -1799,7 +2480,7 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
         ctx.qualified_assoc_scope.insert("Self::${aname}", aty)
     }
 
-    let mut exact_method_schemes: Map<Str, TypeScheme> = map_new()
+    let mut exact_method_schemes: Map<Str, ImplMethodSchemeCore> = map_new()
     let mut declared_method_names: Set<Str> = set_new()
     for method in methods {
         match method {
@@ -1814,33 +2495,17 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
                     declared_method_names.insert(mname)
                     let scheme = register_impl_method(
                         ctx, impl_tv_ids, target_type, mname, mtps, params,
-                        return_type, declared_effects, impl_bounds.scheme_bounds,
-                        saved, type_params, false)
+                        return_type, declared_effects, mspan,
+                        saved, type_params)
                     exact_method_schemes.insert(mname, scheme)
                 }
             },
-            Decl::ExternFn { name: mname, type_params: mtps, params, return_type, declared_effects, span: mspan, .. } => {
-                if declared_method_names.contains(mname) {
-                    let _ = type_error(ctx.sink, E0504,
-                        "Duplicate method '${mname}' in impl for '${nominal_display_name(target_type)}'",
-                        mspan, DiagnosticContext::TraitError {
-                            detail: "an impl block may declare each method name only once"
-                        })
-                } else {
-                    declared_method_names.insert(mname)
-                    let scheme = register_impl_method(
-                        ctx, impl_tv_ids, target_type, mname, mtps, params,
-                        return_type, declared_effects, impl_bounds.scheme_bounds,
-                        saved, type_params, true)
-                    exact_method_schemes.insert(mname, scheme)
-                }
-            },
-            Decl::Delegate { .. } => {},  // Deferred to register_phase3_delegate (needs complete struct fields)
             Decl::AssocType { .. } => {},  // Already handled above
             _ => {}
         }
     }
 
+    let mut owner_valid = true
     match resolved_trait_name {
         some(tname) => {
             let trait_display = nominal_display_name(tname)
@@ -1849,30 +2514,23 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
                 some(trait_def) => {
                     match find_impl(ctx.env.trait_reg, target_type, tname) {
                         some(existing) => {
-                            if existing.origin != origin {
+                            let same_provider = match existing.provider_ref {
+                                some(existing_provider) => impl_provider_ref_same(
+                                    existing_provider, provider_ref),
+                                none => false
+                            }
+                            if !same_provider {
                                 let _ = type_error(ctx.sink, E0504,
                                     "Duplicate impl '${trait_display}' for '${target_display}'",
                                     span, DiagnosticContext::TraitError {
-                                        detail: "distinct impl origins provide the same target/trait pair"
+                                        detail: "distinct exact impl providers supply the same target/trait pair"
                                     })
                             }
                         },
                         none => {}
                     }
-                    let mut impl_method_names: Set<Str> = set_new()
-                    for m in methods {
-                        match m {
-                            Decl::Fn { name: mn, .. } => {
-                                impl_method_names.insert(mn)
-                            },
-                            Decl::ExternFn { name: mn, .. } => {
-                                impl_method_names.insert(mn)
-                            },
-                            _ => {}
-                        }
-                    }
                     for tm in trait_def.methods {
-                        if !tm.has_default && !impl_method_names.contains(tm.name) {
+                        if !declared_method_names.contains(tm.name) {
                             let _ = type_error(ctx.sink, E0502,
                                 "Missing method '${tm.name}' in impl ${trait_display} for ${target_display}",
                                 span, DiagnosticContext::TraitError { detail: "missing method '${tm.name}'" })
@@ -1893,7 +2551,22 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
                             match atdef.default_type {
                                 some(dt) => {
                                     // Use the default
-                                    assoc_type_map.insert(atdef.name, dt)
+                                    let source_schema = match
+                                            atdef.default_effect_schema {
+                                        some(schema) => schema,
+                                        none => panic(
+                                            "impl assoc schema: associated-type default schema is absent")
+                                    }
+                                    let localized =
+                                        instantiate_effect_header_schema(
+                                            ctx.env, [dt], source_schema)
+                                    assoc_type_map.insert(
+                                        atdef.name,
+                                        localized.0.get(0).unwrap())
+                                    assoc_effect_schema_map.insert(
+                                        atdef.name, localized.1)
+                                    publish_effect_header_schema(
+                                        ctx.env, localized.1)
                                 },
                                 none => {
                                     let _ = type_error(ctx.sink, E0510,
@@ -1956,77 +2629,75 @@ fn register_impl_canonical(mut ctx: InferCtx, target_type: Str, type_params: Lis
                         }
                     }
 
-                    // An omitted default method is still owned by this exact
-                    // impl. Specialize the trait declaration through Self,
-                    // associated types, and impl type variables before either
-                    // exact or ordinary lookup can observe it.
-                    let mut trait_type_args: List<Type> = []
-                    let mut trait_index = 0
-                    while trait_index < trait_def.type_params.len() {
-                        match trait_def.type_params.get(trait_index) {
-                            some(type_param_name) =>
-                                match ctx.type_param_scope.get(type_param_name) {
-                                    some(actual) => trait_type_args.push(actual),
-                                    none => match trait_def.type_param_vars.get(trait_index) {
-                                        some(source_id) => trait_type_args.push(
-                                            Type::TypeVar {
-                                                id: source_id,
-                                                name: some(type_param_name)
-                                            }),
-                                        none => {}
-                                    }
-                                },
-                            none => {}
-                        }
-                        trait_index = trait_index + 1
-                    }
-                    for trait_method in trait_def.methods {
-                        if trait_method.has_default &&
-                           !impl_method_names.contains(trait_method.name) {
-                            exact_method_schemes.insert(
-                                trait_method.name,
-                                specialize_trait_method_scheme(
-                                    trait_def, trait_method, impl_self_type,
-                                    trait_type_args, impl_tv_ids,
-                                    assoc_type_map,
-                                    impl_bounds.scheme_bounds))
-                        }
-                    }
-
-                    let mut tp_names: List<Str> = []
-                    for tp in type_params { tp_names.push(tp.name) }
-                    // Keep method_names as the explicit-body set. Defaults
-                    // live in method_schemes but still need this distinction
-                    // when delegate HIR chooses direct versus dict dispatch.
-                    let mut method_names = impl_method_names.to_list()
-                    method_names.sort()
-                    add_impl(ctx.env.trait_reg, ImplEntry {
-                        trait_name: tname, target_type_name: target_type,
-                        type_params: tp_names, method_names: method_names,
-                        dict_bounds: impl_bounds.dict_bounds,
-                        assoc_types: map_clone(assoc_type_map),
-                        method_schemes: map_clone(exact_method_schemes),
-                        origin: origin, span: span
-                    })
                 },
-                none => { let _ = type_error(ctx.sink, E0501,
-                    "Unknown trait: ${trait_display}", span,
-                    DiagnosticContext::TraitError { detail: "unknown trait '${trait_display}'" }) }
+                none => {
+                    owner_valid = false
+                    let _ = type_error(ctx.sink, E0501,
+                        "Unknown trait: ${trait_display}", span,
+                        DiagnosticContext::TraitError {
+                            detail: "unknown trait '${trait_display}'"
+                        })
+                }
             }
         },
         none => {}
     }
 
-    let mut sorted_exact_methods = exact_method_schemes.entries()
-    sorted_exact_methods.sort_by(compare_by_first)
-    for entry in sorted_exact_methods {
-        let (method_name, scheme) = entry
-        let _ = install_method_scheme(
-            ctx.env.trait_reg, ctx.sink,
-            target_type, method_name, scheme,
-            MethodOrigin {
-                origin: origin, trait_name: resolved_trait_name, span: span
-            })
+    if owner_valid {
+        let mut tp_names: List<Str> = []
+        for tp in type_params { tp_names.push(tp.name) }
+        let mut explicit_method_names = declared_method_names.to_list()
+        explicit_method_names.sort()
+        let target_ref = match impl_target_symbol(ctx.env, target_type) {
+            some(symbol) => symbol,
+            none => panic("impl owner: exact target symbol is missing")
+        }
+        let owner_ref = make_impl_owner_ref(
+            target_ref, provider_ref, resolved_trait_ref)
+        publish_impl_check_owner(ctx, decl_index, owner_ref)
+        let mut exact_method_refs: Map<Str, ImplMethodRef> = map_new()
+        for fact in method_identity_facts {
+            if exact_method_schemes.contains_key(fact.name) &&
+               !exact_method_refs.contains_key(fact.name) {
+                exact_method_refs.insert(fact.name, make_impl_method_ref(
+                    owner_ref, fact.member_ref,
+                    fact.source_member_index,
+                    fact.callable_slot_index, fact.name))
+            }
+        }
+        if exact_method_refs.len() != exact_method_schemes.len() {
+            panic("impl method identity ledger: method core census differs")
+        }
+        let owner_entry = ImplEntry {
+            trait_name: resolved_trait_name,
+            target_type_name: target_type,
+            type_params: tp_names,
+            type_param_vars: impl_tv_ids,
+            predicates: frozen_predicates,
+            method_names: explicit_method_names,
+            assoc_types: map_clone(assoc_type_map),
+            assoc_type_effect_schemas:
+                map_clone(assoc_effect_schema_map),
+            method_schemes: map_clone(exact_method_schemes),
+            method_refs: exact_method_refs,
+            method_intrinsics: map_new(),
+            method_resource_contracts: map_new(),
+            provider_ref: some(provider_ref),
+            trait_ref: resolved_trait_ref,
+            owner_ref: some(owner_ref),
+            span: span
+        }
+        add_impl(ctx.env.trait_reg, owner_entry)
+
+        let mut sorted_exact_methods = exact_method_schemes.entries()
+        sorted_exact_methods.sort_by(compare_by_first)
+        for entry in sorted_exact_methods {
+            let (method_name, core) = entry
+            let _ = install_method_core(
+                ctx.env.trait_reg, ctx.sink,
+                target_type, method_name, core,
+                exact_method_refs.get(method_name).unwrap(), span)
+        }
     }
 
     ctx.type_param_scope = saved
@@ -2060,9 +2731,12 @@ fn resolve_impl_self_type(mut ctx: InferCtx, target_type: Str, impl_type_params:
 fn register_impl_method(
     mut ctx: InferCtx, impl_tv_ids: List<Int>,
     target_type: Str, mname: Str, mtps: List<TypeParam>, params: List<Param>,
-    return_type: TypeExpr?, declared_effects: List<EffectExpr>?, impl_scheme_bounds: List<SchemeBound>, outer_saved: Map<Str, Type>,
-    impl_type_params: List<TypeParam>, is_extern: Bool
-) -> TypeScheme {
+    return_type: TypeExpr?, declared_effects: List<EffectExpr>?, method_span: Span,
+    outer_saved: Map<Str, Type>,
+    impl_type_params: List<TypeParam>
+) -> ImplMethodSchemeCore {
+    validate_type_param_bound_shapes(
+        ctx, mtps, BoundShapeContext::ImplMethodBound, method_span)
     let saved_method = map_clone(ctx.type_param_scope)
     let mut method_tv_ids: List<Int> = []
     for mtp in mtps {
@@ -2085,7 +2759,7 @@ fn register_impl_method(
     for mtv in method_tv_ids { all_tvs.push(mtv) }
 
     // Non-extern methods: filter unused type variables from outer scope
-    if !is_extern {
+    {
         let mut declared_names: Set<Str> = set_new()
         let mut sorted_tp_scope = ctx.type_param_scope.entries()
         sorted_tp_scope.sort_by(compare_by_first)
@@ -2105,14 +2779,19 @@ fn register_impl_method(
 
     let impl_m_effects = match declared_effects {
         some(de) => resolve_declared_effects(ctx, de),
-        none => infer_hof_effect_row(param_types)
+        // A body-less registration owns one raw outer row variable. Recursive
+        // group checking constrains this exact variable monomorphically; only
+        // final group closure may turn a surviving tail into a formal schema.
+        none => EffectRow {
+            effects: [], tail: some(ctx.env.fresh_var_id())
+        }
     }
     let fn_type = Type::FnType { params: param_types, return_type: ret, effects: impl_m_effects }
-    collect_effect_tail_vars(fn_type, all_tvs)
-    let scheme = TypeScheme {
-        ty: fn_type, type_vars: all_tvs,
-        bounds: impl_scheme_bounds, def_id: none
+    for tail in ordered_effect_tail_vars(fn_type) {
+        if !all_tvs.contains(tail) { all_tvs.push(tail) }
     }
+    let scheme = make_impl_method_scheme_core(
+        fn_type, all_tvs, empty_typed_effect_header_schema(), none)
 
     // Track mut self methods
     if params.len() > 0 {
@@ -2142,508 +2821,35 @@ fn register_impl_method(
 // Delegate registration
 // ============================================================
 
-fn remap_delegate_scheme_bounds(
-    mut ctx: InferCtx, bounds: List<SchemeBound>,
-    mapping: Map<Int, Type>, wrapper_fn_bounds: List<FnBoundsEntry>,
-    span: Span
-) -> List<SchemeBound> {
-    let mut remapped: List<SchemeBound> = []
-    for bound in bounds {
-        let owner = apply_subst_map(mapping, Type::TypeVar {
-            id: bound.type_var, name: none
+pub fn impl_owner_fn_bounds(owner: ImplEntry) -> List<FnBoundsEntry> {
+    let mut result: List<FnBoundsEntry> = []
+    for predicate in frozen_impl_predicates(owner.predicates) {
+        let index = impl_predicate_subject_param_index(predicate)
+        let type_param_name = owner.type_params.get(index).unwrap_or("")
+        if type_param_name == "" {
+            panic("impl owner: predicate lost source parameter name")
+        }
+        let mut constraints: List<AssocConstraintEntry> = []
+        for constraint in impl_predicate_assoc_constraints(predicate) {
+            constraints.push(AssocConstraintEntry {
+                name: impl_assoc_predicate_name(constraint),
+                ty: impl_assoc_predicate_type(constraint)
+            })
+        }
+        result.push(FnBoundsEntry {
+            type_param_var_id: impl_predicate_subject_type_var(predicate),
+            trait_name: impl_predicate_trait_name(predicate),
+            type_param_name: type_param_name,
+            dict_ordinal: result.len(),
+            assoc_constraints: constraints
         })
-        match owner {
-            Type::TypeVar { id: mapped_id, .. } => {
-                let mut constraints: List<AssocConstraintEntry> = []
-                for constraint in bound.assoc_constraints {
-                    constraints.push(AssocConstraintEntry {
-                        name: constraint.name,
-                        ty: apply_subst_map(mapping, constraint.ty)
-                    })
-                }
-                remapped.push(SchemeBound {
-                    type_var: mapped_id,
-                    trait_name: bound.trait_name,
-                    assoc_constraints: constraints
-                })
-            },
-            _ => {
-                if bound.assoc_constraints.len() > 0 {
-                    let _ = type_error(ctx.sink, E0503,
-                        "Delegated method bound '${nominal_display_name(bound.trait_name)}' with associated constraints cannot be discharged for concrete owner '${type_to_string(owner)}'",
-                        span, DiagnosticContext::TraitError {
-                            detail: "delegate concrete bound discharge cannot prove associated constraints"
-                        })
-                } else {
-                    match resolve_dict_ref_for_type(
-                        ctx.env, wrapper_fn_bounds, owner, ctx.subst,
-                        bound.trait_name
-                    ) {
-                        some(_) => {},
-                        none => {
-                            let _ = type_error(ctx.sink, E0503,
-                                "Delegated impl bound '${nominal_display_name(bound.trait_name)}' is not satisfied by concrete owner '${type_to_string(owner)}'",
-                                span, DiagnosticContext::TraitError {
-                                    detail: "delegate concrete bound has no static trait evidence"
-                                })
-                        }
-                    }
-                }
-            }
-        }
     }
-    remapped
+    validate_fn_bound_order(result)
+    result
 }
 
-fn specialize_delegate_method_scheme(
-    mut ctx: InferCtx, field_scheme: TypeScheme,
-    field_var_map: Map<Int, Type>, self_type: Type,
-    impl_tv_ids: List<Int>, impl_scheme_bounds: List<SchemeBound>,
-    wrapper_fn_bounds: List<FnBoundsEntry>, span: Span
-) -> TypeScheme {
-    let mapped_type = apply_subst_map(field_var_map, field_scheme.ty)
-    let specialized_type = match mapped_type {
-        Type::FnType { params, return_type, effects } => {
-            let mut forwarded_params: List<Type> = []
-            let mut first = true
-            for param in params {
-                if first {
-                    forwarded_params.push(self_type)
-                    first = false
-                } else {
-                    forwarded_params.push(param)
-                }
-            }
-            Type::FnType {
-                params: forwarded_params,
-                return_type: return_type,
-                effects: effects
-            }
-        },
-        _ => mapped_type
-    }
-
-    let mut type_vars = list_clone(impl_tv_ids)
-    for source_id in field_scheme.type_vars {
-        let mapped_owner = apply_subst_map(field_var_map, Type::TypeVar {
-            id: source_id, name: none
-        })
-        match mapped_owner {
-            Type::TypeVar { id: mapped_id, .. } => {
-                if !type_vars.contains(mapped_id) {
-                    type_vars.push(mapped_id)
-                }
-            },
-            _ => {}
-        }
-    }
-
-    let mut bounds = remap_delegate_scheme_bounds(
-        ctx, field_scheme.bounds, field_var_map,
-        wrapper_fn_bounds, span)
-    for impl_bound in impl_scheme_bounds {
-        let already = bounds.any(fn(existing) {
-            existing.type_var == impl_bound.type_var &&
-                existing.trait_name == impl_bound.trait_name
-        })
-        if !already { bounds.push(impl_bound) }
-    }
-    TypeScheme {
-        ty: specialized_type,
-        type_vars: type_vars,
-        bounds: bounds,
-        def_id: none
-    }
-}
-
-fn remap_delegate_dict_bounds(
-    mut ctx: InferCtx, source_bounds: List<ImplDictBound>,
-    source_type_args: List<Type>, mapping: Map<Int, Type>,
-    impl_tv_ids: List<Int>, wrapper_fn_bounds: List<FnBoundsEntry>,
-    span: Span
-) -> List<ImplDictBound> {
-    let mut remapped: List<ImplDictBound> = []
-    for source_bound in source_bounds {
-        match source_type_args.get(source_bound.type_param_index) {
-            some(source_arg) => {
-                let mapped_owner = apply_subst_map(mapping, source_arg)
-                match mapped_owner {
-                    Type::TypeVar { id: mapped_id, .. } => {
-                        let mut mapped_index = 0 - 1
-                        let mut index = 0
-                        while index < impl_tv_ids.len() {
-                            match impl_tv_ids.get(index) {
-                                some(wrapper_id) => {
-                                    if wrapper_id == mapped_id {
-                                        mapped_index = index
-                                    }
-                                },
-                                none => {}
-                            }
-                            index = index + 1
-                        }
-                        if mapped_index >= 0 {
-                            let duplicate = remapped.any(fn(existing) {
-                                existing.type_param_index == mapped_index &&
-                                    existing.trait_name == source_bound.trait_name
-                            })
-                            if !duplicate {
-                                remapped.push(ImplDictBound {
-                                    type_param_index: mapped_index,
-                                    trait_name: source_bound.trait_name
-                                })
-                            }
-                        } else {
-                            let _ = type_error(ctx.sink, E0503,
-                                "Delegated impl bound '${nominal_display_name(source_bound.trait_name)}' does not map to a wrapper impl type parameter",
-                                span, DiagnosticContext::TraitError {
-                                    detail: "delegate dictionary bound owner is not representable"
-                                })
-                        }
-                    },
-                    _ => {
-                        match resolve_dict_ref_for_type(
-                            ctx.env, wrapper_fn_bounds, mapped_owner, ctx.subst,
-                            source_bound.trait_name
-                        ) {
-                            some(_) => {},
-                            none => {
-                                let _ = type_error(ctx.sink, E0503,
-                                    "Delegated impl bound '${nominal_display_name(source_bound.trait_name)}' is not satisfied by concrete owner '${type_to_string(mapped_owner)}'",
-                                    span, DiagnosticContext::TraitError {
-                                        detail: "delegate concrete bound has no static trait evidence"
-                                    })
-                            }
-                        }
-                    }
-                }
-            },
-            none => {
-                let _ = type_error(ctx.sink, E0503,
-                    "Delegated impl bound '${nominal_display_name(source_bound.trait_name)}' has no exact source type parameter",
-                    span, DiagnosticContext::TraitError {
-                        detail: "delegate source impl predicate is incomplete"
-                    })
-            }
-        }
-    }
-    remapped
-}
-
-// Present both delegate-bound remappers with one exact view of the wrapper
-// impl's runtime evidence. ImplDictBound owns the canonical parameter index;
-// the matching registration-time var id and source name define the dictionary
-// parameter that resolve_dict_ref_for_type may recursively consume.
-fn build_delegate_wrapper_fn_bounds(
-    mut ctx: InferCtx, impl_dict_bounds: List<ImplDictBound>,
-    impl_tv_ids: List<Int>, impl_type_params: List<TypeParam>,
-    span: Span
-) -> List<FnBoundsEntry> {
-    let mut fn_bounds: List<FnBoundsEntry> = []
-    for dict_bound in impl_dict_bounds {
-        match (impl_tv_ids.get(dict_bound.type_param_index),
-               impl_type_params.get(dict_bound.type_param_index)) {
-            (some(type_var_id), some(type_param)) => {
-                fn_bounds.push(FnBoundsEntry {
-                    type_param_var_id: type_var_id,
-                    trait_name: dict_bound.trait_name,
-                    type_param_name: type_param.name
-                })
-            },
-            _ => {
-                let _ = type_error(ctx.sink, E0503,
-                    "Delegated wrapper bound '${nominal_display_name(dict_bound.trait_name)}' has no exact wrapper type parameter evidence",
-                    span, DiagnosticContext::TraitError {
-                        detail: "delegate wrapper dictionary bound is incomplete"
-                    })
-            }
-        }
-    }
-    fn_bounds
-}
-
-fn register_delegate(
-    mut ctx: InferCtx, impl_tv_ids: List<Int>,
-    target_type: Str, field: Str, trait_names: List<Str>, span: Span,
-    impl_scheme_bounds: List<SchemeBound>, impl_dict_bounds: List<ImplDictBound>,
-    impl_type_params: List<TypeParam>
-) {
-    let wrapper_fn_bounds = build_delegate_wrapper_fn_bounds(
-        ctx, impl_dict_bounds, impl_tv_ids, impl_type_params, span)
-    // 1. Validate field exists on target struct
-    let target_display = nominal_display_name(target_type)
-    match ctx.env.types.structs.get(target_type) {
-        none => {
-            let _ = type_error(ctx.sink, E0507,
-                "delegate can only be used on struct types, '${target_display}' is not a struct",
-                span, DiagnosticContext::TraitError { detail: "delegate on non-struct type" })
-        },
-        some(struct_def) => {
-            let impl_self_type = resolve_impl_self_type(
-                ctx, target_type, impl_type_params)
-            let mut declared_params: List<Type> = []
-            let mut declared_index = 0
-            for declared_id in struct_def.type_param_vars {
-                let declared_name = match struct_def.type_params.get(declared_index) {
-                    some(name) => some(name), none => none
-                }
-                declared_params.push(Type::TypeVar {
-                    id: declared_id, name: declared_name
-                })
-                declared_index = declared_index + 1
-            }
-            let declared_self_type = Type::StructType {
-                name: struct_def.name, type_params: declared_params
-            }
-            let field_owner_map = build_type_var_map(
-                declared_self_type, impl_self_type,
-                struct_def.type_param_vars)
-            let mut field_type: Type? = none
-            for f in struct_def.fields {
-                if f.name == field {
-                    field_type = some(apply_subst_map(field_owner_map, f.ty))
-                }
-            }
-            match field_type {
-                none => {
-                    let _ = type_error(ctx.sink, E0507,
-                        "field '${field}' not found in struct '${target_display}'",
-                        span, DiagnosticContext::TraitError { detail: "delegate field not found" })
-                },
-                some(ft) => {
-                    // Get the field type name for looking up trait impls
-                    let mut field_type_name: Str? = none
-                    match ft {
-                        Type::StructType { name, .. } => { field_type_name = some(name) },
-                        Type::EnumType { name, .. } => { field_type_name = some(name) },
-                        _ => {
-                            let _ = type_error(ctx.sink, E0507,
-                                "delegate field '${field}' must have a named type (struct or enum)",
-                                span, DiagnosticContext::TraitError { detail: "delegate field has unnamed type" })
-                        }
-                    }
-                    match field_type_name {
-                        none => {},
-                        some(ftn) => {
-                            register_delegate_traits(ctx, impl_tv_ids, target_type,
-                                field, trait_names, span, impl_scheme_bounds, impl_dict_bounds,
-                                wrapper_fn_bounds, impl_type_params, ftn, ft)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn register_delegate_traits(
-    mut ctx: InferCtx, impl_tv_ids: List<Int>,
-    target_type: Str, field: Str, trait_names: List<Str>, span: Span,
-    impl_scheme_bounds: List<SchemeBound>, impl_dict_bounds: List<ImplDictBound>,
-    wrapper_fn_bounds: List<FnBoundsEntry>,
-    impl_type_params: List<TypeParam>, field_type_name: Str, ft: Type
-) {
-    for tname in trait_names {
-        let canonical_trait = resolve_trait_identity(ctx, tname)
-        let trait_display = nominal_display_name(canonical_trait)
-        let field_type_display = nominal_display_name(field_type_name)
-        let target_display = nominal_display_name(target_type)
-        match ctx.env.trait_reg.traits.get(canonical_trait) {
-            none => {
-                let _ = type_error(ctx.sink, E0501,
-                    "Unknown trait: ${trait_display}",
-                    span, DiagnosticContext::TraitError { detail: "unknown trait '${trait_display}'" })
-            },
-            some(trait_def) => {
-                // Validate that the field type implements the trait
-                if !has_impl(ctx.env.trait_reg, field_type_name, canonical_trait) {
-                    let _ = type_error(ctx.sink, E0508,
-                        "type '${field_type_display}' (field '${field}') does not implement trait '${trait_display}'",
-                        span, DiagnosticContext::TraitError { detail: "delegate field type missing trait impl" })
-                } else {
-                    // Check for conflict: same trait already implemented (hand-written) for this type
-                    if has_impl(ctx.env.trait_reg, target_type, canonical_trait) {
-                        let _ = type_error(ctx.sink, E0509,
-                            "trait '${trait_display}' is already implemented for '${target_display}'; cannot delegate the same trait",
-                            span, DiagnosticContext::TraitError { detail: "delegate conflicts with existing impl" })
-                        continue
-                    }
-                    // Collect all traits to register: the explicit trait + its supertraits
-                    let mut all_traits_to_register: List<Str> = [canonical_trait]
-                    let supers = collect_all_supertraits(ctx, canonical_trait)
-                    for st_name in supers {
-                        all_traits_to_register.push(st_name)
-                    }
-
-                    let self_type = resolve_impl_self_type(ctx, target_type, impl_type_params)
-
-                    for reg_tname in all_traits_to_register {
-                        // Check if this trait (or supertrait) is already implemented
-                        if has_impl(ctx.env.trait_reg, target_type, reg_tname) { continue }
-
-                        // Validate that the field type implements this trait
-                        if !has_impl(ctx.env.trait_reg, field_type_name, reg_tname) { continue }
-
-                        match ctx.env.trait_reg.traits.get(reg_tname) {
-                            none => {},
-                            some(reg_trait_def) => {
-                                let field_impl = find_impl(
-                                    ctx.env.trait_reg, field_type_name, reg_tname)
-                                let mut field_var_map: Map<Int, Type> = map_new()
-                                let mut field_impl_type_args: List<Type> = []
-                                match field_impl {
-                                    some(found) => {
-                                        // Derive one canonical source-impl-var
-                                        // mapping from the exact field method
-                                        // receiver and the wrapper's actual
-                                        // field type (for example Source<A>
-                                        // against Source<T>).
-                                        for trait_method in reg_trait_def.methods {
-                                            match found.method_schemes.get(
-                                                trait_method.name) {
-                                                some(field_scheme) =>
-                                                    match field_scheme.ty {
-                                                        Type::FnType { params, .. } =>
-                                                            match params.first() {
-                                                                some(field_receiver) => {
-                                                                    if field_impl_type_args.len() == 0 {
-                                                                        match field_receiver {
-                                                                            Type::StructType { name, type_params } => {
-                                                                                if name == field_type_name {
-                                                                                    field_impl_type_args = list_clone(type_params)
-                                                                                }
-                                                                            },
-                                                                            Type::EnumType { name, type_params } => {
-                                                                                if name == field_type_name {
-                                                                                    field_impl_type_args = list_clone(type_params)
-                                                                                }
-                                                                            },
-                                                                            _ => {}
-                                                                        }
-                                                                    }
-                                                                    let candidate = build_type_var_map(
-                                                                        field_receiver, ft,
-                                                                        field_scheme.type_vars)
-                                                                    let mut source_ids = candidate.keys()
-                                                                    source_ids.sort()
-                                                                    for source_id in source_ids {
-                                                                        match candidate.get(source_id) {
-                                                                            some(mapped) =>
-                                                                                field_var_map.insert(
-                                                                                    source_id, mapped),
-                                                                            none => {}
-                                                                        }
-                                                                    }
-                                                                },
-                                                                none => {}
-                                                            },
-                                                        _ => {}
-                                                    },
-                                                none => {}
-                                            }
-                                        }
-                                    },
-                                    none => {}
-                                }
-
-                                let mut field_assoc_types: Map<Str, Type> = map_new()
-                                match field_impl {
-                                    some(found) => {
-                                        let mut assoc_entries = found.assoc_types.entries()
-                                        assoc_entries.sort_by(compare_by_first)
-                                        for assoc_entry in assoc_entries {
-                                            let (assoc_name, assoc_type) = assoc_entry
-                                            field_assoc_types.insert(
-                                                assoc_name,
-                                                apply_subst_map(
-                                                    field_var_map, assoc_type))
-                                        }
-                                    },
-                                    none => {}
-                                }
-
-                                let mut tp_names: List<Str> = []
-                                for tp in impl_type_params { tp_names.push(tp.name) }
-                                let mut delegated_dict_bounds = list_clone(impl_dict_bounds)
-                                match field_impl {
-                                    some(found) => {
-                                        let mapped_dict_bounds = remap_delegate_dict_bounds(
-                                            ctx, found.dict_bounds,
-                                            field_impl_type_args, field_var_map,
-                                            impl_tv_ids, wrapper_fn_bounds, span)
-                                        for mapped_bound in mapped_dict_bounds {
-                                            let duplicate = delegated_dict_bounds.any(fn(existing) {
-                                                existing.type_param_index == mapped_bound.type_param_index &&
-                                                    existing.trait_name == mapped_bound.trait_name
-                                            })
-                                            if !duplicate {
-                                                delegated_dict_bounds.push(mapped_bound)
-                                            }
-                                        }
-                                    },
-                                    none => {}
-                                }
-                                let mut exact_method_schemes: Map<Str, TypeScheme> = map_new()
-                                let origin = impl_origin(
-                                    target_type, some(reg_tname), span)
-
-                                // Every forwarding scheme is the exact field
-                                // scheme under the same structural mapping.
-                                for tm in reg_trait_def.methods {
-                                    let resolved_method_scheme = match field_impl {
-                                        some(found) => found.method_schemes.get(tm.name),
-                                        none => none
-                                    }
-                                    match resolved_method_scheme {
-                                        some(field_scheme) => {
-                                            let scheme = specialize_delegate_method_scheme(
-                                                ctx, field_scheme, field_var_map,
-                                                self_type, impl_tv_ids,
-                                                impl_scheme_bounds,
-                                                wrapper_fn_bounds, span)
-                                            exact_method_schemes.insert(tm.name, scheme)
-                                            let _ = install_method_scheme(
-                                                ctx.env.trait_reg, ctx.sink,
-                                                target_type, tm.name, scheme,
-                                                MethodOrigin {
-                                                    origin: origin,
-                                                    trait_name: some(reg_tname),
-                                                    span: span
-                                                })
-                                        },
-                                        none => {
-                                            let _ = type_error(ctx.sink, E0508,
-                                                "type '${field_type_display}' has no exact '${nominal_display_name(reg_tname)}::${tm.name}' scheme to delegate",
-                                                span, DiagnosticContext::TraitError {
-                                                    detail: "delegate source method evidence is missing"
-                                                })
-                                        }
-                                    }
-                                }
-
-                                let mut method_names = exact_method_schemes.keys()
-                                method_names.sort()
-
-                                add_impl(ctx.env.trait_reg, ImplEntry {
-                                    trait_name: reg_tname,
-                                    target_type_name: target_type,
-                                    type_params: tp_names,
-                                    method_names: method_names,
-                                    dict_bounds: delegated_dict_bounds,
-                                    assoc_types: map_clone(field_assoc_types),
-                                    method_schemes: exact_method_schemes,
-                                    origin: origin,
-                                    span: span
-                                })
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
+// A generated definition alpha-localizes only the source schema's raw tokens;
+// it preserves every existing EffectParamRef and publishes no new authority.
 fn expand_effect_exprs(mut ctx: InferCtx, decl_effects: List<EffectExpr>, mut expanding: Set<Str>) -> List<Effect> {
     let mut effects: List<Effect> = []
     for eff in decl_effects {
@@ -2711,48 +2917,6 @@ fn expand_effect_exprs(mut ctx: InferCtx, decl_effects: List<EffectExpr>, mut ex
         }
     }
     effects
-}
-
-fn collect_effect_tail_vars(ty: Type, mut vars: List<Int>) {
-    match ty {
-        Type::FnType { params, return_type, effects } => {
-            match effects.tail {
-                some(t_id) => {
-                    if !vars.contains(t_id) { vars.push(t_id) }
-                },
-                none => {}
-            }
-            for p in params { collect_effect_tail_vars(p, vars) }
-            collect_effect_tail_vars(return_type, vars)
-        },
-        Type::StructType { type_params, .. } => {
-            for tp in type_params { collect_effect_tail_vars(tp, vars) }
-        },
-        Type::EnumType { type_params, .. } => {
-            for tp in type_params { collect_effect_tail_vars(tp, vars) }
-        },
-        Type::TupleType { elements } => {
-            for e in elements { collect_effect_tail_vars(e, vars) }
-        },
-        Type::GenericType { base, args } => {
-            collect_effect_tail_vars(base, vars)
-            for a in args { collect_effect_tail_vars(a, vars) }
-        },
-        _ => {}
-    }
-}
-
-fn infer_hof_effect_row(param_types: List<Type>) -> EffectRow {
-    for pt in param_types {
-        match pt {
-            Type::FnType { effects, .. } => match effects.tail {
-                some(t_id) => { return EffectRow { effects: [], tail: some(t_id) } },
-                none => {}
-            },
-            _ => {}
-        }
-    }
-    EMPTY_ROW
 }
 
 pub fn resolve_declared_effects(mut ctx: InferCtx, decl_effects: List<EffectExpr>) -> EffectRow {
@@ -2837,8 +3001,11 @@ pub fn inject_assoc_types_from_bounds(mut ctx: InferCtx, type_params: List<TypeP
 fn register_fn_common(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
     params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?,
-    span: Span, check_dup: Bool, track_mut_params: Bool, track_fn_bounds: Bool
+    span: Span, check_dup: Bool, track_mut_params: Bool,
+    track_fn_bounds: Bool, infer_body_effects: Bool
 ) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     if check_dup { check_duplicate_def(ctx, name, span) }
 
     let mut type_vars: List<Int> = []
@@ -2894,10 +3061,16 @@ fn register_fn_common(
 
     let effects = match declared_effects {
         some(de) => resolve_declared_effects(ctx, de),
-        none => infer_hof_effect_row(param_types)
+        // Keep registration provisional: the checker constrains this raw row
+        // and publishes a formal identity only after the definition closes.
+        none => if infer_body_effects {
+            EffectRow { effects: [], tail: some(ctx.env.fresh_var_id()) }
+        } else { EMPTY_ROW }
     }
     let fn_type = Type::FnType { params: param_types, return_type: ret, effects: effects }
-    collect_effect_tail_vars(fn_type, type_vars)
+    for tail in ordered_effect_tail_vars(fn_type) {
+        if !type_vars.contains(tail) { type_vars.push(tail) }
+    }
 
     let mut fn_bounds_list: List<FnBound> = []
     let mut scheme_bounds: List<SchemeBound> = []
@@ -2969,7 +3142,9 @@ fn register_fn_common(
     ctx.qualified_assoc_scope = saved_qualified
 
     if type_vars.len() > 0 {
-        ctx.env.bind(name, TypeScheme { ty: fn_type, type_vars: type_vars, bounds: scheme_bounds, def_id: none })
+        ctx.env.bind(name, TypeScheme { ty: fn_type,
+            type_vars: type_vars, bounds: scheme_bounds,
+            effect_schema: empty_typed_effect_header_schema(), def_id: none })
     } else {
         ctx.env.bind_mono(name, fn_type)
     }
@@ -2980,23 +3155,37 @@ fn register_fn_common(
     }
     record_value_binding_kind(ctx, name, callable_kind)
     match ctx.env.lookup(name) {
-        some(s) => match s.def_id { some(did) => ctx.env.record_def_span(did, span), none => {} },
+        some(s) => match s.def_id {
+            some(did) => {
+                ctx.env.record_def_span(did, span)
+                if declared_effects.is_some() &&
+                   ordered_effect_tail_vars(fn_type).len() == 0 {
+                    record_h0_closed_registration_header(ctx, did)
+                }
+            },
+            none => {}
+        },
         none => {}
     }
 }
 
 fn register_fn(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?, span: Span) {
-    register_fn_common(ctx, name, type_params, params, return_type, declared_effects, span, true, true, true)
+    register_fn_common(ctx, name, type_params, params, return_type,
+        declared_effects, span, true, true, true, true)
 }
 
 fn register_extern_fn(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, params: List<Param>, return_type: TypeExpr?, declared_effects: List<EffectExpr>?, span: Span) {
-    register_fn_common(ctx, name, type_params, params, return_type, declared_effects, span, false, false, false)
+    register_fn_common(ctx, name, type_params, params, return_type,
+        declared_effects, span, false, false, false, false)
 }
 
 fn register_extern_type_common(
     mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
-    install_visible_name: Bool
+    span: Span, install_visible_name: Bool, decl_index: Int
 ) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
+    let identity = peek_struct_identity_fact(ctx, decl_index, true, 0)
     let mut tp_names: List<Str> = []
     let saved = map_clone(ctx.type_param_scope)
     let mut tp_vars: List<Int> = []
@@ -3010,7 +3199,13 @@ fn register_extern_type_common(
     // is_extern: true marks this as an opaque FFI type so trait derivation skips
     // it (B-074). An opaque type has no fields to compare/clone/order/debug, and
     // a derived dict would reference a non-existent runtime constructor.
-    let def = StructDef { name: name, type_params: tp_names, type_param_vars: tp_vars, fields: [], derive_attrs: [], is_extern: true }
+    let def = StructDef { name: name,
+        owner_ref: make_registered_nominal_ref(identity.owner_ref, name),
+        type_params: tp_names, type_param_vars: tp_vars, fields: [],
+        field_effect_schemas: [],
+        derive_attrs: [], derived_provider_plan: none,
+        resource_storage_parameter_ordinals: [], is_extern: true }
+    commit_struct_identity_fact(ctx, identity, false)
     if install_visible_name {
         ctx.env.types.structs.insert(name, def)
     }
@@ -3018,16 +3213,27 @@ fn register_extern_type_common(
 }
 
 fn register_project_extern_type(
-    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    span: Span, decl_index: Int
 ) {
-    register_extern_type_common(ctx, name, type_params, false)
+    register_extern_type_common(
+        ctx, name, type_params, span, false, decl_index)
 }
 
-fn register_extern_type(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>) {
-    register_extern_type_common(ctx, name, type_params, true)
+fn register_extern_type(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    span: Span, decl_index: Int
+) {
+    register_extern_type_common(
+        ctx, name, type_params, span, true, decl_index)
 }
 
-fn register_type_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, type_expr: TypeExpr) {
+fn register_type_alias(
+    mut ctx: InferCtx, name: Str, type_params: List<TypeParam>,
+    type_expr: TypeExpr, span: Span, decl_index: Int
+) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     let saved = map_clone(ctx.type_param_scope)
     let mut tp_vars: List<Int> = []
     for tp in type_params {
@@ -3039,7 +3245,9 @@ fn register_type_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam
     ctx.type_param_scope = saved
     let mut tp_names: List<Str> = []
     for tp in type_params { tp_names.push(tp.name) }
-    ctx.env.types.type_aliases.insert(name, TypeAliasDef { name: name, type_params: tp_names, type_param_vars: tp_vars, ty: resolved })
+    let owner_ref = source_type_alias_symbol_for_decl(ctx, decl_index)
+    ctx.env.types.type_aliases.insert(name, make_type_alias_def(
+        name, owner_ref, tp_names, tp_vars, resolved))
 }
 
 fn register_const(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, span: Span) {
@@ -3059,36 +3267,6 @@ fn register_const(mut ctx: InferCtx, name: Str, type_annotation: TypeExpr?, span
         none => {}
     }
     record_value_binding_kind(ctx, name, ValueBindingKind::ConstGetter)
-}
-
-fn register_sig(mut ctx: InferCtx, name: Str, members: List<SigMember>, is_pub: Bool) {
-    let saved = map_clone(ctx.type_param_scope)
-    let mut sig_members: Map<Str, TypeScheme> = map_new()
-    for m in members {
-        let mut type_vars: List<Int> = []
-        let msaved = map_clone(ctx.type_param_scope)
-        for tp in m.type_params {
-            let tv = ctx.env.fresh_var()
-            match tv { Type::TypeVar { id, .. } => { type_vars.push(id) }, _ => {} }
-            ctx.type_param_scope.insert(tp.name, tv)
-        }
-        let mut param_types: List<Type> = []
-        for p in m.params {
-            match p.type_annotation {
-                some(ta) => param_types.push(resolve_type_expr(ctx, ta)),
-                none => param_types.push(ctx.env.fresh_var())
-            }
-        }
-        let ret = match m.return_type {
-            some(rt) => resolve_type_expr(ctx, rt),
-            none => ctx.env.fresh_var()
-        }
-        let fn_type = Type::FnType { params: param_types, return_type: ret, effects: EMPTY_ROW }
-        sig_members.insert(m.name, TypeScheme { ty: fn_type, type_vars: type_vars, bounds: [], def_id: none })
-        ctx.type_param_scope = msaved
-    }
-    ctx.type_param_scope = saved
-    ctx.env.types.sigs.insert(name, SigDef { name: name, members: sig_members, is_pub: is_pub })
 }
 
 // ============================================================
@@ -3111,6 +3289,8 @@ fn canonicalize_effect_alias_body(ctx: InferCtx, effects: List<EffectExpr>) -> L
 }
 
 fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypeParam>, effects: List<EffectExpr>, span: Span) {
+    validate_type_param_bound_shapes(
+        ctx, type_params, BoundShapeContext::OrdinaryBound, span)
     if ctx.env.types.effect_aliases.contains_key(name) {
         let display = nominal_display_name(name)
         let _ = type_error(ctx.sink, E0207,
@@ -3139,41 +3319,49 @@ fn register_effect_alias(mut ctx: InferCtx, name: Str, type_params: List<TypePar
 // Dispatch: register individual declaration
 // ============================================================
 
-fn register_decl(mut ctx: InferCtx, decl: Decl) {
+fn register_decl(mut ctx: InferCtx, decl: Decl, decl_index: Int) {
     match decl {
         Decl::Struct { name, type_params, fields, derive_attrs, span, .. } => {
-            preregister_struct(ctx, name, type_params, derive_attrs)
+            preregister_struct(
+                ctx, name, type_params, derive_attrs,
+                span, decl_index, fields.len())
             complete_struct_fields(ctx, name, fields)
         },
         Decl::Enum { name, type_params, variants, derive_attrs, span, .. } => {
-            preregister_enum(ctx, name, type_params, derive_attrs)
+            preregister_enum(
+                ctx, name, type_params, variants,
+                derive_attrs, span, decl_index)
             complete_enum_variants(ctx, name, type_params, variants)
         },
-        Decl::Effect { name, type_params, ops, .. } =>
-            register_effect(ctx, name, type_params, ops),
+        Decl::Effect { name, type_params, ops, span, .. } =>
+            register_effect(ctx, name, type_params, ops, span, decl_index),
         Decl::Impl { target_type, type_params, trait_name, methods, span } =>
-            register_impl(ctx, target_type, type_params, trait_name, methods, span),
+            register_impl(
+                ctx, target_type, type_params, trait_name, methods, span,
+                decl_index),
         Decl::Fn { name, type_params, params, return_type, declared_effects, span, .. } =>
             register_fn(ctx, name, type_params, params, return_type, declared_effects, span),
         Decl::Test { .. } => {},
         Decl::Trait { name, type_params, supertraits, methods, span, .. } =>
-            register_trait(ctx, name, type_params, supertraits, methods, span),
+            register_trait(
+                ctx, name, type_params, supertraits, methods, span,
+                decl_index),
         Decl::ExternFn { name, type_params, params, return_type, declared_effects, span, .. } =>
             register_extern_fn(ctx, name, type_params, params, return_type, declared_effects, span),
-        Decl::ExternType { name, type_params, .. } =>
-            register_extern_type(ctx, name, type_params),
-        Decl::TypeAlias { name, type_params, type_expr, .. } =>
-            register_type_alias(ctx, name, type_params, type_expr),
+        Decl::ExternType { name, type_params, span, .. } =>
+            register_extern_type(ctx, name, type_params, span, decl_index),
+        Decl::TypeAlias { name, type_params, type_expr, span, .. } =>
+            register_type_alias(
+                ctx, name, type_params, type_expr, span, decl_index),
         Decl::Const { name, type_annotation, span, .. } =>
             register_const(ctx, name, type_annotation, span),
-        Decl::Sig { name, members, is_pub, .. } =>
-            register_sig(ctx, name, members, is_pub),
         Decl::EffectAlias { name, type_params, effects, span, .. } =>
             register_effect_alias(ctx, name, type_params, effects, span),
-        Decl::Delegate { .. } => {},  // Only valid inside impl blocks, handled by register_impl
         Decl::AssocType { .. } => {},  // Only valid inside trait/impl blocks
         Decl::ModBlock { name: mod_name, uses: mod_uses, decls: mod_decls, .. } => {
+            enter_struct_identity_child_frame(ctx, decl_index)
             register_mod_block_items(ctx, mod_name, mod_uses, mod_decls, none, none)
+            exit_struct_identity_frame(ctx)
         }
     }
 }

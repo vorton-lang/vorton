@@ -1,6 +1,6 @@
 // B-129 Map/Set HOF llvm_diff coverage.
 // Pure-Ring Map HOF methods iterate occupied slots and obtain owned callback
-// arguments through ring_slot_read; pure-Ring Set HOFs delegate to that Map.
+// arguments through ring_slot_read; pure-Ring Set HOFs forward to that Map.
 // Map output below pins fixed-input traversal; Set assertions stay
 // order-independent because Set iteration order is unspecified. Callbacks
 // include heap-allocated intermediates to exercise the #152 HOF drop fix.

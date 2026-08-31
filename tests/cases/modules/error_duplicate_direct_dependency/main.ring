@@ -1,0 +1,3 @@
+use dep
+
+fn main() {}

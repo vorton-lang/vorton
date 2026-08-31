@@ -14,14 +14,16 @@ impl<T: Hash + Eq> Maker {
 }
 
 trait EmptyMetric {
+    fn empty_count(self) -> Int
+}
+
+struct Metric {}
+impl EmptyMetric for Metric {
     fn empty_count(self) -> Int {
         let empty: Set<Int> = set_from([])
         empty.len()
     }
 }
-
-struct Metric {}
-impl EmptyMetric for Metric {}
 
 effect DefaultMetric {
     fn empty_count() -> Int {
@@ -47,7 +49,7 @@ fn unknown<T>() -> T {
 
 fn hash_identity<T: Hash>(value: T) -> T { value }
 
-fn hash_value<T: Hash>(value: T) -> Int { value.hash() }
+fn hash_value<T: Hash>(value: T) -> Int with {} { value.hash() }
 
 fn attach_source<T, S: Source<Item = T>>(source: S, _value: T) -> S {
     source
@@ -78,13 +80,13 @@ fn invoke_factory(factory: fn() -> Set<Int>) -> Int {
     factory().len()
 }
 
-fn default_set_count(value: Set<Int> = set_from([])) -> Int {
+fn set_count(value: Set<Int>) -> Int {
     value.len()
 }
 
-fn default_hash_count(
+fn hash_count(
     value: Int,
-    callback: fn(Int) -> Int = hash_value
+    callback: fn(Int) -> Int
 ) -> Int {
     callback(value)
 }
@@ -115,12 +117,12 @@ fn main() {
     print("method=${made.len()}")
     print("const=${STATIC_EMPTY.len()}")
     let metric = Metric {}
-    print("trait-default=${metric.empty_count()}")
+    print("explicit-impl=${metric.empty_count()}")
     print("effect-default=${DefaultMetric.empty_count()}")
-    print("param-default=${default_set_count()}")
-    let default_hash = default_hash_count(9)
-    assert(default_hash == hash_value(9), "ground callable default evidence")
-    print("callable-default=ok")
+    print("explicit-param=${set_count(set_from([]))}")
+    let explicit_hash = hash_count(9, hash_value)
+    assert(explicit_hash == hash_value(9), "ground callable argument evidence")
+    print("callable-argument=ok")
 
     if false {
         // map_get_panic registers before the result annotation constrains the

@@ -50,6 +50,23 @@ pub fn list_clone<T>(l: List<T>) -> List<T> {
     List { buf: new_buf, len: n, cap: n }
 }
 
+fn list_deep_clone<T: Clone>(l: List<T>) -> List<T> {
+    let n = l.len
+    if n == 0 {
+        return List { buf: ring_slot_alloc(0), len: 0, cap: 0 }
+    }
+    let new_buf: Ptr<T> = ring_slot_alloc(n)
+    for i in 0..n {
+        let element = ring_slot_read(l.buf, i)
+        ring_slot_write(new_buf, i, element.clone())
+    }
+    List { buf: new_buf, len: n, cap: n }
+}
+
+impl<T: Clone> Clone for List<T> {
+    fn clone(self: List<T>) -> List<T> { list_deep_clone(self) }
+}
+
 impl<T> List {
     pub fn len(self: List<T>) -> Int { self.len }
 
@@ -194,7 +211,7 @@ impl<T> List {
         self.len = 0
     }
 
-    pub fn set(self: List<T>, index: Int, value: T) -> Unit {
+    pub fn set(mut self: List<T>, index: Int, value: T) -> Unit {
         if index < 0 || index >= self.len {
             panic("list index out of bounds")
         }

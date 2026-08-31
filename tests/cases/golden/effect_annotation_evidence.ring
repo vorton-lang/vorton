@@ -1,9 +1,10 @@
 // B-100 P1.1: effect annotation + evidence passing — functions with explicit
-// `with {io}`, `with {fail<T>}`, and multi-effect `with {io, fail<Str>}`
+// `with {console}`, `with {fail<T>}`, and multi-effect
+// `with {console, fail<Str>}`
 // annotations. Tests that the compiler-generated evidence threading is
 // consistent.
 
-fn greet(name: Str) -> Unit with {io} {
+fn greet(name: Str) -> Unit with {console} {
     print("hello ${name}")
 }
 
@@ -12,12 +13,12 @@ fn safe_divide(a: Int, b: Int) -> Int with {fail<Str>} {
     a / b
 }
 
-fn annotated_io_only(x: Int) -> Int with {io} {
+fn annotated_io_only(x: Int) -> Int with {console} {
     print("io: ${x.to_str()}")
     x + 1
 }
 
-fn multi_effect(x: Int) -> Str with {io, fail<Str>} {
+fn multi_effect(x: Int) -> Str with {console, fail<Str>} {
     if x < 0 { fail.raise("negative") }
     print("processing ${x.to_str()}")
     x.to_str()

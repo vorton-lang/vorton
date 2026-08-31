@@ -14,7 +14,6 @@ pub const E0102: Str = "E0102"
 pub const E0103: Str = "E0103"
 pub const E0104: Str = "E0104"
 pub const E0105: Str = "E0105"
-pub const E0106: Str = "E0106"
 pub const E0201: Str = "E0201"
 pub const E0203: Str = "E0203"
 pub const E0204: Str = "E0204"
@@ -47,12 +46,7 @@ pub const E0408: Str = "E0408"
 pub const E0504: Str = "E0504"
 pub const E0505: Str = "E0505"
 pub const E0506: Str = "E0506"
-pub const E0507: Str = "E0507"
-pub const E0508: Str = "E0508"
-pub const E0409: Str = "E0409"
-pub const E0410: Str = "E0410"
 pub const E0411: Str = "E0411"
-pub const E0509: Str = "E0509"
 pub const E0510: Str = "E0510"
 pub const E0511: Str = "E0511"
 pub const E0512: Str = "E0512"
@@ -81,7 +75,6 @@ pub fn error_description(code: Str) -> Str {
     if code == "E0103" { return "Expected token" }
     if code == "E0104" { return "Empty parentheses on enum variant" }
     if code == "E0105" { return "Invalid impl type argument" }
-    if code == "E0106" { return "Non-default parameter after default parameter" }
     if code == "E0201" { return "Undefined variable" }
     if code == "E0203" { return "Unknown struct or invalid constructor fields" }
     if code == "E0204" { return "Unknown type" }
@@ -106,8 +99,6 @@ pub fn error_description(code: Str) -> Str {
     if code == "E0407" { return "Unknown effect" }
     // Reserved: not currently emitted (open row ≠ capability violation, see infer_decl.ring)
     if code == "E0408" { return "Open effect row in capability-restricted module" }
-    if code == "E0409" { return "Default handler body uses effect without default handler" }
-    if code == "E0410" { return "Cyclic default effect handler dependency" }
     if code == "E0411" { return "Unsafe block without module requires" }
     if code == "E0501" { return "Unknown trait" }
     if code == "E0502" { return "Missing trait method implementation" }
@@ -115,9 +106,6 @@ pub fn error_description(code: Str) -> Str {
     if code == "E0504" { return "Ambiguous trait method" }
     if code == "E0505" { return "Missing supertrait implementation" }
     if code == "E0506" { return "Cyclic supertrait inheritance" }
-    if code == "E0507" { return "Delegate field not found" }
-    if code == "E0508" { return "Delegate field type does not implement trait" }
-    if code == "E0509" { return "Delegate conflicts with existing impl" }
     if code == "E0510" { return "Missing associated type implementation" }
     if code == "E0511" { return "Unknown associated type" }
     if code == "E0512" { return "Ambiguous associated type" }

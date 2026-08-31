@@ -3,7 +3,7 @@ effect custom_effect {
 }
 
 // 1. Function with io effect annotation
-fn greet(name: Str) -> Unit with {io} {
+fn greet(name: Str) -> Unit with {console} {
     print("Hello, ${name}")
 }
 
@@ -19,7 +19,7 @@ fn add(a: Int, b: Int) -> Int {
 }
 
 // 4. Annotation is upper bound (actual effects can be subset)
-fn might_print(x: Int) -> Int with {io} {
+fn might_print(x: Int) -> Int with {console} {
     // Does not actually use io, but declares it — legal
     x + 1
 }

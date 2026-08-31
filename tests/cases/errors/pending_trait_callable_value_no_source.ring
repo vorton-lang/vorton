@@ -1,4 +1,4 @@
-fn hash_value<T: Hash>(value: T) -> Int { value.hash() }
+fn hash_value<T: Hash>(value: T) -> Int with {} { value.hash() }
 
 fn main() {
     // The shadow participates in owner saturation but stays silent.  The

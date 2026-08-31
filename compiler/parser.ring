@@ -7,14 +7,14 @@ use ast::{
     Expr, Stmt, DestructureBinding,
     UsePath, NamedImport, UseImport, UseDecl,
     TypeBound, AssocConstraint, TypeParam, StructFieldDecl, NamedEnumField, EnumVariantDecl, EffectOpDecl,
-    DeriveAttribute,
-    SigMember, Decl, Program
+    DeriveAttribute, Decl, Program
 }
 use lexer::{TokenKind, Token, Lexer, new_lexer, token_kind_value}
-use diagnostics::{CollectingSink, Severity, DiagnosticContext, new_collecting_sink, make_diag, make_diagnostic}
-use codes::{E0101, E0103, E0104, E0105, E0106, E0706, W0002}
+use diagnostics::{CompileError, CollectingSink, Severity, DiagnosticContext,
+    new_collecting_sink, make_diag, make_diagnostic}
+use codes::{E0101, E0103, E0104, E0105, E0706, W0002}
 
-extern fn __ring_raise_fail(msg: Str) -> Never with {fail}
+extern fn __ring_raise_fail(msg: Str) -> Never with {fail<CompileError>}
 
 // ============================================================
 // Operator Precedence
@@ -97,7 +97,7 @@ fn is_decl_start(k: TokenKind) -> Bool {
         TkFn => true, TkStruct => true, TkEnum => true,
         TkEffect => true, TkTrait => true, TkImpl => true,
         TkExtern => true, TkUse => true, TkPub => true, TkTest => true,
-        TkConst => true, TkMod => true, TkSig => true, TkAt => true,
+        TkConst => true, TkMod => true, TkAt => true,
         _ => false
     }
 }
@@ -220,7 +220,7 @@ impl Parser {
         })
     }
 
-    pub fn advance(mut self) -> Token {
+    pub fn advance(mut self) -> Token with {} {
         let tok = self.peek()
         self.pos = self.pos + 1
         tok
@@ -230,7 +230,7 @@ impl Parser {
         self.peek().kind == kind
     }
 
-    pub fn try_consume(mut self, kind: TokenKind) -> Bool {
+    pub fn try_consume(mut self, kind: TokenKind) -> Bool with {mut<Parser>} {
         if self.check(kind) {
             self.advance()
             return true
@@ -238,7 +238,7 @@ impl Parser {
         false
     }
 
-    pub fn expect(mut self, kind: TokenKind) -> Token {
+    pub fn expect(mut self, kind: TokenKind) -> Token with {mut<Parser>, fail<CompileError>} {
         let tok = self.peek()
         if tok.kind != kind {
             self.error("Expected '${token_kind_value(kind)}', got '${tok.value}' (${token_kind_value(tok.kind)})")
@@ -257,7 +257,7 @@ impl Parser {
     // Skip tokens until we reach one of the stop tokens at brace depth 0,
     // or an unmatched closing brace. Tracks brace nesting so we don't stop
     // inside a nested block.
-    fn skip_to_recovery_point(mut self, stop_tokens: List<TokenKind>) {
+    fn skip_to_recovery_point(mut self, stop_tokens: List<TokenKind>) with {mut<Parser>} {
         let mut brace_depth = 0
         while !self.at_end() {
             let kind = self.peek().kind
@@ -293,7 +293,7 @@ impl Parser {
     // Error helpers
     // ============================================================
 
-    pub fn report_error(mut self, code: Str, msg: Str, span: Span?) {
+    pub fn report_error(mut self, code: Str, msg: Str, span: Span?) with {fail<CompileError>} {
         let tok = self.peek()
         let error_span = span.unwrap_or(tok.span)
         self.sink.report(make_diag(
@@ -309,7 +309,7 @@ impl Parser {
         }
     }
 
-    fn error(mut self, msg: Str) -> Never {
+    fn error(mut self, msg: Str) -> Never with {mut<Parser>, fail<CompileError>} {
         let tok = self.peek()
         self.report_error(E0103, msg, some(tok.span))
         __ring_raise_fail(msg)
@@ -319,7 +319,7 @@ impl Parser {
     // Program
     // ============================================================
 
-    pub fn parse_program(mut self) -> Program {
+    pub fn parse_program(mut self) -> Program with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         let mut uses: List<UseDecl> = []
         let mut decls: List<Decl> = []
@@ -391,7 +391,7 @@ impl Parser {
     // Statements
     // ============================================================
 
-    pub fn parse_stmt(mut self) -> Stmt {
+    pub fn parse_stmt(mut self) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
 
         if self.check(TokenKind::TkLet) {
@@ -491,7 +491,7 @@ impl Parser {
         Stmt::ExprStmt { expr: expr, has_semi: has_semi, span: self.make_span(start, end) }
     }
 
-    fn parse_while_stmt(mut self) -> Stmt {
+    fn parse_while_stmt(mut self) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkWhile)
         let condition = self.parse_expr_no_struct()
@@ -499,7 +499,7 @@ impl Parser {
         Stmt::While { condition: condition, body: body, span: self.make_span(start, expr_span(body).end) }
     }
 
-    fn parse_loop_stmt(mut self) -> Stmt {
+    fn parse_loop_stmt(mut self) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkLoop)
         let body = self.parse_block_expr()
@@ -507,7 +507,7 @@ impl Parser {
         Stmt::While { condition: condition, body: body, span: self.make_span(start, expr_span(body).end) }
     }
 
-    fn parse_for_in_stmt(mut self) -> Stmt {
+    fn parse_for_in_stmt(mut self) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkFor)
 
@@ -553,7 +553,7 @@ impl Parser {
         }
     }
 
-    fn parse_break_stmt(mut self) -> Stmt {
+    fn parse_break_stmt(mut self) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkBreak)
         self.try_consume(TokenKind::TkSemi)
@@ -561,7 +561,7 @@ impl Parser {
         Stmt::Break { span: self.make_span(start, end) }
     }
 
-    fn parse_continue_stmt(mut self) -> Stmt {
+    fn parse_continue_stmt(mut self) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkContinue)
         self.try_consume(TokenKind::TkSemi)
@@ -569,7 +569,7 @@ impl Parser {
         Stmt::Continue { span: self.make_span(start, end) }
     }
 
-    fn parse_if_let_stmt(mut self, start: Position) -> Stmt {
+    fn parse_if_let_stmt(mut self, start: Position) -> Stmt with {mut<Parser>, fail<CompileError>} {
         self.expect(TokenKind::TkLet)
         let pattern = self.parse_pattern()
         self.expect(TokenKind::TkEq)
@@ -592,13 +592,13 @@ impl Parser {
         }
     }
 
-    fn parse_binding_stmt(mut self, mutable: Bool) -> Stmt {
+    fn parse_binding_stmt(mut self, mutable: Bool) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkLet)
         self.parse_binding_body(mutable, start)
     }
 
-    fn parse_binding_body(mut self, mutable: Bool, start: Position) -> Stmt {
+    fn parse_binding_body(mut self, mutable: Bool, start: Position) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let name_tok = self.expect(TokenKind::TkIdent)
         let name = name_tok.value
         let name_span = name_tok.span
@@ -618,7 +618,7 @@ impl Parser {
         }
     }
 
-    fn parse_return_stmt(mut self) -> Stmt {
+    fn parse_return_stmt(mut self) -> Stmt with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkReturn)
         let mut value: Expr? = none
@@ -630,7 +630,7 @@ impl Parser {
         Stmt::Return { value: value, span: self.make_span(start, end) }
     }
 
-    fn parse_return_expr(mut self) -> Expr {
+    fn parse_return_expr(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkReturn)
         let mut value: Expr? = none
@@ -647,7 +647,7 @@ impl Parser {
     // Block expression
     // ============================================================
 
-    pub fn parse_block_expr(mut self) -> Expr {
+    pub fn parse_block_expr(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkLBrace)
         let mut stmts: List<Stmt> = []
@@ -677,7 +677,7 @@ impl Parser {
     // Unsafe block expression
     // ============================================================
 
-    fn parse_unsafe_expr(mut self) -> Expr {
+    fn parse_unsafe_expr(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkUnsafe)
         let body = self.parse_block_expr()
@@ -688,7 +688,7 @@ impl Parser {
     // Declarations
     // ============================================================
 
-    fn parse_use_decl(mut self, is_pub: Bool) -> UseDecl {
+    fn parse_use_decl(mut self, is_pub: Bool) -> UseDecl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkUse)
 
@@ -760,7 +760,7 @@ impl Parser {
         }
     }
 
-    fn parse_mod_block(mut self, is_pub: Bool) -> Decl {
+    fn parse_mod_block(mut self, is_pub: Bool) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkMod)
         let name = self.expect(TokenKind::TkIdent).value
@@ -819,7 +819,7 @@ impl Parser {
         Decl::ModBlock { name: name, uses: uses, decls: decls, required_effects: required_effects, is_pub: is_pub, span: self.make_span(start, rbrace.span.end) }
     }
 
-    fn parse_decl(mut self) -> Decl? {
+    fn parse_decl(mut self) -> Decl? with {mut<Parser>, fail<CompileError>} {
         // The declaration range includes every prefix token (`@derive`, then
         // optional `pub`) rather than beginning at `struct` / `enum`.
         let decl_start = self.current_span_start()
@@ -871,7 +871,6 @@ impl Parser {
             TkTrait => some(self.parse_trait_decl(is_pub)),
             TkExtern => some(self.parse_extern_decl(is_pub)),
             TkConst => some(self.parse_const_decl(is_pub)),
-            TkSig => some(self.parse_sig_block(is_pub)),
             TkIdent => {
                 if tok.value == "type" { return some(self.parse_type_alias_decl(is_pub)) }
                 self.report_error(E0101, "Expected declaration, got '${tok.value}' (${token_kind_value(tok.kind)})", some(tok.span))
@@ -885,7 +884,7 @@ impl Parser {
     }
 
     // Parse a braced effect list: { effect1, effect2<T>, ... }
-    fn parse_effect_list(mut self) -> List<EffectExpr> {
+    fn parse_effect_list(mut self) -> List<EffectExpr> with {mut<Parser>, fail<CompileError>} {
         self.expect(TokenKind::TkLBrace)
         let mut effects: List<EffectExpr> = []
         while !self.check(TokenKind::TkRBrace) && !self.at_end() {
@@ -926,12 +925,12 @@ impl Parser {
         effects
     }
 
-    fn parse_effect_annotation(mut self) -> List<EffectExpr> {
+    fn parse_effect_annotation(mut self) -> List<EffectExpr> with {mut<Parser>, fail<CompileError>} {
         self.expect(TokenKind::TkWith)
         self.parse_effect_list()
     }
 
-    fn parse_fn_decl(mut self, is_pub: Bool, body_optional: Bool) -> Decl {
+    fn parse_fn_decl(mut self, is_pub: Bool, body_forbidden: Bool) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkFn)
         let name = self.expect(TokenKind::TkIdent).value
@@ -949,13 +948,21 @@ impl Parser {
             declared_effects = some(self.parse_effect_annotation())
         }
         let mut body = Expr::Block { stmts: [], tail: none, span: span_zero() }
-        let mut is_abstract_val = false
-        if body_optional && !self.check(TokenKind::TkLBrace) {
+        let mut end = self.current_span_start()
+        if body_forbidden {
             let pos = self.current_span_start()
             body = Expr::Block { stmts: [], tail: none, span: self.make_span(pos, pos) }
-            is_abstract_val = true
+            if self.check(TokenKind::TkLBrace) {
+                self.report_error(
+                    E0101,
+                    "Trait method bodies are not supported in Ring 0.1; move the body to an explicit impl",
+                    some(self.peek().span))
+                let rejected = self.parse_block_expr()
+                end = expr_span(rejected).end
+            }
         } else {
             body = self.parse_block_expr()
+            end = expr_span(body).end
         }
         Decl::Fn {
             name: name,
@@ -965,12 +972,11 @@ impl Parser {
             declared_effects: declared_effects,
             body: body,
             is_pub: is_pub,
-            is_abstract: is_abstract_val,
-            span: self.make_span(start, expr_span(body).end)
+            span: self.make_span(start, end)
         }
     }
 
-    fn parse_const_decl(mut self, is_pub: Bool) -> Decl {
+    fn parse_const_decl(mut self, is_pub: Bool) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkConst)
         let name = self.expect(TokenKind::TkIdent).value
@@ -983,47 +989,7 @@ impl Parser {
         Decl::Const { name: name, type_annotation: type_annotation, init: init, is_pub: is_pub, span: self.make_span(start, expr_span(init).end) }
     }
 
-    fn parse_sig_block(mut self, is_pub: Bool) -> Decl {
-        let start = self.current_span_start()
-        self.expect(TokenKind::TkSig)
-        let name = self.expect(TokenKind::TkIdent).value
-        self.expect(TokenKind::TkLBrace)
-
-        let mut members: List<SigMember> = []
-        while !self.check(TokenKind::TkRBrace) && !self.at_end() {
-            let mstart = self.current_span_start()
-            self.expect(TokenKind::TkFn)
-            let mname = self.expect(TokenKind::TkIdent).value
-            let mtps = self.parse_type_params()
-            self.expect(TokenKind::TkLParen)
-            let mparams = self.parse_params()
-            self.expect(TokenKind::TkRParen)
-            let mut ret: TypeExpr? = none
-            if self.try_consume(TokenKind::TkArrow) {
-                ret = some(self.parse_type_expr())
-            }
-            let mut meffects: List<TypeExpr> = []
-            if self.try_consume(TokenKind::TkWith) {
-                self.expect(TokenKind::TkLBrace)
-                while !self.check(TokenKind::TkRBrace) && !self.at_end() {
-                    let eff = self.parse_type_expr()
-                    meffects.push(eff)
-                    self.try_consume(TokenKind::TkComma)
-                }
-                self.expect(TokenKind::TkRBrace)
-            }
-            let mend = self.current_span_start()
-            members.push(SigMember {
-                name: mname, type_params: mtps, params: mparams,
-                return_type: ret, declared_effects: meffects,
-                span: self.make_span(mstart, mend)
-            })
-        }
-        let rbrace = self.expect(TokenKind::TkRBrace)
-        Decl::Sig { name: name, members: members, is_pub: is_pub, span: self.make_span(start, rbrace.span.end) }
-    }
-
-    fn parse_extern_decl(mut self, is_pub: Bool) -> Decl {
+    fn parse_extern_decl(mut self, is_pub: Bool) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkExtern)
         if self.check(TokenKind::TkIdent) && self.peek().value == "type" {
@@ -1032,7 +998,7 @@ impl Parser {
         self.parse_extern_fn_decl_body(is_pub, start)
     }
 
-    fn parse_extern_fn_decl_body(mut self, is_pub: Bool, start: Position) -> Decl {
+    fn parse_extern_fn_decl_body(mut self, is_pub: Bool, start: Position) -> Decl with {mut<Parser>, fail<CompileError>} {
         self.expect(TokenKind::TkFn)
         let name = self.expect(TokenKind::TkIdent).value
         let type_params = self.parse_type_params()
@@ -1064,7 +1030,7 @@ impl Parser {
         }
     }
 
-    fn parse_extern_type_decl_body(mut self, is_pub: Bool, start: Position) -> Decl {
+    fn parse_extern_type_decl_body(mut self, is_pub: Bool, start: Position) -> Decl with {mut<Parser>, fail<CompileError>} {
         self.advance()
         let name = self.expect(TokenKind::TkIdent).value
         let type_params = self.parse_type_params()
@@ -1077,7 +1043,7 @@ impl Parser {
         }
     }
 
-    fn parse_type_alias_decl(mut self, is_pub: Bool) -> Decl {
+    fn parse_type_alias_decl(mut self, is_pub: Bool) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.advance()
         let name = self.expect(TokenKind::TkIdent).value
@@ -1094,7 +1060,7 @@ impl Parser {
         }
     }
 
-    fn parse_struct_decl(mut self, start: Position, is_pub: Bool, derive_attrs: List<DeriveAttribute>) -> Decl {
+    fn parse_struct_decl(mut self, start: Position, is_pub: Bool, derive_attrs: List<DeriveAttribute>) -> Decl with {mut<Parser>, fail<CompileError>} {
         self.expect(TokenKind::TkStruct)
         let name = self.expect(TokenKind::TkIdent).value
         let type_params = self.parse_type_params()
@@ -1146,7 +1112,7 @@ impl Parser {
         }
     }
 
-    fn parse_enum_decl(mut self, start: Position, is_pub: Bool, derive_attrs: List<DeriveAttribute>) -> Decl {
+    fn parse_enum_decl(mut self, start: Position, is_pub: Bool, derive_attrs: List<DeriveAttribute>) -> Decl with {mut<Parser>, fail<CompileError>} {
         self.expect(TokenKind::TkEnum)
         let name = self.expect(TokenKind::TkIdent).value
         let type_params = self.parse_type_params()
@@ -1201,7 +1167,7 @@ impl Parser {
         }
     }
 
-    fn parse_impl_decl(mut self) -> Decl {
+    fn parse_impl_decl(mut self) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkImpl)
         let type_params = self.parse_type_params()
@@ -1222,19 +1188,19 @@ impl Parser {
         self.expect(TokenKind::TkLBrace)
         let mut methods: List<Decl> = []
         while !self.check(TokenKind::TkRBrace) && !self.at_end() {
-            // Check for delegate before consuming pub
+            // Consume the removed contextual directive as one diagnostic unit.
             if self.check(TokenKind::TkIdent) && self.peek().value == "delegate" {
-                let d_start = self.current_span_start()
+                self.report_error(
+                    E0101,
+                    "delegate was removed from Ring 0.1; write one explicit impl per trait with forwarding methods",
+                    some(self.peek().span))
                 self.advance()   // consume "delegate"
-                let d_field = self.expect(TokenKind::TkIdent).value
+                self.expect(TokenKind::TkIdent)
                 self.expect(TokenKind::TkColon)
-                let mut d_traits: List<Str> = []
-                d_traits.push(self.expect(TokenKind::TkIdent).value)
+                self.expect(TokenKind::TkIdent)
                 while self.try_consume(TokenKind::TkComma) {
-                    d_traits.push(self.expect(TokenKind::TkIdent).value)
+                    self.expect(TokenKind::TkIdent)
                 }
-                let d_end = self.current_span_start()
-                methods.push(Decl::Delegate { field: d_field, trait_names: d_traits, span: self.make_span(d_start, d_end) })
                 continue
             }
             let m_pub = self.try_consume(TokenKind::TkPub)
@@ -1242,9 +1208,7 @@ impl Parser {
             if self.check(TokenKind::TkIdent) && self.peek().value == "type" {
                 methods.push(self.parse_assoc_type_decl(m_pub))
             } else if self.check(TokenKind::TkExtern) {
-                let m_start = self.current_span_start()
-                self.expect(TokenKind::TkExtern)
-                methods.push(self.parse_extern_fn_decl_body(m_pub, m_start))
+                self.skip_forbidden_impl_extern_member()
             } else {
                 methods.push(self.parse_fn_decl(m_pub, false))
             }
@@ -1259,7 +1223,30 @@ impl Parser {
         }
     }
 
-    fn parse_effect_alias_decl(mut self, is_pub: Bool, start: Position) -> Decl {
+    // Hard-rejected surface with local recovery.  This consumes exactly one
+    // extern signature but never constructs a Decl, so the next impl member
+    // remains in the same container and cannot be reinterpreted top-level.
+    fn skip_forbidden_impl_extern_member(mut self) with {mut<Parser>, fail<CompileError>} {
+        let extern_span = self.peek().span
+        self.report_error(E0103,
+            "impl-member extern fn is not part of Ring 0.1; use a top-level extern fn and an ordinary wrapper",
+            some(extern_span))
+        self.advance() // extern
+        self.expect(TokenKind::TkFn)
+        let _ = self.expect(TokenKind::TkIdent)
+        let _ = self.parse_type_params()
+        self.expect(TokenKind::TkLParen)
+        let _ = self.parse_params()
+        self.expect(TokenKind::TkRParen)
+        if self.try_consume(TokenKind::TkArrow) {
+            let _ = self.parse_type_expr()
+        }
+        if self.check(TokenKind::TkWith) {
+            let _ = self.parse_effect_annotation()
+        }
+    }
+
+    fn parse_effect_alias_decl(mut self, is_pub: Bool, start: Position) -> Decl with {mut<Parser>, fail<CompileError>} {
         // 'effect alias' has been consumed; now parse: Name<T> = { effects }
         let name = self.expect(TokenKind::TkIdent).value
         let type_params = self.parse_type_params()
@@ -1275,7 +1262,7 @@ impl Parser {
         }
     }
 
-    fn parse_effect_decl(mut self, is_pub: Bool) -> Decl {
+    fn parse_effect_decl(mut self, is_pub: Bool) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkEffect)
         let name = self.expect(TokenKind::TkIdent).value
@@ -1294,12 +1281,16 @@ impl Parser {
             self.expect(TokenKind::TkRParen)
             self.expect(TokenKind::TkArrow)
             let return_type = self.parse_type_expr()
-            let mut op_body: Expr? = none
             if self.check(TokenKind::TkLBrace) {
-                op_body = some(self.parse_block_expr())
+                self.report_error(E0103,
+                    "Effect operation bodies are not supported in Ring 0.1",
+                    some(self.peek().span))
+                let _ = self.parse_block_expr()
             }
             let op_end = self.current_span_start()
-            ops.push(EffectOpDecl { name: op_name, params: params, return_type: return_type, body: op_body, span: self.make_span(op_start, op_end) })
+            ops.push(EffectOpDecl { name: op_name, params: params,
+                return_type: return_type,
+                span: self.make_span(op_start, op_end) })
             self.try_consume(TokenKind::TkComma)
             self.try_consume(TokenKind::TkSemi)
         }
@@ -1313,7 +1304,7 @@ impl Parser {
         }
     }
 
-    fn parse_test_decl(mut self) -> Decl {
+    fn parse_test_decl(mut self) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkTest)
         let desc_tok = self.expect(TokenKind::TkStringLit)
@@ -1321,7 +1312,7 @@ impl Parser {
         Decl::Test { description: desc_tok.value, body: body, span: self.make_span(start, expr_span(body).end) }
     }
 
-    fn parse_assoc_type_decl(mut self, is_pub: Bool) -> Decl {
+    fn parse_assoc_type_decl(mut self, is_pub: Bool) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.advance()  // consume 'type' keyword (TkIdent with value "type")
         let name = self.expect(TokenKind::TkIdent).value
@@ -1343,7 +1334,7 @@ impl Parser {
         Decl::AssocType { name: name, bounds: bounds, value: value, is_pub: is_pub, span: self.make_span(start, end) }
     }
 
-    fn parse_trait_decl(mut self, is_pub: Bool) -> Decl {
+    fn parse_trait_decl(mut self, is_pub: Bool) -> Decl with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkTrait)
         let name = self.expect(TokenKind::TkIdent).value
@@ -1382,15 +1373,15 @@ impl Parser {
     // Expressions — Pratt Parsing
     // ============================================================
 
-    pub fn parse_expr(mut self) -> Expr {
+    pub fn parse_expr(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         self.parse_expr_bp(PREC_NONE, true)
     }
 
-    fn parse_expr_no_struct(mut self) -> Expr {
+    fn parse_expr_no_struct(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         self.parse_expr_bp(PREC_NONE, false)
     }
 
-    pub fn parse_expr_bp(mut self, min_prec: Int, allow_struct_lit: Bool) -> Expr {
+    pub fn parse_expr_bp(mut self, min_prec: Int, allow_struct_lit: Bool) -> Expr with {mut<Parser>, fail<CompileError>} {
         let mut left = self.parse_prefix(allow_struct_lit)
         let mut last_was_comparison = false
 
@@ -1436,7 +1427,7 @@ impl Parser {
         left
     }
 
-    fn parse_prefix(mut self, allow_struct_lit: Bool) -> Expr {
+    fn parse_prefix(mut self, allow_struct_lit: Bool) -> Expr with {mut<Parser>, fail<CompileError>} {
         let tok = self.peek()
         let start = self.current_span_start()
 
@@ -1620,7 +1611,7 @@ if self.check(TokenKind::TkIntLit) {
     // Postfix: dot (field access / method call)
     // ============================================================
 
-    fn parse_dot_expr(mut self, left: Expr) -> Expr {
+    fn parse_dot_expr(mut self, left: Expr) -> Expr with {mut<Parser>, fail<CompileError>} {
         self.advance()
         let mut name = ""
         let mut name_end = self.current_span_start()
@@ -1665,7 +1656,7 @@ if self.check(TokenKind::TkIntLit) {
     // Index expression: receiver[index]
     // ============================================================
 
-    fn parse_index_expr(mut self, receiver: Expr) -> Expr {
+    fn parse_index_expr(mut self, receiver: Expr) -> Expr with {mut<Parser>, fail<CompileError>} {
         self.advance() // consume [
         let index = self.parse_expr()
         let end_tok = self.expect(TokenKind::TkRBracket)
@@ -1677,14 +1668,14 @@ if self.check(TokenKind::TkIntLit) {
     // Call expression
     // ============================================================
 
-    fn parse_call_expr(mut self, left: Expr) -> Expr {
+    fn parse_call_expr(mut self, left: Expr) -> Expr with {mut<Parser>, fail<CompileError>} {
         self.advance()
         let args = self.parse_arg_list()
         let rparen = self.expect(TokenKind::TkRParen)
         Expr::Call { callee: left, args: args, type_args: [], span: self.make_span(expr_span(left).start, rparen.span.end) }
     }
 
-    fn parse_arg_list(mut self) -> List<Expr> {
+    fn parse_arg_list(mut self) -> List<Expr> with {mut<Parser>, fail<CompileError>} {
         let mut args: List<Expr> = []
         if self.check(TokenKind::TkRParen) { return args }
         args.push(self.parse_expr())
@@ -1699,7 +1690,7 @@ if self.check(TokenKind::TkIntLit) {
     // Catch expression
     // ============================================================
 
-    fn parse_catch_expr(mut self, left: Expr) -> Expr {
+    fn parse_catch_expr(mut self, left: Expr) -> Expr with {mut<Parser>, fail<CompileError>} {
         self.advance()
         self.expect(TokenKind::TkLBrace)
         let mut arms: List<MatchArm> = []
@@ -1716,7 +1707,7 @@ if self.check(TokenKind::TkIntLit) {
     // String interpolation
     // ============================================================
 
-    fn parse_string_interp(mut self) -> Expr {
+    fn parse_string_interp(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         let start_tok = self.advance()
         let mut parts: List<StringInterpPart> = []
         let mut last_end = start_tok.span.end
@@ -1755,7 +1746,7 @@ if self.check(TokenKind::TkIntLit) {
     // If expression
     // ============================================================
 
-    pub fn parse_if_expr(mut self) -> Expr {
+    pub fn parse_if_expr(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkIf)
 
@@ -1810,7 +1801,7 @@ if self.check(TokenKind::TkIntLit) {
     // Match expression
     // ============================================================
 
-    fn parse_match_expr(mut self) -> Expr {
+    fn parse_match_expr(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkMatch)
         let scrutinee = self.parse_expr_no_struct()
@@ -1831,7 +1822,7 @@ if self.check(TokenKind::TkIntLit) {
         Expr::MatchExpr { scrutinee: scrutinee, arms: arms, span: self.make_span(start, rbrace.span.end) }
     }
 
-    fn parse_match_arm(mut self) -> MatchArm {
+    fn parse_match_arm(mut self) -> MatchArm with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         let mut pattern = self.parse_pattern()
 
@@ -1863,7 +1854,7 @@ if self.check(TokenKind::TkIntLit) {
     // Patterns
     // ============================================================
 
-    pub fn parse_pattern(mut self) -> Pattern {
+    pub fn parse_pattern(mut self) -> Pattern with {mut<Parser>, fail<CompileError>} {
         let tok = self.peek()
         let start = self.current_span_start()
 
@@ -1976,7 +1967,11 @@ if self.check(TokenKind::TkIntLit) {
                     let f_start = self.current_span_start()
                     let f_tok = self.expect(TokenKind::TkIdent)
                     let f_name = f_tok.value
-                    let mut pat = Pattern::Binding { name: f_name, span: f_tok.span }
+                    let mut pat = if f_name == "_" {
+                        Pattern::Wildcard { span: f_tok.span }
+                    } else {
+                        Pattern::Binding { name: f_name, span: f_tok.span }
+                    }
                     if self.try_consume(TokenKind::TkColon) {
                         pat = self.parse_pattern()
                     }
@@ -2021,7 +2016,7 @@ if self.check(TokenKind::TkIntLit) {
     // Handle expression
     // ============================================================
 
-    fn parse_handle_expr(mut self) -> Expr {
+    fn parse_handle_expr(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkHandle)
         let body = self.parse_block_expr()
@@ -2043,7 +2038,7 @@ if self.check(TokenKind::TkIntLit) {
         Expr::HandleExpr { body: body, handlers: handlers, span: self.make_span(start, rbrace.span.end) }
     }
 
-    fn parse_effect_handler(mut self) -> EffectHandler {
+    fn parse_effect_handler(mut self) -> EffectHandler with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         let mut effect_name = self.expect(TokenKind::TkIdent).value
         // Support qualified paths: mod::effect or mod::submod::effect
@@ -2066,7 +2061,7 @@ if self.check(TokenKind::TkIntLit) {
     // Lambda expression
     // ============================================================
 
-    fn parse_lambda_expr(mut self) -> Expr {
+    fn parse_lambda_expr(mut self) -> Expr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkFn)
         self.expect(TokenKind::TkLParen)
@@ -2084,7 +2079,7 @@ if self.check(TokenKind::TkIntLit) {
     // Struct literal
     // ============================================================
 
-    fn parse_struct_literal(mut self, name: Str, start: Position, qualifier: Str?) -> Expr {
+    fn parse_struct_literal(mut self, name: Str, start: Position, qualifier: Str?) -> Expr with {mut<Parser>, fail<CompileError>} {
         self.expect(TokenKind::TkLBrace)
         let mut fields: List<StructFieldInit> = []
         let mut spread: Expr? = none
@@ -2120,7 +2115,7 @@ if self.check(TokenKind::TkIntLit) {
     // Type Expressions
     // ============================================================
 
-    pub fn try_parse_type_args(mut self) -> List<TypeExpr> {
+    pub fn try_parse_type_args(mut self) -> List<TypeExpr> with {mut<Parser>, fail<CompileError>} {
         if !self.check(TokenKind::TkLt) { return [] }
         let save_pos = self.pos
         let save_errors = self.error_count
@@ -2141,7 +2136,7 @@ if self.check(TokenKind::TkIntLit) {
         args
     }
 
-    pub fn parse_type_expr(mut self) -> TypeExpr {
+    pub fn parse_type_expr(mut self) -> TypeExpr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
 
         if self.check(TokenKind::TkLBrace) {
@@ -2254,7 +2249,7 @@ if self.check(TokenKind::TkIntLit) {
         result
     }
 
-    fn parse_record_type_expr(mut self) -> TypeExpr {
+    fn parse_record_type_expr(mut self) -> TypeExpr with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         self.expect(TokenKind::TkLBrace)
         let mut fields: List<RecordTypeField> = []
@@ -2286,7 +2281,7 @@ if self.check(TokenKind::TkIntLit) {
     // Qualified ident: parses "Ident" or "mod::submod::Ident"
     // ============================================================
 
-    fn parse_qualified_ident(mut self) -> Str {
+    fn parse_qualified_ident(mut self) -> Str with {mut<Parser>, fail<CompileError>} {
         let name = self.expect(TokenKind::TkIdent).value
         if !self.check(TokenKind::TkColonColon) {
             return name
@@ -2312,7 +2307,7 @@ if self.check(TokenKind::TkIntLit) {
     // Used in impl Trait for Type<T> where <T> on the target type is redundant.
     // ============================================================
 
-    fn validate_target_type_args(mut self, type_params: List<TypeParam>) {
+    fn validate_target_type_args(mut self, type_params: List<TypeParam>) with {mut<Parser>, fail<CompileError>} {
         if !self.check(TokenKind::TkLt) { return }
         self.advance()
         while !self.check(TokenKind::TkGt) && !self.at_end() {
@@ -2342,7 +2337,7 @@ if self.check(TokenKind::TkIntLit) {
     // Type Params: <T, U: Constraint>
     // ============================================================
 
-    pub fn parse_type_params(mut self) -> List<TypeParam> {
+    pub fn parse_type_params(mut self) -> List<TypeParam> with {mut<Parser>, fail<CompileError>} {
         if !self.check(TokenKind::TkLt) { return [] }
         self.advance()
         let mut params: List<TypeParam> = []
@@ -2365,7 +2360,7 @@ if self.check(TokenKind::TkIntLit) {
         params
     }
 
-    pub fn parse_type_bound(mut self) -> TypeBound {
+    pub fn parse_type_bound(mut self) -> TypeBound with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         let trait_name = self.expect(TokenKind::TkIdent).value
         let mut type_args: List<TypeExpr> = []
@@ -2411,7 +2406,7 @@ if self.check(TokenKind::TkIntLit) {
     // Parameters
     // ============================================================
 
-    pub fn parse_params(mut self) -> List<Param> {
+    pub fn parse_params(mut self) -> List<Param> with {mut<Parser>, fail<CompileError>} {
         let mut params: List<Param> = []
         if self.check(TokenKind::TkRParen) { return params }
         params.push(self.parse_param())
@@ -2419,28 +2414,10 @@ if self.check(TokenKind::TkIntLit) {
             if self.check(TokenKind::TkRParen) { break }
             params.push(self.parse_param())
         }
-        // Validate: non-default params must not follow default params
-        let mut seen_default = false
-        for p in params {
-            match p.default_value {
-                some(_) => { seen_default = true },
-                none => {
-                    if seen_default {
-                        self.sink.report(make_diag(
-                            E0106,
-                            Severity::SevError,
-                            "Non-default parameter '${p.name}' after default parameter",
-                            p.span,
-                            DiagnosticContext::ParseError { token: p.name, expected: none }
-                        ))
-                    }
-                }
-            }
-        }
         params
     }
 
-    pub fn parse_param(mut self) -> Param {
+    pub fn parse_param(mut self) -> Param with {mut<Parser>, fail<CompileError>} {
         let start = self.current_span_start()
         let mut is_mutable = false
         if self.check(TokenKind::TkMut) {
@@ -2452,11 +2429,7 @@ if self.check(TokenKind::TkIntLit) {
         if self.try_consume(TokenKind::TkColon) {
             type_annotation = some(self.parse_type_expr())
         }
-        let mut default_value: Expr? = none
-        if self.try_consume(TokenKind::TkEq) {
-            default_value = some(self.parse_expr())
-        }
         let end = self.current_span_start()
-        Param { name: name, is_mutable: is_mutable, type_annotation: type_annotation, default_value: default_value, span: self.make_span(start, end) }
+        Param { name: name, is_mutable: is_mutable, type_annotation: type_annotation, span: self.make_span(start, end) }
     }
 }

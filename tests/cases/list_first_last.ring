@@ -1,4 +1,4 @@
-fn main() with {io} {
+fn main() with {console} {
     let empty: List<Int> = []
 
     match empty.last() {

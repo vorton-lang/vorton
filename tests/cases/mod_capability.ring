@@ -3,8 +3,8 @@ mod pure_logic requires {} {
     pub fn double(x: Int) -> Int { x + x }
 }
 
-mod io_layer requires {io} {
-    pub fn greet(name: Str) -> Unit with {io} {
+mod io_layer requires {console} {
+    pub fn greet(name: Str) -> Unit with {console} {
         print("Hello, ${name}!")
     }
 }

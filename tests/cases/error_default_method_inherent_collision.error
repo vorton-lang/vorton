@@ -1,4 +1,0 @@
-E0504
-Ambiguous method 'clash' on 'DefaultCollision'
-provided by an inherent impl and trait 'DefaultClash'
-!internal compiler error

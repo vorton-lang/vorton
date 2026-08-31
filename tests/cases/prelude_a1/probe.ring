@@ -1,0 +1,20 @@
+effect PreludeA1Step {
+    fn apply(value: Int) -> Int
+}
+
+fn increment(value: Int) -> Int with {} { value + 1 }
+fn keep(value: Str) -> Str with {} { value }
+fn step(value: Int) -> Int with {PreludeA1Step} {
+    PreludeA1Step.apply(value)
+}
+
+fn main() {
+    let number = prelude_a1_self(increment, 1, 2)
+    let text = prelude_a1_self(keep, "ring", 2)
+    let mutual = handle { prelude_a1_left(step, 2, 2) } with {
+        PreludeA1Step.apply(value) => value + 4,
+    }
+    assert(number == 3 && text == "ring" && mutual == 10,
+        "prelude A1 closes self/mutual recursion independent of source order")
+    print("P_PRELUDE_A1_OK:${number}/${text}/${mutual}")
+}

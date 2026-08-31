@@ -138,7 +138,7 @@
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Custom, nested, abort-arm, re-raise, capture, cleanup, and default effect handler paths execute."
+      "reason": "Custom, nested, abort-arm, re-raise, capture, cleanup, and ordinary complete-handler paths execute."
     },
     {
       "feature_id": "HExpr.Lambda",
@@ -343,7 +343,7 @@
     },
     {
       "feature_id": "HDecl.Impl",
-      "evidence": ["tests/cases/golden/trait_default_method.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step5.ring"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -355,7 +355,7 @@
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Effect declarations with multiple and default operations execute."
+      "reason": "Effect declarations with multiple signature-only operations execute through explicit handlers."
     },
     {
       "feature_id": "HDecl.Test",
@@ -367,11 +367,11 @@
     },
     {
       "feature_id": "HDecl.Trait",
-      "evidence": ["tests/cases/golden/trait_default_method.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step5.ring"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Trait declarations, defaults, and dispatch execute."
+      "reason": "Signature-only trait declarations and explicit implementation dispatch execute."
     },
     {
       "feature_id": "HDecl.ExternFn",
@@ -413,15 +413,6 @@
       "status": "covered",
       "reason": "Inline module declarations and qualified references execute."
     },
-    {
-      "feature_id": "HDecl.Sig",
-      "evidence": ["tests/cases/sig_basic.ring"],
-      "oracle": "handwritten-golden+c-native",
-      "lane": ["e2e-c"],
-      "status": "covered",
-      "reason": "Signature declarations compile in the C-native pipeline alongside executable code."
-    },
-
     {
       "feature_id": "Pattern.Wildcard",
       "evidence": ["tests/cases/golden/c_backend_step4.ring"],
@@ -554,38 +545,6 @@
     },
 
     {
-      "feature_id": "backend.default_effect_topo",
-      "evidence": ["tests/cases/default_effect_topo.ring"],
-      "oracle": "handwritten-golden+c-native",
-      "lane": ["e2e-c"],
-      "status": "covered",
-      "reason": "Topologically ordered default-effect evidence executes against the handwritten golden through the C-native backend."
-    },
-    {
-      "feature_id": "backend.default_effect_body_pipeline",
-      "evidence": ["tests/cases/default_effect_body_io.ring"],
-      "oracle": "c-native-golden",
-      "lane": ["e2e-c"],
-      "status": "covered",
-      "reason": "Default effect bodies run through and/or, dictionary, ANF, Perceus, and RC verification before C-native emission."
-    },
-    {
-      "feature_id": "backend.module_effect_evidence",
-      "evidence": ["tests/cases/mod_effect_evidence.ring"],
-      "oracle": "e2e-golden+c-native",
-      "lane": ["e2e-c"],
-      "status": "covered",
-      "reason": "Unqualified, module-qualified, and nested module-qualified default effect evidence executes under the C-native backend."
-    },
-    {
-      "feature_id": "backend.file_module_effect_evidence",
-      "evidence": ["tests/cases/modules/module_default_effect_evidence/main.ring"],
-      "oracle": "module-golden+c-native",
-      "lane": ["module-c"],
-      "status": "covered",
-      "reason": "A nested file-module path preserves its canonical $-prefix while top-level and inline-child default effect evidence executes under the C-native backend."
-    },
-    {
       "feature_id": "collections.api_clone",
       "evidence": ["tests/cases/api_clone.ring"],
       "oracle": "handwritten-golden+c-native",
@@ -599,10 +558,6 @@
         "tests/cases/iterator.ring",
         "tests/cases/iterator_lowering_control.ring",
         "tests/cases/iterator_lowering_conditional_bound.ring",
-        "tests/cases/iterator_lowering_delegate.ring",
-        "tests/cases/iterator_lowering_delegate_concrete_bound.ring",
-        "tests/cases/iterator_lowering_delegate_generic_instances.ring",
-        "tests/cases/iterator_lowering_delegate_nested_bound.ring",
         "tests/cases/iterator_lowering_effect.ring",
         "tests/cases/iterator_lowering_effect_source_order.ring",
         "tests/cases/iterator_lowering_generic_instances.ring",
@@ -612,7 +567,7 @@
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
-      "reason": "Non-Range for-in lowers through authoritative typed Iterable/Iterator calls before RC and executes with control-flow, effect, owned-item, Drop-source, enum-shadow, protocol-selection, concrete static-bound discharge, nested wrapped evidence from wrapper bounds, generic delegated instance mapping, and C-native executable evidence."
+      "reason": "Non-Range for-in lowers through authoritative typed Iterable/Iterator calls before RC and executes with control-flow, effect, owned-item, Drop-source, enum-shadow, protocol-selection, concrete static-bound discharge, nested wrapped evidence, and C-native executable evidence."
     },
     {
       "feature_id": "checker.pending_trait_obligation_owner",
@@ -621,15 +576,13 @@
         "tests/cases/golden/pending_trait_obligations.ring",
         "tests/cases/golden/pending_trait_test_owner.ring",
         "tests/cases/golden/pending_trait_effect_annotation.ring",
-        "tests/cases/golden/pending_trait_trait_default_effect_annotation.ring",
-        "tests/cases/golden/pending_trait_trait_defaults.ring",
         "tests/cases/golden/pending_trait_callable_assoc_fixed_point.ring",
         "tests/cases/golden/pending_trait_multi_bound_fixed_point.ring"
       ],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
-      "reason": "Declaration-owned call obligations retain one monomorphic instantiation through later annotations, tail and explicit returns, branches, lambdas, declared-effect payloads (including trait-default methods), map indexing, methods, defaults, consts, trait defaults, effects, and tests before atomically publishing dictionaries; exact DefId/live-scheme callable-value shadows contribute associated-type constraints without publishing evidence, and a single reverse-ordered five-bound chain exercises the finite evidence-site fixed point under the C-native backend."
+      "reason": "Declaration-owned call obligations retain one monomorphic instantiation through later annotations, tail and explicit returns, branches, lambdas, declared-effect payloads, map indexing, methods, consts, effects, and tests before atomically publishing dictionaries; exact DefId/live-scheme callable-value shadows contribute associated-type constraints without publishing evidence, and a single reverse-ordered five-bound chain exercises the finite evidence-site fixed point under the C-native backend."
     },
     {
       "feature_id": "backend.frontend_pending_trait_obligation_fail_closed",
@@ -638,19 +591,14 @@
         "tests/cases/errors/pending_trait_concrete_missing.ring",
         "tests/cases/errors/pending_trait_monomorphic_barrier.ring",
         "tests/cases/errors/pending_trait_multi_bound_atomic.ring",
-        "tests/cases/errors/pending_trait_failure_rollback.ring",
         "tests/cases/errors/pending_trait_extern_validation.ring",
         "tests/cases/errors/pending_trait_extern_late_success.ring",
-        "tests/cases/errors/pending_trait_generic_default_unsupported.ring",
-        "tests/cases/errors/pending_trait_callable_default_unsupported.ring",
-        "tests/cases/errors/pending_trait_callable_default_assoc_mismatch_unused.ring",
-        "tests/cases/errors/pending_trait_callable_default_assoc_mismatch_used.ring",
         "tests/cases/errors/pending_trait_callable_value_no_source.ring"
       ],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
       "status": "covered",
-      "reason": "The checker rejects no-source and concrete missing call evidence, conflicting later uses, partial multi-bound resolution, invalid extern callers, caller-specific call or callable-value defaults, and definition-owned default callable associated-type mismatches whether used or unused; ordinary callable-value shadows stay diagnostic-silent so final zonk remains the no-source authority, a localized trait-default recovery exercises the hard owner-exit pending-suffix invariant, and a check-only extern case proves late successful validation without requiring a foreign link target."
+      "reason": "The checker rejects no-source and concrete missing call evidence, conflicting later uses, partial multi-bound resolution, and invalid extern callers; ordinary callable-value shadows stay diagnostic-silent so final zonk remains the no-source authority, and a check-only extern case proves late successful validation without requiring a foreign link target."
     },
     {
       "feature_id": "collections.set_struct_eq",
@@ -714,6 +662,48 @@
       "reason": "A custom effect and fail handler coexist; the abort arm maps its payload under the C-native backend."
     },
     {
+      "feature_id": "frontend.effect_operation_signature_only",
+      "evidence": [
+        "tests/cases/custom_effect.ring",
+        "tests/cases/error_removed_effect_default_body.ring"
+      ],
+      "oracle": "handwritten-golden+c-native+diagnostic-substring",
+      "lane": ["e2e-c", "check"],
+      "status": "covered",
+      "reason": "Ring 0.1 custom effects retain explicit handlers while effect-operation bodies are rejected and locally recovered without automatic default evidence."
+    },
+    {
+      "feature_id": "backend.system_effect_capabilities",
+      "evidence": ["tests/cases/system_effect_surface.ring"],
+      "oracle": "c-native-check+golden",
+      "lane": ["e2e-c"],
+      "status": "covered",
+      "reason": "Console, filesystem, and process calls carry distinct exact system capabilities while pure path operations remain effect-free."
+    },
+    {
+      "feature_id": "backend.system_effect_custom_adapter",
+      "evidence": [
+        "tests/cases/system_effect_custom_adapter.ring",
+        "tests/cases/error_handle_system_effect.ring",
+        "tests/cases/error_removed_io_effect_annotation.ring"
+      ],
+      "oracle": "c-native-golden+diagnostic-substring",
+      "lane": ["e2e-c", "check"],
+      "status": "covered",
+      "reason": "A custom handled effect can explicitly adapt to a system API, while system effects cannot be handled and the removed broad io atom is rejected."
+    },
+    {
+      "feature_id": "backend.core_ownership_cutover",
+      "evidence": [
+        "tests/cases/ownership_core_cutover.ring",
+        "tests/cases/modules/ownership_core_cutover_project/main.ring"
+      ],
+      "oracle": "handwritten-golden+c-native+project-c",
+      "lane": ["e2e-c", "module-c"],
+      "status": "covered",
+      "reason": "Single and project compilation share the structured Core to Flow ownership pipeline before materialized HIR reaches the C backend, including explicit impl, derive, and handled-effect bodies."
+    },
+    {
       "feature_id": "backend.effect_abort_handler_arm",
       "evidence": ["tests/cases/golden/abort_handler_arm.ring"],
       "oracle": "handwritten-golden+c-native",
@@ -730,7 +720,7 @@
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
-      "reason": "Abort handlers refine explicit, unannotated, nested, mixed, and owner-qualified associated-type HOF rows to an exact fail payload contract, preserve residual io, and leave ordinary effect-polymorphic HOF calls and closed handled bodies valid."
+      "reason": "Abort handlers refine explicit, unannotated, nested, mixed, and owner-qualified associated-type HOF rows to an exact fail payload contract, preserve residual console capability, and leave ordinary effect-polymorphic HOF calls and closed handled bodies valid."
     },
     {
       "feature_id": "backend.module_abort_handler_assoc_constraint",

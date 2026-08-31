@@ -23,7 +23,7 @@ impl Iterable for EffectIter {
     }
 }
 
-fn explicit_steps() with {io} {
+fn explicit_steps() with {console} {
     let source = EffectIter { value: 0, max: 1 }
     let mut iterator = source.iter()
     match iterator.next() {
@@ -33,7 +33,7 @@ fn explicit_steps() with {io} {
     let exhausted = iterator.next()
 }
 
-fn implicit_steps() with {io} {
+fn implicit_steps() with {console} {
     for value in (EffectIter { value: 0, max: 1 }) {
         print(value)
     }

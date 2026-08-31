@@ -2,8 +2,8 @@
 // Coverage: lambda capture by value, mut-cell write-through capture (B-091),
 // HOF chains (map/filter/fold), named local closure calls, closures returned
 // from functions (env ownership, B-098), user trait dict dispatch through a
-// generic bound (multi-method trait — slot ordering), default trait methods
-// (B-141, incl. dict-dispatched call from a generic context), derived
+// generic bound (multi-method trait — slot ordering), explicit trait methods,
+// derived
 // Eq/Ord/Debug/Clone consumed via generic dispatch AND via ==/< operators,
 // generic first-class function values carrying trait dicts (#B-087 gap 1),
 // wrapped dicts for parameterized types (List<Point> equality).
@@ -37,15 +37,14 @@ struct Nest {
 
 trait Describe {
     fn describe(self) -> Str
-    fn shout(self) -> Str {
-        "${self.describe()}!"
-    }
+    fn shout(self) -> Str
 }
 
 impl Describe for Point {
     fn describe(self) -> Str {
         "P(${self.x},${self.y})"
     }
+    fn shout(self) -> Str { "${self.describe()}!" }
 }
 
 impl Describe for Color {
@@ -62,7 +61,7 @@ impl Describe for Color {
 }
 
 // Generic fn with a user-trait bound: dict param + dispatch through it
-// (both the required method and the default method).
+// (both required methods).
 fn present<T: Describe>(v: T) -> Str {
     "${v.describe()} / ${v.shout()}"
 }
@@ -114,11 +113,11 @@ fn main() {
     print("twice: ${twice(add7, 1)}")
     print("twice lambda: ${twice(fn(v: Int) { v * 3 }, 2)}")
 
-    // --- user trait dict dispatch (required + default methods) ---
+    // --- user trait dict dispatch (two required methods) ---
     print(present(Point { x: 1, y: 2 }))
     print(present(Color::Green))
 
-    // --- direct default-method call on a concrete type (forwarding stub) ---
+    // --- direct explicit trait-method call on a concrete type ---
     print("stub: ${Point { x: 9, y: 9 }.shout()}")
 
     // --- derived Eq/Ord through generic dict dispatch ---

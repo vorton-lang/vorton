@@ -1,8 +1,0 @@
-describing node
-result: node=7
-greeting ada from node
-greet: hi ada, I am node
-describing leaf
-result2: leaf=99
-greeting bo from leaf
-greet2: hi bo, I am leaf

@@ -1,8 +1,5 @@
 pub mod same {
     fn hidden() -> Int { 7 }
-}
-
-pub mod same {
     pub use self::{hidden}
 }
 
