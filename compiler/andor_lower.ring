@@ -55,7 +55,7 @@ pub fn lower_andor(program: HProgram) -> HProgram {
     }
 }
 
-fn al_decl(d: HDecl) -> HDecl {
+fn al_decl(d: HDecl) -> HDecl with {} {
     match d {
         HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, effect_ctx, body, is_pub, trait_bounds, span } =>
             HDecl::Fn { name: name, def_id: def_id,
@@ -133,7 +133,7 @@ fn al_decl(d: HDecl) -> HDecl {
 // Structural walkers
 // ============================================================
 
-fn al_expr(e: HExpr) -> HExpr {
+fn al_expr(e: HExpr) -> HExpr with {} {
     match e {
         HExpr::IntLit { value, ty, effects, span } =>
             HExpr::IntLit { value: value, ty: ty, effects: effects, span: span },
@@ -358,7 +358,7 @@ fn al_expr(e: HExpr) -> HExpr {
     }
 }
 
-fn al_arms(arms: List<HMatchArm>) -> List<HMatchArm> {
+fn al_arms(arms: List<HMatchArm>) -> List<HMatchArm> with {} {
     let mut out: List<HMatchArm> = []
     for arm in arms {
         let new_guard = match arm.guard {
@@ -373,7 +373,7 @@ fn al_arms(arms: List<HMatchArm>) -> List<HMatchArm> {
     out
 }
 
-fn al_stmt(s: HStmt) -> HStmt {
+fn al_stmt(s: HStmt) -> HStmt with {} {
     match s {
         HStmt::Let { name, name_span, def_id, ty, init, span } =>
             HStmt::Let { name: name, name_span: name_span, def_id: def_id, ty: ty,
