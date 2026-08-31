@@ -994,13 +994,15 @@ pub fn register_hof_intrinsics(mut env: TypeEnv, sink: CollectingSink) {
     register_option_hof(env, sink)
 }
 
-fn append_builtin_type_var(mut values: List<Int>, value: Int) {
+fn append_builtin_type_var(
+    mut values: List<Int>, value: Int
+) with {mut<List<Int>>} {
     if !values.contains(value) { values.push(value) }
 }
 
 fn collect_builtin_effect_formals(
     eff: Effect, mut value_vars: List<Int>, mut row_tails: List<Int>
-) {
+) with {mut<List<Int>>} {
     match eff {
         Effect::FailEffect { error_type } =>
             collect_builtin_type_formals(error_type, value_vars, row_tails),
@@ -1017,7 +1019,7 @@ fn collect_builtin_effect_formals(
 
 fn collect_builtin_effect_row_formals(
     row: EffectRow, mut value_vars: List<Int>, mut row_tails: List<Int>
-) {
+) with {mut<List<Int>>} {
     match row.tail {
         some(value) => append_builtin_type_var(row_tails, value),
         none => {}
@@ -1029,7 +1031,7 @@ fn collect_builtin_effect_row_formals(
 
 fn collect_builtin_type_formals(
     ty: Type, mut value_vars: List<Int>, mut row_tails: List<Int>
-) {
+) with {mut<List<Int>>} {
     match ty {
         Type::TypeVar { id, .. } => append_builtin_type_var(value_vars, id),
         Type::FnType { params, return_type, effects } => {
