@@ -9,13 +9,13 @@
 
 ## 当前排序
 
-当前主线目标是形成 **v0.1 internal self-host / repository-migration checkpoint**：tracked anchor可构建当前compiler，当前compiler连续自编译到可复现fixed point，并足以把完整历史与活动治理原子迁移到`vorton-lang/vorton`。它不是developer preview、release、语言bug清零或ownership/safety产品保证；不命中当前compiler/self-host/迁仓路径的缺陷可保留为Known Issues，迁仓后进入GitHub Issue继续处理。实际公开preview/release、许可证、正确性与最终支持平台仍由用户在后续候选产物和证据齐备后拍板。
+当前主线目标是形成 **v0.1 internal compiler / repository-migration checkpoint**：固定最后一个已有source-build成功证据的`5d576f7c`源码，要求该cut连续自编译到可复现fixed point，并足以把完整历史与活动治理原子迁移到`vorton-lang/vorton`。`5d57`之后的compiler提交保留为post-0.1 WIP，不倒灌进本cut。它不是developer preview、release、语言bug清零或ownership/safety产品保证；不命中该cut/fixed-point/迁仓路径的缺陷可保留为Known Issues，迁仓后进入GitHub Issue继续处理。实际公开preview/release、许可证、正确性与最终支持平台仍由用户在后续候选产物和证据齐备后拍板。
 
 **未发布期 clean-break 原则（2026-08-07 用户拍板；2026-08-30 checkpoint澄清）**：首次公开 preview/release 之前，一项公开语法、API、ABI 或语义变更一旦按授权边界拍板，就采用最简单的原子切换；兼容性本身不是增加 deprecated alias、双实现路径、旧 ABI fallback 或迁移 shim 的理由。仓内调用点、规范和测试在同一变更中整体迁移，并明确记录 break。该原则不替代新语义本身的用户保留决定。0.1 internal checkpoint允许把不命中self-host/迁仓路径的已知缺陷原样后移，而不是假称correctness/safety门已通过；首次公开preview前再按产品治理建立相称质量门，首次公开发布后的版本兼容政策另行建立。
 
 **近期 break 审核门**：任何修改公开语法、签名、ABI 或可观察语义的 item，在实现前必须标成“已拍板 clean break”“等待 decision dossier”或“仅内部、非 breaking”之一。已拍板的 #268/#269 ownership 真值、B-167 调用点 evidence、0.1 no-index-assignment 与 B-193~B-196 surface/effect边界均采用一次性切换；旧 ownership、default evidence、宽泛`io`/host fallback、effectful Drop、index-assignment carrier与refinement placeholder必须在各自原子变更中删除，不形成双轨。B-168/B-169 的探针结论，以及 B-152、B-156、B-171、B-133 等潜在用户面变化在进入实现前仍显式核对 break 边界。每个已拍板 break 的验收都必须列出被删除的旧路径、同步迁移的仓内消费者/规范/测试，并用负例证明旧形式不会经 alias、fallback 或旧 ABI 继续生效。
 
-Canonical dependency chain：`#268/#269 minimal self-host checkpoint -> B-183 repository/GitHub migration -> B-176/B-180 -> B-190 -> remaining correctness/ABI + imported Known Issues -> B-191 -> B-174/B-177/B-175 -> B-204 -> B-072/B-197/B-198/B-202`。
+Canonical dependency chain：`#268/#269 5d57 fixed-point checkpoint -> B-183 repository/GitHub migration -> external-host compiler foundation -> B-176/B-180 -> B-190 -> remaining correctness/ABI + imported Known Issues -> later self-host milestone`。
 
 历史validator索引`#268/#269 -> B-176/B-180；B-176/B-180 -> B-190 -> remaining correctness/ABI -> B-183 -> B-174/B-177/B-175`已被上述2026-08-30迁仓优先路线supersede，只用于验证旧路线文本被显式识别，不再授权性能或correctness backlog先于B-183。
 
@@ -25,7 +25,7 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 处理顺序固定为六道门：
 
 1. **B-186 Repository convergence recovery（已完成）**：worktree/ref/WIP、单一 authority、main/branch 看板、repository-health 与 push/CI 已恢复；这些约束转为持续门。
-2. **#268/#269 最小自举检查点**：当前只要求tracked anchor构建当前compiler，随后同一clean-current源码连续生成可执行compiler并达到gen2/gen3 `main.c`文本fixed point；固定artifact通过compiler/hello最小smoke，且证据足以在B-183后从clean clone重建。固定 archive 只能重建精确 `DBC154…` C，无法重建 `5E862…` / `9DFD…` native-object pins，且没有另存的权威 object/recipe；因此22 GiB crossing 路线已永久关闭且不计为已执行，latest main也不得恢复S-prime或同类资源加码。FlowIR/ONE ResourcePlanner/RcIR仍是后续唯一终态，不允许为过桥建立第二ownership authority；但其不命中当前self-host路径的未闭合语义、完整矩阵与RC/ASan门转为迁仓后的GitHub Known Issues，不再阻止本检查点。
+2. **#268/#269 5d57 fixed-point检查点**：固定source=`5d576f7c`/tree=`a7741f91`及其已有source-built seed，只允许同一clean source连续生成gen2/gen3并要求`main.c`文本fixed point；固定artifact通过compiler/hello最小smoke，且证据足以在B-183后从clean clone重建。`5d57`之后的六个effect/wildcard提交与其它current WIP不进入本交易，保留为迁仓后工作。固定 archive 只能重建精确 `DBC154…` C，无法重建 `5E862…` / `9DFD…` native-object pins，且没有另存的权威 object/recipe；因此22 GiB crossing 路线已永久关闭，latest main也不得恢复S-prime、current-tip carrier backport、direct-edge/publicization/SCU/generated-C或同类资源加码。FlowIR/ONE ResourcePlanner/RcIR仍是后续唯一终态，但不命中5d57 fixed-point路径的未闭合语义、完整矩阵与RC/ASan门转为迁仓后的GitHub Known Issues，不再阻止本检查点。
 
 > **2026-08-30 Known Issues demotion（用户决定；final census）**：0.1检查点允许compiler继续接受已知有缺陷的外部程序而不新增诊断，只要exact census证明当前compiler/std self-host与迁仓路径不命中。必须保留现有最小复现、已知后果和workaround，B-183导入为GitHub Issue；不得删除证据后声称支持。owning或type-parameter-dependent struct spread已确认compiler/std/examples owning consumer为零，直接后移，保留8处shareable compiler spread；B-170 self-host零命中后移；B-160/B-162不跑独立验收，随唯一self-host/fixed-point交易验证。B-165唯一self-host命中已由`d364853e`局部闭合，一般外部bug后移。
 
@@ -70,6 +70,8 @@ B-186 recovery gate 已由 `main@b29c8711` 与 GitHub Actions `32262726058`（ch
 > **分阶段自举是唯一live route（2026-08-30 用户拍板）**：最终one-shot B1-7已固定为temp `9d3ae037…`/tree `00676c0e…`/patch `948596D6…`/manifest `4958DCF5…`，聚合五文件carrier、Unit修复、8 pure headers、全部适用606拆臂与83/83 publicization后，d06仍在16.071 s以`Core producer: struct registry owner is absent`终止（stderr `06215AEA…`），无infra/resource failure。该结果终止B1-0..7逐项backport；不得再按首错补owner或把不同代证据拼接。120条空direct-edge候选因会向旧injector送入完整`ModuleExports`、可能复现raw-tail owner冲突而由用户明确关闭，未运行、不得恢复。
 
 > Canonical chain改为`d06 -> 524d1d00 checkpoint -> 最少的0fab/18e/606附近checkpoint -> clean-current -> gen2/gen3 literal fixed point -> compiler/hello smoke`。d06以后只有16个compiler-tree transition；按当前seed可接受的最远语义checkpoint跳跃，不逐commit replay。首个524d overlay必须由该tree重算exact84 private physical roots（census `4D2274FD…`）、补8 pure headers与适用606拆臂，且不得提前带入`PhysicalNominalFact` carrier；中间publicization/compatibility只存在temp crossing，最终clean-current保持规范privacy/identity。每个选中native checkpoint按candidate machine/review同启与PASS review gate执行。
+
+> **2026-08-31 0.1 cut纠偏（用户决定，supersede上述live chain）**：语言/IR/runtime特性尚未稳定时把current-tip self-host作为开发前提，已实证产生超过功能修复本身的代际兼容成本。分阶段构建保留的最后成功source-built rung为`5d576f7c`；0.1不再追求`04b3` current-tip自举，而直接以clean 5d57做同源gen2/gen3文本fixed point与compiler/hello smoke。其后提交和所有失败bridge证据完整保留，不rewrite/drop，但不再进入#268/#269关键路径。B-183迁仓后优先建立外部宿主语言compiler基础；只有公开语义、IR和runtime契约稳定后再设新的self-host里程碑。
 
 > **Struct move-spread Known Issue（2026-08-30 用户批准demotion，supersede partial/open-drop gate）**：#268/#269只依赖当前compiler中的8处全shareable spread；它们保持base单次求值、override LTR与现有physical RC语义。Owning或type-parameter-dependent字段需要exact Take时，0.1 compiler仍可接受源码但可能产生leak、double-drop、UAF或错误Drop顺序；不要求新增source diagnostic，也不实现`Live`/`Moved` partial/open-drop、`ReleaseMovedAggregate`、storage reuse或专用shell路径。compiler/std/examples当前owning consumer为零；外部程序应显式destructure并重建全部字段。现有反例与workaround随B-183导入GitHub，不阻塞internal self-host/migration checkpoint，也不得据此宣传owning spread正确。
 
