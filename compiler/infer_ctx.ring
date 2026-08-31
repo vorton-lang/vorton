@@ -4387,6 +4387,9 @@ fn bind_pattern_recovery(mut ctx: InferCtx, pattern: Pattern) {
     match pattern {
         Pattern::Wildcard { .. } => {},
         Pattern::Binding { name, span } => {
+            if name == "_" {
+                panic("typed pattern binding: wildcard crossed as binding")
+            }
             ctx.env.bind_mono(name, Type::ErrorType)
             match ctx.env.lookup(name) {
                 some(scheme) => match scheme.def_id {
@@ -4430,6 +4433,9 @@ pub fn bind_pattern(mut ctx: InferCtx, pattern: Pattern, expected_type: Type, su
     match pattern {
         Pattern::Wildcard { .. } => subst,
         Pattern::Binding { name, span } => {
+            if name == "_" {
+                panic("typed pattern binding: wildcard crossed as binding")
+            }
             ctx.env.bind_mono(name, apply_subst(subst, expected_type))
             match ctx.env.lookup(name) {
                 some(scheme) => match scheme.def_id {
@@ -4612,6 +4618,9 @@ pub fn exact_pattern_plan(
         Pattern::Wildcard { .. } => some(h_pattern_wildcard()),
         Pattern::Literal { .. } => some(h_pattern_literal()),
         Pattern::Binding { name, .. } => {
+            if name == "_" {
+                panic("typed pattern plan: wildcard crossed as binding")
+            }
             let scheme = match ctx.env.lookup(name) {
                 some(value) => value,
                 none => return none

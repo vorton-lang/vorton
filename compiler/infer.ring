@@ -1174,30 +1174,37 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                                     },
                                     _ => ctx.env.fresh_var()
                                 }
-                                ctx.env.bind_mono(dname, elem_t)
-                                let dscheme = ctx.env.lookup(dname)
-                                match dscheme {
-                                    some(ds) => {
-                                        match (ds.def_id, destr.spans.get(di)) {
-                                            (some(did), some(dspan)) => {
-                                                journal_record_def_span(
-                                                    ctx, did, dspan)
-                                                journal_var_lambda_depth_set(
-                                                    ctx, did, ctx.lambda_depth)
-                                            },
-                                            _ => {}
-                                        }
-                                        hd.push(HForInDestructure { name: dname,
-                                            def_id: ds.def_id,
-                                            slot: ds.def_id.map(fn(id) {
-                                                make_source_slot_ref(
-                                                    current_identity_file_key(ctx),
-                                                    slot_domain_lexical(), id) }),
-                                            projection: some(h_tuple_projection(di)) })
-                                    },
-                                    none => { hd.push(HForInDestructure {
+                                if dname == "_" {
+                                    hd.push(HForInDestructure {
                                         name: dname, def_id: none, slot: none,
-                                        projection: some(h_tuple_projection(di)) }) }
+                                        projection: some(h_tuple_projection(di))
+                                    })
+                                } else {
+                                    ctx.env.bind_mono(dname, elem_t)
+                                    let dscheme = ctx.env.lookup(dname)
+                                    match dscheme {
+                                        some(ds) => {
+                                            match (ds.def_id, destr.spans.get(di)) {
+                                                (some(did), some(dspan)) => {
+                                                    journal_record_def_span(
+                                                        ctx, did, dspan)
+                                                    journal_var_lambda_depth_set(
+                                                        ctx, did, ctx.lambda_depth)
+                                                },
+                                                _ => {}
+                                            }
+                                            hd.push(HForInDestructure { name: dname,
+                                                def_id: ds.def_id,
+                                                slot: ds.def_id.map(fn(id) {
+                                                    make_source_slot_ref(
+                                                        current_identity_file_key(ctx),
+                                                        slot_domain_lexical(), id) }),
+                                                projection: some(h_tuple_projection(di)) })
+                                        },
+                                        none => { hd.push(HForInDestructure {
+                                            name: dname, def_id: none, slot: none,
+                                            projection: some(h_tuple_projection(di)) }) }
+                                    }
                                 }
                             },
                             none => {}
@@ -1207,10 +1214,16 @@ pub fn infer_stmt(mut ctx: InferCtx, stmt: Stmt, subst: UnionFind) -> StmtResult
                     hdestructure = some(hd)
                 },
                 none => {
-                    ctx.env.bind_mono(binding, element_type)
+                    if binding != "_" {
+                        ctx.env.bind_mono(binding, element_type)
+                    }
                 }
             }
-            let binding_scheme = ctx.env.lookup(binding)
+            let binding_scheme = if binding == "_" {
+                none
+            } else {
+                ctx.env.lookup(binding)
+            }
             match binding_scheme {
                 some(bs) => match bs.def_id {
                     some(did) => {
@@ -1464,6 +1477,14 @@ fn infer_if_let_from_result(
     }
 }
 
+fn for_binding_pattern(name: Str, span: Span) -> Pattern {
+    if name == "_" {
+        Pattern::Wildcard { span: span }
+    } else {
+        Pattern::Binding { name: name, span: span }
+    }
+}
+
 fn lower_protocol_for_in(
     mut ctx: InferCtx, binding: Str, binding_span: Span,
     destructure: DestructureBinding?, iterable_result: InferResult,
@@ -1533,9 +1554,7 @@ fn lower_protocol_for_in(
             init: iter_call_result.hexpr, span: span
         }
 
-        let mut payload_pattern = Pattern::Binding {
-            name: binding, span: binding_span
-        }
+        let mut payload_pattern = for_binding_pattern(binding, binding_span)
         let mut then_block = body
         match destructure {
             some(destr) => {
@@ -1547,14 +1566,12 @@ fn lower_protocol_for_in(
                 while di < destr.names.len() {
                     match (destr.names.get(di), destr.spans.get(di)) {
                         (some(name), some(name_span)) => {
-                            tuple_patterns.push(Pattern::Binding {
-                                name: name, span: name_span
-                            })
+                            tuple_patterns.push(for_binding_pattern(
+                                name, name_span))
                         },
                         (some(name), none) => {
-                            tuple_patterns.push(Pattern::Binding {
-                                name: name, span: binding_span
-                            })
+                            tuple_patterns.push(for_binding_pattern(
+                                name, binding_span))
                         },
                         _ => {}
                     }

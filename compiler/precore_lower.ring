@@ -489,7 +489,10 @@ fn expand_pattern(
             }
             [ClosedPattern { pattern: pattern, plan: plan }]
         },
-        Pattern::Binding { .. } => {
+        Pattern::Binding { name, .. } => {
+            if name == "_" {
+                panic("PreCore closure: wildcard crossed as binding")
+            }
             if h_pattern_kind(plan) != 1 {
                 panic("PreCore closure: binding pattern plan differs")
             }
@@ -789,8 +792,13 @@ fn close_for_in(
     let counter_name = binder_name("$precore_range_counter", counter_binder)
     let finished_name = binder_name(
         "$precore_range_finished", finished_binder)
-    if source_def_id != some(binder_def_id(binding_binder)) {
-        panic("PreCore closure: for binding DefId/plan differs")
+    let binds_value = binding != "_"
+    if binds_value {
+        if source_def_id != some(binder_def_id(binding_binder)) {
+            panic("PreCore closure: for binding DefId/plan differs")
+        }
+    } else if source_def_id.is_some() {
+        panic("PreCore closure: wildcard for binding has a source DefId")
     }
     if destructure.is_some() {
         panic("PreCore closure: Range item cannot be destructured")
@@ -908,12 +916,13 @@ fn close_for_in(
             effects: EMPTY_ROW, span: span }),
         ty: Type::UnitType, effects: EMPTY_ROW, span: span
     }
-    let prefix: List<HStmt> = [
-        binder_let(
+    let mut prefix: List<HStmt> = []
+    if binds_value {
+        prefix.push(binder_let(
             binding, binding_binder, Type::IntType,
-            binding_init, binding_span),
-        HStmt::ExprStmt { expr: advance, span: span }
-    ]
+            binding_init, binding_span))
+    }
+    prefix.push(HStmt::ExprStmt { expr: advance, span: span })
     let loop_body = prepend_statements(prefix, close_expr(body), span)
     [
         binder_let(

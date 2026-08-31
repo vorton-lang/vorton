@@ -879,6 +879,9 @@ pub fn h_pattern_wildcard() -> HPatternPlan {
     HPatternPlan { value: HPatternPlanValue::WildcardPattern }
 }
 pub fn h_pattern_binding(value: HPatternBinding) -> HPatternPlan {
+    if value.name == "_" {
+        panic("HIR pattern plan: wildcard cannot own binding metadata")
+    }
     HPatternPlan { value: HPatternPlanValue::BindingPattern(value) }
 }
 pub fn h_pattern_literal() -> HPatternPlan {

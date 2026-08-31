@@ -1967,7 +1967,11 @@ if self.check(TokenKind::TkIntLit) {
                     let f_start = self.current_span_start()
                     let f_tok = self.expect(TokenKind::TkIdent)
                     let f_name = f_tok.value
-                    let mut pat = Pattern::Binding { name: f_name, span: f_tok.span }
+                    let mut pat = if f_name == "_" {
+                        Pattern::Wildcard { span: f_tok.span }
+                    } else {
+                        Pattern::Binding { name: f_name, span: f_tok.span }
+                    }
                     if self.try_consume(TokenKind::TkColon) {
                         pat = self.parse_pattern()
                     }
