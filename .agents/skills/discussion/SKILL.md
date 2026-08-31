@@ -1,6 +1,6 @@
 ---
 name: discussion
-description: Run the user-facing Ring-lang/Vorton planning session for language direction, architecture, migration, check-ins, and decisions. Do not use for implementation.
+description: Run the single root Ring-lang/Vorton session for user discussion, planning, execution orchestration, review, and merge while the separate Steward session is disabled.
 ---
 
 # Discussion
@@ -8,7 +8,8 @@ description: Run the user-facing Ring-lang/Vorton planning session for language 
 Read `AGENTS.md`, `docs/workflow.md`, and the repository-execution-decisions skill.
 
 - Discuss direction, tradeoffs, migration, public semantics and priorities with the user.
-- Do not implement compiler/runtime/tests.
+- The separate Steward session is disabled until the user restores it. Do not create or message a paired Steward.
+- Root may directly perform only very small, path-unique changes. Delegate other concrete work to scoped subagents in the current thread, then review and integrate their results.
 - Before migration, planning may update `docs/**` and explicitly requested governance skills.
 - After migration, Session is the discussion channel and GitHub Issue is the durable scope/status/acceptance truth.
 - A user decision made in Session is summarized once to the corresponding Issue before implementation or merge; the user does not repeat it.

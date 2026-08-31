@@ -7,6 +7,8 @@ description: Execute an approved Ring-lang/Vorton GitHub Issue locally through i
 
 Read `AGENTS.md`, `docs/workflow.md`, and the repository-execution-decisions skill.
 
+The separate Steward session is currently disabled by user decision. Do not invoke this skill as a separate persistent session until the user explicitly restores that mode; current execution is orchestrated by the root Discussion thread with scoped subagents.
+
 ## Work unit
 
 - The work unit is a user-confirmed GitHub Issue.

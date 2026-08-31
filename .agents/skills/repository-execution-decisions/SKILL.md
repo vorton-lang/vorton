@@ -64,3 +64,9 @@ description: Apply user-established execution-process decisions inside the Ring-
 - Issue只使用：恰好一个`type:bug|feature|design|maintenance|audit`，恰好一个`priority:p0|p1|p2|p3`，零到多个`area:frontend|types-effects|ir-ownership|backend-runtime|tooling|docs`，以及例外`blocked`。
 - 不创建status、wip、owner、phase、has-pr、passed/failed或手工编号标签；这些由Issue/PR/assignee/milestone/Checks表达。
 - PR不手工复制Issue的type/priority/blocked标签；如需PR area标签，只允许根据changed paths机械生成。
+
+## 当前单session执行模式
+
+- 独立Steward session保持禁用，直到用户明确恢复。不得创建、唤醒或向其传递工作包。
+- 当前root session统一负责用户讨论、Issue规划、执行编排、review、验证、merge和状态汇报，避免跨session摘要失真。
+- 只有非常小、路径唯一的修改由root直接完成；其它具体工作由root在当前thread内委派给subagent。Subagent只处理明确scope并把结果返回root，root负责最终事实对账和用户沟通。

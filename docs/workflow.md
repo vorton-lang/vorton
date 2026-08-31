@@ -12,6 +12,13 @@
 - dc91、5d57、tracked C和历史candidate只作oracle；不再恢复Ring self-host、bridge、SCU、publicization或generated-C路线。
 - #268/#269保持未完成，迁仓后继续。
 
+## 当前Agent模式
+
+- 独立Steward session暂时禁用，不创建、不唤醒、不传包；所有用户沟通和执行控制都留在当前root session。
+- Root统一负责规划、Issue/PR编排、review、验证、merge和状态汇报。
+- 非常小且路径唯一的修改可由root直接完成；其它具体工作必须拆成明确scope交给当前thread的subagent，subagent结果回root统一对账。
+- 只有root向用户沟通、修改GitHub状态或形成最终claim；subagent不建立平行真值。
+
 ## 唯一工作链
 
 迁仓后：
