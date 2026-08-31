@@ -5226,7 +5226,7 @@ fn validate_projection_contract(
 fn validate_typed_instructions(
     bodies: List<FlowBody>, callables: List<FlowCallable>,
     type_nodes: List<FlowTypeNode>
-) {
+) with {mut<List<CoreTypeRef>>} {
     for body in bodies {
         for block in body.blocks {
             for instruction in block.instructions {
