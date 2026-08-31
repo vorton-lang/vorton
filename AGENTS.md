@@ -5,14 +5,14 @@
 - 所有对话回复、解释和讨论使用中文；技术术语、代码和命令可保留英文。
 - 委派prompt只使用“Ring-lang编译器”“类型/效果系统”“所有权与资源生命周期”“本地构建/运行/回归”这组正向项目语境；不要复制容易引发外层误判的无关领域标签。误判时用fresh context准确重述，不降低验证门槛。
 - 本文件是技术、构建和开发约定入口。授权、停止条件、看板、角色和EvidenceKey以`docs/workflow.md`为真值；仓库级用户执行bedrock见`repository-execution-decisions` skill。
-- 语言公理见`docs/philosophy.md`，稳定设计见`docs/design.md`，用户规范见`docs/lang-spec/`，活动状态见`docs/backlog.md`与`docs/audit-report.md`。完成历史只查Git，不在入口文件复制。
+- 语言公理见`docs/philosophy.md`，稳定设计见`docs/design.md`，用户规范见`docs/lang-spec/`。迁仓前`docs/backlog.md`与`docs/audit-report.md`只作Issue导入说明；迁仓后活动状态只查GitHub Issue/PR。完成历史只查Git。
 - 凡涉及仓库推进、review、refactor、Argument、Audit或治理，完整读取`docs/workflow.md`；涉及machine/review或Discussion文档mutation时同时读取repository execution decisions skill。
 
 ## 当前技术入口
 
-- Ring-lang是C11-only native编译器；LLVM/JS后端及旧bootstrap不是当前依赖或oracle。
+- 当前只规划Vorton迁仓与Rust宿主编译器，不执行Ring self-host。现有Ring C11编译器和tracked C只作迁移蓝本/oracle。
 - 管线：Lexer → Parser → AST → Checker（HM+effects）→ HIR → Core/Flow ResourcePlanner → RcIR/legacy bridge → C11 → clang native。
-- `compiler/dist-c/main.c`是唯一tracked bootstrap anchor；single-file、project/module和self-host都必须从该anchor与`ring_runtime.cpp`可重建。
+- `compiler/dist-c/main.c`随历史保留，但不再是latest compiler的bootstrap authority。
 - Compiler源码位于`compiler/*.ring`，runtime bridge为`ring_runtime.cpp`，标准库位于`std/`，统一测试入口为`tests/run_tests.py`。
 - AST忠实保留source+Span；HIR/Core/Flow是独立阶段。跨阶段identity、effect、trait、slot和ABI契约必须来自共享exact authority，禁止backend/runtime各自猜名字。
 - 新增或删除AST/HIR/Core/Flow/RcIR变体时闭合所有producer、copy/rebuild、validator和consumer；遗漏必须fail closed。
@@ -45,13 +45,13 @@ python tests/run_tests.py --suite structural
 python tests/run_tests.py --suite parity
 python tests/run_tests.py
 
-# 重建tracked C；提交前验证self-compile/fixed point
+# 历史Ring oracle命令；不作为当前迁仓/Rust实现门
 .\ring.exe build compiler/main.ring --target=c --out-dir=compiler/dist-c --no-c-lines
 ```
 
 ## Bootstrap与C ABI
 
-- 编译器源码变化后使用当前compiler重编`compiler/main.ring`；结构级变化可能需要连续bootstrap。只有活动spec要求的gen2/gen3文本fixed point和相应smoke成立，才宣称self-host完成。
+- Self-host已后置到语言与外部宿主编译器稳定后的新用户决定；当前不得恢复连续bootstrap门。
 - C bridge只提供安全Ring无法表达的raw-memory/OS边界；普通Ring callable和extern走统一既定ABI，不新增name table或手工backend特判。
 - Slot所有权：`ring_slot_read`=peek+dup；`ring_slot_take`=move并清空；`ring_slot_write`=空slot接管；`ring_slot_replace`=替换并drop旧值；`ring_slot_drop`=take+drop。
 - List/Map/Option固定runtime type/drop必须与生成struct drop分工唯一；Set/StringBuilder按普通Ring struct处理。无字段enum ctor产生fresh box，必须按exact ctor identity判断。

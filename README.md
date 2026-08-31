@@ -82,6 +82,5 @@ python tests/run_tests.py --suite parity      # 静态证据矩阵
 - [语言规范](docs/lang-spec/README.md)：当前已实现的公开语法与语义
 - [设计哲学](docs/philosophy.md)：九条公理与仲裁层级
 - [编译器与 runtime 设计](docs/design.md)：实现架构和不变量
-- [长期语言设计](docs/lang-design.md)：尚未全部落地的语言面方向
 - [竞品与行业定位](docs/competitive-analysis.md)：有事实截止日期的比较基线
-- [开发约定](CLAUDE.md)：工具链、bootstrap、测试与仓库工作流
+- [开发约定](AGENTS.md)：工具链与仓库入口；当前工作流见[`docs/workflow.md`](docs/workflow.md)

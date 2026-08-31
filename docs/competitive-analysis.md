@@ -122,7 +122,7 @@ stars 和发布频率只辅助判断后两项，不直接证明产品质量。
 | **Verus** | 2026-08 稳定/rolling release 持续 | Rust 子集、spec/proof/exec、ghost erasure、SMT、权限模型 | CryptoProver、Vero 等 repo/cross-file proof 研究继续推进 | G3 | 形式化验证首要参照，非应用语言直接替代 |
 | **Roc** | 仍明确未 ready for 0.1 | 低标注函数式应用语言、platform-controlled I/O、ARC + opportunistic reuse | 提供 experimental AI-friendly docs | G1 目标 | 应用/ARC/platform capability 机制近邻，产品成熟度有限 |
 | **Flux** | 活跃研究工具；稳定发布/生产采用未知 | Rust refinement checker，以逻辑谓词验证值级性质 | 非主要目标 | G2 | B-001 的直接工程参照，非应用语言竞品 |
-| **Rue** | 2026-08-21 field report：820/823 traced rules、2,375 spec tests；仍 early-stage | affine ownership、native、自研 IR、spec/test/fuzz/sanitizer | 主要由 Claude 协助构建 | G1 目标，仍实验性 | 一人+agent 工程基准 |
+| **Rue** | 2026-08-21 field report：820/823 traced rules、2,375 spec tests；仍 early-stage | affine ownership、native、自研 IR、spec/test/fuzz/sanitizer | 主要由LLM协助构建 | G1 目标，仍实验性 | 一人+agent 工程基准 |
 | **Mog** | 官方最新提交仍为 2026-03-09 | 3,200-token spec、host capabilities、native | 为 agent 使用而压缩规范 | G0–G1 | 小型规格/嵌入式启发 |
 
 ---
@@ -443,7 +443,7 @@ Ring 的合理响应是双层：
 
 ### 9.1 Rue：持续活跃的 agent 编译器工程基准
 
-Rue 是 Steve Klabnik 主导、Claude 深度协作的实验性系统语言。2026-08-21 官方 field report 的状态包括：
+Rue 是 Steve Klabnik 主导、LLM深度协作的实验性系统语言。2026-08-21 官方field report的状态包括：
 
 - 820/823 个规范规则可追踪；
 - 2,375 个 spec test cases；

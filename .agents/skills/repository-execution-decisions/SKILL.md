@@ -44,3 +44,9 @@ description: Apply user-established execution-process decisions inside the Ring-
 - 唯一状态链为`Issue #N → 一个active PR → PR head branch`。PR正文写`Closes #N`，merge后由GitHub自动关闭Issue；大任务先拆成多个Issue，不给一个Issue并行多个实现PR。
 - Worktree只是本机可选checkout方式，不是任务、状态、authority或handoff真值，不进入用户治理模型。
 - Session用于讨论；Issue保存scope/status/acceptance。用户在Session拍板后只同步一条Issue摘要，用户无需重复。
+
+## 文档禁止写日记
+
+- 每当想把日期化进展、实验过程、失败流水、命令记录、阶段总结或“以后回来更新”的说明写进长期文档时，立即把它视为危险信号并停止。
+- 长期文档只写当前仍有效的设计、规则、scope和acceptance。过程进入Git commit、Issue或PR；完成历史只查Git。
+- 不创建需要未来人工回头修订的状态段落。真值变化时直接改成新真值，不在正文叠加supersede日记。

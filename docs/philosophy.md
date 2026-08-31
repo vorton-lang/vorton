@@ -75,7 +75,7 @@ Bidirectional + constraint solving + effect inference。写代码的体验接近
 
 ### 5. 编译器必须终止（层 1 · 硬约束）
 
-类型检查与推断必须可判定——每个高级特性限制在可判定片段内，超出片段 = 编译错误（要求标注或 runtime check 兜底），不允许编译器不终止或耗时不可预期。为此放弃的特性及替代方案见 lang-design.md §11.7（函数重载/真 union 子类型/rank-2+/specialization 等八项）。这是「编译器是最终权威」的前置条件：编译器卡死 = 裁判失职，无论人类还是 agent。对比：Rust trait solver 图灵完备（可能不终止），Ring 当前系统全部可判定。
+类型检查与推断必须可判定——每个高级特性限制在可判定片段内，超出片段 = 编译错误（要求标注或runtime check兜底），不允许编译器不终止或耗时不可预期。这是「编译器是最终权威」的前置条件：编译器卡死 = 裁判失职，无论人类还是agent。
 
 做实条款（2026-06-12 D-5）：① 「耗时可预期」不靠运气——HM 最坏指数级（let-多态可构造爆炸案例），推断须有 fuel/深度上限、超限 = 编译错误带标注兜底，不默许「实践中遇不到」（B-119）；② refinement（B-001）的 SMT 查询限于**具名可判定片段**（QF_LIA 类），超出片段 = 编译错误要求 runtime check——timeout 即「耗时不可预期」by construction（已入 B-001 spec）；③ 「当前系统全部可判定」对 trait instance resolution 尚未证明（`impl Foo for T where Bar<T>: Foo` 类可致 solver 无界递归；Haskell 靠 Paterson 条件，Rust 靠 recursion limit），待审计（B-119）。
 
