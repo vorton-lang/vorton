@@ -1763,9 +1763,13 @@ fn validate_hir_expr(
         },
         HExpr::MatchExpr { scrutinee, arms, .. } => {
             validate_hir_expr(scrutinee, seen, scope)
+            let mut arm_union: Set<Int> = set_from(seen.to_list())
             for arm in arms {
-                validate_hir_arm(arm, seen, scope, "match arm")
+                let arm_seen: Set<Int> = set_from(seen.to_list())
+                validate_hir_arm(arm, arm_seen, scope, "match arm")
+                for id in arm_seen { arm_union.insert(id) }
             }
+            for id in arm_union { seen.insert(id) }
         },
         HExpr::Block { stmts, tail, .. } => {
             push_hir_validation_scope(scope)
@@ -1806,9 +1810,13 @@ fn validate_hir_expr(
         },
         HExpr::TryCatch { body, arms, .. } => {
             validate_hir_expr(body, seen, scope)
+            let mut arm_union: Set<Int> = set_from(seen.to_list())
             for arm in arms {
-                validate_hir_arm(arm, seen, scope, "catch arm")
+                let arm_seen: Set<Int> = set_from(seen.to_list())
+                validate_hir_arm(arm, arm_seen, scope, "catch arm")
+                for id in arm_seen { arm_union.insert(id) }
             }
+            for id in arm_union { seen.insert(id) }
         },
         HExpr::HandleExpr { body, handlers, effect_ctx_install, .. } => {
             validate_hir_expr(body, seen, scope)
