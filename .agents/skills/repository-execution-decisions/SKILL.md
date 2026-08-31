@@ -15,6 +15,14 @@ description: Apply user-established execution-process decisions inside the Ring-
 - Machine PASS保持quarantine直到Review CLEAR；Review BLOCK时PASS无效并丢弃，不得以已消耗机器时间为理由复用。
 - 该规则只改变launch ordering，不放宽EvidenceKey、资源、安全、命令、postcondition、no-retry或root复核门。
 
+## 未知时长任务不得使用预测式kill wall
+
+- Point estimate、历史相似任务耗时和人工检查点只用于排程、观测与状态汇报，不得直接变成进程终止条件。
+- 对尚无可靠实测上界的construction、bootstrap crossing、fixed-point或长门，不得拍脑袋设置30/60/90分钟等任意wall并在到时杀进程。
+- Harness若技术上必须提供有限`wall_seconds`，只能使用用户明确给出的整体deadline或当前目标剩余窗口；没有这类deadline时应使用不构成实际约束的充分大值。
+- Memory、输出、明确的安全资源门保持独立有效；不得因取消预测式wall而放宽这些门。
+- 已确认live的任务不得仅为调整wall而中断。若既有错误wall已造成纯超时，必须保存terminal receipt，并以相同fixed输入、全新输出和非预测式deadline重新执行；不得拼接半产物。
+
 ## Discussion纯文档修改默认无需lease
 
 - Discussion的变更若严格限于`docs/**`，默认可直接在main修改并正常commit，无需事前query Steward或申请main mutation lease。
