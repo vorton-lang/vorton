@@ -352,7 +352,7 @@ fn project_expr(
 
 fn expand_pattern_sequence(
     patterns: List<Pattern>, plans: List<HPatternPlan>
-) -> List<ClosedPatternSequence> {
+) -> List<ClosedPatternSequence> with {} {
     if patterns.len() != plans.len() {
         panic("PreCore closure: pattern child/plan census differs")
     }
@@ -405,7 +405,9 @@ fn projected_plan(
     }
 }
 
-fn expand_pattern(pattern: Pattern, plan: HPatternPlan) -> List<ClosedPattern> {
+fn expand_pattern(
+    pattern: Pattern, plan: HPatternPlan
+) -> List<ClosedPattern> with {} {
     match pattern {
         Pattern::OrPattern { patterns, .. } => {
             if h_pattern_kind(plan) != 6 {
@@ -503,7 +505,9 @@ fn expand_pattern(pattern: Pattern, plan: HPatternPlan) -> List<ClosedPattern> {
     }
 }
 
-fn closed_pattern_bindings(plan: HPatternPlan) -> List<HPatternBinding> {
+fn closed_pattern_bindings(
+    plan: HPatternPlan
+) -> List<HPatternBinding> with {} {
     match h_pattern_kind(plan) {
         0 | 2 => [],
         1 => [h_pattern_plan_binding(plan)],
@@ -530,7 +534,7 @@ fn closed_pattern_bindings(plan: HPatternPlan) -> List<HPatternBinding> {
     }
 }
 
-fn close_arms(values: List<HMatchArm>) -> List<HMatchArm> {
+fn close_arms(values: List<HMatchArm>) -> List<HMatchArm> with {} {
     let mut result: List<HMatchArm> = []
     for arm in values {
         let plan = match arm.pattern_plan {
@@ -553,7 +557,7 @@ fn close_arms(values: List<HMatchArm>) -> List<HMatchArm> {
 fn close_string_interp(
     parts: List<HStringInterpPart>, plan: HStringInterpPlan,
     ty: Type, effects: EffectRow, span: Span
-) -> HExpr {
+) -> HExpr with {} {
     let builder_binder = h_string_interp_builder_binder(plan)
     let append_literal = h_string_interp_append_literal(plan)
     let append_value = h_string_interp_append_value(plan)
@@ -623,7 +627,7 @@ fn close_string_interp(
 fn close_list_literal(
     elements: List<HExpr>, plan: HListLiteralPlan,
     ty: Type, effects: EffectRow, span: Span
-) -> HExpr {
+) -> HExpr with {} {
     let element_type = match ty {
         Type::StructType { type_params, .. } => match type_params.get(0) {
             some(value) => value,
@@ -713,7 +717,7 @@ fn close_index(
     receiver: HExpr, index: HExpr,
     call_plan: HExactCallPlan?, projection: HProjectionRef?,
     ty: Type, effects: EffectRow, span: Span
-) -> HExpr {
+) -> HExpr with {} {
     let closed_receiver = close_expr(receiver)
     let closed_index = close_expr(index)
     match (call_plan, projection) {
@@ -733,7 +737,7 @@ fn unit_expr(span: Span) -> HExpr {
     }
 }
 
-fn close_control_branch(value: HExpr) -> HExpr {
+fn close_control_branch(value: HExpr) -> HExpr with {} {
     match close_expr(value) {
         HExpr::Block { stmts, tail, effects, span, .. } => {
             let mut statements = stmts
@@ -776,7 +780,7 @@ fn close_for_in(
     binding: Str, binding_span: Span, source_def_id: Int?,
     destructure: List<HForInDestructure>?, plan: HForInPlan,
     iterable: HExpr, body: HExpr, span: Span
-) -> List<HStmt> {
+) -> List<HStmt> with {} {
     let binding_binder = h_for_in_binding_binder(plan)
     let range_binder = h_range_for_in_range_binder(plan)
     let counter_binder = h_range_for_in_counter_binder(plan)
@@ -925,20 +929,20 @@ fn close_for_in(
     ]
 }
 
-fn close_expr_list(values: List<HExpr>) -> List<HExpr> {
+fn close_expr_list(values: List<HExpr>) -> List<HExpr> with {} {
     let mut result: List<HExpr> = []
     for value in values { result.push(close_expr(value)) }
     result
 }
 
-fn close_optional_expr(value: HExpr?) -> HExpr? {
+fn close_optional_expr(value: HExpr?) -> HExpr? with {} {
     match value {
         some(item) => some(close_expr(item)),
         none => none
     }
 }
 
-fn close_decl_list(values: List<HDecl>) -> List<HDecl> {
+fn close_decl_list(values: List<HDecl>) -> List<HDecl> with {} {
     let mut result: List<HDecl> = []
     for value in values { result.push(close_decl(value)) }
     result
@@ -1028,7 +1032,7 @@ fn close_dict_construct(
     }
 }
 
-fn close_stmt(value: HStmt) -> List<HStmt> {
+fn close_stmt(value: HStmt) -> List<HStmt> with {} {
     match value {
         HStmt::Let { name, name_span, def_id, ty, init, span } => {
             let closed_init = match init {
@@ -1159,7 +1163,7 @@ fn close_stmt(value: HStmt) -> List<HStmt> {
     }
 }
 
-fn close_block_statements(values: List<HStmt>) -> List<HStmt> {
+fn close_block_statements(values: List<HStmt>) -> List<HStmt> with {} {
     let mut result: List<HStmt> = []
     for value in values {
         for lowered in close_stmt(value) { result.push(lowered) }
@@ -1167,7 +1171,7 @@ fn close_block_statements(values: List<HStmt>) -> List<HStmt> {
     result
 }
 
-fn close_captures(values: List<HLambdaCapture>) -> List<HLambdaCapture> {
+fn close_captures(values: List<HLambdaCapture>) -> List<HLambdaCapture> with {} {
     let mut result: List<HLambdaCapture> = []
     for capture in values {
         result.push(HLambdaCapture {
@@ -1180,7 +1184,7 @@ fn close_captures(values: List<HLambdaCapture>) -> List<HLambdaCapture> {
     result
 }
 
-fn close_handlers(values: List<HEffectHandler>) -> List<HEffectHandler> {
+fn close_handlers(values: List<HEffectHandler>) -> List<HEffectHandler> with {} {
     let mut result: List<HEffectHandler> = []
     for handler in values {
         match (handler.handled_instance, handler.operation_ref,
@@ -1225,7 +1229,7 @@ fn close_handle_expr(
     body: HExpr, handlers: List<HEffectHandler>,
     effect_ctx_install: TypedEffectCtxInstall?,
     ty: Type, effects: EffectRow, span: Span
-) -> HExpr {
+) -> HExpr with {} {
     HExpr::HandleExpr {
         body: close_expr(body), handlers: close_handlers(handlers),
         effect_ctx_install: effect_ctx_install,
@@ -1233,7 +1237,7 @@ fn close_handle_expr(
     }
 }
 
-fn close_assignment_target(value: HExpr) -> HExpr {
+fn close_assignment_target(value: HExpr) -> HExpr with {} {
     match value {
         HExpr::Ident { .. } => close_expr(value),
         HExpr::FieldAccess {
@@ -1255,7 +1259,7 @@ fn close_assignment_target(value: HExpr) -> HExpr {
     }
 }
 
-fn close_expr(value: HExpr) -> HExpr {
+fn close_expr(value: HExpr) -> HExpr with {} {
     match value {
         HExpr::IntLit { value, ty, effects, span } =>
             HExpr::IntLit { value: value, ty: ty, effects: effects, span: span },
@@ -1577,7 +1581,7 @@ fn close_expr(value: HExpr) -> HExpr {
     }
 }
 
-fn close_decl(value: HDecl) -> HDecl {
+fn close_decl(value: HDecl) -> HDecl with {} {
     match value {
         HDecl::Fn {
             name, def_id, executable_ref, impl_method_ref,

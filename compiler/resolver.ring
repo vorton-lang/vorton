@@ -226,7 +226,7 @@ fn direct_declaration_site(decl: Decl) -> DirectDeclarationSite? {
 
 fn first_duplicate_direct_declaration_in_scope(
     decls: List<Decl>
-) -> DuplicateDirectDeclaration? {
+) -> DuplicateDirectDeclaration? with {} {
     // The census is deliberately fresh for every direct declaration list:
     // same-leaf declarations under different parents are independent.
     let mut seen: Map<Str, DirectDeclarationSite> = map_new()
@@ -281,7 +281,7 @@ fn is_reserved_0_1_type_name(name: Str) -> Bool {
 
 fn first_reserved_type_declaration_in_scope(
     decls: List<Decl>
-) -> ReservedTypeDeclaration? {
+) -> ReservedTypeDeclaration? with {} {
     for decl in decls {
         match decl {
             Decl::Struct { name, span, .. } => if
@@ -730,7 +730,7 @@ fn collect_inline_frame_headers(
     parent_is_public: Bool,
     decls: List<Decl>,
     mut frames: List<ModuleFramePlan>
-) {
+) with {mut<List<ModuleFramePlan>>} {
     for decl_index in 0..decls.len() {
         match decls.get(decl_index) {
             some(decl) => match decl {
@@ -1656,7 +1656,18 @@ fn collect_frame_contents(
     mut imports: List<ImportObligation>,
     mut physical_dependencies: List<PhysicalDependencyObligation>,
     mut issues: List<ImportIssue>
-) {
+) with {
+    mut<List<NamespaceSeed>>,
+    mut<List<EnumVariantFactGroup>>,
+    mut<List<StructIdentityFact>>,
+    mut<List<TraitIdentityFact>>,
+    mut<List<EffectIdentityFact>>,
+    mut<List<SourceImplProviderFact>>,
+    mut<List<NominalDerivedProviderPlanFact>>,
+    mut<List<ImportObligation>>,
+    mut<List<PhysicalDependencyObligation>>,
+    mut<List<ImportIssue>>
+} {
     for use_index in 0..uses.len() {
         match uses.get(use_index) {
             some(use_decl) => {
@@ -2933,7 +2944,7 @@ fn static_value_winner_index(
 fn compare_value_structural_producers(
     left: ValueStructuralProducer,
     right: ValueStructuralProducer
-) -> Int {
+) -> Int with {} {
     if left.occurrence.site.file_key <
        right.occurrence.site.file_key { return -1 }
     if left.occurrence.site.file_key >
@@ -4755,7 +4766,10 @@ fn import_scc_connect(
     mut indices: Map<Str, Int>,
     mut lowlinks: Map<Str, Int>,
     mut result: List<List<Str>>
-) {
+) with {
+    mut<List<Int>>, mut<List<Str>>, mut<Set<Str>>,
+    mut<Map<Str, Int>>, mut<List<List<Str>>>
+} {
     let node_index = index_counter[0]
     index_counter.set(0, node_index + 1)
     indices.insert(node, node_index)
