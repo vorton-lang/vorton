@@ -30,3 +30,17 @@ description: Apply user-established execution-process decisions inside the Ring-
 - 完成验证与commit后通知Steward exact SHA和scope，由Steward正常吸收；通知是事后交接，不是事前批准。
 - 同一连续处理窗口内连续到来的多个docs修改请求应合并处理，只在最终batch完成后向Steward发送一次合并通知，不逐请求query或通知。
 - 本例外不授权push、GitHub/外部状态、history rewrite或其他非文档mutation。
+
+## 单人项目：security默认禁入
+
+- 本仓库当前是单人项目。不得主动建设或规划GitHub App、token broker、webhook服务、权限矩阵、CODEOWNERS、安全ruleset、签名、供应链扫描、sandbox、untrusted-fork执行模型或其它security/hardening基础设施。
+- 任何以security、权限隔离、威胁模型、最小权限、secret管理或攻击面为理由的新增工作，必须先两次反问：是否存在当前可复现问题或用户明确需求；不做是否会阻塞当前真实consumer。任一回答无证据即默认拒绝，不立项、不预留hook、不扩大治理。
+- 本机仍是agent主要执行面；GitHub初期只使用用户现有的`git`/`gh`身份完成已批准操作，不创建额外机器身份或常驻服务。
+- 不得把compiler crash、错误诊断、wrong-code、UB、数据损坏或ownership/RC错误改称security问题来绕过本禁令；这些继续按普通correctness处理。
+
+## 迁仓后的唯一工作链
+
+- GitHub Issue取代`docs/backlog.md`/`docs/audit-report.md`作为活动任务真值；迁仓后新任务只使用Issue编号，不再分配B/A/D编号。旧编号仅保存在导入Issue正文中供历史检索。
+- 唯一状态链为`Issue #N → 一个active PR → PR head branch`。PR正文写`Closes #N`，merge后由GitHub自动关闭Issue；大任务先拆成多个Issue，不给一个Issue并行多个实现PR。
+- Worktree只是本机可选checkout方式，不是任务、状态、authority或handoff真值，不进入用户治理模型。
+- Session用于讨论；Issue保存scope/status/acceptance。用户在Session拍板后只同步一条Issue摘要，用户无需重复。

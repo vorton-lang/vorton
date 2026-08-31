@@ -126,11 +126,9 @@ B-176/B-180不得绕过B-183+B-205的迁仓、selected-host workspace与translat
 
 > **2026-08-31 用户决定，最高优先级**：语言surface、类型/效果系统、Core/Flow ownership IR与runtime尚未稳定时，不再要求旧Ring compiler理解current source。B-205与Vorton迁移作为同一个最高优先级program直接在目标仓库启动：实现蓝本固定为`04b3ba53`的`compiler/std/ring_runtime.cpp/tests`，治理真值取本规划commit后的main，完整Git历史与两ref均迁移；dc91 tracked C fixed point、5d57 source-built artifact及其他历史candidate只作限定oracle，不作为实现基线或self-host门。#268/#269保持未完成并迁入新仓，在外部宿主compiler上继续。
 
-**宿主语言 / 翻译原则**：首选候选为Rust，但不在spike前永久锁定。初始结构映射上，Ring的`struct/enum/match/fn/impl`、`Option/Result`、泛型与`List/Map/Set`可分别对应Rust ADT、pattern match、function/impl、`Option/Result`、`Vec/IndexMap/IndexSet`；TypeScript需要tagged-union/switch，C++通常需要variant/visitor。Rust同时提供native性能、内存安全、Cargo增量构建/测试/profiling和成熟Windows/Linux工具链。参考TypeScript compiler的原则是“compiler实现使用成熟宿主生态、源码module与compiler stage保持直接映射、先机械保真再重构”，不是预设必须使用TypeScript。
+**宿主语言 / 翻译原则**：直接选择Rust，不做预先的多语言竞赛。Ring的`struct/enum/match/fn/impl`、`Option/Result`、泛型与容器算法按文件和函数尽量一对一翻译；参考TypeScript compiler的原则是使用成熟宿主生态、保持源码module与compiler stage直接映射、先机械保真再重构。只有实际翻译遇到明确且无法局部解决的Rust结构性阻塞时才回用户讨论，不提前设计TypeScript/C++ fallback。
 
-**选型硬门**：对同一三个固定切片分别统计source declaration/function总数、能保持一对一module/type/function映射的数量、host-only adapter LOC、因borrow/GC/object model而重排的函数数、check/build wall和peak RSS。Rust只有在一对一映射覆盖率`>=80%`、需要控制流/数据结构重写的函数`<=20%`，且非机械差异可集中在`host_support`/arena边界时锁定；否则用完全相同的fixtures、统计脚本与验收比较TypeScript和C++，按“映射保真优先，其次开发反馈，再其次runtime性能”一次裁决。任何候选要求双IR、双resolver、旧compiler RPC或按模块混合宿主即淘汰。
-
-**Phase 0 — 固定蓝本与1:1 spike**：B-183迁仓manifest分别固定04b3实现ref和main治理ref的SHA/tree、每个compiler/std/runtime/test/spec文件hash、公开surface清单、pipeline/IR variant census、diagnostic codes与Known Issues。先在目标仓库翻译三个代表性切片：`lexer+parser+AST`、`types+env+unify`、`TypedHIR→Core`。记录原/宿主LOC、非机械改写点、clone/arena/interior-mutation适配、compile/check wall与peak RSS；宿主锁定严格只由上一段`>=80%`/`<=20%`硬门和同样本Rust/TypeScript/C++比较决定，不在本段建立第二selection authority。不得做Ring→host通用transpiler、混合调用旧compiler、双parser/checker authority或边迁边重设计公开语义。
+**Phase 0 — 固定蓝本与最小纵切**：B-183迁仓manifest固定合并后唯一main的SHA/tree与每个compiler/std/runtime/test/spec文件hash。获得后续实施授权后，第一步只翻译一个`source → token → AST → diagnostic`纵切，用现有fixture证明路径可工作；不先翻译三套大切片，不写通用Ring→Rust transpiler，不混合调用旧compiler，也不同时维护双parser/checker。
 
 **Phase 1 — compiler纵切**：按`Lexer/Parser → AST/diagnostics → resolver/modules → type/effect checker → TypedHIR/CoreHIR → FlowIR/ResourcePlanner/RcIR/certificate → C11 backend`移植；初期继续复用现有`ring_runtime.cpp`与C ABI。建立internal `host_support`层只映射确定容器、字符串/intern、Span、arena和稳定迭代顺序，不模拟Ring ownership/effect runtime，也不把host语言的内存模型当Ring语义。每个Ring源文件与selected-host module保留可追踪映射；先达到行为parity，再以独立commit做host-native重构。
 
@@ -678,25 +676,25 @@ compiler内部、每进程初始化/重复parse-check、runner/C-toolchain调度
 
 ### B-183 Vorton 仓库身份与 GitHub 工作流原子迁移 [infra] [P0] [XL] [judgment] [queued] [with: B-205] [before: B-176+B-180+#268+#269+B-174+B-177+B-175]
 
-> **2026-08-31 用户方向（supersede等待self-host顺序）**：立即把latest蓝本、完整历史/WIP与治理迁入`vorton-lang`，并在目标仓库与B-205一起建立外部宿主compiler；#268/#269、B-176/B-180与Known Issues在新仓继续，不再等待任何Ring self-host checkpoint。进入本项时仍必须先展开执行规范和外部变更清单，再由用户批准transfer、凭据/App、组织权限与批量导入等具体动作；本顺序变化本身不授权任何仓库外写入。
+> **2026-09-01 用户方向（单人项目治理减法）**：立即把latest蓝本、完整历史/WIP与治理迁入`vorton-lang`，并在目标仓库与B-205一起建立外部宿主compiler；#268/#269、B-176/B-180与Known Issues在新仓继续。迁仓前只规划最小可执行流程；transfer/rename等外部动作仍须用户随后明确批准。
 
-**范围 / 文件与外部面**：GitHub organization/repository settings、`.github/` Issue/PR 模板与 ruleset、`docs/workflow.md`、`docs/backlog.md`、`docs/audit-report.md`、`.agents/` / `.claude/` provider adapter 与验证器、Git notes audit ledger、repo-wide public identity/CLI/source extension/editor package/cache path、`.gitattributes`、tracked bootstrap、README/规范/测试/CI。
+**范围 / 文件与外部面**：authority正常merge回main、GitHub transfer+rename、最小Issue/PR模板、现有CI适配、活动backlog/audit导入、`docs/workflow.md`与provider adapter、repo-wide public identity/CLI/source extension/editor package/cache path、README/规范/测试。
 
 **已固定边界**：
 
 1. 核心仓库目标为 `vorton-lang/vorton`；使用 GitHub transfer + rename，保留完整 commit/tag/ref provenance，不新建空仓导入、不 squash 或重写历史，也不得复用旧 `YYF233333/Ring-lang` slug 破坏重定向。
 2. `compiler/dist-c/main.c`继续随完整历史迁移、不拆仓、不转Git LFS，以`linguist-generated`排除语言统计并默认折叠diff；它是dc91旧功能oracle，不再是latest compiler的bootstrap authority。B-205选型硬门产出的selected-host compiler及lockfile成为clean-clone可构建入口，其他生成C仍不入库或只作test/release artifact。
 3. 公共身份按未发布期 clean break 原子改为 Vorton，不建立 Ring alias/双 CLI/双 ABI；`.v` 因与 V、Verilog、Rocq Prover 冲突而排除，最终源码扩展名及 CLI/package/editor namespace 在本项 planning 固定。
-4. GitHub 成为活动工作与用户决策的异步入口，稳定设计/治理结论仍落仓库；Issue 与旧 Markdown 看板不得长期并存为两份手工真值。初期使用当前人类账号下限定到 Vorton 仓库的最小权限凭据，长期无人值守身份优先组织拥有的 GitHub App，machine user 只作工具能力不足时的 fallback；bot/App 不取得 organization owner。
+4. GitHub Issue成为活动scope/status/acceptance的持久真值，session继续承担讨论；用户在session拍板后由Discussion向Issue同步一条摘要，用户无需重复。单人项目直接使用现有用户`git`/`gh`身份，不建设GitHub App、broker、webhook、machine user、权限矩阵或security基础设施。
 
 **planning 必须先产出的执行规范**：
 
-- 固定 cutover snapshot，盘点并处置全部 worktree/local branch、未推送 main、tag、自定义 ref 与 `refs/notes/*`；生成可恢复 backup/bundle、迁移 manifest 和逐项 rollback/stop 条件。
-- 定义 B/A/D 到 Issue 的 title/body/label/state/dependency 映射、幂等 marker、两阶段建链、dry-run、断点续传、数量/内容校验，以及 cutover 后 Markdown 看板的归档或生成视图方案；完成历史不批量制造 Issue。
-- 定义 Steward 的 GitHub 读写授权矩阵、同账号署名/机器标记、用户保留决定门、Issue/PR 生命周期、merge 策略、review/CI/thread gate、回访频率、离线补扫和未来 webhook 切换；不读取或改变用户个人 notification read-state。
-- 把repo transfer、公共标识clean break、B-205 selected-host workspace/spike、workflow/ruleset/template上线和活动账本导入排成一个有界维护窗口；任何需要组织管理、凭据、App安装或公开状态变化的步骤在执行前逐项取得用户批准。
+- 隔离rehearsal后用normal merge commit把authority合回main；不squash/rebase/rewrite。生成全部refs/notes/tags的bundle与一份迁移manifest。
+- 活动B/A/D各生成一个Issue：保留标题、现状、验收、依赖与原ID；closed历史不导入。导入后新工作只使用Issue编号，旧编号仅供搜索；核对Issue总数与依赖后冻结`docs/backlog.md`/`docs/audit-report.md`。
+- Session只负责讨论；Issue保存scope/status/acceptance，唯一实现链为`Issue #N → 一个active PR → PR head branch`。PR正文写`Closes #N`，merge自动关Issue；本地worktree只是可选checkout。session决定在开始实现或merge前同步一次，冲突时直接问用户。
+- 用户批准后执行transfer+rename，更新remote、公共标识、最小Issue/PR模板和CI；随后另行批准才开始B-205 spike。
 
-**验收**：迁移前manifest能从备份恢复全部durable ref/notes，main与远端exact SHA、活动工作处置和CI状态可复核；迁移后`vorton-lang/vorton`保留完整ancestry/tag/notes与旧URL/Git重定向，仓内公共标识、最终扩展名、CLI/editor/runtime/test/文档一次切换且无遗留alias；clean clone可用selected-host固定toolchain/lockfile构建B-205 workspace并运行translation spike/parity CI，旧tracked C oracle仍可独立构建但不要求current self-compile；Issue/PR schema、ruleset、最小权限访问和定时/离线扫描均有dry-run与负面测试，导入计数、#268/#269、Known Issues和依赖映射可重放且不存在双重手工真值。完整C/RC/structural/parity/ASan等语言质量矩阵作为导入后的GitHub工作继续，不冒充本项已绿。本项不创建release/tag，也不授权公开preview。
+**验收**：authority已正常merge进唯一main；bundle/manifest可解析全部durable refs/notes/tags；迁移后`vorton-lang/vorton`保留完整ancestry，main与远端SHA一致；活动Issue数量、原ID和依赖核对一致，Markdown看板冻结且无第二手工真值；clean clone可运行现有基础CI。B-205 workspace/spike、release、公开preview和全部语言质量门不属于本项执行授权。
 
 ### B-184 Ownership checker workaround retirement / 语义人体工学收口 [refactor] [P1] [L] [judgment] [queued] [after: B-183]
 
