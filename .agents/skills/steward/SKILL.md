@@ -18,13 +18,13 @@ Read `AGENTS.md`, `docs/workflow.md`, and the repository-execution-decisions ski
 ## Execution
 
 1. Read the latest Issue scope and acceptance.
-2. Implement locally on the linked branch.
+2. Create/connect the branch from the Issue when possible, then implement locally.
 3. Launch fixed-candidate machine execution and review together when applicable.
 4. Treat machine FAIL as immediate development feedback; PASS waits for review CLEAR.
 5. Push the branch and update the PR with tests and exact result.
 6. Merge only when Issue acceptance is satisfied.
-7. Confirm the Issue closed and delete the merged branch immediately; prefer GitHub auto-delete.
+7. Merge to the default branch; `Closes #N` closes the Issue and GitHub auto-deletes the head branch.
 
-Update the Issue only at start, confirmed blocker, PR-ready/terminal, and done. Do not post command logs, polling, or subagent status.
+Do not manually mirror normal status into Issue comments. The linked draft/ready/merged PR is the status. Comment only for a user decision or confirmed blocker.
 
 Use the user's existing `git`/`gh` identity. Do not build GitHub App, broker, webhook, permission or security infrastructure.

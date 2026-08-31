@@ -50,3 +50,11 @@ description: Apply user-established execution-process decisions inside the Ring-
 - 每当想把日期化进展、实验过程、失败流水、命令记录、阶段总结或“以后回来更新”的说明写进长期文档时，立即把它视为危险信号并停止。
 - 长期文档只写当前仍有效的设计、规则、scope和acceptance。过程进入Git commit、Issue或PR；完成历史只查Git。
 - 不创建需要未来人工回头修订的状态段落。真值变化时直接改成新真值，不在正文叠加supersede日记。
+
+## 优先让GitHub基础设施表达不变量
+
+- GitHub已经提供唯一编号、Issue关联branch/PR、closing keyword和merged branch自动删除时，禁止再维护手工编号、映射表、重复状态或人工清理清单。
+- 工作状态直接由GitHub对象推导：open Issue且无PR=待做；linked draft PR=进行中；ready PR=review；merged PR自动关闭Issue=完成。只有`blocked`需要额外标记。
+- Branch优先从Issue的Development入口创建，使GitHub自动关联；PR面向默认branch并写`Closes #N`。仓库启用Automatically delete head branches。
+- Project若使用，只作GitHub对象的自动视图，启用auto-add和closed/merged→Done；不得成为第二状态真值。
+- 批量Issue导入只消费用户确认过的固定manifest；创建脚本逐项保存GitHub返回的Issue URL并核对输入/输出数量。中断后先按已返回URL对账再继续，禁止盲目重跑制造重复。

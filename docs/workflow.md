@@ -26,7 +26,7 @@ Issue #N → 一个active PR → PR head branch → merge → Issue自动关闭
 - 创建任何Issue前，必须向用户展示准确标题、正文和数量并取得明确确认；批量导入按完整manifest一次确认。
 - 每个Issue只有一个active实现PR。大任务先拆Issue，不并行多个实现PR。
 - PR正文写`Closes #N`；merge后由GitHub自动关闭Issue。
-- PR对应一个branch。merge后立即删除branch，迁仓时优先启用GitHub自动删除head branch。
+- Branch优先从Issue的Development入口创建，使GitHub自动关联；PR面向默认branch并写`Closes #N`。迁仓时启用Automatically delete head branches。
 - Worktree只是本机可选checkout方式，不是任务、状态、authority或handoff真值。
 
 迁仓前，`docs/backlog.md`和`docs/audit-report.md`仅作Issue导入源；导入核对完成后冻结，不再手工维护。
@@ -37,7 +37,7 @@ Issue #N → 一个active PR → PR head branch → merge → Issue自动关闭
 - 用户在Session拍板后，Discussion在开始实现或merge前向对应Issue同步一条摘要；用户无需重复。
 - Agent恢复工作时先读取Issue最新正文与评论。
 - 两渠道出现不清楚的冲突就直接问用户，不建设cursor、命令语法、webhook或自动双向同步。
-- Issue只更新start、confirmed blocker、ready/terminal和done；不写命令流水、subagent状态、轮询或长日志。
+- 普通状态不写Issue评论；linked PR和merge结果已经表达进度。Issue评论只保留用户决定和confirmed blocker，不写命令流水、subagent状态、轮询或长日志。
 
 ## 本机执行
 
@@ -48,18 +48,15 @@ Issue #N → 一个active PR → PR head branch → merge → Issue自动关闭
 - 未知时长任务不得使用预测式kill wall。资源门、输出门和用户明确deadline仍有效。
 - 结果绑定同一EvidenceKey：source SHA、artifact/patch SHA、producer command/receipt、observed stage。不同SHA结果不得拼接。
 
-## 最小状态
+## 状态由GitHub推导
 
-Issue只使用四种状态：
-
-```text
-Ready → In progress → Review → Done
-                  ↘ Blocked
-```
-
-- `Blocked`只冻结该Issue；其他工作继续。
-- PR ready时进入`Review`；merge满足acceptance后进入`Done`。
-- PR未merge而关闭，不自动完成Issue。
+- Open Issue且没有linked PR：待做。
+- Linked draft PR：进行中。
+- Linked ready-for-review PR：review。
+- PR merge到默认branch：`Closes #N`自动关闭Issue，表示完成。
+- PR未merge而关闭：Issue保持open。
+- 只有`blocked`需要额外label；它只冻结该Issue。
+- 如果使用GitHub Project，只启用auto-add与closed/merged→Done内建自动化，Project不成为第二状态真值。
 
 ## 用户保留决定
 
@@ -93,7 +90,7 @@ Discussion当前可直接提交纯`docs/**`规划修改；其它main mutation只
 1. 隔离rehearsal后用normal merge commit把authority合回main；不squash、rebase或rewrite。
 2. 生成全部refs/notes/tags的bundle和迁移manifest。
 3. 用户另行批准后执行GitHub transfer+rename，更新remote和最小CI。
-4. 展示活动Issue导入manifest并取得用户确认；创建Issue后冻结Markdown看板。之后另行批准才开始Rust纵切。
+4. 展示活动Issue导入manifest并取得用户确认；脚本逐项保存GitHub返回的Issue URL并核对输入/输出数量，中断后先对账再继续。创建完成后冻结Markdown看板；之后另行批准才开始Rust纵切。
 
 ## 迁仓验收
 
@@ -104,7 +101,7 @@ Discussion当前可直接提交纯`docs/**`规划修改；其它main mutation只
 - Markdown看板冻结且不存在第二手工真值；
 - clean clone可运行基础CI；
 - 未创建未经用户确认的Issue；
-- merged PR branch已自动或立即删除。
+- 仓库已启用Automatically delete head branches，merged PR branch由GitHub删除。
 
 ## 用户状态摘要
 
