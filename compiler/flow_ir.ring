@@ -4837,7 +4837,7 @@ fn type_node_for(
 fn require_flow_type_actual_satisfies_formal(
     actual: CoreTypeRef, formal: CoreTypeRef,
     type_nodes: List<FlowTypeNode>, message: Str
-) {
+) with {mut<List<CoreTypeRef>>} {
     if !flow_type_actual_satisfies_formal(
             type_nodes,
             type_node_for(type_nodes, actual),
