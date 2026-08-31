@@ -72,7 +72,9 @@ use ir_inventory::{
 
 struct DictLowerState { ordinals: List<Int> }
 
-pub fn lower_dicts(program: HProgram, module_key: Str) -> HProgram {
+pub fn lower_dicts(
+    program: HProgram, module_key: Str
+) -> HProgram with {} {
     if module_key == "" { panic("dictionary lowering: empty module key") }
     let mut defs: List<HDictDef> = []
     let mut seen: Set<Str> = set_new()
@@ -100,7 +102,9 @@ pub fn lower_dicts(program: HProgram, module_key: Str) -> HProgram {
 }
 
 fn dl_derived_action(action: FieldAction, mut defs: List<HDictDef>,
-                     mut seen: Set<Str>) -> FieldAction {
+                     mut seen: Set<Str>) -> FieldAction with {
+    mut<List<HDictDef>>, mut<Set<Str>>
+} {
     match action {
         FieldAction::Call { method_ref, base_dict, extra_dicts } => {
             let lowered_base = dl_ref_static_only(base_dict, defs, seen)
@@ -133,7 +137,9 @@ fn dl_derived_action(action: FieldAction, mut defs: List<HDictDef>,
 }
 
 fn dl_derived_fields(fields: List<DerivedField>, mut defs: List<HDictDef>,
-                     mut seen: Set<Str>) -> List<DerivedField> {
+                     mut seen: Set<Str>) -> List<DerivedField> with {
+    mut<List<HDictDef>>, mut<Set<Str>>
+} {
     let mut lowered: List<DerivedField> = []
     for field in fields {
         lowered.push(DerivedField {
@@ -148,7 +154,9 @@ fn dl_derived_fields(fields: List<DerivedField>, mut defs: List<HDictDef>,
 }
 
 fn dl_derived_impl(di: DerivedImpl, mut defs: List<HDictDef>,
-                   mut seen: Set<Str>) -> DerivedImpl {
+                   mut seen: Set<Str>) -> DerivedImpl with {
+    mut<List<HDictDef>>, mut<Set<Str>>
+} {
     let struct_fields = match di.struct_fields {
         some(fields) => some(dl_derived_fields(fields, defs, seen)),
         none => none,
@@ -189,7 +197,12 @@ fn dl_derived_impl(di: DerivedImpl, mut defs: List<HDictDef>,
     }
 }
 
-fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: DictLowerState) -> HDecl {
+fn dl_decl(
+    d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>,
+    counter: DictLowerState
+) -> HDecl with {
+    mut<List<HDictDef>>, mut<Set<Str>>
+} {
     match d {
         HDecl::Fn { name, def_id, executable_ref, impl_method_ref, type_params, params, return_type, effects, effect_ctx, body, is_pub, trait_bounds, span } =>
             HDecl::Fn { name: name, def_id: def_id,
@@ -270,7 +283,9 @@ fn dl_decl(d: HDecl, mut defs: List<HDictDef>, mut seen: Set<Str>, counter: Dict
 // DictRef classification / rewriting
 // ============================================================
 
-fn dl_register(mut defs: List<HDictDef>, mut seen: Set<Str>, def: HDictDef) {
+fn dl_register(
+    mut defs: List<HDictDef>, mut seen: Set<Str>, def: HDictDef
+) with {mut<List<HDictDef>>, mut<Set<Str>>} {
     if seen.contains(def.name) == false {
         seen.insert(def.name)
         defs.push(def)
@@ -284,7 +299,9 @@ fn dl_ref_dyn(
     dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>,
     mut counter: DictLowerState, owner: ExecutableRef,
     mut lets: List<HStmt>, span: Span
-) -> DictRef {
+) -> DictRef with {
+    mut<List<HDictDef>>, mut<Set<Str>>, mut<List<HStmt>>
+} {
     if dict_ref_is_simple_physical(dr) { return dr }
     if dict_ref_is_static_physical(dr) {
         let payload_name = dict_ref_static_name(dr)
@@ -346,7 +363,9 @@ fn dl_ref_dyn(
 // Rewrite a DictRef in a position that CANNOT host local constructions (BinOp
 // dispatch extra_dicts): all-static wrapped → Static(instance); a dynamic
 // wrapped keeps its Wrapped shell (inners still individually rewritten).
-fn dl_ref_static_only(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>) -> DictRef {
+fn dl_ref_static_only(
+    dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>
+) -> DictRef with {mut<List<HDictDef>>, mut<Set<Str>>} {
     if dict_ref_is_simple_physical(dr) { return dr }
     if dict_ref_is_static_physical(dr) {
         let payload_name = dict_ref_static_name(dr)
@@ -382,7 +401,9 @@ fn dl_ref_static_only(dr: DictRef, mut defs: List<HDictDef>, mut seen: Set<Str>)
             }
 }
 
-fn dl_dispatch(d: TraitDispatch?, mut defs: List<HDictDef>, mut seen: Set<Str>) -> TraitDispatch? {
+fn dl_dispatch(
+    d: TraitDispatch?, mut defs: List<HDictDef>, mut seen: Set<Str>
+) -> TraitDispatch? with {mut<List<HDictDef>>, mut<Set<Str>>} {
     match d {
         some(td) => match td {
             TraitDispatch::Direct { dict, extra_dicts } => {
@@ -411,7 +432,7 @@ fn dl_dispatch(d: TraitDispatch?, mut defs: List<HDictDef>, mut seen: Set<Str>) 
 
 fn dl_method_call_ref(
     value: MethodCallRef?, mut defs: List<HDictDef>, mut seen: Set<Str>
-) -> MethodCallRef? {
+) -> MethodCallRef? with {mut<List<HDictDef>>, mut<Set<Str>>} {
     match value {
         some(exact) => if method_call_ref_is_bound(exact) {
             some(make_bound_method_call_ref(
@@ -429,7 +450,7 @@ fn dl_method_call_ref(
 
 fn dl_operator_plan(
     value: HOperatorPlan?, mut defs: List<HDictDef>, mut seen: Set<Str>
-) -> HOperatorPlan? {
+) -> HOperatorPlan? with {mut<List<HDictDef>>, mut<Set<Str>>} {
     match value {
         some(plan) => if h_operator_is_tuple(plan) {
             some(h_operator_tuple(h_operator_elements(plan).map(fn(item) {
@@ -457,7 +478,9 @@ fn dl_operator_plan(
 fn dl_expr(
     e: HExpr, mut defs: List<HDictDef>, mut seen: Set<Str>,
     counter: DictLowerState, owner: ExecutableRef
-) -> HExpr {
+) -> HExpr with {
+    mut<List<HDictDef>>, mut<Set<Str>>
+} {
     match e {
         HExpr::IntLit { value, ty, effects, span } =>
             HExpr::IntLit { value: value, ty: ty, effects: effects, span: span },
@@ -746,7 +769,9 @@ fn dl_expr(
 fn dl_arms(
     arms: List<HMatchArm>, mut defs: List<HDictDef>, mut seen: Set<Str>,
     counter: DictLowerState, owner: ExecutableRef
-) -> List<HMatchArm> {
+) -> List<HMatchArm> with {
+    mut<List<HDictDef>>, mut<Set<Str>>
+} {
     let mut out: List<HMatchArm> = []
     for arm in arms {
         let new_guard = match arm.guard {
@@ -765,7 +790,9 @@ fn dl_arms(
 fn dl_stmt(
     s: HStmt, mut defs: List<HDictDef>, mut seen: Set<Str>,
     counter: DictLowerState, owner: ExecutableRef
-) -> HStmt {
+) -> HStmt with {
+    mut<List<HDictDef>>, mut<Set<Str>>
+} {
     match s {
         HStmt::Let { name, name_span, def_id, ty, init, span } =>
             HStmt::Let { name: name, name_span: name_span, def_id: def_id, ty: ty,
