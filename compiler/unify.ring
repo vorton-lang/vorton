@@ -11,24 +11,28 @@ pub struct UnificationError {
     pub is_occurs_check: Bool
 }
 
-pub fn empty_subst() -> UnionFind { new_union_find() }
+pub fn empty_subst() -> UnionFind with {} { new_union_find() }
 
 // ============================================================
 // Error helpers
 // ============================================================
 
-fn unify_error(t1: Type, t2: Type, detail: Str?) -> Never {
+fn unify_error(
+    t1: Type, t2: Type, detail: Str?
+) -> Never with {fail<UnificationError>} {
     let base = "Type mismatch: cannot unify ${type_to_string(t1)} with ${type_to_string(t2)}"
     let msg = match detail { some(d) => "${base} — ${d}", none => base }
     fail.raise(UnificationError { message: msg, is_occurs_check: false })
 }
 
-fn unify_error_occurs(t1: Type, t2: Type) -> Never {
+fn unify_error_occurs(
+    t1: Type, t2: Type
+) -> Never with {fail<UnificationError>} {
     let msg = "Type mismatch: cannot unify ${type_to_string(t1)} with ${type_to_string(t2)} — infinite type (occurs check)"
     fail.raise(UnificationError { message: msg, is_occurs_check: true })
 }
 
-fn unify_error_msg(detail: Str) -> Never {
+fn unify_error_msg(detail: Str) -> Never with {fail<UnificationError>} {
     fail.raise(UnificationError { message: detail, is_occurs_check: false })
 }
 
@@ -36,7 +40,9 @@ fn unify_error_msg(detail: Str) -> Never {
 // Occurs check: does var_id appear anywhere in type?
 // ============================================================
 
-pub fn occurs_in(var_id: Int, t: Type, subst: UnionFind) -> Bool {
+pub fn occurs_in(
+    var_id: Int, t: Type, subst: UnionFind
+) -> Bool with {mut<UnionFind>} {
     match t {
         Type::IntType => false,
         Type::FloatType => false,
@@ -88,7 +94,9 @@ pub fn occurs_in(var_id: Int, t: Type, subst: UnionFind) -> Bool {
     }
 }
 
-fn occurs_in_row(var_id: Int, row: EffectRow, subst: UnionFind) -> Bool {
+fn occurs_in_row(
+    var_id: Int, row: EffectRow, subst: UnionFind
+) -> Bool with {mut<UnionFind>} {
     let in_tail = match row.tail {
         some(t_id) => {
             let root = uf_find(subst, t_id)
@@ -103,7 +111,9 @@ fn occurs_in_row(var_id: Int, row: EffectRow, subst: UnionFind) -> Bool {
     in_tail || row.effects.any(fn(e) { occurs_in_effect(var_id, e, subst) })
 }
 
-fn occurs_in_effect(var_id: Int, e: Effect, subst: UnionFind) -> Bool {
+fn occurs_in_effect(
+    var_id: Int, e: Effect, subst: UnionFind
+) -> Bool with {mut<UnionFind>} {
     match e {
         Effect::FailEffect { error_type } => occurs_in(var_id, error_type, subst),
         Effect::MutEffect { state_type } => occurs_in(var_id, state_type, subst),
@@ -117,7 +127,11 @@ fn occurs_in_effect(var_id: Int, e: Effect, subst: UnionFind) -> Bool {
 // ============================================================
 
 
-pub fn unify_effect_params(a: Effect, b: Effect, subst: UnionFind, mut env: TypeEnv) -> UnionFind {
+pub fn unify_effect_params(
+    a: Effect, b: Effect, subst: UnionFind, mut env: TypeEnv
+) -> UnionFind with {
+    mut<UnionFind>, mut<TypeEnv>, fail<UnificationError>
+} {
     match (a, b) {
         (Effect::FailEffect { error_type: et_a }, Effect::FailEffect { error_type: et_b }) =>
             unify(et_a, et_b, subst, env),
@@ -163,7 +177,11 @@ fn filter_by_index_not_in(effects: List<Effect>, excluded: Set<Int>) -> List<Eff
 // Unify effect rows (Koka-style row variable solving)
 // ============================================================
 
-pub fn unify_effect_rows(a: EffectRow, b: EffectRow, subst: UnionFind, mut env: TypeEnv) -> UnionFind {
+pub fn unify_effect_rows(
+    a: EffectRow, b: EffectRow, subst: UnionFind, mut env: TypeEnv
+) -> UnionFind with {
+    mut<UnionFind>, mut<TypeEnv>, fail<UnificationError>
+} {
     let mut s = subst
     let ra = apply_subst_row(s, a)
     let rb = apply_subst_row(s, b)
@@ -275,7 +293,11 @@ pub fn unify_effect_rows(a: EffectRow, b: EffectRow, subst: UnionFind, mut env: 
 // Record row unification
 // ============================================================
 
-fn unify_record_rows(ra: Type, rb: Type, subst: UnionFind, mut env: TypeEnv) -> UnionFind {
+fn unify_record_rows(
+    ra: Type, rb: Type, subst: UnionFind, mut env: TypeEnv
+) -> UnionFind with {
+    mut<UnionFind>, mut<TypeEnv>, fail<UnificationError>
+} {
     match (ra, rb) {
         (Type::RecordType { fields: a_fields, tail: a_tail, .. },
          Type::RecordType { fields: b_fields, tail: b_tail, .. }) => {
@@ -372,7 +394,11 @@ fn unify_record_rows(ra: Type, rb: Type, subst: UnionFind, mut env: TypeEnv) -> 
 // Struct -> Record coercion
 // ============================================================
 
-fn unify_struct_with_record(st: Type, rt: Type, subst: UnionFind, mut env: TypeEnv) -> UnionFind {
+fn unify_struct_with_record(
+    st: Type, rt: Type, subst: UnionFind, mut env: TypeEnv
+) -> UnionFind with {
+    mut<UnionFind>, mut<TypeEnv>, fail<UnificationError>
+} {
     match (st, rt) {
         (Type::StructType { name, type_params, .. },
          Type::RecordType { fields: record_fields, tail: record_tail, .. }) => {
@@ -447,7 +473,9 @@ fn var_id(t: Type) -> Int? { match t { Type::TypeVar { id, .. } => some(id), _ =
 // Bind type variable (with occurs check)
 // ============================================================
 
-fn bind_var(id: Int, target: Type, t1: Type, t2: Type, subst: UnionFind) -> UnionFind {
+fn bind_var(
+    id: Int, target: Type, t1: Type, t2: Type, subst: UnionFind
+) -> UnionFind with {mut<UnionFind>, fail<UnificationError>} {
     if occurs_in(id, target, subst) {
         unify_error_occurs(t1, t2)
     }
@@ -459,7 +487,11 @@ fn bind_var(id: Int, target: Type, t1: Type, t2: Type, subst: UnionFind) -> Unio
 // Main unification
 // ============================================================
 
-pub fn unify(t1: Type, t2: Type, subst: UnionFind, mut env: TypeEnv) -> UnionFind {
+pub fn unify(
+    t1: Type, t2: Type, subst: UnionFind, mut env: TypeEnv
+) -> UnionFind with {
+    mut<UnionFind>, mut<TypeEnv>, fail<UnificationError>
+} {
     let a = apply_subst(subst, t1)
     let b = apply_subst(subst, t2)
 
