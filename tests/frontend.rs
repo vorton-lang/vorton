@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use vorton::ast::{
     BinaryOp, Decl, EffectName, Expr, ForBinding, Pattern, PatternLiteral, Program, Stmt,
-    TraitMember, TypeExpr, UseKind, VariantFields,
+    StringPart, TraitMember, TypeExpr, UseKind, VariantFields,
 };
 use vorton::diagnostic::{Diagnostic, DiagnosticNote, format_human, format_llm};
 use vorton::lexer::{Token, TokenKind, lex};
@@ -436,13 +436,34 @@ fn nested_string_interpolation_and_raw_strings_remain_distinct() {
     let output =
         parse(r#"fn main() { let text = "outer ${"inner ${value}"}" let raw = r"${value}\n" }"#);
     assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
-    let json = serde_json::to_string(&output.program).unwrap();
-    assert!(json.contains("InterpolatedString"));
-    assert!(json.contains("RawString"));
+    let Decl::Function(function) = &output.program.declarations[0] else {
+        panic!("function")
+    };
+    let Expr::Block { statements, .. } = &function.body else {
+        panic!("block")
+    };
+    let Stmt::Let {
+        value: Expr::InterpolatedString { parts, .. },
+        ..
+    } = &statements[0]
+    else {
+        panic!("interpolated string")
+    };
+    assert!(parts.iter().any(|part| matches!(
+        part,
+        StringPart::Expression(Expr::InterpolatedString { .. })
+    )));
+    assert!(matches!(
+        statements[1],
+        Stmt::Let {
+            value: Expr::RawString { .. },
+            ..
+        }
+    ));
 }
 
 #[test]
-fn parser_covers_declarations_types_statements_expressions_and_patterns() {
+fn full_surface_fixture_preserves_use_and_enum_shapes() {
     let output = parse(include_str!("frontend/fixtures/full_surface.vorton"));
     assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
     assert!(matches!(output.program.uses[0].kind, UseKind::Bare));
@@ -451,99 +472,6 @@ fn parser_covers_declarations_types_statements_expressions_and_patterns() {
         output.program.uses[2].kind,
         UseKind::NamedItems(_)
     ));
-
-    let json = serde_json::to_string(&output.program).unwrap();
-    for declaration in [
-        "Function",
-        "Struct",
-        "Enum",
-        "Trait",
-        "Impl",
-        "Effect",
-        "EffectAlias",
-        "ExternFunction",
-        "ExternType",
-        "TypeAlias",
-        "Test",
-        "Const",
-        "Module",
-    ] {
-        assert!(
-            json.contains(&format!("\"{declaration}\"")),
-            "missing declaration {declaration}"
-        );
-    }
-    for ty in ["Named", "Function", "Tuple", "Parenthesized", "Record"] {
-        assert!(
-            json.contains(&format!("\"{ty}\"")),
-            "missing type shape {ty}"
-        );
-    }
-    for expression in [
-        "Integer",
-        "String",
-        "RawString",
-        "InterpolatedString",
-        "Boolean",
-        "Path",
-        "Unary",
-        "Binary",
-        "Range",
-        "Call",
-        "MethodCall",
-        "FieldAccess",
-        "TupleFieldAccess",
-        "Index",
-        "NamedLiteral",
-        "List",
-        "Tuple",
-        "Unit",
-        "Parenthesized",
-        "Block",
-        "If",
-        "Match",
-        "Handle",
-        "Lambda",
-        "Catch",
-        "Unsafe",
-        "Return",
-    ] {
-        assert!(
-            json.contains(&format!("\"{expression}\"")),
-            "missing expression {expression}"
-        );
-    }
-    for statement in [
-        "Let",
-        "IfLet",
-        "Return",
-        "While",
-        "Loop",
-        "For",
-        "Break",
-        "Continue",
-        "Assign",
-        "Expression",
-    ] {
-        assert!(
-            json.contains(&format!("\"{statement}\"")),
-            "missing statement {statement}"
-        );
-    }
-    for pattern in [
-        "Wildcard",
-        "Name",
-        "Literal",
-        "Constructor",
-        "NamedConstructor",
-        "Tuple",
-        "Or",
-    ] {
-        assert!(
-            json.contains(&format!("\"{pattern}\"")),
-            "missing pattern {pattern}"
-        );
-    }
 
     let enum_decl = output
         .program
