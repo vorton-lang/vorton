@@ -141,7 +141,7 @@ impl<'a> Parser<'a> {
         } else {
             UseKind::Bare
         };
-        self.consume(TokenKind::Semicolon);
+        self.forbid_trailing_declaration_semicolon()?;
         Some(UseDecl {
             visibility,
             path,
@@ -572,7 +572,7 @@ impl<'a> Parser<'a> {
             let type_params = self.parse_type_params()?;
             self.expect(TokenKind::Equal)?;
             let effects = self.parse_effect_set()?;
-            self.consume(TokenKind::Semicolon);
+            self.forbid_trailing_declaration_semicolon()?;
             return Some(Decl::EffectAlias(EffectAliasDecl {
                 visibility,
                 name,
@@ -610,8 +610,19 @@ impl<'a> Parser<'a> {
                 );
                 return None;
             }
-            self.consume(TokenKind::Semicolon);
-            self.consume(TokenKind::Comma);
+            if self.at_any(&[TokenKind::Semicolon, TokenKind::Comma]) {
+                self.advance();
+                if self.at_any(&[TokenKind::Semicolon, TokenKind::Comma]) {
+                    let token = self.peek().clone();
+                    self.report(Diagnostic::parse(
+                        "E0101",
+                        "An effect operation accepts at most one trailing separator",
+                        token.span,
+                        token.value,
+                    ));
+                    return None;
+                }
+            }
             operations.push(EffectOperation {
                 name: op_name,
                 params,
@@ -638,7 +649,7 @@ impl<'a> Parser<'a> {
             self.advance();
             let name = self.expect_name()?;
             let type_params = self.parse_type_params()?;
-            self.consume(TokenKind::Semicolon);
+            self.forbid_trailing_declaration_semicolon()?;
             return Some(Decl::ExternType(ExternTypeDecl {
                 visibility,
                 name,
@@ -658,7 +669,7 @@ impl<'a> Parser<'a> {
             None
         };
         let effects = self.parse_optional_effect_annotation()?;
-        self.consume(TokenKind::Semicolon);
+        self.forbid_trailing_declaration_semicolon()?;
         Some(Decl::ExternFunction(ExternFunctionDecl {
             visibility,
             name,
@@ -683,7 +694,7 @@ impl<'a> Parser<'a> {
             self.reject_where_clause();
             return None;
         }
-        self.consume(TokenKind::Semicolon);
+        self.forbid_trailing_declaration_semicolon()?;
         Some(TypeAliasDecl {
             visibility,
             name,
@@ -754,7 +765,7 @@ impl<'a> Parser<'a> {
         };
         self.expect(TokenKind::Equal)?;
         let value = self.parse_expr()?;
-        self.consume(TokenKind::Semicolon);
+        self.forbid_trailing_declaration_semicolon()?;
         Some(ConstDecl {
             visibility,
             name,
@@ -843,6 +854,23 @@ impl<'a> Parser<'a> {
             )
             .with_suggestion("Remove the clause", None),
         );
+    }
+
+    fn forbid_trailing_declaration_semicolon(&mut self) -> Option<()> {
+        if let Some(token) = self.consume(TokenKind::Semicolon) {
+            self.report(
+                Diagnostic::parse(
+                    "E0101",
+                    "This declaration does not accept a trailing ';'",
+                    token.span,
+                    token.value,
+                )
+                .with_suggestion("Remove the trailing semicolon", None),
+            );
+            None
+        } else {
+            Some(())
+        }
     }
 
     fn parse_params(&mut self) -> Option<Vec<Param>> {
@@ -1527,7 +1555,10 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LeftBrace)?;
         let spread = if self.consume(TokenKind::DotDot).is_some() {
             let value = self.parse_expr()?;
-            self.consume(TokenKind::Comma);
+            if self.consume(TokenKind::Comma).is_none() && !self.at(TokenKind::RightBrace) {
+                self.expected(TokenKind::Comma);
+                return None;
+            }
             Some(Box::new(value))
         } else {
             None
@@ -1719,7 +1750,10 @@ impl<'a> Parser<'a> {
         }
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
             handlers.push(self.parse_effect_handler()?);
-            self.consume(TokenKind::Comma);
+            if self.at(TokenKind::RightBrace) {
+                break;
+            }
+            self.expect(TokenKind::Comma)?;
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(Expr::Handle {
@@ -1911,6 +1945,18 @@ impl<'a> Parser<'a> {
         }
         let path = self.parse_path(false)?;
         if self.consume(TokenKind::LeftParen).is_some() {
+            if self.at(TokenKind::RightParen) {
+                self.report(
+                    Diagnostic::parse(
+                        "E0101",
+                        "Positional constructor patterns require at least one field; use the bare name for a unit pattern",
+                        self.peek().span,
+                        self.peek().value.clone(),
+                    )
+                    .with_suggestion("Remove the empty parentheses", None),
+                );
+                return None;
+            }
             let mut fields = Vec::new();
             while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
                 fields.push(self.parse_pattern_atom()?);
@@ -2096,14 +2142,25 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::RightBrace) {
             self.report(Diagnostic::parse(
                 "E0101",
-                "A record type must declare at least one field",
+                "A record type must declare at least one named field",
                 self.peek().span,
                 "}",
             ));
             return None;
         }
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            if self.consume(TokenKind::DotDot).is_some() {
+            if self.at(TokenKind::DotDot) {
+                if fields.is_empty() {
+                    let token = self.peek().clone();
+                    self.report(Diagnostic::parse(
+                        "E0101",
+                        "A record type must declare at least one named field",
+                        token.span,
+                        token.value,
+                    ));
+                    return None;
+                }
+                self.advance();
                 rest = Some(self.expect_name()?);
                 self.consume(TokenKind::Comma);
                 break;

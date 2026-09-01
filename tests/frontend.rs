@@ -4,8 +4,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vorton::ast::{
-    BinaryOp, Decl, EffectName, Expr, ForBinding, Pattern, PatternLiteral, Program, Stmt, TypeExpr,
-    UseKind, VariantFields,
+    BinaryOp, Decl, EffectName, Expr, ForBinding, Pattern, PatternLiteral, Program, Stmt,
+    TraitMember, TypeExpr, UseKind, VariantFields,
 };
 use vorton::diagnostic::{Diagnostic, DiagnosticNote, format_human, format_llm};
 use vorton::lexer::{Token, TokenKind, lex};
@@ -588,6 +588,390 @@ fn enum_named_variants_require_at_least_one_field() {
     assert!(matches!(
         enum_decl.variants[1].fields,
         VariantFields::Named(ref fields) if fields.len() == 1
+    ));
+}
+
+#[test]
+fn grammar_cardinality_errors_fail_closed_at_the_first_diagnostic() {
+    for (label, text, code, message, found) in [
+        (
+            "empty record type",
+            "type Empty = {}\n",
+            "E0101",
+            "A record type must declare at least one named field",
+            "}",
+        ),
+        (
+            "rest-only record type",
+            "type RestOnly = {..rest}\n",
+            "E0101",
+            "A record type must declare at least one named field",
+            "..",
+        ),
+        (
+            "named literal spread without a comma before fields",
+            "fn bad(base: S) { S {..base x: 1} }\n",
+            "E0103",
+            "Expected ',', found 'x'",
+            "x",
+        ),
+        (
+            "effect operation semicolon then comma",
+            "effect Bad { fn op() -> Int;, }\n",
+            "E0101",
+            "An effect operation accepts at most one trailing separator",
+            ",",
+        ),
+        (
+            "effect operation comma then semicolon",
+            "effect Bad { fn op() -> Int,; }\n",
+            "E0101",
+            "An effect operation accepts at most one trailing separator",
+            ";",
+        ),
+        (
+            "empty handler group",
+            "fn bad() { handle {} with {} }\n",
+            "E0101",
+            "A handle expression must provide at least one handler",
+            "}",
+        ),
+        (
+            "handlers without a comma",
+            "fn bad() { handle {} with {io.read() => 1 io.write() => 2} }\n",
+            "E0103",
+            "Expected ',', found 'io'",
+            "io",
+        ),
+        (
+            "empty positional constructor pattern",
+            "fn bad(value: Option<Int>) { match value { none() => 0 } }\n",
+            "E0101",
+            "Positional constructor patterns require at least one field; use the bare name for a unit pattern",
+            ")",
+        ),
+    ] {
+        let invalid = parse_error(text);
+        assert_eq!(invalid.diagnostics.len(), 1, "{label}");
+        let diagnostic = &invalid.diagnostics[0];
+        assert_eq!(diagnostic.code, code, "{label}");
+        assert_eq!(diagnostic.message, message, "{label}");
+        assert_eq!(
+            &invalid.source.text()[diagnostic.span.start as usize..diagnostic.span.end as usize],
+            found,
+            "{label}"
+        );
+    }
+
+    let empty_constructor =
+        parse_error("fn bad(value: Option<Int>) { match value { none() => 0 } }\n");
+    assert_eq!(
+        empty_constructor.diagnostics[0].suggestions[0].message,
+        "Remove the empty parentheses"
+    );
+}
+
+#[test]
+fn undocumented_declaration_semicolons_fail_closed() {
+    for (label, text) in [
+        ("use", "use parser;\n"),
+        ("effect alias", "effect alias Io = {io};\n"),
+        ("extern type", "extern type Handle;\n"),
+        ("extern function", "extern fn host();\n"),
+        ("type alias", "type Id = Int;\n"),
+        ("const", "const LIMIT = 1;\n"),
+    ] {
+        let invalid = parse_error(text);
+        assert_eq!(invalid.diagnostics.len(), 1, "{label}");
+        let diagnostic = &invalid.diagnostics[0];
+        assert_eq!(diagnostic.code, "E0101", "{label}");
+        assert_eq!(
+            diagnostic.message, "This declaration does not accept a trailing ';'",
+            "{label}"
+        );
+        assert_eq!(
+            &invalid.source.text()[diagnostic.span.start as usize..diagnostic.span.end as usize],
+            ";",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn cardinality_positive_forms_preserve_ast_shapes() {
+    let output = parse(
+        r#"
+struct Empty {}
+
+type Record = {x: Int, y: Str, ..rest,}
+
+enum Pair<T,> {
+    pair(Int, Str,),
+}
+
+trait Contract<T,>: Bound<T, Item = Int,> {
+    type Item: Bound<Int,>;
+    fn call<U,>(value: List<U,>) -> Int;
+}
+
+effect Ops {
+    fn plain() -> Int
+    fn semicolon() -> Int;
+    fn comma() -> Int,
+}
+
+fn values<T,>(base: S, items: Items) {
+    let empty = S {}
+    let spread = S {..base}
+    let extended = S {..base, x: 1,}
+    let tuple = (1, 2,)
+    for (left, right,) in items {}
+}
+
+fn handled() {
+    handle {} with {
+        io.read() => 1,
+        io.write() => 2,
+    }
+}
+"#,
+    );
+
+    let empty_struct = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Struct(value) if value.name.text == "Empty" => Some(value),
+            _ => None,
+        })
+        .expect("empty struct");
+    assert!(empty_struct.fields.is_empty());
+
+    let record = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::TypeAlias(value) if value.name.text == "Record" => Some(value),
+            _ => None,
+        })
+        .expect("record alias");
+    assert!(matches!(
+        record.ty,
+        TypeExpr::Record {
+            ref fields,
+            rest: Some(ref rest),
+            ..
+        } if fields.len() == 2 && rest.text == "rest"
+    ));
+
+    let pair = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Enum(value) if value.name.text == "Pair" => Some(value),
+            _ => None,
+        })
+        .expect("pair enum");
+    assert_eq!(pair.type_params.len(), 1);
+    assert!(matches!(
+        pair.variants[0].fields,
+        VariantFields::Positional(ref fields) if fields.len() == 2
+    ));
+
+    let contract = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Trait(value) if value.name.text == "Contract" => Some(value),
+            _ => None,
+        })
+        .expect("contract trait");
+    assert_eq!(contract.type_params.len(), 1);
+    assert_eq!(contract.supertraits[0].type_args.len(), 1);
+    assert_eq!(contract.supertraits[0].associated.len(), 1);
+    let TraitMember::AssociatedType(associated) = &contract.members[0] else {
+        panic!("associated type")
+    };
+    assert_eq!(associated.bounds[0].type_args.len(), 1);
+    let TraitMember::Method(method) = &contract.members[1] else {
+        panic!("trait method")
+    };
+    assert_eq!(method.type_params.len(), 1);
+    assert!(matches!(
+        method.params[0].type_annotation,
+        Some(TypeExpr::Named { ref type_args, .. }) if type_args.len() == 1
+    ));
+
+    let operations = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Effect(value) if value.name.text == "Ops" => Some(value),
+            _ => None,
+        })
+        .expect("effect operations");
+    assert_eq!(operations.operations.len(), 3);
+
+    let values = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Function(value) if value.name.text == "values" => Some(value),
+            _ => None,
+        })
+        .expect("values function");
+    assert_eq!(values.type_params.len(), 1);
+    let Expr::Block { statements, .. } = &values.body else {
+        panic!("values body")
+    };
+    assert!(matches!(
+        statements[0],
+        Stmt::Let {
+            value: Expr::NamedLiteral {
+                spread: None,
+                ref fields,
+                ..
+            },
+            ..
+        } if fields.is_empty()
+    ));
+    assert!(matches!(
+        statements[1],
+        Stmt::Let {
+            value: Expr::NamedLiteral {
+                spread: Some(_),
+                ref fields,
+                ..
+            },
+            ..
+        } if fields.is_empty()
+    ));
+    assert!(matches!(
+        statements[2],
+        Stmt::Let {
+            value: Expr::NamedLiteral {
+                spread: Some(_),
+                ref fields,
+                ..
+            },
+            ..
+        } if fields.len() == 1
+    ));
+    assert!(matches!(
+        tail_expression("S {..base,}"),
+        Expr::NamedLiteral {
+            spread: Some(_),
+            ref fields,
+            ..
+        } if fields.is_empty()
+    ));
+    assert!(matches!(
+        statements[3],
+        Stmt::Let {
+            value: Expr::Tuple { ref elements, .. },
+            ..
+        } if elements.len() == 2
+    ));
+    assert!(matches!(
+        statements[4],
+        Stmt::For {
+            binding: ForBinding::Tuple(ref names, _),
+            ..
+        } if names.len() == 2
+    ));
+
+    let handled = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Function(value) if value.name.text == "handled" => Some(value),
+            _ => None,
+        })
+        .expect("handled function");
+    let Expr::Block {
+        tail: Some(tail), ..
+    } = &handled.body
+    else {
+        panic!("handled body")
+    };
+    assert!(matches!(
+        tail.as_ref(),
+        Expr::Handle { handlers, .. } if handlers.len() == 2
+    ));
+}
+
+#[test]
+fn named_constructor_patterns_require_commas_and_keep_empty_and_rest_forms() {
+    let invalid = parse_error("fn bad(value: Point) { match value { Point {x y} => 0 } }\n");
+    assert_eq!(invalid.diagnostics.len(), 1);
+    assert_eq!(invalid.diagnostics[0].code, "E0103");
+    assert_eq!(invalid.diagnostics[0].message, "Expected '}', found 'y'");
+    assert_eq!(
+        &invalid.source.text()
+            [invalid.diagnostics[0].span.start as usize..invalid.diagnostics[0].span.end as usize],
+        "y"
+    );
+
+    let valid = parse(
+        r#"
+fn patterns(value: Point) {
+    match value {
+        none => 0,
+        some(item,) => 1,
+        Point {} => 2,
+        Point {..,} => 3,
+        Point {x, y, ..,} => 4,
+    }
+}
+"#,
+    );
+    let Decl::Function(function) = &valid.program.declarations[0] else {
+        panic!("patterns function")
+    };
+    let Expr::Block {
+        tail: Some(tail), ..
+    } = &function.body
+    else {
+        panic!("patterns body")
+    };
+    let Expr::Match { arms, .. } = tail.as_ref() else {
+        panic!("match")
+    };
+    assert!(matches!(arms[0].pattern, Pattern::Name { .. }));
+    assert!(matches!(
+        arms[1].pattern,
+        Pattern::Constructor { ref fields, .. } if fields.len() == 1
+    ));
+    assert!(matches!(
+        arms[2].pattern,
+        Pattern::NamedConstructor {
+            ref fields,
+            rest: None,
+            ..
+        } if fields.is_empty()
+    ));
+    assert!(matches!(
+        arms[3].pattern,
+        Pattern::NamedConstructor {
+            ref fields,
+            rest: Some(_),
+            ..
+        } if fields.is_empty()
+    ));
+    assert!(matches!(
+        arms[4].pattern,
+        Pattern::NamedConstructor {
+            ref fields,
+            rest: Some(_),
+            ..
+        } if fields.len() == 2
     ));
 }
 
