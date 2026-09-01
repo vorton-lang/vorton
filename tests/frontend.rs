@@ -3,8 +3,8 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vorton::ast::{Decl, Expr, Pattern, Stmt, TypeExpr, UseKind, VariantFields};
-use vorton::diagnostic::{format_human, format_llm};
+use vorton::ast::{BinaryOp, Decl, Expr, Pattern, Stmt, TypeExpr, UseKind, VariantFields};
+use vorton::diagnostic::{Diagnostic, DiagnosticNote, format_human, format_llm};
 use vorton::lexer::{TokenKind, lex};
 use vorton::source::{SourceFile, SourceId};
 
@@ -14,6 +14,29 @@ fn source(text: &str) -> SourceFile {
 
 fn parse(text: &str) -> vorton::FrontendOutput {
     vorton::parse_source(source(text))
+}
+
+fn tail_expression(text: &str) -> Expr {
+    let output = parse(&format!("fn main() {{ {text} }}"));
+    assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
+    let Decl::Function(function) = &output.program.declarations[0] else {
+        panic!("function")
+    };
+    let Expr::Block {
+        tail: Some(tail), ..
+    } = &function.body
+    else {
+        panic!("tail")
+    };
+    tail.as_ref().clone()
+}
+
+fn has_function(output: &vorton::FrontendOutput, expected: &str) -> bool {
+    output
+        .program
+        .declarations
+        .iter()
+        .any(|decl| matches!(decl, Decl::Function(function) if function.name.text == expected))
 }
 
 #[test]
@@ -153,6 +176,14 @@ fn lexer_uses_byte_spans_and_derives_unicode_columns() {
             .collect::<Vec<_>>()
     };
     assert_eq!(values(&lf), values(&crlf));
+
+    let lone_cr = lex(&source(
+        "fn main() { let a = \"left\rright\" let b = r\"left\rright\" }",
+    ));
+    assert_eq!(
+        values(&lone_cr),
+        vec!["left\rright".to_owned(), "left\rright".to_owned()]
+    );
 }
 
 #[test]
@@ -195,6 +226,51 @@ fn ast_spans_are_exact_half_open_byte_ranges() {
     };
     assert_span(name.span, 20, 25, "value");
     assert_span(value.span(), 28, 30, "42");
+}
+
+#[test]
+fn named_type_spans_include_every_closing_angle_bracket() {
+    let text = "type Plain = List<Int>\ntype Nested = List<Map<Int, Str>>\n";
+    let output = parse(text);
+    assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
+
+    let aliases = output
+        .program
+        .declarations
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::TypeAlias(alias) => Some(alias),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        (aliases[0].ty.span().start, aliases[0].ty.span().end),
+        (13, 22)
+    );
+    assert_eq!(
+        &text[aliases[0].ty.span().start as usize..aliases[0].ty.span().end as usize],
+        "List<Int>"
+    );
+    assert_eq!(
+        (aliases[1].ty.span().start, aliases[1].ty.span().end),
+        (37, 56)
+    );
+    assert_eq!(
+        &text[aliases[1].ty.span().start as usize..aliases[1].ty.span().end as usize],
+        "List<Map<Int, Str>>"
+    );
+    let TypeExpr::Named { type_args, .. } = &aliases[1].ty else {
+        panic!("named type")
+    };
+    assert_eq!(
+        (type_args[0].span().start, type_args[0].span().end),
+        (42, 55)
+    );
+    assert_eq!(
+        &text[type_args[0].span().start as usize..type_args[0].span().end as usize],
+        "Map<Int, Str>"
+    );
 }
 
 #[test]
@@ -380,6 +456,46 @@ fn parser_covers_declarations_types_statements_expressions_and_patterns() {
 }
 
 #[test]
+fn grouped_use_requires_the_colon_colon_separator() {
+    let text = "use parser::{Token}\n";
+    let valid = parse(text);
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+    assert_eq!(
+        (
+            valid.program.uses[0].span.start,
+            valid.program.uses[0].span.end
+        ),
+        (0, 19)
+    );
+    assert_eq!(
+        &text[valid.program.uses[0].span.start as usize..valid.program.uses[0].span.end as usize],
+        "use parser::{Token}"
+    );
+    assert_eq!(
+        (
+            valid.program.uses[0].path.span.start,
+            valid.program.uses[0].path.span.end
+        ),
+        (4, 10)
+    );
+    let UseKind::NamedItems(items) = &valid.program.uses[0].kind else {
+        panic!("named items")
+    };
+    assert_eq!((items[0].span.start, items[0].span.end), (13, 18));
+
+    let invalid = parse("use parser {Token}\nfn after() {}\n");
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0101"
+                && diagnostic.message == "A grouped use requires '::' before '{'")
+    );
+    assert!(invalid.program.uses.is_empty());
+    assert!(has_function(&invalid, "after"));
+}
+
+#[test]
 fn prohibited_surfaces_fail_loud_without_ast_carriers() {
     let output = parse(
         r#"
@@ -417,6 +533,17 @@ fn bad(value: Int?) -> Option<Int> { value? }
 }
 
 #[test]
+fn raw_string_patterns_fail_without_becoming_string_patterns() {
+    let output =
+        parse("fn bad(value: Str) { match value { r\"raw\" => 1, _ => 0 } }\nfn after() {}\n");
+    assert!(output.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0101"
+            && diagnostic.message == "Raw string literals are not supported in patterns"
+    }));
+    assert!(has_function(&output, "after"));
+}
+
+#[test]
 fn delimiter_aware_recovery_keeps_following_declarations() {
     for (fixture, expected_name) in [
         (
@@ -446,6 +573,99 @@ fn delimiter_aware_recovery_keeps_following_declarations() {
         assert!(
             names.contains(&expected_name),
             "recovered declarations: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn removed_syntax_contracts_fail_stably_and_recover() {
+    let default_parameter_cases = [
+        ("fn", "fn bad(value: Int = 1) {}\nfn after() {}\n"),
+        ("extern", "extern fn bad(value: Int = 1)\nfn after() {}\n"),
+        (
+            "effect",
+            "effect Bad { fn op(value: Int = 1) -> Unit }\nfn after() {}\n",
+        ),
+        (
+            "handler",
+            "fn bad() { handle {} with { Logger.log(value: Int = 1) => () } }\nfn after() {}\n",
+        ),
+        (
+            "lambda",
+            "fn bad() { fn(value: Int = 1) { value } }\nfn after() {}\n",
+        ),
+        (
+            "trait",
+            "trait Bad { fn method(value: Int = 1) }\nfn after() {}\n",
+        ),
+    ];
+    for (label, text) in default_parameter_cases {
+        let output = parse(text);
+        assert!(
+            output.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "E0101"
+                    && diagnostic.message == "Default parameters are not part of Vorton 0.1"
+            }),
+            "missing default-parameter diagnostic for {label}: {:#?}",
+            output.diagnostics
+        );
+        assert!(
+            has_function(&output, "after"),
+            "recovery failed for {label}"
+        );
+    }
+
+    let cases = [
+        (
+            "trait body",
+            "trait Bad { fn bad() { 1 } fn okay() }\nfn after() {}\n",
+            "E0101",
+            "Trait method bodies are not supported in Vorton 0.1",
+        ),
+        (
+            "effect body",
+            "effect Bad { fn bad() -> Unit { () } fn okay() -> Unit }\nfn after() {}\n",
+            "E0101",
+            "Effect operation bodies are not supported in Vorton 0.1",
+        ),
+        (
+            "delegate",
+            "struct Box {}\nimpl Box { delegate inner: Show\n fn okay() {} }\nfn after() {}\n",
+            "E0101",
+            "'delegate' is not part of Vorton 0.1",
+        ),
+        (
+            "impl extern",
+            "struct Box {}\nimpl Box { extern fn raw(value: Int) -> Int\n fn okay() {} }\nfn after() {}\n",
+            "E0101",
+            "Impl-member extern functions are not part of Vorton 0.1",
+        ),
+        (
+            "try",
+            "fn bad() { try { 1 } }\nfn after() {}\n",
+            "E0101",
+            "'try' is reserved; use a catch expression",
+        ),
+        (
+            "empty enum parentheses",
+            "enum Bad { empty(), okay }\nfn after() {}\n",
+            "E0104",
+            "Empty parentheses on an enum variant are not allowed",
+        ),
+    ];
+    for (label, text, code, message) in cases {
+        let output = parse(text);
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == code && diagnostic.message == message),
+            "missing diagnostic for {label}: {:#?}",
+            output.diagnostics
+        );
+        assert!(
+            has_function(&output, "after"),
+            "recovery failed for {label}"
         );
     }
 }
@@ -517,15 +737,38 @@ fn human_and_llm_renderers_share_the_ordered_diagnostic_list() {
 }
 
 #[test]
+fn llm_note_span_keeps_the_version_one_point_shape() {
+    let file = source("abc\n");
+    let mut diagnostic = Diagnostic::parse("E0101", "bad", file.span(0, 1), "a");
+    diagnostic.notes.push(DiagnosticNote {
+        message: "detail".to_owned(),
+        span: Some(file.span(1, 3)),
+    });
+    let document: serde_json::Value =
+        serde_json::from_str(&format_llm(&file, &[diagnostic])).unwrap();
+    let note_span = document["diagnostics"][0]["notes"][0]["span"]
+        .as_object()
+        .unwrap();
+    assert_eq!(
+        note_span.keys().map(String::as_str).collect::<HashSet<_>>(),
+        HashSet::from(["line", "col"])
+    );
+    assert_eq!(note_span["line"], 1);
+    assert_eq!(note_span["col"], 1);
+}
+
+#[test]
 fn cli_uses_stable_success_source_error_and_input_error_codes() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!(
+    let directory = std::env::temp_dir().join(format!(
         "vorton-frontend-{}-{unique}.vorton",
         std::process::id()
     ));
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("case.vorton");
     fs::write(&path, "fn main() { 1 }").unwrap();
     let binary = env!("CARGO_BIN_EXE_vorton");
 
@@ -547,7 +790,33 @@ fn cli_uses_stable_success_source_error_and_input_error_codes() {
 
     let input_error = Command::new(binary).arg("unknown").output().unwrap();
     assert_eq!(input_error.status.code(), Some(2));
+
+    let top_level_help = Command::new(binary).arg("help").output().unwrap();
+    assert_eq!(top_level_help.status.code(), Some(0));
+    assert!(
+        String::from_utf8(top_level_help.stdout)
+            .unwrap()
+            .contains("Usage:")
+    );
+
+    fs::write(directory.join("help"), "fn main() {}").unwrap();
+    let help_path = Command::new(binary)
+        .current_dir(&directory)
+        .args(["parse", "help"])
+        .output()
+        .unwrap();
+    assert_eq!(help_path.status.code(), Some(0));
+    assert_eq!(String::from_utf8(help_path.stdout).unwrap().trim(), "OK");
+
+    let nested_help_flag = Command::new(binary)
+        .args(["parse", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(nested_help_flag.status.code(), Some(2));
+
     fs::remove_file(path).unwrap();
+    fs::remove_file(directory.join("help")).unwrap();
+    fs::remove_dir(directory).unwrap();
 }
 
 #[test]
@@ -636,4 +905,98 @@ fn call_parentheses_must_start_on_the_callee_line() {
         }
     ));
     assert!(matches!(tail.as_ref(), Expr::Parenthesized { .. }));
+
+    let same_line_method = parse("fn main() { receiver.method(1) }");
+    let Decl::Function(function) = &same_line_method.program.declarations[0] else {
+        panic!("function")
+    };
+    let Expr::Block {
+        tail: Some(tail), ..
+    } = &function.body
+    else {
+        panic!("tail")
+    };
+    assert!(matches!(tail.as_ref(), Expr::MethodCall { .. }));
+
+    let next_line_method = parse("fn main() { receiver.method\n(1) }");
+    assert!(next_line_method.diagnostics.is_empty());
+    let Decl::Function(function) = &next_line_method.program.declarations[0] else {
+        panic!("function")
+    };
+    let Expr::Block {
+        statements,
+        tail: Some(tail),
+        ..
+    } = &function.body
+    else {
+        panic!("body")
+    };
+    assert!(matches!(
+        statements[0],
+        Stmt::Expression {
+            expression: Expr::FieldAccess { .. },
+            ..
+        }
+    ));
+    assert!(matches!(tail.as_ref(), Expr::Parenthesized { .. }));
+}
+
+#[test]
+fn precedence_and_associativity_are_structural() {
+    let multiplied_first = tail_expression("1 + 2 * 3");
+    let Expr::Binary {
+        op: BinaryOp::Add,
+        right,
+        ..
+    } = multiplied_first
+    else {
+        panic!("add root")
+    };
+    assert!(matches!(
+        right.as_ref(),
+        Expr::Binary {
+            op: BinaryOp::Multiply,
+            ..
+        }
+    ));
+
+    let left_associative = tail_expression("1 - 2 - 3");
+    let Expr::Binary {
+        op: BinaryOp::Subtract,
+        left,
+        ..
+    } = left_associative
+    else {
+        panic!("subtract root")
+    };
+    assert!(matches!(
+        left.as_ref(),
+        Expr::Binary {
+            op: BinaryOp::Subtract,
+            ..
+        }
+    ));
+
+    let comparison = parse("fn main() { 1 < 2 < 3 }");
+    assert!(
+        comparison
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "Comparison operators are non-associative")
+    );
+
+    let range_then_catch = tail_expression("1 + 2..3 catch { _ => 4 }");
+    let Expr::Catch { expression, .. } = range_then_catch else {
+        panic!("catch root")
+    };
+    let Expr::Range { start, .. } = expression.as_ref() else {
+        panic!("range inside catch")
+    };
+    assert!(matches!(
+        start.as_ref(),
+        Expr::Binary {
+            op: BinaryOp::Add,
+            ..
+        }
+    ));
 }

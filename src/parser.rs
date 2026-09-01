@@ -104,7 +104,23 @@ impl<'a> Parser<'a> {
         let visibility = self.parse_visibility();
         self.expect(TokenKind::Use)?;
         let path = self.parse_path(true)?;
-        let kind = if self.consume(TokenKind::LeftBrace).is_some() {
+        let has_group_separator = self
+            .tokens
+            .get(self.position.saturating_sub(1))
+            .is_some_and(|token| token.kind == TokenKind::ColonColon);
+        let kind = if self.at(TokenKind::LeftBrace) {
+            if !has_group_separator {
+                self.report(Diagnostic::parse(
+                    "E0101",
+                    "A grouped use requires '::' before '{'",
+                    self.peek().span,
+                    "{",
+                ));
+                self.skip_balanced_group(TokenKind::LeftBrace, TokenKind::RightBrace);
+                self.consume(TokenKind::Semicolon);
+                return None;
+            }
+            self.advance();
             let mut items = Vec::new();
             if self.at(TokenKind::RightBrace) {
                 self.report(Diagnostic::parse(
@@ -1235,9 +1251,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.at(TokenKind::LeftParen) && 10 > minimum {
-                let left_line = self.source.line_index(left.span().end);
-                let call_line = self.source.line_index(self.peek().span.start);
-                if left_line != call_line {
+                if !self.call_parenthesis_is_same_line(left.span().end) {
                     break;
                 }
                 left = self.parse_call_expression(left)?;
@@ -1534,7 +1548,8 @@ impl<'a> Parser<'a> {
             });
         }
         let field = self.expect_name()?;
-        if self.consume(TokenKind::LeftParen).is_some() {
+        if self.call_parenthesis_is_same_line(field.span.end) {
+            self.advance();
             let args = self.parse_argument_list()?;
             let close = self.expect(TokenKind::RightParen)?;
             Some(Expr::MethodCall {
@@ -1600,6 +1615,11 @@ impl<'a> Parser<'a> {
             fields,
             span: self.source.span(start, close.span.end as usize),
         })
+    }
+
+    fn call_parenthesis_is_same_line(&self, callee_end: u32) -> bool {
+        self.at(TokenKind::LeftParen)
+            && self.source.line_index(callee_end) == self.source.line_index(self.peek().span.start)
     }
 
     fn path_may_name_literal(&self, path: &Path) -> bool {
@@ -1891,12 +1911,22 @@ impl<'a> Parser<'a> {
                     span: token.span,
                 });
             }
-            TokenKind::String | TokenKind::RawString => {
+            TokenKind::String => {
                 self.advance();
                 return Some(Pattern::Literal {
                     literal: PatternLiteral::String(token.value),
                     span: token.span,
                 });
+            }
+            TokenKind::RawString => {
+                self.advance();
+                self.report(Diagnostic::parse(
+                    "E0101",
+                    "Raw string literals are not supported in patterns",
+                    token.span,
+                    token.value,
+                ));
+                return None;
             }
             TokenKind::True | TokenKind::False => {
                 self.advance();
@@ -2105,9 +2135,7 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier | TokenKind::Super => {
                 let path = self.parse_path(false)?;
                 let type_args = self.parse_type_arguments()?;
-                let end = type_args
-                    .last()
-                    .map_or(path.span.end, |value| value.span().end);
+                let end = self.previous_end() as u32;
                 Some(TypeExpr::Named {
                     span: self.source.span(path.span.start as usize, end as usize),
                     path,

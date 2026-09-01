@@ -27,10 +27,7 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Vec<String>) -> Result<u8, String> {
-    if args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "help"))
-    {
+    if matches!(args.as_slice(), [arg] if matches!(arg.as_str(), "-h" | "--help" | "help")) {
         print!("{}", usage());
         return Ok(EXIT_SUCCESS);
     }

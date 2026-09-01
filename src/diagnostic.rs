@@ -258,7 +258,13 @@ enum LlmContext<'a> {
 struct LlmNote<'a> {
     message: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    span: Option<LlmSpan>,
+    span: Option<LlmNoteSpan>,
+}
+
+#[derive(Serialize)]
+struct LlmNoteSpan {
+    line: u32,
+    col: u32,
 }
 
 #[derive(Serialize)]
@@ -289,7 +295,7 @@ pub fn format_llm(source: &SourceFile, diagnostics: &[Diagnostic]) -> String {
                     .iter()
                     .map(|note| LlmNote {
                         message: &note.message,
-                        span: note.span.map(|span| llm_span(source, span)),
+                        span: note.span.map(|span| llm_note_span(source, span)),
                     })
                     .collect(),
                 suggestions: diagnostic
@@ -322,4 +328,9 @@ fn llm_span(source: &SourceFile, span: Span) -> LlmSpan {
         end_line,
         end_col,
     }
+}
+
+fn llm_note_span(source: &SourceFile, span: Span) -> LlmNoteSpan {
+    let (line, col) = source.line_column(span.start);
+    LlmNoteSpan { line, col }
 }

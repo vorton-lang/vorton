@@ -371,7 +371,7 @@ impl<'a> Lexer<'a> {
                 }
                 continue;
             }
-            if current != '\r' {
+            if current != '\r' || self.peek_nth_char(1) != Some('\n') {
                 value.push(current);
             }
             self.advance_char();
@@ -411,7 +411,7 @@ impl<'a> Lexer<'a> {
                 }
                 return self.token(TokenKind::RawString, value, start, self.position);
             }
-            if current != '\r' {
+            if current != '\r' || self.peek_nth_char(1) != Some('\n') {
                 value.push(current);
             }
             self.advance_char();
