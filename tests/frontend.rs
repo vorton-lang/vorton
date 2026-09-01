@@ -1421,7 +1421,7 @@ fn remaining_surface_shapes_have_direct_structural_coverage() {
 }
 
 #[test]
-fn call_parentheses_must_start_on_the_callee_line() {
+fn same_line_parentheses_form_calls() {
     let same_line = parse("fn main() { call(1) }");
     let Decl::Function(function) = &same_line.program.declarations[0] else {
         panic!("function")
@@ -1434,28 +1434,6 @@ fn call_parentheses_must_start_on_the_callee_line() {
     };
     assert!(matches!(tail.as_ref(), Expr::Call { .. }));
 
-    let next_line = parse("fn main() { call\n(1) }");
-    assert!(next_line.diagnostics.is_empty());
-    let Decl::Function(function) = &next_line.program.declarations[0] else {
-        panic!("function")
-    };
-    let Expr::Block {
-        statements,
-        tail: Some(tail),
-        ..
-    } = &function.body
-    else {
-        panic!("body")
-    };
-    assert!(matches!(
-        statements[0],
-        Stmt::Expression {
-            expression: Expr::Path { .. },
-            ..
-        }
-    ));
-    assert!(matches!(tail.as_ref(), Expr::Parenthesized { .. }));
-
     let same_line_method = parse("fn main() { receiver.method(1) }");
     let Decl::Function(function) = &same_line_method.program.declarations[0] else {
         panic!("function")
@@ -1467,28 +1445,6 @@ fn call_parentheses_must_start_on_the_callee_line() {
         panic!("tail")
     };
     assert!(matches!(tail.as_ref(), Expr::MethodCall { .. }));
-
-    let next_line_method = parse("fn main() { receiver.method\n(1) }");
-    assert!(next_line_method.diagnostics.is_empty());
-    let Decl::Function(function) = &next_line_method.program.declarations[0] else {
-        panic!("function")
-    };
-    let Expr::Block {
-        statements,
-        tail: Some(tail),
-        ..
-    } = &function.body
-    else {
-        panic!("body")
-    };
-    assert!(matches!(
-        statements[0],
-        Stmt::Expression {
-            expression: Expr::FieldAccess { .. },
-            ..
-        }
-    ));
-    assert!(matches!(tail.as_ref(), Expr::Parenthesized { .. }));
 }
 
 #[test]

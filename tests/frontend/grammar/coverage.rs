@@ -1,15 +1,22 @@
 use std::collections::BTreeSet;
 
 use vorton::ast::*;
-use vorton::source::{SourceFile, SourceId};
+use vorton::source::{SourceFile, SourceId, Span};
 
 #[derive(Default)]
 pub(crate) struct AstCoverage {
     pub(crate) variants: BTreeSet<&'static str>,
+    pub(crate) nodes: BTreeSet<&'static str>,
+    pub(crate) field_shapes: BTreeSet<&'static str>,
+    source: Option<SourceId>,
+    source_len: u32,
 }
 
 impl AstCoverage {
     pub(crate) fn visit_program(&mut self, program: &Program) {
+        self.source = Some(program.source);
+        self.source_len = program.span.end;
+        self.node("Program", program.span);
         for use_decl in &program.uses {
             self.visit_use_decl(use_decl);
         }
@@ -19,6 +26,8 @@ impl AstCoverage {
     }
 
     fn visit_use_decl(&mut self, use_decl: &UseDecl) {
+        self.node("UseDecl", use_decl.span);
+        self.visit_visibility(&use_decl.visibility);
         self.visit_path(&use_decl.path);
         self.visit_use_kind(&use_decl.kind);
     }
@@ -26,10 +35,19 @@ impl AstCoverage {
     fn visit_use_kind(&mut self, kind: &UseKind) {
         match kind {
             UseKind::Bare => self.mark("UseKind::Bare"),
-            UseKind::PathAlias(_) => self.mark("UseKind::PathAlias"),
+            UseKind::PathAlias(alias) => {
+                self.mark("UseKind::PathAlias");
+                self.visit_name(alias);
+            }
             UseKind::NamedItems(items) => {
                 self.mark("UseKind::NamedItems");
                 for item in items {
+                    self.node("UseItem", item.span);
+                    self.shape(if item.alias.is_some() {
+                        "UseItem.alias.some"
+                    } else {
+                        "UseItem.alias.none"
+                    });
                     if let Some(alias) = &item.alias {
                         self.visit_name(alias);
                     }
@@ -40,6 +58,7 @@ impl AstCoverage {
     }
 
     fn visit_decl(&mut self, declaration: &Decl) {
+        self.span(declaration.span());
         match declaration {
             Decl::Function(value) => {
                 self.mark("Decl::Function");
@@ -47,24 +66,38 @@ impl AstCoverage {
             }
             Decl::Struct(value) => {
                 self.mark("Decl::Struct");
+                self.node("StructDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
                 for field in &value.fields {
+                    self.node("StructField", field.span);
+                    self.visit_visibility(&field.visibility);
+                    self.visit_name(&field.name);
                     self.visit_type(&field.ty);
                 }
             }
             Decl::Enum(value) => {
                 self.mark("Decl::Enum");
+                self.node("EnumDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
                 for variant in &value.variants {
+                    self.node("EnumVariant", variant.span);
+                    self.visit_name(&variant.name);
                     self.visit_variant_fields(&variant.fields);
                 }
             }
             Decl::Trait(value) => {
                 self.mark("Decl::Trait");
+                self.node("TraitDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
@@ -77,6 +110,7 @@ impl AstCoverage {
             }
             Decl::Impl(value) => {
                 self.mark("Decl::Impl");
+                self.node("ImplDecl", value.span);
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
@@ -87,10 +121,15 @@ impl AstCoverage {
             }
             Decl::Effect(value) => {
                 self.mark("Decl::Effect");
+                self.node("EffectDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
                 for operation in &value.operations {
+                    self.node("EffectOperation", operation.span);
+                    self.visit_name(&operation.name);
                     for parameter in &operation.params {
                         self.visit_param(parameter);
                     }
@@ -99,6 +138,9 @@ impl AstCoverage {
             }
             Decl::EffectAlias(value) => {
                 self.mark("Decl::EffectAlias");
+                self.node("EffectAliasDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
@@ -106,6 +148,19 @@ impl AstCoverage {
             }
             Decl::ExternFunction(value) => {
                 self.mark("Decl::ExternFunction");
+                self.node("ExternFunctionDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
+                self.shape(if value.return_type.is_some() {
+                    "ExternFunctionDecl.return.some"
+                } else {
+                    "ExternFunctionDecl.return.none"
+                });
+                self.shape(if value.effects.is_some() {
+                    "ExternFunctionDecl.effects.some"
+                } else {
+                    "ExternFunctionDecl.effects.none"
+                });
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
@@ -121,12 +176,18 @@ impl AstCoverage {
             }
             Decl::ExternType(value) => {
                 self.mark("Decl::ExternType");
+                self.node("ExternTypeDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
             }
             Decl::TypeAlias(value) => {
                 self.mark("Decl::TypeAlias");
+                self.node("TypeAliasDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
@@ -134,10 +195,21 @@ impl AstCoverage {
             }
             Decl::Test(value) => {
                 self.mark("Decl::Test");
+                self.node("TestDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.span(value.description_span);
                 self.visit_expr(&value.body);
             }
             Decl::Const(value) => {
                 self.mark("Decl::Const");
+                self.node("ConstDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
+                self.shape(if value.type_annotation.is_some() {
+                    "ConstDecl.annotation.some"
+                } else {
+                    "ConstDecl.annotation.none"
+                });
                 if let Some(annotation) = &value.type_annotation {
                     self.visit_type(annotation);
                 }
@@ -145,6 +217,14 @@ impl AstCoverage {
             }
             Decl::Module(value) => {
                 self.mark("Decl::Module");
+                self.node("ModuleDecl", value.span);
+                self.visit_visibility(&value.visibility);
+                self.visit_name(&value.name);
+                self.shape(if value.requires.is_some() {
+                    "ModuleDecl.requires.some"
+                } else {
+                    "ModuleDecl.requires.none"
+                });
                 if let Some(requires) = &value.requires {
                     self.visit_effect_set(requires);
                 }
@@ -159,6 +239,19 @@ impl AstCoverage {
     }
 
     fn visit_function(&mut self, function: &FunctionDecl) {
+        self.node("FunctionDecl", function.span);
+        self.visit_visibility(&function.visibility);
+        self.visit_name(&function.name);
+        self.shape(if function.return_type.is_some() {
+            "FunctionDecl.return.some"
+        } else {
+            "FunctionDecl.return.none"
+        });
+        self.shape(if function.effects.is_some() {
+            "FunctionDecl.effects.some"
+        } else {
+            "FunctionDecl.effects.none"
+        });
         for parameter in &function.type_params {
             self.visit_type_param(parameter);
         }
@@ -186,6 +279,8 @@ impl AstCoverage {
             VariantFields::Named(fields) => {
                 self.mark("VariantFields::Named");
                 for field in fields {
+                    self.node("NamedTypeField", field.span);
+                    self.visit_name(&field.name);
                     self.visit_type(&field.ty);
                 }
             }
@@ -196,6 +291,18 @@ impl AstCoverage {
         match member {
             TraitMember::Method(value) => {
                 self.mark("TraitMember::Method");
+                self.node("FunctionSignature", value.span);
+                self.visit_name(&value.name);
+                self.shape(if value.return_type.is_some() {
+                    "FunctionSignature.return.some"
+                } else {
+                    "FunctionSignature.return.none"
+                });
+                self.shape(if value.effects.is_some() {
+                    "FunctionSignature.effects.some"
+                } else {
+                    "FunctionSignature.effects.none"
+                });
                 for parameter in &value.type_params {
                     self.visit_type_param(parameter);
                 }
@@ -217,6 +324,14 @@ impl AstCoverage {
     }
 
     fn visit_associated_type(&mut self, associated: &AssociatedTypeDecl) {
+        self.node("AssociatedTypeDecl", associated.span);
+        self.visit_visibility(&associated.visibility);
+        self.visit_name(&associated.name);
+        self.shape(if associated.value.is_some() {
+            "AssociatedTypeDecl.value.some"
+        } else {
+            "AssociatedTypeDecl.value.none"
+        });
         for bound in &associated.bounds {
             self.visit_type_bound(bound);
         }
@@ -253,28 +368,46 @@ impl AstCoverage {
     }
 
     fn visit_type_param(&mut self, parameter: &TypeParam) {
+        self.node("TypeParam", parameter.span);
+        self.visit_name(&parameter.name);
         for bound in &parameter.bounds {
             self.visit_type_bound(bound);
         }
     }
 
     fn visit_type_bound(&mut self, bound: &TypeBound) {
+        self.node("TypeBound", bound.span);
         self.visit_path(&bound.path);
         for argument in &bound.type_args {
             self.visit_type(argument);
         }
         for constraint in &bound.associated {
+            self.node("AssociatedConstraint", constraint.span);
+            self.visit_name(&constraint.name);
             self.visit_type(&constraint.ty);
         }
     }
 
     fn visit_param(&mut self, parameter: &Param) {
+        self.node("Param", parameter.span);
+        self.visit_name(&parameter.name);
+        self.shape(if parameter.mutable {
+            "Param.mutable.true"
+        } else {
+            "Param.mutable.false"
+        });
+        self.shape(if parameter.type_annotation.is_some() {
+            "Param.annotation.some"
+        } else {
+            "Param.annotation.none"
+        });
         if let Some(annotation) = &parameter.type_annotation {
             self.visit_type(annotation);
         }
     }
 
     fn visit_type(&mut self, ty: &TypeExpr) {
+        self.span(ty.span());
         match ty {
             TypeExpr::Named {
                 path, type_args, ..
@@ -312,7 +445,19 @@ impl AstCoverage {
             }
             TypeExpr::Record { fields, .. } => {
                 self.mark("TypeExpr::Record");
+                if let TypeExpr::Record { rest, .. } = ty {
+                    self.shape(if rest.is_some() {
+                        "TypeExpr.Record.rest.some"
+                    } else {
+                        "TypeExpr.Record.rest.none"
+                    });
+                    if let Some(rest) = rest {
+                        self.visit_name(rest);
+                    }
+                }
                 for field in fields {
+                    self.node("NamedTypeField", field.span);
+                    self.visit_name(&field.name);
                     self.visit_type(&field.ty);
                 }
             }
@@ -320,7 +465,14 @@ impl AstCoverage {
     }
 
     fn visit_effect_set(&mut self, set: &EffectSet) {
+        self.node("EffectSet", set.span);
+        self.shape(if set.effects.is_empty() {
+            "EffectSet.empty"
+        } else {
+            "EffectSet.nonempty"
+        });
         for effect in &set.effects {
+            self.node("EffectExpr", effect.span);
             self.visit_effect_name(&effect.name);
             for argument in &effect.type_args {
                 self.visit_type(argument);
@@ -346,14 +498,26 @@ impl AstCoverage {
     }
 
     fn visit_stmt(&mut self, statement: &Stmt) {
+        self.span(statement.span());
         match statement {
             Stmt::Let {
+                mutable,
                 pattern,
                 type_annotation,
                 value,
                 ..
             } => {
                 self.mark("Stmt::Let");
+                self.shape(if *mutable {
+                    "Stmt.Let.mutable.true"
+                } else {
+                    "Stmt.Let.mutable.false"
+                });
+                self.shape(if type_annotation.is_some() {
+                    "Stmt.Let.annotation.some"
+                } else {
+                    "Stmt.Let.annotation.none"
+                });
                 self.visit_pattern(pattern);
                 if let Some(annotation) = type_annotation {
                     self.visit_type(annotation);
@@ -368,6 +532,11 @@ impl AstCoverage {
                 ..
             } => {
                 self.mark("Stmt::IfLet");
+                self.shape(if else_block.is_some() {
+                    "Stmt.IfLet.else.some"
+                } else {
+                    "Stmt.IfLet.else.none"
+                });
                 self.visit_pattern(pattern);
                 self.visit_expr(value);
                 self.visit_expr(then_block);
@@ -377,6 +546,11 @@ impl AstCoverage {
             }
             Stmt::Return { value, .. } => {
                 self.mark("Stmt::Return");
+                self.shape(if value.is_some() {
+                    "Stmt.Return.value.some"
+                } else {
+                    "Stmt.Return.value.none"
+                });
                 if let Some(value) = value {
                     self.visit_expr(value);
                 }
@@ -415,6 +589,13 @@ impl AstCoverage {
             }
             Stmt::Expression { expression, .. } => {
                 self.mark("Stmt::Expression");
+                if let Stmt::Expression { has_semicolon, .. } = statement {
+                    self.shape(if *has_semicolon {
+                        "Stmt.Expression.semicolon.true"
+                    } else {
+                        "Stmt.Expression.semicolon.false"
+                    });
+                }
                 self.visit_expr(expression);
             }
         }
@@ -428,6 +609,9 @@ impl AstCoverage {
             }
             ForBinding::Tuple(names, _) => {
                 self.mark("ForBinding::Tuple");
+                if let ForBinding::Tuple(_, span) = binding {
+                    self.span(*span);
+                }
                 for name in names {
                     self.visit_name(name);
                 }
@@ -447,6 +631,7 @@ impl AstCoverage {
     }
 
     pub(crate) fn visit_expr(&mut self, expression: &Expr) {
+        self.span(expression.span());
         match expression {
             Expr::Integer { .. } => self.mark("Expr::Integer"),
             Expr::Float { .. } => self.mark("Expr::Float"),
@@ -476,8 +661,18 @@ impl AstCoverage {
                 self.visit_expr(left);
                 self.visit_expr(right);
             }
-            Expr::Range { start, end, .. } => {
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => {
                 self.mark("Expr::Range");
+                self.shape(if *inclusive {
+                    "Expr.Range.inclusive.true"
+                } else {
+                    "Expr.Range.inclusive.false"
+                });
                 self.visit_expr(start);
                 self.visit_expr(end);
             }
@@ -488,16 +683,25 @@ impl AstCoverage {
                     self.visit_expr(argument);
                 }
             }
-            Expr::MethodCall { receiver, args, .. } => {
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => {
                 self.mark("Expr::MethodCall");
                 self.visit_expr(receiver);
+                self.visit_name(method);
                 for argument in args {
                     self.visit_expr(argument);
                 }
             }
-            Expr::FieldAccess { receiver, .. } => {
+            Expr::FieldAccess {
+                receiver, field, ..
+            } => {
                 self.mark("Expr::FieldAccess");
                 self.visit_expr(receiver);
+                self.visit_name(field);
             }
             Expr::TupleFieldAccess { receiver, .. } => {
                 self.mark("Expr::TupleFieldAccess");
@@ -518,15 +722,32 @@ impl AstCoverage {
             } => {
                 self.mark("Expr::NamedLiteral");
                 self.visit_path(path);
+                self.shape(if spread.is_some() {
+                    "Expr.NamedLiteral.spread.some"
+                } else {
+                    "Expr.NamedLiteral.spread.none"
+                });
                 if let Some(spread) = spread {
                     self.visit_expr(spread);
                 }
                 for field in fields {
+                    self.node("FieldInit", field.span);
+                    self.visit_name(&field.name);
+                    self.shape(if field.shorthand {
+                        "FieldInit.shorthand.true"
+                    } else {
+                        "FieldInit.shorthand.false"
+                    });
                     self.visit_expr(&field.value);
                 }
             }
             Expr::List { elements, .. } => {
                 self.mark("Expr::List");
+                self.shape(if elements.is_empty() {
+                    "Expr.List.empty"
+                } else {
+                    "Expr.List.nonempty"
+                });
                 for element in elements {
                     self.visit_expr(element);
                 }
@@ -546,6 +767,11 @@ impl AstCoverage {
                 statements, tail, ..
             } => {
                 self.mark("Expr::Block");
+                self.shape(if tail.is_some() {
+                    "Expr.Block.tail.some"
+                } else {
+                    "Expr.Block.tail.none"
+                });
                 for statement in statements {
                     self.visit_stmt(statement);
                 }
@@ -560,6 +786,11 @@ impl AstCoverage {
                 ..
             } => {
                 self.mark("Expr::If");
+                self.shape(if else_branch.is_some() {
+                    "Expr.If.else.some"
+                } else {
+                    "Expr.If.else.none"
+                });
                 self.visit_expr(condition);
                 self.visit_expr(then_branch);
                 if let Some(else_branch) = else_branch {
@@ -579,7 +810,9 @@ impl AstCoverage {
                 self.mark("Expr::Handle");
                 self.visit_expr(body);
                 for handler in handlers {
+                    self.node("EffectHandler", handler.span);
                     self.visit_path(&handler.effect);
+                    self.visit_name(&handler.operation);
                     for parameter in &handler.params {
                         self.visit_param(parameter);
                     }
@@ -593,6 +826,11 @@ impl AstCoverage {
                 ..
             } => {
                 self.mark("Expr::Lambda");
+                self.shape(if return_type.is_some() {
+                    "Expr.Lambda.return.some"
+                } else {
+                    "Expr.Lambda.return.none"
+                });
                 for parameter in params {
                     self.visit_param(parameter);
                 }
@@ -616,6 +854,11 @@ impl AstCoverage {
             }
             Expr::Return { value, .. } => {
                 self.mark("Expr::Return");
+                self.shape(if value.is_some() {
+                    "Expr.Return.value.some"
+                } else {
+                    "Expr.Return.value.none"
+                });
                 if let Some(value) = value {
                     self.visit_expr(value);
                 }
@@ -625,7 +868,10 @@ impl AstCoverage {
 
     fn visit_string_part(&mut self, part: &StringPart) {
         match part {
-            StringPart::Text { .. } => self.mark("StringPart::Text"),
+            StringPart::Text { span, .. } => {
+                self.mark("StringPart::Text");
+                self.span(*span);
+            }
             StringPart::Expression(expression) => {
                 self.mark("StringPart::Expression");
                 self.visit_expr(expression);
@@ -659,6 +905,12 @@ impl AstCoverage {
     }
 
     fn visit_match_arm(&mut self, arm: &MatchArm) {
+        self.node("MatchArm", arm.span);
+        self.shape(if arm.guard.is_some() {
+            "MatchArm.guard.some"
+        } else {
+            "MatchArm.guard.none"
+        });
         self.visit_pattern(&arm.pattern);
         if let Some(guard) = &arm.guard {
             self.visit_expr(guard);
@@ -667,9 +919,13 @@ impl AstCoverage {
     }
 
     fn visit_pattern(&mut self, pattern: &Pattern) {
+        self.span(pattern.span());
         match pattern {
             Pattern::Wildcard { .. } => self.mark("Pattern::Wildcard"),
-            Pattern::Name { .. } => self.mark("Pattern::Name"),
+            Pattern::Name { name, .. } => {
+                self.mark("Pattern::Name");
+                self.visit_name(name);
+            }
             Pattern::Literal { literal, .. } => {
                 self.mark("Pattern::Literal");
                 self.visit_pattern_literal(literal);
@@ -682,14 +938,26 @@ impl AstCoverage {
                 }
             }
             Pattern::NamedConstructor {
-                path,
-                fields,
-                rest: _,
-                ..
+                path, fields, rest, ..
             } => {
                 self.mark("Pattern::NamedConstructor");
                 self.visit_path(path);
+                self.shape(if rest.is_some() {
+                    "Pattern.NamedConstructor.rest.some"
+                } else {
+                    "Pattern.NamedConstructor.rest.none"
+                });
+                if let Some(rest) = rest {
+                    self.span(*rest);
+                }
                 for field in fields {
+                    self.node("NamedPatternField", field.span);
+                    self.visit_name(&field.name);
+                    self.shape(if field.shorthand {
+                        "NamedPatternField.shorthand.true"
+                    } else {
+                        "NamedPatternField.shorthand.false"
+                    });
                     self.visit_pattern(&field.pattern);
                 }
             }
@@ -718,12 +986,52 @@ impl AstCoverage {
     }
 
     fn visit_path(&mut self, path: &Path) {
+        self.node("Path", path.span);
+        self.shape(if path.segments.len() == 1 {
+            "Path.segments.single"
+        } else {
+            "Path.segments.multi"
+        });
         for segment in &path.segments {
             self.visit_name(segment);
         }
     }
 
-    fn visit_name(&mut self, _name: &Name) {}
+    fn visit_name(&mut self, name: &Name) {
+        self.node("Name", name.span);
+    }
+
+    fn visit_visibility(&mut self, visibility: &Visibility) {
+        self.nodes.insert("Visibility");
+        self.shape(if visibility.public {
+            "Visibility.public.true"
+        } else {
+            "Visibility.public.false"
+        });
+        self.shape(if visibility.span.is_some() {
+            "Visibility.span.some"
+        } else {
+            "Visibility.span.none"
+        });
+        if let Some(span) = visibility.span {
+            self.span(span);
+        }
+    }
+
+    fn node(&mut self, tag: &'static str, span: Span) {
+        self.nodes.insert(tag);
+        self.span(span);
+    }
+
+    fn shape(&mut self, tag: &'static str) {
+        self.field_shapes.insert(tag);
+    }
+
+    fn span(&self, span: Span) {
+        assert_eq!(Some(span.source), self.source);
+        assert!(span.start <= span.end, "reversed span {span:?}");
+        assert!(span.end <= self.source_len, "out-of-bounds span {span:?}");
+    }
 
     fn mark(&mut self, tag: &'static str) {
         self.variants.insert(tag);
@@ -840,7 +1148,139 @@ pub(crate) const EXPECTED_AST_VARIANTS: &[&str] = &[
     "VariantFields::Unit",
 ];
 
+const EXPECTED_PUBLIC_NODES: &[&str] = &[
+    "AssociatedConstraint",
+    "AssociatedTypeDecl",
+    "ConstDecl",
+    "EffectAliasDecl",
+    "EffectDecl",
+    "EffectExpr",
+    "EffectHandler",
+    "EffectOperation",
+    "EffectSet",
+    "EnumDecl",
+    "EnumVariant",
+    "ExternFunctionDecl",
+    "ExternTypeDecl",
+    "FieldInit",
+    "FunctionDecl",
+    "FunctionSignature",
+    "ImplDecl",
+    "MatchArm",
+    "ModuleDecl",
+    "Name",
+    "NamedPatternField",
+    "NamedTypeField",
+    "Param",
+    "Path",
+    "Program",
+    "StructDecl",
+    "StructField",
+    "TestDecl",
+    "TraitDecl",
+    "TypeAliasDecl",
+    "TypeBound",
+    "TypeParam",
+    "UseDecl",
+    "UseItem",
+    "Visibility",
+];
+
+// The spec-first candidate still compiles against the pre-implementation
+// carrier, so the visitor records its only legal value. The implementation
+// candidate will remove the field without changing this semantic tag.
+const EXPECTED_FIELD_SHAPES: &[&str] = &[
+    "AssociatedTypeDecl.value.none",
+    "AssociatedTypeDecl.value.some",
+    "ConstDecl.annotation.none",
+    "ConstDecl.annotation.some",
+    "EffectSet.empty",
+    "EffectSet.nonempty",
+    "Expr.Block.tail.none",
+    "Expr.Block.tail.some",
+    "Expr.If.else.none",
+    "Expr.If.else.some",
+    "Expr.Lambda.return.none",
+    "Expr.Lambda.return.some",
+    "Expr.List.empty",
+    "Expr.List.nonempty",
+    "Expr.NamedLiteral.spread.none",
+    "Expr.NamedLiteral.spread.some",
+    "Expr.Range.inclusive.false",
+    "Expr.Range.inclusive.true",
+    "Expr.Return.value.none",
+    "Expr.Return.value.some",
+    "ExternFunctionDecl.effects.none",
+    "ExternFunctionDecl.effects.some",
+    "ExternFunctionDecl.return.none",
+    "ExternFunctionDecl.return.some",
+    "FieldInit.shorthand.false",
+    "FieldInit.shorthand.true",
+    "FunctionDecl.effects.none",
+    "FunctionDecl.effects.some",
+    "FunctionDecl.return.none",
+    "FunctionDecl.return.some",
+    "FunctionSignature.effects.none",
+    "FunctionSignature.effects.some",
+    "FunctionSignature.return.none",
+    "FunctionSignature.return.some",
+    "MatchArm.guard.none",
+    "MatchArm.guard.some",
+    "ModuleDecl.requires.none",
+    "ModuleDecl.requires.some",
+    "NamedPatternField.shorthand.false",
+    "NamedPatternField.shorthand.true",
+    "Param.annotation.none",
+    "Param.annotation.some",
+    "Param.mutable.false",
+    "Param.mutable.true",
+    "Path.segments.multi",
+    "Path.segments.single",
+    "Pattern.NamedConstructor.rest.none",
+    "Pattern.NamedConstructor.rest.some",
+    "Stmt.Expression.semicolon.true",
+    "Stmt.IfLet.else.none",
+    "Stmt.IfLet.else.some",
+    "Stmt.Let.annotation.none",
+    "Stmt.Let.annotation.some",
+    "Stmt.Let.mutable.false",
+    "Stmt.Let.mutable.true",
+    "Stmt.Return.value.none",
+    "Stmt.Return.value.some",
+    "TypeExpr.Record.rest.none",
+    "TypeExpr.Record.rest.some",
+    "UseItem.alias.none",
+    "UseItem.alias.some",
+    "Visibility.public.false",
+    "Visibility.public.true",
+    "Visibility.span.none",
+    "Visibility.span.some",
+];
+
 const COVERAGE_SUPPLEMENT: &str = r#"
+const INFERRED = 1
+extern fn host_without_annotations()
+mod plain {}
+trait Bare {
+    type Item
+    fn bare(self)
+}
+type ClosedRecord = {field: Int}
+fn constrained<T: Bound<Item = Int>>() {}
+
+fn shapes(base: Shape, item: Shape, untyped, typed: Int) with {} {
+    let empty = []
+    let literal = Shape {x, y: 1}
+    let updated = Shape {..base, x: 1}
+    let conditional = if true {}
+    if let value = item {}
+    let lambda = fn(value) {value}
+    let exclusive = 1..2
+    let no_rest = match item {Shape {x, y: value} => value}
+    let with_rest = match item {Shape {x, ..} if true => x}
+    call();
+}
+
 fn operators(flag: Bool, item: Item, items: Items) with {mut<Int>, unsafe} {
     let sub = 3 - 2
     let mul = 3 * 2
@@ -891,6 +1331,11 @@ fn all_ast_enum_variants_are_visited_exhaustively_and_exactly() {
     coverage.visit_program(&parse_valid(COVERAGE_SUPPLEMENT, 2));
 
     let expected: BTreeSet<_> = EXPECTED_AST_VARIANTS.iter().copied().collect();
+    let expected_nodes: BTreeSet<_> = EXPECTED_PUBLIC_NODES.iter().copied().collect();
+    let expected_fields: BTreeSet<_> = EXPECTED_FIELD_SHAPES.iter().copied().collect();
     assert_eq!(EXPECTED_AST_VARIANTS.len(), 107);
+    assert_eq!(EXPECTED_PUBLIC_NODES.len(), 35);
     assert_eq!(coverage.variants, expected);
+    assert_eq!(coverage.nodes, expected_nodes);
+    assert_eq!(coverage.field_shapes, expected_fields);
 }

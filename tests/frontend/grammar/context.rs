@@ -349,3 +349,84 @@ fn shared_path_surface_preserves_segments_and_half_open_spans() {
     };
     assert_path(path, "module::value");
 }
+
+#[test]
+fn super_root_keeps_the_same_path_shape_across_frontend_surfaces() {
+    let text = r#"
+mod outer {
+    mod inner {
+        use super::{value, helper}
+        use super::super::{root}
+        type Parent = super::Type
+        fn f<T: super::Bound>(value: super::Type) with {super::io} {
+            let literal = super::Shape {}
+            let matched = match value {super::some(item) => item}
+            super::value
+        }
+    }
+}
+"#;
+    let output =
+        vorton::parse_source(SourceFile::new(SourceId(701), "super.vorton", text).unwrap());
+    let program = output.syntax.expect("super path fixture");
+    let Decl::Module(outer) = &program.declarations[0] else {
+        panic!("outer")
+    };
+    let Decl::Module(inner) = &outer.declarations[0] else {
+        panic!("inner")
+    };
+    assert_eq!(inner.uses[0].path.segments.len(), 1);
+    assert_eq!(inner.uses[0].path.segments[0].text, "super");
+    assert!(matches!(inner.uses[0].kind, UseKind::NamedItems(_)));
+    assert_eq!(inner.uses[1].path.segments.len(), 2);
+
+    let Decl::TypeAlias(alias) = &inner.declarations[0] else {
+        panic!("type alias")
+    };
+    let TypeExpr::Named { path, .. } = &alias.ty else {
+        panic!("type path")
+    };
+    assert_eq!(path.segments[0].text, "super");
+
+    let Decl::Function(function) = &inner.declarations[1] else {
+        panic!("function")
+    };
+    assert_eq!(
+        function.type_params[0].bounds[0].path.segments[0].text,
+        "super"
+    );
+    let Some(TypeExpr::Named { path, .. }) = &function.params[0].type_annotation else {
+        panic!("parameter type")
+    };
+    assert_eq!(path.segments[0].text, "super");
+    let EffectName::Path(path) = &function.effects.as_ref().unwrap().effects[0].name else {
+        panic!("effect")
+    };
+    assert_eq!(path.segments[0].text, "super");
+    let Expr::Block {
+        statements, tail, ..
+    } = &function.body
+    else {
+        panic!("body")
+    };
+    assert!(matches!(
+        statements[0],
+        Stmt::Let {
+            value: Expr::NamedLiteral { ref path, .. },
+            ..
+        } if path.segments[0].text == "super"
+    ));
+    let Stmt::Let {
+        value: Expr::Match { arms, .. },
+        ..
+    } = &statements[1]
+    else {
+        panic!("match")
+    };
+    assert!(
+        matches!(arms[0].pattern, Pattern::Constructor { ref path, .. }
+        if path.segments[0].text == "super")
+    );
+    assert!(matches!(tail.as_deref(), Some(Expr::Path { path, .. })
+        if path.segments[0].text == "super"));
+}

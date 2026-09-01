@@ -194,78 +194,16 @@ fn all_case_meta() -> Vec<CaseMeta> {
     cases
 }
 
-const REQUIRED_CASE_IDS: &[&str] = &[
-    "V.S.DeclKind.all-alternatives",
-    "V.S.VariantFields.positional-and-named",
-    "V.S.ImplDecl.inherent-and-trait",
-    "V.S.InherentImplMember.fn-and-type",
-    "V.S.TraitMember.all-alternatives",
-    "V.S.TypeExpr.all-alternatives",
-    "V.S.EffectName.all-alternatives",
-    "V.S.Stmt.all-alternatives",
-    "V.S.AssignStmt.all-operators",
-    "V.S.PrimaryExpr.all-alternatives",
-    "V.S.Pattern.all-single-alternatives",
-    "V.S.EffectSet.many-trailing",
-    "I.S.EffectSet.missing-comma",
-    "V.S.Params.many-trailing",
-    "I.S.Params.missing-comma",
-    "V.S.TypeParams.many-trailing",
-    "I.S.TypeParams.empty",
-    "V.S.TypeBound.mixed-trailing",
-    "I.S.TypeBound.empty-angles",
-    "V.S.TypeArgs.nested-trailing",
-    "I.S.TypeArgs.missing-comma",
-    "V.S.ForBinding.tuple-trailing",
-    "I.S.ForBinding.tuple-one",
-    "V.S.NamedLiteralBody.spread-and-fields",
-    "I.S.NamedLiteralBody.missing-comma-after-spread",
-    "V.S.ListLit.many-trailing",
-    "I.S.ListLit.leading-comma",
-    "V.S.TupleOrParen.tuple-trailing",
-    "I.S.TupleOrParen.single-tuple",
-    "V.S.HandleExpr.many-trailing",
-    "I.S.HandleExpr.empty",
-    "V.S.PatList.many-trailing",
-    "I.S.PatList.missing-comma",
-    "V.S.NamedPatGroup.fields-rest-trailing",
-    "I.S.NamedPatGroup.rest-first-with-fields",
-    "I.S.BreakStmt.expression-after-break",
-    "I.S.ContinueStmt.expression-after-continue",
-    "V.S.ReturnStmt.bare-before-let",
-    "I.S.Block.extra-token-after-tail",
-    "C.expr.precedence.postfix-over-unary",
-    "C.expr.precedence.unary-over-mul",
-    "C.expr.precedence.mul-over-add",
-    "C.expr.precedence.add-over-range",
-    "C.expr.precedence.range-over-compare",
-    "C.expr.precedence.compare-over-equality",
-    "C.expr.precedence.equality-over-and",
-    "C.expr.precedence.and-over-or",
-    "C.expr.precedence.or-over-catch",
-    "C.expr.nonassoc.equality-chain-rejected",
-    "C.expr.nonassoc.compare-chain-rejected",
-    "C.expr.call.same-line",
-    "C.expr.call.next-line-not-call",
-    "C.expr.method-call.same-line",
-    "C.expr.method-call.next-line-is-field-then-paren",
-    "C.context.self-colon-colon-rejected",
-    "C.path.lowercase-named-literal",
-    "C.path.lowercase-positional-constructor",
-    "C.path.lowercase-constructor-pattern",
-    "C.return.bare-before-statement-token",
-];
-
+const EXPECTED_CASE_IDS: &str = include_str!("expected_case_ids.txt");
 #[test]
 fn docs_lhs_and_executable_manifest_are_mechanically_closed() {
     let lexical = production_ids("L", include_str!("../../../docs/lang-spec/lexical.md"));
     let syntax = production_ids("S", include_str!("../../../docs/lang-spec/syntax.md"));
     assert_eq!(lexical.len(), 8, "lexical production count");
-    assert_eq!(syntax.len(), 104, "syntax production count");
+    assert_eq!(syntax.len(), 106, "syntax production count");
 
     let documented: BTreeSet<_> = lexical.union(&syntax).cloned().collect();
     let cases = all_case_meta();
-    assert_eq!(cases.len(), 326, "executable case count");
     let mut ids = BTreeSet::new();
     let mut coverage: BTreeMap<&str, (bool, bool)> = BTreeMap::new();
     for case in &cases {
@@ -294,9 +232,21 @@ fn docs_lhs_and_executable_manifest_are_mechanically_closed() {
         }
     }
 
-    for required in REQUIRED_CASE_IDS {
-        assert!(ids.contains(required), "missing required case {required}");
-    }
+    let expected_lines: Vec<_> = EXPECTED_CASE_IDS
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect();
+    let expected: BTreeSet<_> = expected_lines.iter().copied().collect();
+    assert!(
+        expected_lines.windows(2).all(|pair| pair[0] < pair[1]),
+        "expected case IDs must stay sorted"
+    );
+    assert_eq!(
+        expected.len(),
+        expected_lines.len(),
+        "duplicate expected case ID"
+    );
+    assert_eq!(ids, expected, "expected/executable case-ID drift");
 
     let registered: BTreeSet<_> = coverage.keys().map(|value| (*value).to_owned()).collect();
     assert_eq!(registered, documented, "manifest/document production drift");

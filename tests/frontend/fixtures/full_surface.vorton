@@ -107,7 +107,7 @@ fn exercise(base: Point<Int>, opt: Maybe<Int>) -> Int {
         _ => 0,
     }
     let handled = handle {
-        Logger.log("hello")
+        Logger.log("hello");
         1
     } with {
         Logger.log(message) => (),

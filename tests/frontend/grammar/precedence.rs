@@ -184,6 +184,26 @@ fn assert_left_range(program: &vorton::ast::Program) {
     ));
 }
 
+fn assert_exclusive_range(program: &vorton::ast::Program) {
+    assert!(matches!(
+        tail(program),
+        Expr::Range {
+            inclusive: false,
+            ..
+        }
+    ));
+}
+
+fn assert_inclusive_range(program: &vorton::ast::Program) {
+    assert!(matches!(
+        tail(program),
+        Expr::Range {
+            inclusive: true,
+            ..
+        }
+    ));
+}
+
 fn assert_right_unary(program: &vorton::ast::Program) {
     assert!(matches!(
         tail(program),
@@ -266,6 +286,8 @@ const CASES: &[SyntaxCase] = &[
     SyntaxCase::valid("V.S.CompareExpr.one", "S.CompareExpr", "fn f() {a < b}", assert_compare),
     SyntaxCase::invalid("I.S.CompareExpr.chain", "S.CompareExpr", "fn f() {a < b < c}", "E0101", "<"),
     SyntaxCase::valid("V.S.RangeExpr.left-chain", "S.RangeExpr", "fn f() {1..2..3}", assert_left_range),
+    SyntaxCase::valid("V.S.RangeExpr.exclusive", "S.RangeExpr", "fn f() {1..2}", assert_exclusive_range),
+    SyntaxCase::valid("V.S.RangeExpr.inclusive", "S.RangeExpr", "fn f() {1..=2}", assert_inclusive_range),
     SyntaxCase::invalid("I.S.RangeExpr.missing-end", "S.RangeExpr", "fn f() {1..}", "E0101", "}"),
     SyntaxCase::valid("V.S.AddExpr.left", "S.AddExpr", "fn f() {1 + 2 + 3}", assert_left_binary),
     SyntaxCase::invalid("I.S.AddExpr.missing-right", "S.AddExpr", "fn f() {1 +}", "E0101", "}"),
@@ -298,9 +320,11 @@ const CASES: &[SyntaxCase] = &[
     SyntaxCase::context_invalid("C.expr.nonassoc.compare-chain-rejected", "fn f() {a < b < c}", "E0101", "<"),
     SyntaxCase::context_valid("C.expr.nonassoc.mixed-equality-compare-structural", "fn f() {1 < 2 == 3 < 4}", assert_compare_over_equality),
     SyntaxCase::context_valid("C.expr.call.same-line", "fn f() {call(1)}", assert_same_line_call),
-    SyntaxCase::context_valid("C.expr.call.next-line-not-call", "fn f() {call\n(1)}", assert_next_line_not_call),
+    SyntaxCase::context_invalid("C.expr.call.next-line-without-semicolon-rejected", "fn f() {call\n(1)}", "E0101", "("),
+    SyntaxCase::context_valid("C.expr.call.next-line-after-semicolon", "fn f() {call;\n(1)}", assert_next_line_not_call),
     SyntaxCase::context_valid("C.expr.method-call.same-line", "fn f() {value.method(1)}", assert_same_line_method),
-    SyntaxCase::context_valid("C.expr.method-call.next-line-is-field-then-paren", "fn f() {value.method\n(1)}", assert_next_line_method_split),
+    SyntaxCase::context_invalid("C.expr.method-call.next-line-without-semicolon-rejected", "fn f() {value.method\n(1)}", "E0101", "("),
+    SyntaxCase::context_valid("C.expr.method-call.next-line-after-semicolon", "fn f() {value.method;\n(1)}", assert_next_line_method_split),
     SyntaxCase::context_valid("C.expr.index-cross-line", "fn f() {value\n[0]}", assert_postfix),
     SyntaxCase::context_valid("C.expr.dot-cross-line", "fn f() {value\n.field}", assert_field),
 ];

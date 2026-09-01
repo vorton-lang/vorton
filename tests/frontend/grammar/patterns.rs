@@ -23,6 +23,10 @@ fn assert_pattern_alternatives(program: &vorton::ast::Program) {
     }
 }
 
+fn assert_any_pattern(program: &vorton::ast::Program) {
+    assert!(!match_arms(program).is_empty());
+}
+
 fn match_arms(program: &vorton::ast::Program) -> &[vorton::ast::MatchArm] {
     let Some(Decl::Function(function)) = program.declarations.first() else {
         panic!("function")
@@ -43,6 +47,20 @@ fn assert_positional_fields(program: &vorton::ast::Program) {
     assert!(matches!(
         match_arms(program)[0].pattern,
         Pattern::Constructor { ref fields, .. } if fields.len() == 2
+    ));
+}
+
+fn assert_any_constructor(program: &vorton::ast::Program) {
+    assert!(matches!(
+        match_arms(program)[0].pattern,
+        Pattern::Constructor { .. }
+    ));
+}
+
+fn assert_any_named_pattern(program: &vorton::ast::Program) {
+    assert!(matches!(
+        match_arms(program)[0].pattern,
+        Pattern::NamedConstructor { .. }
     ));
 }
 
@@ -88,14 +106,44 @@ const CASES: &[SyntaxCase] = &[
     SyntaxCase::valid("V.S.Pattern.all-single-alternatives", "S.Pattern", ALL_PATTERNS, assert_pattern_alternatives),
     SyntaxCase::invalid("I.S.Pattern.arm-or-outside-arm", "S.Pattern", "fn f(x: T) {if let A | B = x {}}", "E0103", "|"),
     SyntaxCase::valid("V.S.SinglePattern.lowercase-and-qualified", "S.SinglePattern", ALL_PATTERNS, assert_pattern_alternatives),
+    SyntaxCase::valid("V.S.SinglePattern.wildcard", "S.SinglePattern", "fn f(x: T) {match x {_ => 0}}", assert_any_pattern),
+    SyntaxCase::valid("V.S.SinglePattern.int", "S.SinglePattern", "fn f(x: T) {match x {1 => 0}}", assert_any_pattern),
+    SyntaxCase::valid("V.S.SinglePattern.float", "S.SinglePattern", "fn f(x: T) {match x {1.5 => 0}}", assert_any_pattern),
+    SyntaxCase::valid("V.S.SinglePattern.string", "S.SinglePattern", "fn f(x: T) {match x {\"x\" => 0}}", assert_any_pattern),
+    SyntaxCase::valid("V.S.SinglePattern.bool", "S.SinglePattern", "fn f(x: T) {match x {true => 0}}", assert_any_pattern),
+    SyntaxCase::valid("V.S.SinglePattern.name", "S.SinglePattern", "fn f(x: T) {match x {name => 0}}", assert_any_pattern),
+    SyntaxCase::valid("V.S.SinglePattern.positional-ctor", "S.SinglePattern", "fn f(x: T) {match x {some(value) => 0}}", assert_any_constructor),
+    SyntaxCase::valid("V.S.SinglePattern.named-ctor", "S.SinglePattern", "fn f(x: T) {match x {shape {value} => 0}}", assert_any_named_pattern),
+    SyntaxCase::valid("V.S.SinglePattern.qualified-ctor", "S.SinglePattern", "fn f(x: T) {match x {module::some(value) => 0}}", assert_any_constructor),
+    SyntaxCase::valid("V.S.SinglePattern.tuple", "S.SinglePattern", "fn f(x: T) {match x {(a, b) => 0}}", assert_any_pattern),
     SyntaxCase::invalid("I.S.SinglePattern.raw-string", "S.SinglePattern", "fn f(x: T) {match x {r\"raw\" => 0}}", "E0101", "r\"raw\""),
+    SyntaxCase::invalid("I.S.SinglePattern.interpolated-string", "S.SinglePattern", "fn f(x: T) {match x {\"${value}\" => 0}}", "E0101", "\"${"),
+    SyntaxCase::invalid("I.S.SinglePattern.empty-positional-ctor", "S.SinglePattern", "fn f(x: T) {match x {none() => 0}}", "E0101", ")"),
+    SyntaxCase::invalid("I.S.SinglePattern.single-tuple", "S.SinglePattern", "fn f(x: T) {match x {(a,) => 0}}", "E0101", "("),
     SyntaxCase::valid("V.S.PatFields.positional", "S.PatFields", "fn f(x: T) {match x {some(a, b,) => 0}}", assert_positional_fields),
+    SyntaxCase::valid("V.S.PatFields.named", "S.PatFields", "fn f(x: T) {match x {shape {a} => 0}}", assert_any_named_pattern),
     SyntaxCase::invalid("I.S.PatFields.empty-positional", "S.PatFields", "fn f(x: T) {match x {none() => 0}}", "E0101", ")"),
     SyntaxCase::valid("V.S.PatList.many-trailing", "S.PatList", "fn f(x: T) {match x {some(a, b,) => 0}}", assert_positional_fields),
+    SyntaxCase::valid("V.S.PatList.one", "S.PatList", "fn f(x: T) {match x {some(a) => 0}}", assert_any_constructor),
+    SyntaxCase::valid("V.S.PatList.many", "S.PatList", "fn f(x: T) {match x {some(a, b) => 0}}", assert_positional_fields),
+    SyntaxCase::invalid("I.S.PatList.empty", "S.PatList", "fn f(x: T) {match x {none() => 0}}", "E0101", ")"),
+    SyntaxCase::invalid("I.S.PatList.leading-comma", "S.PatList", "fn f(x: T) {match x {some(,a) => 0}}", "E0101", ","),
+    SyntaxCase::invalid("I.S.PatList.double-comma", "S.PatList", "fn f(x: T) {match x {some(a,,b) => 0}}", "E0101", ","),
     SyntaxCase::invalid("I.S.PatList.missing-comma", "S.PatList", "fn f(x: T) {match x {some(a b) => 0}}", "E0103", "b"),
     SyntaxCase::valid("V.S.NamedPatGroup.fields-rest-trailing", "S.NamedPatGroup", "fn f(x: T) {match x {shape {a, b: value, ..,} => 0}}", assert_named_group),
+    SyntaxCase::valid("V.S.NamedPatGroup.empty", "S.NamedPatGroup", "fn f(x: T) {match x {shape {} => 0}}", assert_any_named_pattern),
+    SyntaxCase::valid("V.S.NamedPatGroup.rest-only", "S.NamedPatGroup", "fn f(x: T) {match x {shape {..} => 0}}", assert_any_named_pattern),
+    SyntaxCase::valid("V.S.NamedPatGroup.rest-only-trailing", "S.NamedPatGroup", "fn f(x: T) {match x {shape {..,} => 0}}", assert_any_named_pattern),
+    SyntaxCase::valid("V.S.NamedPatGroup.one-field", "S.NamedPatGroup", "fn f(x: T) {match x {shape {a} => 0}}", assert_any_named_pattern),
+    SyntaxCase::valid("V.S.NamedPatGroup.many-fields", "S.NamedPatGroup", "fn f(x: T) {match x {shape {a, b} => 0}}", assert_any_named_pattern),
+    SyntaxCase::valid("V.S.NamedPatGroup.fields-rest", "S.NamedPatGroup", "fn f(x: T) {match x {shape {a, ..} => 0}}", assert_any_named_pattern),
+    SyntaxCase::invalid("I.S.NamedPatGroup.leading-comma", "S.NamedPatGroup", "fn f(x: T) {match x {shape {,a} => 0}}", "E0103", ","),
     SyntaxCase::invalid("I.S.NamedPatGroup.rest-first-with-fields", "S.NamedPatGroup", "fn f(x: T) {match x {shape {.., a} => 0}}", "E0103", "a"),
+    SyntaxCase::invalid("I.S.NamedPatGroup.field-after-rest", "S.NamedPatGroup", "fn f(x: T) {match x {shape {a, .., b} => 0}}", "E0103", "b"),
+    SyntaxCase::invalid("I.S.NamedPatGroup.double-comma", "S.NamedPatGroup", "fn f(x: T) {match x {shape {a,,b} => 0}}", "E0103", ","),
     SyntaxCase::valid("V.S.NamedPat.punning-explicit", "S.NamedPat", "fn f(x: T) {match x {shape {a, b: value} => 0}}", assert_named_pattern_fields),
+    SyntaxCase::valid("V.S.NamedPat.punning", "S.NamedPat", "fn f(x: T) {match x {shape {a} => 0}}", assert_any_named_pattern),
+    SyntaxCase::valid("V.S.NamedPat.explicit", "S.NamedPat", "fn f(x: T) {match x {shape {a: value} => 0}}", assert_any_named_pattern),
     SyntaxCase::invalid("I.S.NamedPat.missing-pattern", "S.NamedPat", "fn f(x: T) {match x {shape {a:} => 0}}", "E0101", "}"),
 ];
 
