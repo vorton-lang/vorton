@@ -1,4 +1,4 @@
-compiler/dist-c/main.c text eol=lf
+compiler/dist-c/main.c text eol=lf linguist-generated=true
 bench/check/manifest.json text eol=lf
 bench/check/run.py text eol=lf
 bench/check/windows_job.py text eol=lf
