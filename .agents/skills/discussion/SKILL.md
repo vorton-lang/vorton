@@ -1,6 +1,6 @@
 ---
 name: discussion
-description: Run the single root Ring-lang/Vorton session for user discussion, planning, execution orchestration, review, and merge while the separate Steward session is disabled.
+description: Run the single root Vorton session for user discussion, planning, execution orchestration, review, and merge while the separate Steward session is disabled.
 ---
 
 # Discussion

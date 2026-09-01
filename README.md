@@ -55,7 +55,7 @@ Rust compiler workspace 尚未进入仓库，因此当前没有可声明为 Vort
 python .agents/scripts/validate_workflow.py
 ```
 
-它验证当前工作流、Issue 模板、冻结历史文档与 CI 自身的约束；它不宣称旧 compiler 或未来 Rust compiler 已通过。
+它验证当前工作流、Issue 模板、历史看板保持删除与 CI 自身的约束；它不宣称旧 compiler 或未来 Rust compiler 已通过。
 
 ## 参与工作
 

@@ -16,9 +16,13 @@ REQUIRED_FILES = (
     "AGENTS.md",
     "README.md",
     "docs/workflow.md",
+    "docs/design.md",
     ".github/workflows/test.yml",
     ".github/ISSUE_TEMPLATE/work-item.md",
     ".github/ISSUE_TEMPLATE/config.yml",
+    ".agents/skills/repository-execution-decisions/SKILL.md",
+    ".agents/skills/discussion/SKILL.md",
+    ".agents/skills/steward/SKILL.md",
 )
 
 RETIRED_MARKDOWN_BOARDS = (
@@ -29,6 +33,18 @@ RETIRED_MARKDOWN_BOARDS = (
 RETIRED_BRAND = re.compile(
     r"(?<![A-Za-z0-9_.])ring(?![A-Za-z0-9_])",
     re.IGNORECASE,
+)
+
+ACTIVE_BRAND_FILES = (
+    "AGENTS.md",
+    "README.md",
+    "docs/workflow.md",
+    ".github/workflows/test.yml",
+    ".github/ISSUE_TEMPLATE/work-item.md",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    ".agents/skills/repository-execution-decisions/SKILL.md",
+    ".agents/skills/discussion/SKILL.md",
+    ".agents/skills/steward/SKILL.md",
 )
 
 ALLOWED_LABELS = {
@@ -96,6 +112,7 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
             "当前工程路线是在 Rust 宿主上重建 Vorton 编译器",
             "只作迁移蓝本、语义 oracle 和已知缺陷复现",
             "python .agents/scripts/validate_workflow.py",
+            "历史看板保持删除",
             ISSUES_URL,
             DISCUSSION_URL,
         ),
@@ -195,12 +212,71 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
 
 
 def validate_active_branding(files: dict[str, str], errors: list[str]) -> None:
-    for relative in ("AGENTS.md", "README.md", "docs/workflow.md"):
+    for relative in ACTIVE_BRAND_FILES:
         for line_number, line in enumerate(files[relative].splitlines(), 1):
             if RETIRED_BRAND.search(line):
                 errors.append(
                     f"{relative}:{line_number} contains the retired standalone brand"
                 )
+
+
+def validate_execution_skills(files: dict[str, str], errors: list[str]) -> None:
+    decisions_path = ".agents/skills/repository-execution-decisions/SKILL.md"
+    decisions = files[decisions_path]
+    require_fragments(
+        decisions_path,
+        decisions,
+        (
+            "description: Apply user-established execution-process decisions inside the Vorton repository",
+            "# Vorton Repository Execution Decisions",
+            "所有repository mutation都必须基于用户已确认的GitHub Issue",
+            "`docs/**`与治理skill没有直写`main`例外",
+            "同一个confirmed Issue",
+            "同一个active PR中合并为一个batch",
+            "不得因此直写`main`",
+        ),
+        errors,
+    )
+    for retired_exception in (
+        "Discussion纯文档修改默认无需lease",
+        "通知是事后交接",
+    ):
+        if retired_exception in decisions:
+            errors.append(
+                f"{decisions_path} retains the retired direct-main exception: "
+                f"{retired_exception}"
+            )
+    if re.search(r"可直接在\s*`?main`?\s*修改", decisions, re.IGNORECASE):
+        errors.append(f"{decisions_path} must not authorize direct main mutation")
+
+    require_fragments(
+        ".agents/skills/discussion/SKILL.md",
+        files[".agents/skills/discussion/SKILL.md"],
+        ("description: Run the single root Vorton session",),
+        errors,
+    )
+    require_fragments(
+        ".agents/skills/steward/SKILL.md",
+        files[".agents/skills/steward/SKILL.md"],
+        ("description: Execute an approved Vorton GitHub Issue",),
+        errors,
+    )
+
+
+def validate_design_authority(design: str, errors: list[str]) -> None:
+    require_fragments(
+        "docs/design.md",
+        design,
+        (
+            "当前技术入口以 `AGENTS.md` 为准",
+            "活动依赖、范围与验收只查 GitHub Issues",
+            "完成历史、被否决方案和逐轮调查只查 Git",
+            "必须进入经用户确认的 GitHub Issue",
+        ),
+        errors,
+    )
+    if "`docs/backlog.md`、`docs/audit-report.md`" in design:
+        errors.append("docs/design.md points at deleted Markdown boards as authority")
 
 
 def validate_ci(ci: str, errors: list[str]) -> None:
@@ -323,6 +399,8 @@ def validate() -> list[str]:
 
     validate_current_truth(files, errors)
     validate_active_branding(files, errors)
+    validate_execution_skills(files, errors)
+    validate_design_authority(files["docs/design.md"], errors)
     validate_ci(files[".github/workflows/test.yml"], errors)
     validate_issue_template(files[".github/ISSUE_TEMPLATE/work-item.md"], errors)
     validate_template_config(files[".github/ISSUE_TEMPLATE/config.yml"], errors)
