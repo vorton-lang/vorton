@@ -248,4 +248,4 @@ TS 要读完实现才知道函数会抛什么异常。Vorton 的模块签名包�
 | 数据结构 | struct + enum + trait，不造 class 层级 |
 | 内存 | Perceus RC + ownership 推断（无 borrow checker），零标注负担；无 GC |
 | 注释 | `//` 单行（无块注释），默认不写注释 |
-| 编译目标 | native；C11 为唯一产品 codegen 与 tracked bootstrap，未来第二信道门见 design.md §10.4 |
+| 编译目标 | 目标为 native；产品后端与 bootstrap gate 由当前 Rust 重建路线的 GitHub Issue 建立，迁移前 C11 codegen 与 tracked anchor 仅作 oracle |
