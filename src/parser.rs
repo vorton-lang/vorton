@@ -3,7 +3,7 @@ use crate::diagnostic::{Diagnostic, push_diagnostic, sort_diagnostics};
 use crate::lexer::{Token, TokenKind};
 use crate::source::SourceFile;
 
-pub fn parse(source: &SourceFile, tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
+pub(crate) fn parse(source: &SourceFile, tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
     let mut parser = Parser::new(source, tokens);
     let program = parser.parse_program();
     sort_diagnostics(&mut parser.diagnostics);
@@ -326,6 +326,18 @@ impl<'a> Parser<'a> {
                     VariantFields::Positional(values)
                 }
             } else if self.consume(TokenKind::LeftBrace).is_some() {
+                if self.at(TokenKind::RightBrace) {
+                    self.report(
+                        Diagnostic::parse(
+                            "E0101",
+                            "Named enum variants require at least one field; use a bare name for a unit variant",
+                            self.peek().span,
+                            self.peek().value.clone(),
+                        )
+                        .with_suggestion("Remove the empty braces", None),
+                    );
+                    return None;
+                }
                 let mut values = Vec::new();
                 while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
                     let field_start = self.peek().span.start as usize;

@@ -1,7 +1,7 @@
 pub mod ast;
 pub mod diagnostic;
 pub mod lexer;
-pub mod parser;
+mod parser;
 pub mod source;
 
 use diagnostic::Diagnostic;

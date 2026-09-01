@@ -377,6 +377,29 @@ fn lexer_errors_return_err_without_a_parser_program() {
 }
 
 #[test]
+fn unknown_escape_cannot_bypass_the_public_lexer_gate() {
+    let output = vorton::parse_source(source("fn main() { let text = \"bad\\q\" }"));
+    assert!(
+        output
+            .tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::String)
+    );
+    assert!(
+        output
+            .tokens
+            .iter()
+            .all(|token| token.kind != TokenKind::Error)
+    );
+    let Err(diagnostics) = output.syntax else {
+        panic!("unknown escape must not publish a Program")
+    };
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "E0101");
+    assert_eq!(diagnostics[0].message, "Unknown string escape '\\q'");
+}
+
+#[test]
 fn frontend_result_makes_program_and_diagnostics_mutually_exclusive() {
     let valid = vorton::parse_source(source("fn main() {}"));
     assert!(matches!(valid.syntax, Ok(Program { .. })));
@@ -539,6 +562,32 @@ fn parser_covers_declarations_types_statements_expressions_and_patterns() {
     assert!(matches!(
         enum_decl.variants[2].fields,
         VariantFields::Named(_)
+    ));
+}
+
+#[test]
+fn enum_named_variants_require_at_least_one_field() {
+    let text = "enum E { empty {} }\n";
+    let invalid = parse_error(text);
+    assert_eq!(invalid.diagnostics.len(), 1);
+    assert_eq!(invalid.diagnostics[0].code, "E0101");
+    assert_eq!(
+        invalid.diagnostics[0].message,
+        "Named enum variants require at least one field; use a bare name for a unit variant"
+    );
+    assert_eq!(
+        &text[invalid.diagnostics[0].span.start as usize..invalid.diagnostics[0].span.end as usize],
+        "}"
+    );
+
+    let valid = parse("enum E { empty, value { item: Int } }\n");
+    let Decl::Enum(enum_decl) = &valid.program.declarations[0] else {
+        panic!("enum")
+    };
+    assert!(matches!(enum_decl.variants[0].fields, VariantFields::Unit));
+    assert!(matches!(
+        enum_decl.variants[1].fields,
+        VariantFields::Named(ref fields) if fields.len() == 1
     ));
 }
 
