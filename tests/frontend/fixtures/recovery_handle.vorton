@@ -1,0 +1,11 @@
+effect Ask {
+    fn get() -> Int
+}
+
+fn bad_handle() -> Int {
+    handle { Ask.get() } with {
+        Ask(value) => 42,
+    }
+}
+
+fn after_handle() -> Int { 42 }

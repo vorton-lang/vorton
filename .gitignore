@@ -11,6 +11,7 @@ __pycache__/
 /.worktrees/
 .claude/settings.local.json
 .deepseek/
+/target/
 
 tests/scratch/
 tests/cases/**/*.js

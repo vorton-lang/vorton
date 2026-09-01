@@ -278,10 +278,14 @@ def validate_ci(ci: str, errors: list[str]) -> None:
         ".github/workflows/test.yml",
         ci,
         (
-            "name: Governance",
+            "name: Test",
             "jobs:\n  governance:",
+            "  rust:",
+            "os: [ubuntu-latest, windows-latest]",
             "run: python .agents/scripts/validate_naming.py",
             "run: python .agents/scripts/validate_workflow.py",
+            "run: cargo build --locked",
+            "run: cargo test --locked",
         ),
         errors,
     )
@@ -289,14 +293,28 @@ def validate_ci(ci: str, errors: list[str]) -> None:
     if jobs_marker in ci:
         jobs = ci.split(jobs_marker, 1)[1]
         job_ids = set(re.findall(r"(?m)^  ([A-Za-z][A-Za-z0-9_-]*):\s*$", jobs))
-        if job_ids != {"governance"}:
-            errors.append("test.yml must define only the governance job")
-    commands = re.findall(r"(?m)^\s+run:\s*(\S.*)$", ci)
-    if commands != [
+        if job_ids != {"governance", "rust"}:
+            errors.append(
+                ".github/workflows/test.yml must define the governance and Rust jobs; "
+                f"found: {', '.join(sorted(job_ids)) or 'none'}"
+            )
+
+    run_commands = re.findall(r"(?m)^\s+run:\s*(\S.*)$", ci)
+    if run_commands != [
         "python .agents/scripts/validate_naming.py",
         "python .agents/scripts/validate_workflow.py",
+        "cargo build --locked",
+        "cargo test --locked",
     ]:
-        errors.append("test.yml must run only the two current validators")
+        errors.append(
+            ".github/workflows/test.yml must run the validators and locked Cargo gates"
+        )
+    forbid_fragments(
+        ".github/workflows/test.yml",
+        ci,
+        ("tests/run_tests.py", "self-compile", "bootstrap", "cache"),
+        errors,
+    )
 
 
 def validate_other_authorities(files: dict[str, str], errors: list[str]) -> None:

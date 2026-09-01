@@ -1,4 +1,4 @@
-name: Governance
+name: Test
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 concurrency:
-  group: governance-${{ github.ref }}
+  group: test-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -22,3 +22,17 @@ jobs:
         run: python .agents/scripts/validate_naming.py
       - name: Validate repository workflow truth
         run: python .agents/scripts/validate_workflow.py
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build locked Rust compiler
+        run: cargo build --locked
+      - name: Test locked Rust compiler
+        run: cargo test --locked
