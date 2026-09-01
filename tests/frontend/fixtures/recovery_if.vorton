@@ -1,9 +1,0 @@
-fn bad_if() -> Int {
-    if foo( {
-        1
-    } else {
-        2
-    }
-}
-
-fn after_if() -> Int { 42 }

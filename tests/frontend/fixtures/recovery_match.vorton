@@ -1,8 +1,0 @@
-fn bad_match(x: Int) -> Int {
-    match x {
-        1 "missing arrow",
-        2 => 20,
-    }
-}
-
-fn after_match() -> Int { 42 }

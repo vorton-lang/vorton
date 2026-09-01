@@ -4,19 +4,49 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vorton::ast::{
-    BinaryOp, Decl, EffectName, Expr, ForBinding, ImplMember, Pattern, PatternLiteral, Stmt,
-    TypeExpr, UseKind, VariantFields,
+    BinaryOp, Decl, EffectName, Expr, ForBinding, Pattern, PatternLiteral, Program, Stmt, TypeExpr,
+    UseKind, VariantFields,
 };
 use vorton::diagnostic::{Diagnostic, DiagnosticNote, format_human, format_llm};
-use vorton::lexer::{TokenKind, lex};
+use vorton::lexer::{Token, TokenKind, lex};
 use vorton::source::{SourceFile, SourceId};
 
 fn source(text: &str) -> SourceFile {
     SourceFile::new(SourceId(0), "test.vorton", text).expect("valid test source")
 }
 
-fn parse(text: &str) -> vorton::FrontendOutput {
-    vorton::parse_source(source(text))
+struct ValidFrontendOutput {
+    tokens: Vec<Token>,
+    program: Program,
+    diagnostics: Vec<Diagnostic>,
+}
+
+struct InvalidFrontendOutput {
+    source: SourceFile,
+    diagnostics: Vec<Diagnostic>,
+}
+
+fn parse(text: &str) -> ValidFrontendOutput {
+    let output = vorton::parse_source(source(text));
+    match output.syntax {
+        Ok(program) => ValidFrontendOutput {
+            tokens: output.tokens,
+            program,
+            diagnostics: Vec::new(),
+        },
+        Err(diagnostics) => panic!("expected valid syntax: {diagnostics:#?}"),
+    }
+}
+
+fn parse_error(text: &str) -> InvalidFrontendOutput {
+    let output = vorton::parse_source(source(text));
+    match output.syntax {
+        Ok(program) => panic!("expected syntax error, got: {program:#?}"),
+        Err(diagnostics) => InvalidFrontendOutput {
+            source: output.source,
+            diagnostics,
+        },
+    }
 }
 
 fn tail_expression(text: &str) -> Expr {
@@ -32,14 +62,6 @@ fn tail_expression(text: &str) -> Expr {
         panic!("tail")
     };
     tail.as_ref().clone()
-}
-
-fn has_function(output: &vorton::FrontendOutput, expected: &str) -> bool {
-    output
-        .program
-        .declarations
-        .iter()
-        .any(|decl| matches!(decl, Decl::Function(function) if function.name.text == expected))
 }
 
 #[test]
@@ -195,7 +217,7 @@ fn ast_spans_are_exact_half_open_byte_ranges() {
     let output = vorton::parse_source(
         SourceFile::new(SourceId(7), "span.vorton", text).expect("valid source"),
     );
-    assert!(output.diagnostics.is_empty());
+    let program = output.syntax.expect("valid syntax");
 
     let assert_span = |span: vorton::source::Span, start: u32, end: u32, slice: &str| {
         assert_eq!(span.source, SourceId(7));
@@ -203,8 +225,8 @@ fn ast_spans_are_exact_half_open_byte_ranges() {
         assert_eq!(&text[start as usize..end as usize], slice);
     };
 
-    assert_span(output.program.span, 0, 33, text);
-    let Decl::Function(function) = &output.program.declarations[0] else {
+    assert_span(program.span, 0, 33, text);
+    let Decl::Function(function) = &program.declarations[0] else {
         panic!("function")
     };
     assert_span(function.span, 0, 32, "fn main() {\n    let value = 42\n}");
@@ -278,11 +300,13 @@ fn named_type_spans_include_every_closing_angle_bracket() {
 
 #[test]
 fn type_bounds_reject_empty_angles_and_keep_associated_constraints() {
-    let invalid = parse("fn bad<T: Trait<>>(value: T) {}\nfn after() {}\n");
-    assert!(invalid.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "E0101" && diagnostic.message == "Type bound arguments cannot be empty"
-    }));
-    assert!(has_function(&invalid, "after"));
+    let invalid = parse_error("fn bad<T: Trait<>>(value: T) {}\n");
+    assert_eq!(invalid.diagnostics.len(), 1);
+    assert_eq!(invalid.diagnostics[0].code, "E0101");
+    assert_eq!(
+        invalid.diagnostics[0].message,
+        "Type bound arguments cannot be empty"
+    );
 
     let valid = parse("fn good<T: Trait<Item = Int>>(value: T) {}\n");
     assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
@@ -300,7 +324,7 @@ fn type_bounds_reject_empty_angles_and_keep_associated_constraints() {
 }
 
 #[test]
-fn lexer_recovers_after_invalid_input_and_reports_unterminated_forms() {
+fn lexer_errors_return_err_without_a_parser_program() {
     let invalid = lex(&source("& # fn valid() {}"));
     assert_eq!(invalid.diagnostics.len(), 2);
     assert_eq!(
@@ -338,12 +362,49 @@ fn lexer_recovers_after_invalid_input_and_reports_unterminated_forms() {
         "${"
     );
 
-    let many_errors = parse(&format!("{} fn valid() {{}}", "# ".repeat(40)));
-    assert_eq!(many_errors.diagnostics.len(), 20);
+    let frontend = vorton::parse_source(source("& fn valid() {}"));
     assert!(
-        many_errors.program.declarations.iter().any(|decl| {
-            matches!(decl, Decl::Function(function) if function.name.text == "valid")
-        })
+        frontend
+            .tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::Fn)
+    );
+    let Err(diagnostics) = frontend.syntax else {
+        panic!("lexer error must not expose a Program")
+    };
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "E0101");
+}
+
+#[test]
+fn frontend_result_makes_program_and_diagnostics_mutually_exclusive() {
+    let valid = vorton::parse_source(source("fn main() {}"));
+    assert!(matches!(valid.syntax, Ok(Program { .. })));
+
+    let first = vorton::parse_source(source("fn broken( { @"));
+    let Err(first_diagnostics) = &first.syntax else {
+        panic!("parser error must not expose a Program")
+    };
+    assert_eq!(first_diagnostics.len(), 1);
+    assert!(
+        first
+            .tokens
+            .iter()
+            .all(|token| token.kind != TokenKind::Error)
+    );
+
+    let second = vorton::parse_source(source("fn broken( { @"));
+    let Err(second_diagnostics) = &second.syntax else {
+        panic!("repeated parser error must remain Err")
+    };
+    assert_eq!(first_diagnostics, second_diagnostics);
+    assert_eq!(
+        format_human(&first.source, &first_diagnostics),
+        format_human(&second.source, &second_diagnostics)
+    );
+    assert_eq!(
+        format_llm(&first.source, &first_diagnostics),
+        format_llm(&second.source, &second_diagnostics)
     );
 }
 
@@ -509,106 +570,64 @@ fn grouped_use_requires_the_colon_colon_separator() {
     };
     assert_eq!((items[0].span.start, items[0].span.end), (13, 18));
 
-    let invalid = parse("use parser {Token}\nfn after() {}\n");
-    assert!(
-        invalid
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "E0101"
-                && diagnostic.message == "A grouped use requires '::' before '{'")
+    let invalid = parse_error("use parser {Token}\n");
+    assert_eq!(invalid.diagnostics.len(), 1);
+    assert_eq!(invalid.diagnostics[0].code, "E0101");
+    assert_eq!(
+        invalid.diagnostics[0].message,
+        "A grouped use requires '::' before '{'"
     );
-    assert!(invalid.program.uses.is_empty());
-    assert!(has_function(&invalid, "after"));
-}
-
-#[test]
-fn malformed_grouped_use_stays_inside_its_inline_module() {
-    let output = parse("mod m { use foo::{Bar as } fn inside() {} } fn top() {}\n");
-    assert!(
-        output
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "E0103")
-    );
-
-    let Decl::Module(module) = &output.program.declarations[0] else {
-        panic!("module")
-    };
-    assert!(module.uses.is_empty());
-    assert!(module.declarations.iter().any(|decl| {
-        matches!(decl, Decl::Function(function) if function.name.text == "inside")
-    }));
-    assert!(has_function(&output, "top"));
 }
 
 #[test]
 fn prohibited_surfaces_fail_loud_without_ast_carriers() {
-    let output = parse(
-        r#"
-requires {unsafe}
-@derive(Json)
-struct Old { value: Int where value > 0 }
-fn bad(value: Int?) -> Option<Int> { value? }
-"#,
-    );
-    let messages = output
-        .diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect::<Vec<_>>();
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("File-level 'requires'"))
-    );
-    assert!(messages.iter().any(|message| message.contains("@derive")));
-    assert!(messages.iter().any(|message| message.contains("where")));
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("Type suffix '?'"))
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("Postfix '?'"))
-    );
-    let json = serde_json::to_string(&output.program).unwrap();
-    assert!(!json.contains("Derive"));
-    assert!(!json.contains("OptionType"));
+    for (text, message) in [
+        (
+            "requires {unsafe}\n",
+            "File-level 'requires' is not part of the canonical 0.1 surface",
+        ),
+        (
+            "@derive(Json) struct Old {}\n",
+            "Attribute '@derive' is not part of the canonical 0.1 surface",
+        ),
+        (
+            "struct Old { value: Int where value > 0 }\n",
+            "Refinement 'where' clauses are not part of Vorton 0.1",
+        ),
+        (
+            "fn bad(value: Int?) {}\n",
+            "Type suffix '?' is not part of Vorton 0.1; use Option<T>",
+        ),
+        (
+            "fn bad(value: Option<Int>) { value? }\n",
+            "Postfix '?' is not part of Vorton 0.1",
+        ),
+    ] {
+        let output = parse_error(text);
+        assert_eq!(output.diagnostics.len(), 1);
+        assert_eq!(output.diagnostics[0].message, message);
+    }
 }
 
 #[test]
 fn raw_string_patterns_fail_without_becoming_string_patterns() {
-    let output =
-        parse("fn bad(value: Str) { match value { r\"raw\" => 1, _ => 0 } }\nfn after() {}\n");
-    assert!(output.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "E0101"
-            && diagnostic.message == "Raw string literals are not supported in patterns"
-    }));
-    assert!(has_function(&output, "after"));
+    let output = parse_error("fn bad(value: Str) { match value { r\"raw\" => 1 } }\n");
+    assert_eq!(output.diagnostics.len(), 1);
+    assert_eq!(output.diagnostics[0].code, "E0101");
+    assert_eq!(
+        output.diagnostics[0].message,
+        "Raw string literals are not supported in patterns"
+    );
 }
 
 #[test]
 fn return_expression_is_restricted_to_match_and_catch_arms() {
-    let invalid = parse("fn bad() { let value = return 1 }\nfn after() {}\n");
-    assert!(invalid.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "E0101" && diagnostic.message == "Expected expression, found 'return'"
-    }));
-    let bad = invalid
-        .program
-        .declarations
-        .iter()
-        .find_map(|decl| match decl {
-            Decl::Function(function) if function.name.text == "bad" => Some(function),
-            _ => None,
-        })
-        .expect("bad function");
-    let Expr::Block { statements, .. } = &bad.body else {
-        panic!("block")
-    };
-    assert!(statements.is_empty());
-    assert!(has_function(&invalid, "after"));
+    let invalid = parse_error("fn bad() { let value = return 1 }\n");
+    assert_eq!(invalid.diagnostics.len(), 1);
+    assert_eq!(
+        invalid.diagnostics[0].message,
+        "Expected expression, found 'return'"
+    );
 
     let match_return = tail_expression("match 1 { _ => return 1 }");
     let Expr::Match { arms, .. } = match_return else {
@@ -624,161 +643,110 @@ fn return_expression_is_restricted_to_match_and_catch_arms() {
 }
 
 #[test]
-fn delimiter_aware_recovery_keeps_following_declarations() {
-    for (fixture, expected_name) in [
-        (
-            include_str!("frontend/fixtures/recovery_match.vorton"),
-            "after_match",
-        ),
-        (
-            include_str!("frontend/fixtures/recovery_handle.vorton"),
-            "after_handle",
-        ),
-        (
-            include_str!("frontend/fixtures/recovery_if.vorton"),
-            "after_if",
-        ),
-    ] {
-        let output = parse(fixture);
-        assert!(!output.diagnostics.is_empty());
-        let names = output
-            .program
-            .declarations
-            .iter()
-            .filter_map(|decl| match decl {
-                Decl::Function(value) => Some(value.name.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            names.contains(&expected_name),
-            "recovered declarations: {names:?}"
-        );
-    }
-}
-
-#[test]
-fn removed_syntax_contracts_fail_stably_and_recover() {
+fn removed_syntax_contracts_fail_closed_with_stable_diagnostics() {
     let default_parameter_cases = [
-        ("fn", "fn bad(value: Int = 1) {}\nfn after() {}\n"),
-        ("extern", "extern fn bad(value: Int = 1)\nfn after() {}\n"),
-        (
-            "effect",
-            "effect Bad { fn op(value: Int = 1) -> Unit }\nfn after() {}\n",
-        ),
+        ("fn", "fn bad(value: Int = 1) {}\n"),
+        ("extern", "extern fn bad(value: Int = 1)\n"),
+        ("effect", "effect Bad { fn op(value: Int = 1) -> Unit }\n"),
         (
             "handler",
-            "fn bad() { handle {} with { Logger.log(value: Int = 1) => () } }\nfn after() {}\n",
+            "fn bad() { handle {} with { Logger.log(value: Int = 1) => () } }\n",
         ),
-        (
-            "lambda",
-            "fn bad() { fn(value: Int = 1) { value } }\nfn after() {}\n",
-        ),
-        (
-            "trait",
-            "trait Bad { fn method(value: Int = 1) }\nfn after() {}\n",
-        ),
+        ("lambda", "fn bad() { fn(value: Int = 1) { value } }\n"),
+        ("trait", "trait Bad { fn method(value: Int = 1) }\n"),
     ];
     for (label, text) in default_parameter_cases {
-        let output = parse(text);
+        let output = parse_error(text);
         assert!(
-            output.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "E0101"
-                    && diagnostic.message == "Default parameters are not part of Vorton 0.1"
-            }),
+            output.diagnostics[0].code == "E0101"
+                && output.diagnostics[0].message == "Default parameters are not part of Vorton 0.1",
             "missing default-parameter diagnostic for {label}: {:#?}",
             output.diagnostics
-        );
-        assert!(
-            has_function(&output, "after"),
-            "recovery failed for {label}"
         );
     }
 
     let cases = [
         (
             "trait body",
-            "trait Bad { fn bad() { 1 } fn okay() }\nfn after() {}\n",
+            "trait Bad { fn bad() { 1 } }\n",
             "E0101",
             "Trait method bodies are not supported in Vorton 0.1",
         ),
         (
             "effect body",
-            "effect Bad { fn bad() -> Unit { () } fn okay() -> Unit }\nfn after() {}\n",
+            "effect Bad { fn bad() -> Unit { () } }\n",
             "E0101",
             "Effect operation bodies are not supported in Vorton 0.1",
         ),
         (
             "delegate",
-            "struct Box {}\nimpl Box { delegate inner: Show\n fn okay() {} }\nfn after() {}\n",
+            "struct Box {}\nimpl Box { delegate inner: Show }\n",
             "E0101",
             "'delegate' is not part of Vorton 0.1",
         ),
         (
             "impl extern",
-            "struct Box {}\nimpl Box { extern fn raw(value: Int) -> Int\n fn okay() {} }\nfn after() {}\n",
+            "struct Box {}\nimpl Box { extern fn raw(value: Int) -> Int }\n",
             "E0101",
             "Impl-member extern functions are not part of Vorton 0.1",
         ),
         (
             "try",
-            "fn bad() { try { 1 } }\nfn after() {}\n",
+            "fn bad() { try { 1 } }\n",
             "E0101",
             "'try' is reserved; use a catch expression",
         ),
         (
             "empty enum parentheses",
-            "enum Bad { empty(), okay }\nfn after() {}\n",
+            "enum Bad { empty() }\n",
             "E0104",
             "Empty parentheses on an enum variant are not allowed",
         ),
     ];
     for (label, text, code, message) in cases {
-        let output = parse(text);
+        let output = parse_error(text);
         assert!(
-            output
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == code && diagnostic.message == message),
+            output.diagnostics[0].code == code && output.diagnostics[0].message == message,
             "missing diagnostic for {label}: {:#?}",
             output.diagnostics
-        );
-        assert!(
-            has_function(&output, "after"),
-            "recovery failed for {label}"
         );
     }
 }
 
 #[test]
-fn impl_extern_recovery_preserves_contextual_type_and_method_members() {
-    let output = parse(
-        "struct Box {}\nimpl Box { extern fn raw(value: Int) -> Int\n type Item = Int\n fn okay() {} }\nfn after() {}\n",
+fn impl_member_extern_fails_closed() {
+    let output = parse_error("struct Box {}\nimpl Box { extern fn raw() -> Int }\n");
+    assert_eq!(output.diagnostics.len(), 1);
+    assert_eq!(output.diagnostics[0].code, "E0101");
+    assert_eq!(
+        output.diagnostics[0].message,
+        "Impl-member extern functions are not part of Vorton 0.1"
     );
-    assert!(output.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "E0101"
-            && diagnostic.message == "Impl-member extern functions are not part of Vorton 0.1"
-    }));
-    let impl_decl = output
-        .program
-        .declarations
-        .iter()
-        .find_map(|decl| match decl {
-            Decl::Impl(value) => Some(value),
-            _ => None,
-        })
-        .expect("impl");
-    assert_eq!(impl_decl.members.len(), 2);
-    let ImplMember::AssociatedType(associated) = &impl_decl.members[0] else {
-        panic!("associated type")
-    };
-    assert_eq!(associated.name.text, "Item");
-    assert!(matches!(associated.value, Some(TypeExpr::Named { .. })));
-    let ImplMember::Method(method) = &impl_decl.members[1] else {
-        panic!("method")
-    };
-    assert_eq!(method.name.text, "okay");
-    assert!(has_function(&output, "after"));
+}
+
+#[test]
+fn impl_trait_and_target_require_named_types() {
+    for text in [
+        "impl (Trait, Other) for Box {}\n",
+        "impl fn(Int) -> Int for Box {}\n",
+        "impl {field: Int} for Box {}\n",
+        "impl Trait for (Box, Other) {}\n",
+        "impl Trait for fn(Int) -> Int {}\n",
+        "impl Trait for {field: Int} {}\n",
+    ] {
+        let output = parse_error(text);
+        assert_eq!(output.diagnostics.len(), 1);
+        assert_eq!(output.diagnostics[0].code, "E0101");
+        assert_eq!(
+            output.diagnostics[0].message,
+            "Impl trait and target must be named types"
+        );
+    }
+
+    for text in ["impl Box {}\n", "impl Trait for Box {}\n"] {
+        let output = parse(text);
+        assert!(matches!(output.program.declarations[0], Decl::Impl(_)));
+    }
 }
 
 #[test]
@@ -793,8 +761,7 @@ fn repeated_frontend_runs_are_identical() {
 
 #[test]
 fn human_and_llm_renderers_share_the_ordered_diagnostic_list() {
-    let output = parse("fn broken( { @");
-    assert!(!output.diagnostics.is_empty());
+    let output = parse_error("fn broken( { @");
     let human = format_human(&output.source, &output.diagnostics);
     let llm = format_llm(&output.source, &output.diagnostics);
     let document: serde_json::Value = serde_json::from_str(&llm).unwrap();
@@ -982,6 +949,57 @@ fn selected_ast_nodes_keep_surface_shapes() {
 }
 
 #[test]
+fn control_head_named_literals_require_parentheses_for_that_ast_shape() {
+    let Expr::If { condition, .. } = tail_expression("if (Point {x: 1}) {}") else {
+        panic!("if")
+    };
+    assert!(matches!(
+        condition.as_ref(),
+        Expr::Parenthesized { inner, .. } if matches!(inner.as_ref(), Expr::NamedLiteral { .. })
+    ));
+
+    let Expr::If { condition, .. } = tail_expression("if Point {}") else {
+        panic!("if")
+    };
+    assert!(matches!(condition.as_ref(), Expr::Path { .. }));
+
+    let output =
+        parse("fn main() { if let value = Point {} while Point {} for value in Point {} }\n");
+    let Decl::Function(function) = &output.program.declarations[0] else {
+        panic!("function")
+    };
+    let Expr::Block { statements, .. } = &function.body else {
+        panic!("block")
+    };
+    assert!(matches!(
+        statements[0],
+        Stmt::IfLet {
+            value: Expr::Path { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        statements[1],
+        Stmt::While {
+            condition: Expr::Path { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        statements[2],
+        Stmt::For {
+            iterable: Expr::Path { .. },
+            ..
+        }
+    ));
+
+    let Expr::Match { scrutinee, .. } = tail_expression("match Value { _ => 0 }") else {
+        panic!("match")
+    };
+    assert!(matches!(scrutinee.as_ref(), Expr::Path { .. }));
+}
+
+#[test]
 fn remaining_surface_shapes_have_direct_structural_coverage() {
     assert!(matches!(tail_expression("3.5"), Expr::Float { .. }));
     assert!(matches!(tail_expression("()"), Expr::Unit { .. }));
@@ -1148,12 +1166,10 @@ fn precedence_and_associativity_are_structural() {
         }
     ));
 
-    let comparison = parse("fn main() { 1 < 2 < 3 }");
-    assert!(
-        comparison
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message == "Comparison operators are non-associative")
+    let comparison = parse_error("fn main() { 1 < 2 < 3 }");
+    assert_eq!(
+        comparison.diagnostics[0].message,
+        "Comparison operators are non-associative"
     );
 
     let range_then_catch = tail_expression("1 + 2..3 catch { _ => 4 }");

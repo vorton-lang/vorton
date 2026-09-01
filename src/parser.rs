@@ -3,13 +3,14 @@ use crate::diagnostic::{Diagnostic, push_diagnostic, sort_diagnostics};
 use crate::lexer::{Token, TokenKind};
 use crate::source::SourceFile;
 
-pub struct ParseOutput {
-    pub program: Program,
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-pub fn parse(source: &SourceFile, tokens: &[Token], diagnostics: Vec<Diagnostic>) -> ParseOutput {
-    Parser::new(source, tokens, diagnostics).parse_program()
+pub fn parse(source: &SourceFile, tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
+    let mut parser = Parser::new(source, tokens);
+    let program = parser.parse_program();
+    sort_diagnostics(&mut parser.diagnostics);
+    match program {
+        Some(program) if parser.diagnostics.is_empty() => Ok(program),
+        _ => Err(parser.diagnostics),
+    }
 }
 
 struct Parser<'a> {
@@ -20,25 +21,26 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a SourceFile, tokens: &'a [Token], diagnostics: Vec<Diagnostic>) -> Self {
+    fn new(source: &'a SourceFile, tokens: &'a [Token]) -> Self {
         Self {
             source,
             tokens,
             position: 0,
-            diagnostics,
+            diagnostics: Vec::new(),
         }
     }
 
-    fn parse_program(mut self) -> ParseOutput {
+    fn parse_program(&mut self) -> Option<Program> {
         let mut uses = Vec::new();
         let mut declarations = Vec::new();
         let mut declarations_started = false;
         while !self.at(TokenKind::Eof) {
-            let before = self.position;
             if self.at(TokenKind::Error) {
-                self.advance();
+                self.unexpected("valid token");
+                return None;
             } else if self.at(TokenKind::Requires) {
                 self.reject_file_requires();
+                return None;
             } else if self.is_use_start() {
                 if declarations_started {
                     self.report(Diagnostic::parse(
@@ -47,32 +49,20 @@ impl<'a> Parser<'a> {
                         self.peek().span,
                         self.peek().value.clone(),
                     ));
+                    return None;
                 }
-                if let Some(value) = self.parse_use_decl() {
-                    uses.push(value);
-                } else {
-                    self.recover_declaration();
-                }
+                uses.push(self.parse_use_decl()?);
             } else {
                 declarations_started = true;
-                if let Some(value) = self.parse_decl() {
-                    declarations.push(value);
-                } else {
-                    self.recover_declaration();
-                }
+                declarations.push(self.parse_decl()?);
             }
-            self.ensure_progress(before);
         }
-        sort_diagnostics(&mut self.diagnostics);
-        ParseOutput {
-            program: Program {
-                source: self.source.id(),
-                uses,
-                declarations,
-                span: self.source.span(0, self.source.len()),
-            },
-            diagnostics: self.diagnostics,
-        }
+        Some(Program {
+            source: self.source.id(),
+            uses,
+            declarations,
+            span: self.source.span(0, self.source.len()),
+        })
     }
 
     fn reject_file_requires(&mut self) {
@@ -89,9 +79,6 @@ impl<'a> Parser<'a> {
                 None,
             ),
         );
-        if self.at(TokenKind::LeftBrace) {
-            self.skip_balanced_group(TokenKind::LeftBrace, TokenKind::RightBrace);
-        }
     }
 
     fn is_use_start(&self) -> bool {
@@ -116,8 +103,6 @@ impl<'a> Parser<'a> {
                     self.peek().span,
                     "{",
                 ));
-                self.skip_balanced_group(TokenKind::LeftBrace, TokenKind::RightBrace);
-                self.consume(TokenKind::Semicolon);
                 return None;
             }
             self.advance();
@@ -129,21 +114,13 @@ impl<'a> Parser<'a> {
                     self.peek().span,
                     "}",
                 ));
-                self.abandon_grouped_use();
                 return None;
             }
             while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
                 let item_start = self.peek().span.start as usize;
-                let Some(name) = self.expect_name() else {
-                    self.abandon_grouped_use();
-                    return None;
-                };
+                let name = self.expect_name()?;
                 let alias = if self.consume(TokenKind::As).is_some() {
-                    let Some(alias) = self.expect_name() else {
-                        self.abandon_grouped_use();
-                        return None;
-                    };
-                    Some(alias)
+                    Some(self.expect_name()?)
                 } else {
                     None
                 };
@@ -157,10 +134,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            if self.expect(TokenKind::RightBrace).is_none() {
-                self.abandon_grouped_use();
-                return None;
-            }
+            self.expect(TokenKind::RightBrace)?;
             UseKind::NamedItems(items)
         } else if self.consume(TokenKind::As).is_some() {
             UseKind::PathAlias(self.expect_name()?)
@@ -176,19 +150,15 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn abandon_grouped_use(&mut self) {
-        self.recover_until(&[TokenKind::RightBrace]);
-        self.consume(TokenKind::RightBrace);
-        self.consume(TokenKind::Semicolon);
-    }
-
     fn parse_decl(&mut self) -> Option<Decl> {
-        while self.at(TokenKind::At) {
+        if self.at(TokenKind::At) {
             self.reject_attribute();
+            return None;
         }
         let visibility = self.parse_visibility();
-        while self.at(TokenKind::At) {
+        if self.at(TokenKind::At) {
             self.reject_attribute();
+            return None;
         }
         let token = self.peek().clone();
         match token.kind {
@@ -199,6 +169,7 @@ impl<'a> Parser<'a> {
             TokenKind::Impl => {
                 if visibility.public {
                     self.invalid_visibility(&visibility, "impl blocks do not have visibility");
+                    return None;
                 }
                 self.parse_impl_decl().map(Decl::Impl)
             }
@@ -232,10 +203,6 @@ impl<'a> Parser<'a> {
         } else {
             String::new()
         };
-        if self.at(TokenKind::LeftParen) {
-            self.skip_balanced_group(TokenKind::LeftParen, TokenKind::RightParen);
-            end = self.previous_end();
-        }
         let label = if name.is_empty() {
             "Attributes".to_owned()
         } else {
@@ -292,28 +259,15 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LeftBrace)?;
         let mut fields = Vec::new();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
             let field_start = self.peek().span.start as usize;
             let field_visibility = self.parse_visibility();
-            let Some(field_name) = self.expect_name() else {
-                self.recover_until(&[TokenKind::Comma, TokenKind::RightBrace]);
-                self.consume(TokenKind::Comma);
-                self.ensure_progress(before);
-                continue;
-            };
-            if self.expect(TokenKind::Colon).is_none() {
-                self.recover_until(&[TokenKind::Comma, TokenKind::RightBrace]);
-                self.consume(TokenKind::Comma);
-                self.ensure_progress(before);
-                continue;
+            let field_name = self.expect_name()?;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.parse_type_expr()?;
+            if self.at(TokenKind::Where) {
+                self.reject_where_clause();
+                return None;
             }
-            let Some(ty) = self.parse_type_expr() else {
-                self.recover_until(&[TokenKind::Comma, TokenKind::RightBrace]);
-                self.consume(TokenKind::Comma);
-                self.ensure_progress(before);
-                continue;
-            };
-            self.reject_where_clause(&[TokenKind::Comma, TokenKind::RightBrace]);
             let end = ty.span().end as usize;
             fields.push(StructField {
                 visibility: field_visibility,
@@ -322,7 +276,6 @@ impl<'a> Parser<'a> {
                 span: self.source.span(field_start, end),
             });
             self.consume(TokenKind::Comma);
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(StructDecl {
@@ -344,14 +297,8 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LeftBrace)?;
         let mut variants = Vec::new();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
             let variant_start = self.peek().span.start as usize;
-            let Some(variant_name) = self.expect_name() else {
-                self.recover_until(&[TokenKind::Comma, TokenKind::RightBrace]);
-                self.consume(TokenKind::Comma);
-                self.ensure_progress(before);
-                continue;
-            };
+            let variant_name = self.expect_name()?;
             let fields = if self.consume(TokenKind::LeftParen).is_some() {
                 if self.at(TokenKind::RightParen) {
                     let close = self.advance();
@@ -364,7 +311,7 @@ impl<'a> Parser<'a> {
                         )
                         .with_suggestion("Remove the parentheses from the unit variant", None),
                     );
-                    VariantFields::Unit
+                    return None;
                 } else {
                     let mut values = Vec::new();
                     loop {
@@ -407,7 +354,6 @@ impl<'a> Parser<'a> {
                 span: self.source.span(variant_start, end),
             });
             self.consume(TokenKind::Comma);
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(EnumDecl {
@@ -438,42 +384,39 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LeftBrace)?;
         let mut members = Vec::new();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
             let member_visibility = self.parse_visibility();
             if member_visibility.public {
                 self.invalid_visibility(
                     &member_visibility,
                     "trait members inherit the trait visibility",
                 );
+                return None;
             }
             if self.at_contextual("type") {
-                if let Some(value) = self.parse_associated_type(member_visibility) {
-                    members.push(TraitMember::AssociatedType(value));
-                }
+                members.push(TraitMember::AssociatedType(
+                    self.parse_associated_type(member_visibility)?,
+                ));
             } else if self.at(TokenKind::Fn) {
-                if let Some(signature) = self.parse_function_signature() {
-                    if self.at(TokenKind::LeftBrace) {
-                        let body_span = self.peek().span;
-                        self.report(
-                            Diagnostic::parse(
-                                "E0101",
-                                "Trait method bodies are not supported in Vorton 0.1",
-                                body_span,
-                                "{",
-                            )
-                            .with_suggestion("Move the body to each explicit trait impl", None),
-                        );
-                        self.skip_balanced_group(TokenKind::LeftBrace, TokenKind::RightBrace);
-                    } else {
-                        self.consume(TokenKind::Semicolon);
-                    }
-                    members.push(TraitMember::Method(signature));
+                let signature = self.parse_function_signature()?;
+                if self.at(TokenKind::LeftBrace) {
+                    let body_span = self.peek().span;
+                    self.report(
+                        Diagnostic::parse(
+                            "E0101",
+                            "Trait method bodies are not supported in Vorton 0.1",
+                            body_span,
+                            "{",
+                        )
+                        .with_suggestion("Move the body to each explicit trait impl", None),
+                    );
+                    return None;
                 }
+                self.consume(TokenKind::Semicolon);
+                members.push(TraitMember::Method(signature));
             } else {
                 self.unexpected("trait member");
-                self.recover_member();
+                return None;
             }
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(TraitDecl {
@@ -513,10 +456,29 @@ impl<'a> Parser<'a> {
         let start = self.expect(TokenKind::Impl)?.span.start as usize;
         let type_params = self.parse_type_params()?;
         let first = self.parse_type_expr()?;
+        if !matches!(first, TypeExpr::Named { .. }) {
+            self.report(Diagnostic::parse(
+                "E0101",
+                "Impl trait and target must be named types",
+                first.span(),
+                "impl type",
+            ));
+            return None;
+        }
         let kind = if self.consume(TokenKind::For).is_some() {
+            let target = self.parse_type_expr()?;
+            if !matches!(target, TypeExpr::Named { .. }) {
+                self.report(Diagnostic::parse(
+                    "E0101",
+                    "Impl trait and target must be named types",
+                    target.span(),
+                    "impl type",
+                ));
+                return None;
+            }
             ImplKind::Trait {
                 trait_path: first,
-                target: self.parse_type_expr()?,
+                target,
             }
         } else {
             ImplKind::Inherent { target: first }
@@ -525,7 +487,6 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LeftBrace)?;
         let mut members = Vec::new();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
             if self.at_contextual("delegate") {
                 let token = self.advance();
                 self.report(
@@ -537,15 +498,7 @@ impl<'a> Parser<'a> {
                     )
                     .with_suggestion("Write explicit forwarding methods", None),
                 );
-                self.recover_until(&[
-                    TokenKind::Semicolon,
-                    TokenKind::Fn,
-                    TokenKind::Pub,
-                    TokenKind::RightBrace,
-                ]);
-                self.consume(TokenKind::Semicolon);
-                self.ensure_progress(before);
-                continue;
+                return None;
             }
             let member_visibility = self.parse_visibility();
             if trait_impl && member_visibility.public {
@@ -553,22 +506,23 @@ impl<'a> Parser<'a> {
                     &member_visibility,
                     "trait impl members inherit trait visibility",
                 );
+                return None;
             }
             if self.at(TokenKind::Extern) {
                 self.reject_impl_extern();
+                return None;
             } else if self.at_contextual("type") {
-                if let Some(value) = self.parse_associated_type(member_visibility) {
-                    members.push(ImplMember::AssociatedType(value));
-                }
+                members.push(ImplMember::AssociatedType(
+                    self.parse_associated_type(member_visibility)?,
+                ));
             } else if self.at(TokenKind::Fn) {
-                if let Some(value) = self.parse_function_decl(member_visibility) {
-                    members.push(ImplMember::Method(value));
-                }
+                members.push(ImplMember::Method(
+                    self.parse_function_decl(member_visibility)?,
+                ));
             } else {
                 self.unexpected("impl member");
-                self.recover_member();
+                return None;
             }
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(ImplDecl {
@@ -593,61 +547,6 @@ impl<'a> Parser<'a> {
                 None,
             ),
         );
-        let consumed = (|| -> Option<()> {
-            self.expect(TokenKind::Fn)?;
-            self.expect_name()?;
-            self.parse_type_params()?;
-            self.expect(TokenKind::LeftParen)?;
-            self.parse_params()?;
-            self.expect(TokenKind::RightParen)?;
-            if self.consume(TokenKind::Arrow).is_some() {
-                self.parse_type_expr()?;
-            }
-            self.parse_optional_effect_annotation()?;
-            self.consume(TokenKind::Semicolon);
-            Some(())
-        })();
-        if consumed.is_none() {
-            self.recover_impl_member_boundary();
-        }
-    }
-
-    fn recover_impl_member_boundary(&mut self) {
-        let mut parens = 0_u32;
-        let mut brackets = 0_u32;
-        let mut braces = 0_u32;
-        while !self.at(TokenKind::Eof) {
-            if parens == 0 && brackets == 0 && braces == 0 {
-                if self.at_any(&[
-                    TokenKind::Fn,
-                    TokenKind::Pub,
-                    TokenKind::Extern,
-                    TokenKind::RightBrace,
-                ]) || self.at_contextual("type")
-                    || self.at_contextual("delegate")
-                {
-                    return;
-                }
-                if self.consume(TokenKind::Semicolon).is_some() {
-                    return;
-                }
-            }
-            match self.peek().kind {
-                TokenKind::LeftParen => parens += 1,
-                TokenKind::RightParen => parens = parens.saturating_sub(1),
-                TokenKind::LeftBracket => brackets += 1,
-                TokenKind::RightBracket => brackets = brackets.saturating_sub(1),
-                TokenKind::LeftBrace => braces += 1,
-                TokenKind::RightBrace => {
-                    if braces == 0 {
-                        return;
-                    }
-                    braces -= 1;
-                }
-                _ => {}
-            }
-            self.advance();
-        }
     }
 
     fn parse_effect_decl(&mut self, visibility: Visibility) -> Option<Decl> {
@@ -675,18 +574,9 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LeftBrace)?;
         let mut operations = Vec::new();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
             let op_start = self.peek().span.start as usize;
-            if self.expect(TokenKind::Fn).is_none() {
-                self.recover_member();
-                self.ensure_progress(before);
-                continue;
-            }
-            let Some(op_name) = self.expect_name() else {
-                self.recover_member();
-                self.ensure_progress(before);
-                continue;
-            };
+            self.expect(TokenKind::Fn)?;
+            let op_name = self.expect_name()?;
             self.expect(TokenKind::LeftParen)?;
             let params = self.parse_params()?;
             self.expect(TokenKind::RightParen)?;
@@ -706,7 +596,7 @@ impl<'a> Parser<'a> {
                         None,
                     ),
                 );
-                self.skip_balanced_group(TokenKind::LeftBrace, TokenKind::RightBrace);
+                return None;
             }
             self.consume(TokenKind::Semicolon);
             self.consume(TokenKind::Comma);
@@ -716,7 +606,6 @@ impl<'a> Parser<'a> {
                 return_type,
                 span: self.source.span(op_start, self.previous_end()),
             });
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(Decl::Effect(EffectDecl {
@@ -778,7 +667,10 @@ impl<'a> Parser<'a> {
         let type_params = self.parse_type_params()?;
         self.expect(TokenKind::Equal)?;
         let ty = self.parse_type_expr()?;
-        self.reject_where_clause(&[TokenKind::Semicolon]);
+        if self.at(TokenKind::Where) {
+            self.reject_where_clause();
+            return None;
+        }
         self.consume(TokenKind::Semicolon);
         Some(TypeAliasDecl {
             visibility,
@@ -878,7 +770,6 @@ impl<'a> Parser<'a> {
         let mut declarations = Vec::new();
         let mut declarations_started = false;
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
             if self.is_use_start() {
                 if declarations_started {
                     self.report(Diagnostic::parse(
@@ -887,21 +778,13 @@ impl<'a> Parser<'a> {
                         self.peek().span,
                         self.peek().value.clone(),
                     ));
+                    return None;
                 }
-                if let Some(value) = self.parse_use_decl() {
-                    uses.push(value);
-                } else {
-                    self.recover_declaration();
-                }
+                uses.push(self.parse_use_decl()?);
             } else {
                 declarations_started = true;
-                if let Some(value) = self.parse_decl() {
-                    declarations.push(value);
-                } else {
-                    self.recover_declaration();
-                }
+                declarations.push(self.parse_decl()?);
             }
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(ModuleDecl {
@@ -934,7 +817,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn reject_where_clause(&mut self, stops: &[TokenKind]) {
+    fn reject_where_clause(&mut self) {
         if !self.at(TokenKind::Where) {
             return;
         }
@@ -948,7 +831,6 @@ impl<'a> Parser<'a> {
             )
             .with_suggestion("Remove the clause", None),
         );
-        self.recover_until(stops);
     }
 
     fn parse_params(&mut self) -> Option<Vec<Param>> {
@@ -962,7 +844,10 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            self.reject_where_clause(&[TokenKind::Comma, TokenKind::RightParen]);
+            if self.at(TokenKind::Where) {
+                self.reject_where_clause();
+                return None;
+            }
             if self.at(TokenKind::Equal) {
                 let token = self.advance();
                 self.report(
@@ -974,7 +859,7 @@ impl<'a> Parser<'a> {
                     )
                     .with_suggestion("Define an explicit wrapper function", None),
                 );
-                self.recover_until(&[TokenKind::Comma, TokenKind::RightParen]);
+                return None;
             }
             let end = self.previous_end().max(name.span.end as usize);
             params.push(Param {
@@ -1036,12 +921,16 @@ impl<'a> Parser<'a> {
                     self.tokens[self.position - 1].span,
                     ":",
                 ));
+                return None;
             }
             Some(self.parse_type_expr()?)
         } else {
             None
         };
-        self.reject_where_clause(&[TokenKind::Equal]);
+        if self.at(TokenKind::Where) {
+            self.reject_where_clause();
+            return None;
+        }
         self.expect(TokenKind::Equal)?;
         let value = self.parse_expr()?;
         self.consume(TokenKind::Semicolon);
@@ -1063,6 +952,7 @@ impl<'a> Parser<'a> {
                     self.peek().span,
                     "(",
                 ));
+                return None;
             }
             let pattern = self.parse_pattern_atom()?;
             if !matches!(pattern, Pattern::Tuple { .. }) {
@@ -1072,6 +962,7 @@ impl<'a> Parser<'a> {
                     pattern.span(),
                     "pattern",
                 ));
+                return None;
             }
             return Some(pattern);
         }
@@ -1166,6 +1057,7 @@ impl<'a> Parser<'a> {
                     open.span.join(close.span),
                     "()",
                 ));
+                return None;
             }
             ForBinding::Tuple(names, open.span.join(close.span))
         } else {
@@ -1205,6 +1097,7 @@ impl<'a> Parser<'a> {
                     expression.span(),
                     "assignment target",
                 ));
+                return None;
             }
             return Some(Stmt::Assign {
                 target: expression,
@@ -1230,14 +1123,7 @@ impl<'a> Parser<'a> {
         let open = self.expect(TokenKind::LeftBrace)?;
         let mut statements = Vec::new();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
-            if let Some(statement) = self.parse_statement() {
-                statements.push(statement);
-            } else {
-                self.recover_until(&[TokenKind::Semicolon, TokenKind::RightBrace]);
-                self.consume(TokenKind::Semicolon);
-            }
-            self.ensure_progress(before);
+            statements.push(self.parse_statement()?);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         let tail = if matches!(
@@ -1272,9 +1158,6 @@ impl<'a> Parser<'a> {
             )
             .with_suggestion("Use `expression catch { pattern => handler }`", None),
         );
-        if self.at(TokenKind::LeftBrace) {
-            self.skip_balanced_group(TokenKind::LeftBrace, TokenKind::RightBrace);
-        }
     }
 
     fn parse_expr(&mut self) -> Option<Expr> {
@@ -1303,7 +1186,7 @@ impl<'a> Parser<'a> {
                     )
                     .with_suggestion("Use Option methods or an explicit catch expression", None),
                 );
-                continue;
+                return None;
             }
             if self.at(TokenKind::Dot) && 10 > minimum {
                 left = self.parse_dot_expression(left)?;
@@ -1725,13 +1608,7 @@ impl<'a> Parser<'a> {
 
     fn parse_if_expression(&mut self) -> Option<Expr> {
         let start = self.expect(TokenKind::If)?.span.start as usize;
-        let condition = match self.parse_expr_with_named_literals(false) {
-            Some(value) => value,
-            None => {
-                self.recover_until(&[TokenKind::LeftBrace]);
-                return None;
-            }
-        };
+        let condition = self.parse_expr_with_named_literals(false)?;
         let then_branch = self.parse_block_expr()?;
         let else_branch = if self.consume(TokenKind::Else).is_some() {
             if self.at(TokenKind::If) {
@@ -1759,14 +1636,8 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LeftBrace)?;
         let mut arms = Vec::new();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
-            if let Some(arm) = self.parse_match_arm() {
-                arms.push(arm);
-            } else {
-                self.recover_until(&[TokenKind::Comma, TokenKind::RightBrace]);
-            }
+            arms.push(self.parse_match_arm()?);
             self.consume(TokenKind::Comma);
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(Expr::Match {
@@ -1808,14 +1679,8 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LeftBrace)?;
         let mut arms = Vec::new();
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
-            if let Some(arm) = self.parse_match_arm() {
-                arms.push(arm);
-            } else {
-                self.recover_until(&[TokenKind::Comma, TokenKind::RightBrace]);
-            }
+            arms.push(self.parse_match_arm()?);
             self.consume(TokenKind::Comma);
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(Expr::Catch {
@@ -1838,16 +1703,11 @@ impl<'a> Parser<'a> {
                 self.peek().span,
                 "}",
             ));
+            return None;
         }
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
-            let before = self.position;
-            if let Some(handler) = self.parse_effect_handler() {
-                handlers.push(handler);
-            } else {
-                self.recover_until(&[TokenKind::Comma, TokenKind::RightBrace]);
-            }
+            handlers.push(self.parse_effect_handler()?);
             self.consume(TokenKind::Comma);
-            self.ensure_progress(before);
         }
         let close = self.expect(TokenKind::RightBrace)?;
         Some(Expr::Handle {
@@ -2125,6 +1985,7 @@ impl<'a> Parser<'a> {
                 )
                 .with_suggestion("Write the type as `Option<T>`", None),
             );
+            return None;
         }
         // Preserve the successfully parsed canonical prefix; rejected suffixes
         // never create AST variants or documentation-only carriers.
@@ -2227,6 +2088,7 @@ impl<'a> Parser<'a> {
                 self.peek().span,
                 "}",
             ));
+            return None;
         }
         while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
             if self.consume(TokenKind::DotDot).is_some() {
@@ -2268,6 +2130,7 @@ impl<'a> Parser<'a> {
                 self.peek().span,
                 ">",
             ));
+            return None;
         }
         while !self.at(TokenKind::Greater) && !self.at(TokenKind::Eof) {
             values.push(self.parse_type_expr()?);
@@ -2291,6 +2154,7 @@ impl<'a> Parser<'a> {
                 self.peek().span,
                 ">",
             ));
+            return None;
         }
         while !self.at(TokenKind::Greater) && !self.at(TokenKind::Eof) {
             let start = self.peek().span.start as usize;
@@ -2451,130 +2315,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn recover_declaration(&mut self) {
-        // Recovery stops only at a declaration boundary outside braces. An
-        // unmatched header paren/bracket must not swallow a later top-level
-        // declaration once the malformed declaration's body has balanced.
-        let mut parens = 0_u32;
-        let mut brackets = 0_u32;
-        let mut braces = 0_u32;
-        while !self.at(TokenKind::Eof) && !self.at(TokenKind::RightBrace) {
-            if braces == 0 && self.is_declaration_start() {
-                return;
-            }
-            match self.peek().kind {
-                TokenKind::LeftParen => parens += 1,
-                TokenKind::RightParen => parens = parens.saturating_sub(1),
-                TokenKind::LeftBracket => brackets += 1,
-                TokenKind::RightBracket => brackets = brackets.saturating_sub(1),
-                TokenKind::LeftBrace => braces += 1,
-                TokenKind::RightBrace => {
-                    if braces == 0 {
-                        return;
-                    }
-                    braces -= 1;
-                }
-                _ => {}
-            }
-            self.advance();
-            // A declaration cannot be nested in parentheses/brackets. If a
-            // malformed header omitted a closer, a balanced body still gives
-            // us a safe top-level declaration boundary.
-            if braces == 0 && self.is_declaration_start() {
-                let _ = (parens, brackets);
-                return;
-            }
-        }
-    }
-
-    fn recover_member(&mut self) {
-        self.recover_until(&[
-            TokenKind::Fn,
-            TokenKind::Pub,
-            TokenKind::Extern,
-            TokenKind::RightBrace,
-            TokenKind::Semicolon,
-        ]);
-        self.consume(TokenKind::Semicolon);
-    }
-
-    fn recover_until(&mut self, stops: &[TokenKind]) {
-        // Commas and closing delimiters inside nested (), [] or {} are never
-        // synchronization points for the surrounding construct.
-        let mut parens = 0_u32;
-        let mut brackets = 0_u32;
-        let mut braces = 0_u32;
-        while !self.at(TokenKind::Eof) {
-            let kind = self.peek().kind;
-            if parens == 0 && brackets == 0 && braces == 0 && stops.contains(&kind) {
-                return;
-            }
-            match kind {
-                TokenKind::LeftParen => parens += 1,
-                TokenKind::RightParen => {
-                    if parens == 0 {
-                        return;
-                    }
-                    parens -= 1;
-                }
-                TokenKind::LeftBracket => brackets += 1,
-                TokenKind::RightBracket => {
-                    if brackets == 0 {
-                        return;
-                    }
-                    brackets -= 1;
-                }
-                TokenKind::LeftBrace => braces += 1,
-                TokenKind::RightBrace => {
-                    if braces == 0 {
-                        return;
-                    }
-                    braces -= 1;
-                }
-                _ => {}
-            }
-            self.advance();
-        }
-    }
-
-    fn skip_balanced_group(&mut self, open: TokenKind, close: TokenKind) {
-        if !self.at(open) {
-            return;
-        }
-        let mut depth = 0_u32;
-        while !self.at(TokenKind::Eof) {
-            let kind = self.peek().kind;
-            self.advance();
-            if kind == open {
-                depth += 1;
-            } else if kind == close {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return;
-                }
-            }
-        }
-    }
-
-    fn is_declaration_start(&self) -> bool {
-        matches!(
-            self.peek().kind,
-            TokenKind::At
-                | TokenKind::Pub
-                | TokenKind::Fn
-                | TokenKind::Struct
-                | TokenKind::Enum
-                | TokenKind::Trait
-                | TokenKind::Impl
-                | TokenKind::Effect
-                | TokenKind::Extern
-                | TokenKind::Test
-                | TokenKind::Const
-                | TokenKind::Mod
-                | TokenKind::Use
-        ) || self.at_contextual("type")
-    }
-
     fn unexpected(&mut self, expected: &str) {
         let token = self.peek().clone();
         self.report(Diagnostic::parse(
@@ -2603,12 +2343,8 @@ impl<'a> Parser<'a> {
     }
 
     fn report(&mut self, diagnostic: Diagnostic) {
-        push_diagnostic(&mut self.diagnostics, diagnostic);
-    }
-
-    fn ensure_progress(&mut self, before: usize) {
-        if self.position == before && !self.at(TokenKind::Eof) {
-            self.advance();
+        if self.diagnostics.is_empty() {
+            push_diagnostic(&mut self.diagnostics, diagnostic);
         }
     }
 

@@ -6,27 +6,26 @@ pub mod source;
 
 use diagnostic::Diagnostic;
 use lexer::Token;
-use parser::ParseOutput;
 use source::SourceFile;
 
 pub struct FrontendOutput {
     pub source: SourceFile,
     pub tokens: Vec<Token>,
-    pub program: ast::Program,
-    pub diagnostics: Vec<Diagnostic>,
+    pub syntax: Result<ast::Program, Vec<Diagnostic>>,
 }
 
 pub fn parse_source(source: SourceFile) -> FrontendOutput {
-    let lexed = lexer::lex(&source);
-    let ParseOutput {
-        program,
-        diagnostics,
-    } = parser::parse(&source, &lexed.tokens, lexed.diagnostics);
+    let mut lexed = lexer::lex(&source);
+    let syntax = if lexed.diagnostics.is_empty() {
+        parser::parse(&source, &lexed.tokens)
+    } else {
+        diagnostic::sort_diagnostics(&mut lexed.diagnostics);
+        Err(lexed.diagnostics)
+    };
 
     FrontendOutput {
         source,
         tokens: lexed.tokens,
-        program,
-        diagnostics,
+        syntax,
     }
 }

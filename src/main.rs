@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use vorton::diagnostic::{Severity, format_human, format_llm};
+use vorton::diagnostic::{format_human, format_llm};
 use vorton::source::{SourceFile, SourceId};
 
 const EXIT_SUCCESS: u8 = 0;
@@ -65,14 +65,10 @@ fn run(args: Vec<String>) -> Result<u8, String> {
         fs::read_to_string(path).map_err(|error| format!("cannot read '{path}': {error}"))?;
     let source = SourceFile::new(SourceId(0), path.clone(), text)?;
     let output = vorton::parse_source(source);
-    let has_errors = output
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.severity == Severity::Error);
-    if has_errors {
+    if let Err(diagnostics) = &output.syntax {
         match error_format {
-            ErrorFormat::Human => eprint!("{}", format_human(&output.source, &output.diagnostics)),
-            ErrorFormat::Llm => println!("{}", format_llm(&output.source, &output.diagnostics)),
+            ErrorFormat::Human => eprint!("{}", format_human(&output.source, diagnostics)),
+            ErrorFormat::Llm => println!("{}", format_llm(&output.source, diagnostics)),
         }
         return Ok(EXIT_SOURCE_ERROR);
     }
