@@ -1,14 +1,14 @@
 # 模块系统
 
-Ring 使用基于文件的模块系统。每个 `.ring` 文件是一个模块。模块通过 `use` 声明导入其他模块的公开符号。
+Vorton 使用基于文件的模块系统。每个 `.vorton` 文件是一个模块。模块通过 `use` 声明导入其他模块的公开符号。
 
 ## 模块标识
 
 模块名由文件路径派生，`::` 分隔符映射到文件系统目录分隔符：
 
 ```
-use parser::lexer    →  parser/lexer.ring
-use utils            →  utils.ring
+use parser::lexer    →  parser/lexer.vorton
+use utils            →  utils.vorton
 ```
 
 项目根目录是入口文件所在目录。
@@ -17,15 +17,15 @@ use utils            →  utils.ring
 
 ### 单符号导入
 
-```ring
+```vorton
 use parser::Token
 ```
 
-从 `parser.ring` 导入 `Token`。
+从 `parser.vorton` 导入 `Token`。
 
 ### 多符号导入
 
-```ring
+```vorton
 use parser::{Token, parse, Lexer}
 ```
 
@@ -33,7 +33,7 @@ use parser::{Token, parse, Lexer}
 
 ### 整模块导入
 
-```ring
+```vorton
 use parser
 ```
 
@@ -41,7 +41,7 @@ use parser
 
 ### 重命名导入
 
-```ring
+```vorton
 use parser::{Token as T}
 ```
 
@@ -49,11 +49,11 @@ use parser::{Token as T}
 
 ### 嵌套路径
 
-```ring
+```vorton
 use checker::env::TypeEnv
 ```
 
-映射到 `checker/env.ring` 中的 `TypeEnv`。
+映射到 `checker/env.vorton` 中的 `TypeEnv`。
 
 ### 相对路径（`super::`/`self::`）
 
@@ -61,7 +61,7 @@ use checker::env::TypeEnv
 
 #### `super::` 引用父模块
 
-```ring
+```vorton
 mod outer {
     pub fn value() -> Int { 42 }
 
@@ -74,7 +74,7 @@ mod outer {
 
 `super::` 可以在 `use` 声明中使用，也可以在表达式中直接使用：
 
-```ring
+```vorton
 mod outer {
     pub fn value() -> Int { 42 }
 
@@ -86,7 +86,7 @@ mod outer {
 
 支持多级 `super` 链式引用和多符号导入：
 
-```ring
+```vorton
 use super::super::some_fn         // 向上两层
 use super::{value, helper}        // 从父模块导入多个符号
 ```
@@ -95,7 +95,7 @@ use super::{value, helper}        // 从父模块导入多个符号
 
 #### `self::` 引用当前模块
 
-```ring
+```vorton
 mod math {
     pub fn add(a: Int, b: Int) -> Int { a + b }
 
@@ -111,7 +111,7 @@ mod math {
 
 ### `pub` 修饰符
 
-```ring
+```vorton
 pub fn greet() -> Str { "hello" }
 pub struct Point { pub x: Int, pub y: Int }
 ```
@@ -122,7 +122,7 @@ pub struct Point { pub x: Int, pub y: Int }
 
 ### `pub use` 再导出
 
-```ring
+```vorton
 pub use inner::greet
 ```
 
@@ -130,7 +130,7 @@ pub use inner::greet
 
 0.1的public export必须对enum constructor保持owner closure：一个facade若单独公开或重命名constructor，其最终public type exports中也必须包含该constructor的exact owner enum；不要求两者来自同一条`pub use`。
 
-```ring
+```vorton
 // 合法：owner enum 与constructor同时公开
 pub use leaf::{Token, Wrap}
 
@@ -157,11 +157,11 @@ Provider随正常public root输出仅供compiler使用的exact physical metadata
 
 ## Inline `mod` 块
 
-除了基于文件的模块外，Ring 支持在同一文件内定义 inline 模块块。
+除了基于文件的模块外，Vorton 支持在同一文件内定义 inline 模块块。
 
 ### 基本语法
 
-```ring
+```vorton
 mod math {
     pub fn add(a: Int, b: Int) -> Int { a + b }
     pub fn double(x: Int) -> Int { x + x }
@@ -178,7 +178,7 @@ fn main() {
 
 `mod` 块可以嵌套，形成多级命名空间：
 
-```ring
+```vorton
 mod outer {
     pub mod inner {
         pub fn greet(name: Str) -> Str {
@@ -198,7 +198,7 @@ fn main() {
 
 同一 direct parent scope 中，每个 inline module 名称只能声明一次：
 
-```ring
+```vorton
 mod tools {
     pub fn first() -> Int { 1 }
 }
@@ -212,7 +212,7 @@ mod tools {                         // E0207: Duplicate definition
 
 相同 leaf 位于不同 parent 时是不同 logical module，因此合法：
 
-```ring
+```vorton
 mod outer {
     mod inner {}
 }
@@ -226,7 +226,7 @@ mod inner {}
 
 `mod` 块内部可以使用 `use` 导入外部模块的符号，也可以使用 `super::`/`self::` 相对路径（见上文）：
 
-```ring
+```vorton
 mod outer {
     pub fn value() -> Int { 42 }
 
@@ -241,7 +241,7 @@ mod outer {
 
 `mod` 块内可以包含所有声明类型：函数、struct、enum、trait、impl、effect、const、嵌套 mod 等。
 
-```ring
+```vorton
 mod shapes {
     pub struct Circle { pub radius: Float }
 
@@ -257,20 +257,20 @@ mod shapes {
 
 #### 文件模块 header
 
-```ring
+```vorton
 requires {unsafe}
 
 use std::ptr
-extern fn ring_raw_alloc(count: Int) -> Ptr<Int>
+extern fn vorton_raw_alloc(count: Int) -> Ptr<Int>
 ```
 
 文件 header 必须是第一项非注释语法、每文件至多一次，并位于全部 `use` 与声明之前。有 header 时，它是文件模块的 effect ceiling；省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 许可从不隐式获得。使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效文件/inline-module `requires` 集合显式包含 `unsafe`。
 
-Header只提供模块许可：unsafe原语仍必须位于`unsafe {}`责任块。Extern声明本身是“签名忠实于C实现”的ABI签字，调用extern函数不向调用点传播unsafe。Ring不提供逐声明`unsafe extern fn`第二套授权语法。
+Header只提供模块许可：unsafe原语仍必须位于`unsafe {}`责任块。Extern声明本身是“签名忠实于C实现”的ABI签字，调用extern函数不向调用点传播unsafe。Vorton不提供逐声明`unsafe extern fn`第二套授权语法。
 
 #### 纯模块（无 effect）
 
-```ring
+```vorton
 mod pure_logic requires {} {
     pub fn add(a: Int, b: Int) -> Int { a + b }
     pub fn double(x: Int) -> Int { x + x }
@@ -282,7 +282,7 @@ mod pure_logic requires {} {
 
 #### 受限模块（指定 effect 子集）
 
-```ring
+```vorton
 mod console_layer requires {console} {
     pub fn greet(name: Str) -> Unit with {console} {
         print("Hello, ${name}!")

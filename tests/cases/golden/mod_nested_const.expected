@@ -1,7 +1,7 @@
 nested_greet=hello world
 nested_add=3
 version=42
-name=ring
+name=vorton
 describe=release-v42
 swap_a=world
 swap_b=hello

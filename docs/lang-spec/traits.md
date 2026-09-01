@@ -1,10 +1,10 @@
 # Trait 系统
 
-Ring 的 trait 系统提供有界多态性（bounded polymorphism）。具体 receiver 在类型检查时解析到唯一 impl；受 trait bound 的类型变量通过隐式 dictionary evidence 调用。Evidence 的目标表示不是语言规范的一部分。
+Vorton 的 trait 系统提供有界多态性（bounded polymorphism）。具体 receiver 在类型检查时解析到唯一 impl；受 trait bound 的类型变量通过隐式 dictionary evidence 调用。Evidence 的目标表示不是语言规范的一部分。
 
 ## Trait 声明
 
-```ring
+```vorton
 trait Show {
     fn to_str(self: Self) -> Str;
 }
@@ -33,21 +33,21 @@ Trait 是完整的行为 contract，不为method或associated type提供独立vi
 
 非法`pub`必须hard-fail并给删除修复，不能接受后忽略。Trait dictionary、provider identity与CoreHIR不保存per-member visibility。需要sealed trait时将来使用显式设计，不以private required method模拟。
 
-Ring 0.1的inherent impl与trait impl都不接受`extern fn` member；这与visibility无关，写在impl中的`extern fn`一律hard-fail。用户FFI只由top-level `extern fn`声明；需要method形态时以普通inherent wrapper调用该top-level extern。标准库内建方法由编译器exact intrinsic manifest提供，不是trait/impl语法成员。
+Vorton 0.1的inherent impl与trait impl都不接受`extern fn` member；这与visibility无关，写在impl中的`extern fn`一律hard-fail。用户FFI只由top-level `extern fn`声明；需要method形态时以普通inherent wrapper调用该top-level extern。标准库内建方法由编译器exact intrinsic manifest提供，不是trait/impl语法成员。
 
 ### Public interface、private impl 与 opaque return
 
 Public item的参数、返回类型、pub field、public enum payload、generic bound及effect/trait contract不得引用更private的declaration；违反时hard-fail。Public struct的private field可以包含private nominal，因为该representation只经compiler metadata运输，不进入source interface。`impl PublicTrait for PrivateType`可在module内部合法存在并参与project coherence，但不会成为外部callable surface。Trait impl只有target与trait均对调用方可见时才随module export，public inherent type也只导出其`pub`methods。
 
-Ring 0.1不支持return-position`impl Trait`、opaque type或由推断产生的匿名public concrete type。需要隐藏返回值具体类型时，当前使用显式public wrapper/generic contract；post-0.1由B-200在真实consumer下重新设计。`impl`出现在type position必须稳定parse error，不能先建立只transport不约束的占位节点。
+Vorton 0.1不支持return-position`impl Trait`、opaque type或由推断产生的匿名public concrete type。需要隐藏返回值具体类型时，当前使用显式public wrapper/generic contract；post-0.1由B-200在真实consumer下重新设计。`impl`出现在type position必须稳定parse error，不能先建立只transport不约束的占位节点。
 
 ### 0.1 方法签名边界
 
-Ring 0.1 的 source trait member 只有方法签名，不允许函数体。Trait declaration 中出现 `{ ... }` 方法体必须稳定报错，并建议把实现写入每个 `impl Trait for Type`；每个 impl 必须显式提供 trait 的全部方法。该限制不删除 associated type default，也不影响编译器内建或 auto-derived 的 exact impl body。
+Vorton 0.1 的 source trait member 只有方法签名，不允许函数体。Trait declaration 中出现 `{ ... }` 方法体必须稳定报错，并建议把实现写入每个 `impl Trait for Type`；每个 impl 必须显式提供 trait 的全部方法。该限制不删除 associated type default，也不影响编译器内建或 auto-derived 的 exact impl body。
 
 ### Supertrait 继承
 
-```ring
+```vorton
 trait Describable {
     fn describe(self) -> Str
 }
@@ -69,7 +69,7 @@ trait Printable: Describable {
 
 ### 关联类型
 
-```ring
+```vorton
 trait Container {
     type Item
     fn get(self) -> Item
@@ -80,7 +80,7 @@ trait Container {
 
 **impl 中赋值**：
 
-```ring
+```vorton
 impl Container for IntBox {
     type Item = Int
     fn get(self) -> Int { self.value }
@@ -89,7 +89,7 @@ impl Container for IntBox {
 
 **限定路径**：泛型函数中通过 `T::Item` 引用关联类型。
 
-```ring
+```vorton
 fn use_it<T: Producer>(p: T) -> T::Item {
     p.produce()
 }
@@ -97,7 +97,7 @@ fn use_it<T: Producer>(p: T) -> T::Item {
 
 **约束语法**：`<Item = Int>` 约束关联类型的具体值。
 
-```ring
+```vorton
 fn sum_source<T: Source<Item = Int>>(s: T) -> Int {
     s.next() + s.next()
 }
@@ -105,7 +105,7 @@ fn sum_source<T: Source<Item = Int>>(s: T) -> Int {
 
 **关联类型 bound**：声明关联类型时可附加 trait 约束。
 
-```ring
+```vorton
 trait Container {
     type Item: Eq   // Item 必须实现 Eq
     fn get(self) -> Item
@@ -114,7 +114,7 @@ trait Container {
 
 **默认关联类型**：声明时可提供默认值，impl 可省略或覆盖。
 
-```ring
+```vorton
 trait Processor {
     type Output = Int           // 默认为 Int
     fn process(self) -> Output
@@ -144,7 +144,7 @@ impl Processor for Greeter {    // 覆盖为 Str
 
 ### 固有方法
 
-```ring
+```vorton
 impl Point {
     pub fn distance(self) -> Float { ... }
 }
@@ -156,7 +156,7 @@ impl Point {
 
 ### Trait 实现
 
-```ring
+```vorton
 impl Show for Point {
     fn to_str(self: Self) -> Str {
         "${self.x}, ${self.y}"
@@ -168,7 +168,7 @@ impl Show for Point {
 
 ### 泛型 Impl
 
-```ring
+```vorton
 impl<T: Show> Show for List<T> {
     fn to_str(self: Self) -> Str { ... }
 }
@@ -180,7 +180,7 @@ Impl 块可以有自己的类型参数和约束。
 
 ### 函数约束
 
-```ring
+```vorton
 fn stringify<T: Show>(x: T) -> Str {
     x.to_str()
 }
@@ -190,7 +190,7 @@ fn stringify<T: Show>(x: T) -> Str {
 
 ### 多约束
 
-```ring
+```vorton
 fn process<T: Show + Eq>(x: T, y: T) -> Bool { ... }
 ```
 
@@ -217,7 +217,7 @@ bounds = { (α₁, "Show"), (α₂, "Eq"), ... }
 
 找不到方法时报 E0305。
 
-```ring
+```vorton
 fn stringify<T: Show>(value: T) -> Str {
     value.to_str()
 }
@@ -231,7 +231,7 @@ fn show_twice<T: Show>(value: T) -> Str {
 
 ## 显式转发
 
-Ring 0.1 不提供 `delegate` declaration。Impl 中以 `delegate field: Trait` 形式出现的旧表面必须稳定报错，并建议写普通 `impl Trait for Type`，由每个方法显式调用相应字段。普通 trait、associated type、supertrait、dictionary evidence 与手写 forwarding impl 均保持；编译器不得生成 delegate owner、wrapper body或专属 Core/ABI carrier。
+Vorton 0.1 不提供 `delegate` declaration。Impl 中以 `delegate field: Trait` 形式出现的旧表面必须稳定报错，并建议写普通 `impl Trait for Type`，由每个方法显式调用相应字段。普通 trait、associated type、supertrait、dictionary evidence 与手写 forwarding impl 均保持；编译器不得生成 delegate owner、wrapper body或专属 Core/ABI carrier。
 
 ## 自动派生 (Auto-derive)
 

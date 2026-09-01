@@ -1,0 +1,62 @@
+// B-100 P1.1: effect annotation + evidence passing — functions with explicit
+// `with {console}`, `with {fail<T>}`, and multi-effect
+// `with {console, fail<Str>}`
+// annotations. Tests that the compiler-generated evidence threading is
+// consistent.
+
+fn greet(name: Str) -> Unit with {console} {
+    print("hello ${name}")
+}
+
+fn safe_divide(a: Int, b: Int) -> Int with {fail<Str>} {
+    if b == 0 { fail.raise("division by zero") }
+    a / b
+}
+
+fn annotated_io_only(x: Int) -> Int with {console} {
+    print("io: ${x.to_str()}")
+    x + 1
+}
+
+fn multi_effect(x: Int) -> Str with {console, fail<Str>} {
+    if x < 0 { fail.raise("negative") }
+    print("processing ${x.to_str()}")
+    x.to_str()
+}
+
+fn chain_annotated(a: Int, b: Int) -> Int with {fail<Str>} {
+    let q = safe_divide(a, b)
+    let r = safe_divide(q, 2)
+    r
+}
+
+fn main() {
+    // Test 1: io annotation
+    greet("Vorton")
+
+    // Test 2: fail annotation — success path
+    let r1 = safe_divide(10, 2) catch { _ => -1 }
+    print("div ok: ${r1.to_str()}")
+
+    // Test 3: fail annotation — failure path
+    let r2 = safe_divide(10, 0) catch { _ => -1 }
+    print("div fail: ${r2.to_str()}")
+
+    // Test 4: io annotation returns value
+    let r3 = annotated_io_only(5)
+    print("io result: ${r3.to_str()}")
+
+    // Test 5: multi-effect — success
+    let r4 = multi_effect(42) catch { _ => "caught" }
+    print("multi ok: ${r4}")
+
+    // Test 6: multi-effect — failure
+    let r5 = multi_effect(-1) catch { e => "caught: ${e}" }
+    print("multi fail: ${r5}")
+
+    // Test 7: chained annotated calls
+    let r6 = chain_annotated(100, 5) catch { _ => -1 }
+    print("chain: ${r6.to_str()}")
+
+    print("effect_annotation_evidence: done")
+}

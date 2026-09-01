@@ -1,0 +1,83 @@
+// B-100 P1.3 R2 adversarial combo: closure captures multiple trait dicts.
+//
+// A closure created inside a generic function with MULTIPLE trait bounds
+// must capture ALL implicit dict params, not just one. Existing test
+// (closure_captures_dict.vorton) covers single Eq, but multi-bound closures
+// could fail if the LLVM closure capture code only grabs the first dict.
+//
+// Exercises:
+//   * Closure capturing Eq dict for comparison
+//   * Closure capturing Ord dict for ordering
+//   * Closure inside fn with both Eq + Ord bounds
+//   * HOF receiving closure that implicitly carries dicts
+
+trait Show {
+    fn show(self) -> Str
+}
+
+impl Show for Int {
+    fn show(self) -> Str { self.to_str() }
+}
+
+impl Show for Str {
+    fn show(self) -> Str { self }
+}
+
+fn find_min_eq<T: Eq + Ord>(xs: List<T>, target: T) -> Bool {
+    // Closure captures both Eq dict (for ==) and Ord dict (for <)
+    let is_min_and_eq = fn(x: T) -> Bool {
+        x == target
+    }
+    for x in xs {
+        if is_min_and_eq(x) { return true }
+    }
+    false
+}
+
+fn collect_less_than<T: Ord + Show>(xs: List<T>, threshold: T) -> Str {
+    // Closure captures Ord dict (for <) and Show dict (for show)
+    let check_and_show = fn(x: T) -> Str {
+        if x < threshold { x.show() } else { "skip" }
+    }
+    let mut parts: List<Str> = []
+    for x in xs {
+        parts.push(check_and_show(x))
+    }
+    parts.join(",")
+}
+
+fn apply_pred<T>(xs: List<T>, pred: fn(T) -> Bool) -> Int {
+    let mut count = 0
+    for x in xs {
+        if pred(x) { count = count + 1 }
+    }
+    count
+}
+
+fn count_equal<T: Eq>(xs: List<T>, target: T) -> Int {
+    // Closure captures T's Eq dict, then passed to HOF
+    let eq_pred = fn(x: T) -> Bool { x == target }
+    apply_pred(xs, eq_pred)
+}
+
+fn main() {
+    // Test 1: Eq + Ord closure — found
+    print("T1: ${find_min_eq([3, 1, 2], 1)}")
+
+    // Test 2: Eq + Ord closure — not found
+    print("T2: ${find_min_eq([3, 1, 2], 9)}")
+
+    // Test 3: Ord + Show closure — Int
+    print("T3: ${collect_less_than([5, 2, 8, 1], 4)}")
+
+    // Test 4: Ord + Show closure — Str
+    print("T4: ${collect_less_than(["c", "a", "d", "b"], "c")}")
+
+    // Test 5: HOF with closure carrying Eq dict — Int
+    print("T5: ${count_equal([1, 2, 1, 3, 1], 1)}")
+
+    // Test 6: HOF with closure carrying Eq dict — Str
+    print("T6: ${count_equal(["a", "b", "a", "c"], "a")}")
+
+    print("adversarial_combo_closure_multi_dict: done")
+}

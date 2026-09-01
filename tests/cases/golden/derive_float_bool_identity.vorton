@@ -1,0 +1,51 @@
+// #163: Float identity derive — struct with Float field using derive Eq/Ord/Debug
+// must not call vorton_str_eq on boxed floats (was UB: type confusion).
+// #169: Bool identity derive — struct with Bool field using derive Debug
+// must render "true"/"false", not "0"/"1".
+
+struct FPoint { x: Float, y: Float }
+struct BFlag { name: Str, active: Bool }
+struct Mixed { val: Float, flag: Bool, label: Str }
+
+fn main() {
+    // ── Float Eq ──
+    let p1 = FPoint { x: 1.5, y: 2.5 }
+    let p2 = FPoint { x: 1.5, y: 2.5 }
+    let p3 = FPoint { x: 1.5, y: 3.0 }
+    print("fp_eq=${p1 == p2}")       // fp_eq=true
+    print("fp_ne=${p1 == p3}")       // fp_ne=false
+
+    // ── Float Debug ──
+    print(p1.debug())                // FPoint { x: 1.5, y: 2.5 }
+
+    // ── Bool Debug (#169) ──
+    let b1 = BFlag { name: "on", active: true }
+    let b2 = BFlag { name: "off", active: false }
+    print(b1.debug())                // BFlag { name: on, active: true }
+    print(b2.debug())                // BFlag { name: off, active: false }
+
+    // ── Bool Eq ──
+    let b3 = BFlag { name: "on", active: true }
+    print("bf_eq=${b1 == b3}")       // bf_eq=true
+    print("bf_ne=${b1 == b2}")       // bf_ne=false
+
+    // ── Mixed struct ──
+    let m1 = Mixed { val: 3.14, flag: true, label: "pi" }
+    let m2 = Mixed { val: 3.14, flag: true, label: "pi" }
+    let m3 = Mixed { val: 2.71, flag: false, label: "e" }
+    print("mx_eq=${m1 == m2}")       // mx_eq=true
+    print("mx_ne=${m1 == m3}")       // mx_ne=false
+    print(m1.debug())                // Mixed { val: 3.14, flag: true, label: pi }
+    print(m3.debug())                // Mixed { val: 2.71, flag: false, label: e }
+
+    // ── Float edge cases ──
+    let z1 = FPoint { x: 0.0, y: 0.0 }
+    let z2 = FPoint { x: 0.0, y: 0.0 }
+    print("zero_eq=${z1 == z2}")     // zero_eq=true
+
+    // ── Clone with Float/Bool ──
+    let p4 = p1.clone()
+    print("clone_eq=${p1 == p4}")    // clone_eq=true
+    let b4 = b1.clone()
+    print("bclone_eq=${b1 == b4}")   // bclone_eq=true
+}

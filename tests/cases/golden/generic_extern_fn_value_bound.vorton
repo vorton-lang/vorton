@@ -1,0 +1,17 @@
+// A bounded extern function value validates its trait constraint statically,
+// but the bound is not a runtime dictionary parameter of the foreign ABI.
+// The raw ABI leaf is explicit and accepts Str; an accidental dictionary
+// capture/argument would corrupt the foreign call.
+
+extern fn vorton_print<T: Hash>(value: T) -> Unit with {console}
+
+fn call_bounded(
+    f: fn(Str) -> Unit with {console},
+    value: Str
+) -> Unit with {console} {
+    f(value)
+}
+
+fn main() {
+    call_bounded(vorton_print, "107")
+}

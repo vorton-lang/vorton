@@ -1,0 +1,57 @@
+// String-keyed Map dispatch: insert / get / contains_key / entries / values over
+// Map<Str, Struct>, including struct field access on looked-up values and folding
+// over entries. Hash/eq dispatch on Str keys must agree across backends. Locks
+// Map<Str,_> parity on the LLVM backend.
+//
+// NOTE: generic trait-method dispatch through a type parameter (`fn f<T: Trait>`)
+// and generic Ord dispatch (`fn f<T: Ord>`) are NOT covered here — both crash on
+// the LLVM backend (missing '__Int_Ord' dict / str_from_cstr segfault), recorded
+// under B-087 in docs/worker_feedback.md. The builtin Eq path is covered by
+// generic_eq_dispatch.vorton.
+
+struct Cat { name: Str, weight: Int }
+
+fn main() {
+    let mut cats: Map<Str, Cat> = map_new()
+    cats.insert("a", Cat { name: "ash", weight: 3 })
+    cats.insert("b", Cat { name: "boo", weight: 5 })
+    cats.insert("c", Cat { name: "cid", weight: 7 })
+
+    // get hit -> struct field access on the looked-up value
+    match cats.get("b") {
+        some(c) => print("lookup b: ${c.name} w=${c.weight}"),  // lookup b: boo w=5
+        none => print("lookup b: missing")
+    }
+    // get miss
+    match cats.get("z") {
+        some(c) => print("lookup z: ${c.name}"),
+        none => print("lookup z: missing")                      // lookup z: missing
+    }
+
+    // contains_key on Str keys
+    print("has a: ${cats.contains_key("a")}")                   // has a: true
+    print("has z: ${cats.contains_key("z")}")                   // has z: false
+    print("size: ${cats.len()}")                                // size: 3
+
+    // overwrite an existing key
+    cats.insert("a", Cat { name: "ash2", weight: 30 })
+    print("a updated: ${cats.get("a").map(fn(c) { c.weight }).unwrap_or(-1)}")  // a updated: 30
+    print("size after overwrite: ${cats.len()}")                // size after overwrite: 3
+
+    // fold over entries (key + struct field)
+    let mut total = 0
+    let mut names = ""
+    for entry in cats.entries() {
+        let (k, c) = entry
+        total = total + c.weight
+        names = "${names}${k}"
+    }
+    print("total weight: ${total}")                             // total weight: 42
+
+    // a second map keyed by Str with Int values, to exercise the simple value case
+    let mut scores: Map<Str, Int> = map_new()
+    scores.insert("x", 10)
+    scores.insert("y", 20)
+    print("x score: ${scores.get("x").unwrap_or(0)}")           // x score: 10
+    print("missing score: ${scores.get("q").unwrap_or(-1)}")    // missing score: -1
+}

@@ -1,0 +1,74 @@
+// B-101 regression: an enum VARIANT CONSTRUCTOR written in CALL syntax
+// (`some(x)` / `ok(v)` / `err(e)` / a user `Variant(payload)`) stores its argument
+// BY OWNERSHIP without a runtime dup.  When the argument is an owner-bearing LOCAL
+// that is also scope-end-dropped, the perceus pass must Clone it into the
+// constructor (exactly like a StructLit / NamedVariantConstruct field) — otherwise
+// the local's drop frees the payload the new enum holds → native RC use-after-free.
+//
+// This is the over-free that blocked native self-compile: the prelude loader runs
+// `match find_std_dir() { some(std_dir) => … }`, where find_std_dir returns
+// `some(dir)` with `dir` an owned local — the payload was freed before use, so the
+// whole std prelude silently failed to load.  The earlier option_methods.vorton used
+// only LITERAL payloads (`some("alice")`), which never triggered the bug.
+//
+// Output must match the .expected snapshot byte-for-byte.
+
+enum Wrap {
+    W { v: Str }
+}
+
+// some(<owned local>) — the bug's canonical shape.
+fn opt_local() -> Str? {
+    let x = "alpha"
+    some(x)
+}
+
+// Returned through a loop, then re-bound: `dir` is a borrow of a list element that
+// is dup'd into the Option (find_std_dir's exact shape).
+fn pick_first(xs: List<Str>) -> Str? {
+    for d in xs {
+        return some(d)
+    }
+    none
+}
+
+// A user variant constructor in call syntax with an owned-local payload.
+fn wrap_local() -> Wrap {
+    let s = "wrapped"
+    Wrap::W { v: s }
+}
+
+fn main() {
+    // unwrap path
+    let a = opt_local().unwrap()
+    print("a=${a}")                       // a=alpha
+
+    // match path
+    match opt_local() {
+        some(s) => print("b=${s}"),        // b=alpha
+        none => print("b=none")
+    }
+
+    // loop + return some(borrow) path
+    let names = ["one", "two", "three"]
+    match pick_first(names) {
+        some(s) => print("c=${s}"),        // c=one
+        none => print("c=none")
+    }
+
+    // user variant constructor with owned-local payload
+    match wrap_local() {
+        Wrap::W { v } => print("d=${v}")   // d=wrapped
+    }
+
+    // construct-in-a-loop, accumulate (per-iter Clone + drop must balance)
+    let mut acc = ""
+    for n in names {
+        let local = n
+        match some(local) {
+            some(s) => { acc = "${acc}${s}," }
+            none => {}
+        }
+    }
+    print("e=${acc}")                      // e=one,two,three,
+}

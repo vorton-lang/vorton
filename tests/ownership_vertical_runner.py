@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manifest-driven runner for the Ring 0.1 ownership vertical fixtures.
+"""Manifest-driven runner for the Vorton 0.1 ownership vertical fixtures.
 
 This module owns fixture planning and verdicts.  Toolchain construction,
 compiler invocation, native linking, and result collection stay in
@@ -24,7 +24,7 @@ DEFAULT_MANIFEST = (
     "manifest.json"
 )
 _ORDINARY_CRASH_MARKERS = (
-    "ring panic:",
+    "vorton panic:",
     "internal compiler error",
     "compiler panicked",
     "access violation",
@@ -137,8 +137,8 @@ def _guard_fixture_path(root: Path, value: object, label: str) -> str:
         candidate.relative_to(root.resolve())
     except ValueError as exc:
         raise ManifestError(f"{label} escapes the fixture root") from exc
-    if candidate.suffix != ".ring" or not candidate.is_file():
-        raise ManifestError(f"{label} is not an existing .ring fixture: {relative}")
+    if candidate.suffix != ".vorton" or not candidate.is_file():
+        raise ManifestError(f"{label} is not an existing .vorton fixture: {relative}")
     return candidate.relative_to(root.resolve()).as_posix()
 
 
@@ -285,7 +285,7 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> ManifestPlan:
         )
     actual_sources = {
         source.resolve().relative_to(root).as_posix()
-        for source in root.rglob("*.ring")
+        for source in root.rglob("*.vorton")
     }
     declared_sources = entry_paths | support_paths
     if actual_sources != declared_sources:
@@ -333,7 +333,7 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> ManifestPlan:
         ids.add(canary_id)
         if raw.get("source_fixture") is not None:
             raise ManifestError(
-                f"{canary_id} must remain an internal Ring canary, not a source fixture"
+                f"{canary_id} must remain an internal Vorton canary, not a source fixture"
             )
         canaries.append(InternalCanary(
             id=canary_id,
@@ -379,7 +379,7 @@ def normal_diagnostic_contract_failure(
 ) -> Optional[str]:
     """Require the compiler's normal diagnostic process contract.
 
-    A matching diagnostic is accepted only when ``ring check`` terminates via
+    A matching diagnostic is accepted only when ``vorton check`` terminates via
     its ordinary diagnostic exit. Signals and platform exception statuses are
     failures even if they happened to flush matching text first.
     """
@@ -407,7 +407,7 @@ def _selected(
 
 
 _EFFECT_CTX_TOKEN_DEFINITION_RE = re.compile(
-    r"(?m)^static unsigned char __ring_effect_ctx_token_([0-9]+);$"
+    r"(?m)^static unsigned char __vorton_effect_ctx_token_([0-9]+);$"
 )
 
 
@@ -543,7 +543,7 @@ def _run_internal_canary(
     if context.internal_canary is None:
         context.add_result(
             "FAIL", label,
-            "required Ring internal constructor/mutation callback is absent",
+            "required Vorton internal constructor/mutation callback is absent",
         )
         return
     try:
@@ -564,7 +564,7 @@ def _run_internal_canary(
             f"expected exact internal panic {expected!r}, got {output[:300]!r}",
         )
     else:
-        context.add_result("PASS", label, "exact Ring internal panic observed")
+        context.add_result("PASS", label, "exact Vorton internal panic observed")
 
 
 def run_ownership_vertical(
@@ -584,7 +584,7 @@ def run_ownership_vertical(
     selected_ids = {fixture.id for fixture in selected}
     observed_stdout: Dict[str, str] = {}
     fixture_root = plan.path.parent
-    with tempfile.TemporaryDirectory(prefix="ring_ownership_vertical_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="vorton_ownership_vertical_") as tmpdir:
         output_root = Path(tmpdir)
         for fixture in selected:
             actual = _run_fixture(context, fixture, fixture_root, output_root)

@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 import run as harness
 
 
-COMBINED_SCHEMA = "ring.check-benchmark.combined.v1"
+COMBINED_SCHEMA = "vorton.check-benchmark.combined.v1"
 
 
 def _require_file(run_dir: Path, name: str) -> Path:
@@ -55,16 +55,16 @@ def _fingerprint(
     warm_seed = environment.get("warm_cache_seed")
     if not isinstance(os_record, dict) or not isinstance(cpu, dict) or not isinstance(power, dict):
         raise harness.HarnessError("environment lacks stable machine identity records")
-    ring = tools.get("ring") if isinstance(tools, dict) else None
+    vorton = tools.get("vorton") if isinstance(tools, dict) else None
     lld_link = tools.get("lld_link") if isinstance(tools, dict) else None
     required_build_values = {
         "source_sha": environment.get("source_sha"),
         "manifest_sha": environment.get("manifest_sha"),
         "dist_c_sha256": environment.get("dist_c_sha256"),
         "runtime_sha256": environment.get("runtime_sha256"),
-        "tools.ring.path": ring.get("path") if isinstance(ring, dict) else None,
-        "tools.ring.version": ring.get("version") if isinstance(ring, dict) else None,
-        "tools.ring.sha256": ring.get("sha256") if isinstance(ring, dict) else None,
+        "tools.vorton.path": vorton.get("path") if isinstance(vorton, dict) else None,
+        "tools.vorton.version": vorton.get("version") if isinstance(vorton, dict) else None,
+        "tools.vorton.sha256": vorton.get("sha256") if isinstance(vorton, dict) else None,
         "tools.lld_link.path": (
             lld_link.get("path") if isinstance(lld_link, dict) else None
         ),

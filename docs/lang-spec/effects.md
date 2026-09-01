@@ -1,6 +1,6 @@
 # Effect 系统
 
-Ring 用 effect row 描述计算可能发生的副作用。函数声明通常省略 effect 标注并由编译器推断；显式 `with { ... }` 是约束和文档，不改变函数体的实际语义。
+Vorton 用 effect row 描述计算可能发生的副作用。函数声明通常省略 effect 标注并由编译器推断；显式 `with { ... }` 是约束和文档，不改变函数体的实际语义。
 
 ## Effect 分类与消除权
 
@@ -26,7 +26,7 @@ Effect row 中的 atom 共享组合与推断机制，但并不共享同一种运
 
 递归组body只做一次effect inference；其raw effect row随内部draft等待整组求解，随后恰好一次final-zonk、evidence canonicalization与header publication。每个scheme/callable实例的effect actual必须来自该实例唯一的full mapping receipt，并与type actual、dictionary/evidence共用；禁止按已zonk类型再次结构匹配重建effect或dictionary替换。
 
-Ring 0.1对同一尚未闭合的A1检查单元采用closed-header限制：具名函数作为first-class value使用时，provider声明的完整header必须在registration时已经递归closed，不能等待provider body inference补全effect tail。Pure provider使用显式`with {}`；effectful provider使用完整封闭`with { ... }`。开放header在函数值使用点稳定报错并建议补全header或改用lambda wrapper；编译器不得为接受它而在SCC中重做名字解析、按源码顺序猜provider或提前发布scheme。
+Vorton 0.1对同一尚未闭合的A1检查单元采用closed-header限制：具名函数作为first-class value使用时，provider声明的完整header必须在registration时已经递归closed，不能等待provider body inference补全effect tail。Pure provider使用显式`with {}`；effectful provider使用完整封闭`with { ... }`。开放header在函数值使用点稳定报错并建议补全header或改用lambda wrapper；编译器不得为接受它而在SCC中重做名字解析、按源码顺序猜provider或提前发布scheme。
 
 该限制不影响普通direct call、header已冻结的import/re-export函数值、lambda、函数参数转发、factory/dynamic call及HOF callback formal的open row。Post-0.1的B-204将以sole resolver产生的exact callable-occurrence dependency建立proper ResolvedAST纵切，完成后恢复同检查单元省略`with`且由body推断effect的具名函数值；0.1不为此预留carrier或fallback。
 
@@ -56,7 +56,7 @@ System effect 是静态能力事实，不是语言内动态 provider：
 
 需要可替换/可 mock 的依赖时，定义用户 handled effect，并以普通显式 handler adapter 翻译到 system API：
 
-```ring
+```vorton
 effect FileAccess {
     fn read(path: Str) -> Str
 }
@@ -78,7 +78,7 @@ fn load_from_os(path: Str) -> Config with {fs, fail<FsError>} {
 
 ## 用户自定义 Effect
 
-```ring
+```vorton
 effect Logger {
     fn log(msg: Str) -> Unit;
 }
@@ -100,7 +100,7 @@ Default provider 有真实的建模与人体工学价值，post-0.1 由 B-197 �
 
 `effect alias` 给一组 effect 命名：
 
-```ring
+```vorton
 effect alias HostIO = {console, fs, process}
 effect alias Fallible<E> = {fail<E>}
 ```
@@ -122,7 +122,7 @@ Alias 可泛型化、可 `pub` 导出，并在类型检查前递归展开；循�
 
 `unsafe` 标记编译器不能验证其内存安全前提的操作。它进入函数签名并向调用方传播，但不能由普通 `handle` 或 `catch` 消除；唯一 discharge 形式是词法 `unsafe { ... }` block。
 
-```ring
+```vorton
 mod raw_buffer requires {unsafe} {
     fn first(ptr: Ptr<Int>) -> Int {
         unsafe { ptr.read() }
@@ -175,11 +175,11 @@ Effect 按求值组合：
 
 ### Effectful function value 的 evidence
 
-普通 lambda/closure 不捕获定义点当前安装的 handled-effect evidence。其 body row 冻结在函数类型中；所有Ring callable统一接收一个显式borrowed `EffectCtx*`，每次调用从调用点当前 dynamic handler environment传入。没有对应typed handler entry时，effect继续传播到调用者，不能因为closure在某个`handle`内创建而被提前消除。
+普通 lambda/closure 不捕获定义点当前安装的 handled-effect evidence。其 body row 冻结在函数类型中；所有Vorton callable统一接收一个显式borrowed `EffectCtx*`，每次调用从调用点当前 dynamic handler environment传入。没有对应typed handler entry时，effect继续传播到调用者，不能因为closure在某个`handle`内创建而被提前消除。
 
 因此，一个pure factory可以返回effectful closure：调用factory不需要该effect，调用返回值时才需要。closure在`handle`内创建后逃逸，也不会延长旧handler的动态范围；在新的handler内调用时使用新handler。Handler arm/re-perform的内部runtime对象可显式持有outer evidence，但不改变ordinary user closure规则。
 
-Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`EffectCtx*`；direct/method调用省略`env`但保持其余相对顺序。Pure与system-only Ring callable传immortal empty context。普通用户top-level extern与不会回调Ring callable的普通HostImport leaf不接收context；exact compiler-owned runtime intrinsic只要会调用Ring callable，就必须显式接收并转发context。0.1当前穷尽集合为`ring_list_sort_bridge`/`ring_list_sort`、`Option.map`、`Option.and_then`、`Option.unwrap_or_else`与`Cell.update`：sort和Option三项转发current context，pure `Cell.update` callback接收immortal empty context。调用同步完成，leaf不保存或retain context；集合由exact compiler intrinsic identity裁决，禁止名字猜测、thunk或通用adapter，也不新增用户extern callback能力。Context entry由完整typed handled instance（exact effect identity + exact type arguments）索引，不能按名字或nominal leaf合并；`GenericProbe<Str>`与`GenericProbe<Int>`是两个不同entry。
+Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`EffectCtx*`；direct/method调用省略`env`但保持其余相对顺序。Pure与system-only Vorton callable传immortal empty context。普通用户top-level extern与不会回调Vorton callable的普通HostImport leaf不接收context；exact compiler-owned runtime intrinsic只要会调用Vorton callable，就必须显式接收并转发context。0.1当前穷尽集合为`vorton_list_sort_bridge`/`vorton_list_sort`、`Option.map`、`Option.and_then`、`Option.unwrap_or_else`与`Cell.update`：sort和Option三项转发current context，pure `Cell.update` callback接收immortal empty context。调用同步完成，leaf不保存或retain context；集合由exact compiler intrinsic identity裁决，禁止名字猜测、thunk或通用adapter，也不新增用户extern callback能力。Context entry由完整typed handled instance（exact effect identity + exact type arguments）索引，不能按名字或nominal leaf合并；`GenericProbe<Str>`与`GenericProbe<Int>`是两个不同entry。
 
 `handle`创建owned child overlay并引用parent context；ordinary calls只borrow并转发指针，returned closure不捕获。Closed row可用冻结layout的静态位置；open effect-row formal原样转发同一个context pointer，typed view只作静态证明，不产生stack/heap remap。禁止C varargs、stack remap view、closure remap descriptor、TLS/global/root handler、runtime name lookup以及closed/open两套function-pointer ABI。Handler arm/re-perform内部对象可显式持parent context，其生命周期不改变ordinary closure规则。
 
@@ -189,7 +189,7 @@ Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`Eff
 
 `catch` 捕获左侧计算的 `fail<E>`，并用 match-arm 语法处理 payload：
 
-```ring
+```vorton
 let value = risky() catch {
     Missing(name) => default_for(name),
     Invalid(msg) => repair(msg),
@@ -200,7 +200,7 @@ Arms 对 `E` 做穷尽性检查，未覆盖时报 E0601；部分处理必须在 
 
 ### `handle ... with`
 
-```ring
+```vorton
 let result = handle {
     Logger.log("hello")
     42
@@ -211,11 +211,11 @@ let result = handle {
 
 Handler 在其body的动态调用范围内提供 handled-effect operations。被显式处理的 exact handled effect 从 body row 中消除；开放尾未知 effect 与 handler arm 新产生的 effect继续传播。System effect、`mut<T>` 与 `unsafe` 不能由 `handle` 删去。只在该范围内创建但未调用的ordinary closure不会捕获handler；它逃逸后的effect仍由未来调用点处理。
 
-Ring 0.1 对 custom handled effect 采用 **whole-effect complete handler**：同一个 `handle...with` 只要为某个 exact `HandledEffectRef` 写出任一 operation arm，就必须覆盖该 `EffectDef` 声明的全部 operations，各恰好一次。源码 arm 顺序任意；TypedHIR 按 exact `EffectOperationRef` 的声明 ordinal 重排并冻结 dense `0..N-1` evidence，只有完整 census 后才可删除整个 effect atom并发布handler facts。Missing、duplicate、unknown operation或cross-owner arm均稳定报源码诊断；Core再次验证owner、count与ordinal全集。0.1不支持partial residual effect、未覆盖operation向parent自动转发或sparse evidence ABI；需要部分拦截时必须拆分effect或为其余operations写显式转发/re-perform arm。
+Vorton 0.1 对 custom handled effect 采用 **whole-effect complete handler**：同一个 `handle...with` 只要为某个 exact `HandledEffectRef` 写出任一 operation arm，就必须覆盖该 `EffectDef` 声明的全部 operations，各恰好一次。源码 arm 顺序任意；TypedHIR 按 exact `EffectOperationRef` 的声明 ordinal 重排并冻结 dense `0..N-1` evidence，只有完整 census 后才可删除整个 effect atom并发布handler facts。Missing、duplicate、unknown operation或cross-owner arm均稳定报源码诊断；Core再次验证owner、count与ordinal全集。0.1不支持partial residual effect、未覆盖operation向parent自动转发或sparse evidence ABI；需要部分拦截时必须拆分effect或为其余operations写显式转发/re-perform arm。
 
 ## Handler 语义
 
-非 abort operation 是 tail-resumptive：arm 结果作为 operation 返回值，计算随后继续。Arm 结果必须与 operation return type兼容；返回`Unit`的operation位于语句语义位置，arm值被丢弃，`Never`作为bottom可用于任何返回位置。Ring 不支持显式 `resume`、post-resume 或 multi-shot continuation。
+非 abort operation 是 tail-resumptive：arm 结果作为 operation 返回值，计算随后继续。Arm 结果必须与 operation return type兼容；返回`Unit`的operation位于语句语义位置，arm值被丢弃，`Never`作为bottom可用于任何返回位置。Vorton 不支持显式 `resume`、post-resume 或 multi-shot continuation。
 
 `fail.raise(error)` 不恢复原计算。捕获它的 arm 恰好执行一次，arm 结果替换整个 `handle` / `catch` 表达式；处理当前 failure 时对应 handler 已失活，再次 raise 逃向外层。
 
@@ -227,7 +227,7 @@ Ring 0.1 对 custom handled effect 采用 **whole-effect complete handler**：�
 map : (List<T>, (T) -> U / ?ε) -> List<U> / ?ε
 ```
 
-Callback 的 system、handled、failure、mutation 或 unsafe effect都通过 `?ε` 传播；HOF 不得假装 callback 纯净，也不得把 system effect转成 handler evidence。精确标准库声明以[`std/*.ring`](../../std/)为准。
+Callback 的 system、handled、failure、mutation 或 unsafe effect都通过 `?ε` 传播；HOF 不得假装 callback 纯净，也不得把 system effect转成 handler evidence。精确标准库声明以[`std/*.vorton`](../../std/)为准。
 
 ## Drop 的 0.1 边界
 

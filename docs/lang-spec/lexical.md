@@ -6,7 +6,7 @@
 LineComment  ::= '//' ⟨除换行外的任意字符⟩* ⟨换行 | EOF⟩
 ```
 
-Ring 仅使用 `//` 行注释，无块注释。
+Vorton 仅使用 `//` 行注释，无块注释。
 
 ## 空白
 
@@ -14,7 +14,7 @@ Ring 仅使用 `//` 行注释，无块注释。
 
 **函数调用同行规则：** `(` token 仅在与前一个表达式同行时，才被解析为调用表达式的后缀。这消除了以下歧义：
 
-```ring
+```vorton
 foo
 (x, y)    // 两个独立表达式：`foo` 和 tuple `(x, y)`
 
@@ -135,7 +135,7 @@ RawStringLit ::= 'r"'  ⟨除 '"' 外的任意字符⟩* '"'
 InterpString ::= '"' (⟨string-char⟩ | '${' Expr '}')* '"'
 ```
 
-插值表达式是任意 Ring 表达式。Lexer 将插值字符串分词为以下序列：
+插值表达式是任意 Vorton 表达式。Lexer 将插值字符串分词为以下序列：
 
 ```
 StringInterpStart  →  Expr  →  StringInterpMiddle  →  Expr  →  StringInterpEnd

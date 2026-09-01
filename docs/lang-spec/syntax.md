@@ -1,6 +1,6 @@
 # 语法
 
-Ring 的完整 EBNF 文法。产生式按类别分组。可选元素用 `?`，重复用 `*`（零或多个）和 `+`（一或多个）。终结符用 `'单引号'` 括起。
+Vorton 的完整 EBNF 文法。产生式按类别分组。可选元素用 `?`，重复用 `*`（零或多个）和 `+`（一或多个）。终结符用 `'单引号'` 括起。
 
 ## 程序
 
@@ -46,7 +46,7 @@ Param        ::= 'mut'? Ident (':' TypeExpr)?
 
 省略返回类型注解时由推断确定。省略参数类型注解时分配 fresh 类型变量。`mut` 前缀标记参数为可变（允许在函数体内重赋值），也适用于方法的 `mut self`。`with { ... }` 子句声明函数的 effect 签名。
 
-Ring 0.1 不支持函数默认参数；`Param` 后的 `= Expr` 是语法错误。需要默认行为时定义显式 wrapper 函数。该规则不影响 trait method 的默认 body。Effect operation 在 0.1 同样不得带 body，具体边界见下文。
+Vorton 0.1 不支持函数默认参数；`Param` 后的 `= Expr` 是语法错误。需要默认行为时定义显式 wrapper 函数。该规则不影响 trait method 的默认 body。Effect operation 在 0.1 同样不得带 body，具体边界见下文。
 
 ### Struct 声明
 
@@ -56,7 +56,7 @@ StructDecl   ::= 'struct' Ident TypeParams? '{' StructField* '}'
 StructField  ::= 'pub'? Ident ':' TypeExpr ','?
 ```
 
-Ring 0.1 尚未实现 refinement types，字段、参数及其他类型位置均不接受 refinement `where` clause。`where` 在词法层继续保留为未来关键字；出现时必须 hard-fail 并提示删除 clause，不能消费后忽略、降为 warning 或充当 documentation-only annotation。B-001 将来只有在 parser 与实际验证语义原子完成时才重新开放该语法。
+Vorton 0.1 尚未实现 refinement types，字段、参数及其他类型位置均不接受 refinement `where` clause。`where` 在词法层继续保留为未来关键字；出现时必须 hard-fail 并提示删除 clause，不能消费后忽略、降为 warning 或充当 documentation-only annotation。B-001 将来只有在 parser 与实际验证语义原子完成时才重新开放该语法。
 
 ### Enum 声明
 
@@ -88,7 +88,7 @@ TraitImplMember ::= FnDecl
                    | AssocTypeDecl
 ```
 
-`impl Type { ... }` 定义固有方法，member可分别`pub`或private。Impl block无visibility，`pub impl ...`是hard error。`impl Trait for Type { ... }`实现trait，全部member visibility继承trait，写`pub`同样hard-error。Ring 0.1不允许impl-member `extern fn`；在inherent或trait impl中写`extern fn`必须于`extern`处hard-fail。用户需要FFI method时使用top-level `extern fn`加普通inherent wrapper；标准库内建方法由编译器的exact intrinsic manifest提供，不形成用户语法。Ring 0.1也不提供`delegate`member；需要转发时写完整普通trait impl。关联类型`type Name = TypeExpr`用于满足trait的关联类型要求。
+`impl Type { ... }` 定义固有方法，member可分别`pub`或private。Impl block无visibility，`pub impl ...`是hard error。`impl Trait for Type { ... }`实现trait，全部member visibility继承trait，写`pub`同样hard-error。Vorton 0.1不允许impl-member `extern fn`；在inherent或trait impl中写`extern fn`必须于`extern`处hard-fail。用户需要FFI method时使用top-level `extern fn`加普通inherent wrapper；标准库内建方法由编译器的exact intrinsic manifest提供，不形成用户语法。Vorton 0.1也不提供`delegate`member；需要转发时写完整普通trait impl。关联类型`type Name = TypeExpr`用于满足trait的关联类型要求。
 
 ### Trait 声明
 
@@ -102,7 +102,7 @@ TraitMethod  ::= 'fn' Ident TypeParams? '(' Params ')' ('->' TypeExpr)? EffectAn
 AssocTypeDecl ::= 'type' Ident (':' TypeBound ('+' TypeBound)*)? ('=' TypeExpr)?
 ```
 
-Ring 0.1 的 trait 方法只有签名；在trait declaration中写方法body必须稳定hard-fail，每个trait impl显式提供全部方法。Supertrait继承通过`:`后的`TypeBound`列表声明（如`trait Ord: Eq`），支持多级传递和循环检测。关联类型通过`type Name`声明，可带bounds约束和默认值。Trait是完整contract：所有member visibility随trait，trait declaration与trait impl member不得单独写`pub`；只有inherent impl保留逐member visibility。
+Vorton 0.1 的 trait 方法只有签名；在trait declaration中写方法body必须稳定hard-fail，每个trait impl显式提供全部方法。Supertrait继承通过`:`后的`TypeBound`列表声明（如`trait Ord: Eq`），支持多级传递和循环检测。关联类型通过`type Name`声明，可带bounds约束和默认值。Trait是完整contract：所有member visibility随trait，trait declaration与trait impl member不得单独写`pub`；只有inherent impl保留逐member visibility。
 
 ### Effect 声明
 
@@ -112,7 +112,7 @@ EffectDecl   ::= 'effect' Ident TypeParams? '{' EffectOp* '}'
 EffectOp     ::= 'fn' Ident '(' Params ')' '->' TypeExpr (';' | ',')?
 ```
 
-Ring 0.1 的用户自定义 effect operation 只有签名，不允许 body。Custom effect 必须由显式 `handle...with` 提供解释；不存在自动 default evidence、部分默认或默认 body 依赖图。该能力因具有真实抽象价值而保留为 post-0.1 的重新设计议题，但旧实现不得作为兼容路径或直接恢复。
+Vorton 0.1 的用户自定义 effect operation 只有签名，不允许 body。Custom effect 必须由显式 `handle...with` 提供解释；不存在自动 default evidence、部分默认或默认 body 依赖图。该能力因具有真实抽象价值而保留为 post-0.1 的重新设计议题，但旧实现不得作为兼容路径或直接恢复。
 
 ### Effect Alias 声明
 
@@ -198,7 +198,7 @@ RecordField  ::= Ident ':' TypeExpr
 TypeExprList ::= TypeExpr (',' TypeExpr)* ','?
 ```
 
-Ring 0.1不支持return-position`impl Trait`或其他opaque type；`impl`在type position是语法错误。省略返回标注只会推断并保留concrete type，不形成API abstraction。Public interface也不得引用private concrete type；post-0.1的显式opaque return由B-200重新设计。
+Vorton 0.1不支持return-position`impl Trait`或其他opaque type；`impl`在type position是语法错误。省略返回标注只会推断并保留concrete type，不形成API abstraction。Public interface也不得引用private concrete type；post-0.1的显式opaque return由B-200重新设计。
 
 命名类型的 `?` 后缀是 `Option<T>` 的语法糖：`Int?` ≡ `Option<Int>`。`FnType` 的 `with` 子句标注函数类型的 effect（无标注时为 open row，支持 effect 多态）。
 
@@ -291,7 +291,7 @@ ExprStmt     ::= Expr ';'?
 
 同一 evaluation region 内的同级子表达式按源码从左到右求值：callable/receiver 先于 arguments；二元运算数、参数、List/tuple/constructor 字段和字符串插值片段依次求值；index 先 receiver 后 index，range 先 start 后 end。`&&` 与 `||` 先求左侧并短路；条件表达式先求 condition，只求值选中的分支；match 先求 scrutinee，arm 自上而下检查，模式成功后再求 guard。
 
-若任一子表达式产生 `fail`、panic 或 diverge，后续子表达式不再执行。编译器可以重排仅当它证明 effect、mutation、fail/panic、资源 transfer、Drop 时点及结果均不可观察地相同；目标后端自身未规定的 operand / argument order 不改变 Ring 语义。
+若任一子表达式产生 `fail`、panic 或 diverge，后续子表达式不再执行。编译器可以重排仅当它证明 effect、mutation、fail/panic、资源 transfer、Drop 时点及结果均不可观察地相同；目标后端自身未规定的 operand / argument order 不改变 Vorton 语义。
 
 ### 块
 
@@ -348,7 +348,7 @@ FieldInit    ::= Ident (':' Expr)?
 
 **0.1 compiler Known Issue（2026-08-30）**：上述move-spread语义目前只在全shareable字段路径上作为self-host依赖；compiler/std/examples没有owning或type-parameter-dependent spread consumer。若未覆盖字段需要ownership Take，0.1 compiler仍可能接受程序却产生leak、double-drop、UAF或错误Drop顺序，并且不保证给出专门诊断。迁仓后修复前，程序应显式destructure `base`并重建全部字段。0.1 internal checkpoint不实现partial/open-drop、`Live`/`Moved` occupancy或专用moved-shell release，也不把该路径计入已支持能力。
 
-Ring 0.1 不允许 named enum / variant 字面量包含 `..expr`；解析后若目标是 variant，编译器稳定报错并建议在对应 match arm 中显式重建全部字段。Named-field variant construction、generic enum、pattern matching 与字段 move 保持不变。
+Vorton 0.1 不允许 named enum / variant 字面量包含 `..expr`；解析后若目标是 variant，编译器稳定报错并建议在对应 match arm 中显式重建全部字段。Named-field variant construction、generic enum、pattern matching 与字段 move 保持不变。
 
 ### List 字面量
 

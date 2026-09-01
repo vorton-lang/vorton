@@ -1,4 +1,4 @@
-# Build the Ring compiler from the tracked C bootstrap anchor.
+# Build the Vorton compiler from the tracked C bootstrap anchor.
 # Usage: .\compiler\scripts\build_native.ps1 [-Stats]
 
 param([switch]$Stats)
@@ -7,11 +7,11 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $anchorPath = Join-Path $repoRoot "compiler\dist-c\main.c"
-$compilerObject = Join-Path $repoRoot "ring_compiler_lto.o"
-$runtimeSource = Join-Path $repoRoot "ring_runtime.cpp"
-$runtimeObject = Join-Path $repoRoot "ring_runtime_lto.o"
-$outputPath = Join-Path $repoRoot "ring.exe"
-$ltoCache = Join-Path ([System.IO.Path]::GetTempPath()) "ring-lang-thinlto-cache"
+$compilerObject = Join-Path $repoRoot "vorton_compiler_lto.o"
+$runtimeSource = Join-Path $repoRoot "vorton_runtime.cpp"
+$runtimeObject = Join-Path $repoRoot "vorton_runtime_lto.o"
+$outputPath = Join-Path $repoRoot "vorton.exe"
+$ltoCache = Join-Path ([System.IO.Path]::GetTempPath()) "vorton-lang-thinlto-cache"
 $compileOptimizationFlags = @("-O3", "-flto=thin")
 $linkOptimizationFlags = @(
     "-flto=thin",
@@ -54,7 +54,7 @@ $runtimeFlags = @(
     "-D_CRT_SECURE_NO_WARNINGS"
 )
 $runtimeFlags += $compileOptimizationFlags
-if ($Stats) { $runtimeFlags += "-DRING_ALLOC_STATS" }
+if ($Stats) { $runtimeFlags += "-DVORTON_ALLOC_STATS" }
 & $clangxx.Source @runtimeFlags
 if ($LASTEXITCODE -ne 0) {
     throw "clang++ runtime compilation failed with exit code $LASTEXITCODE"

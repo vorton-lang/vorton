@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ring-lang Python test runner (B-151 P2).
+vorton-lang Python test runner (B-151 P2).
 
 Replaces the retired Node-based test harnesses with a single C-native Python
 runner that depends only on the stdlib.
@@ -53,20 +53,20 @@ CASES_DIR = REPO / "tests" / "cases"
 GOLDEN_CASES_DIR = CASES_DIR / "golden"
 NATIVE_ONLY_DIR = CASES_DIR / "native_only"
 MODULES_DIR = CASES_DIR / "modules"
-RUNTIME_CPP = REPO / "ring_runtime.cpp"
-RUNTIME_O = REPO / "ring_runtime.o"
+RUNTIME_CPP = REPO / "vorton_runtime.cpp"
+RUNTIME_O = REPO / "vorton_runtime.o"
 DIST_C_DIR = REPO / "compiler" / "dist-c"
 DIST_C_MAIN = DIST_C_DIR / "main.c"
-THINLTO_CACHE = Path(tempfile.gettempdir()) / "ring-lang-thinlto-cache"
+THINLTO_CACHE = Path(tempfile.gettempdir()) / "vorton-lang-thinlto-cache"
 COMPILER_ARTIFACT_CACHE = (
-    Path(tempfile.gettempdir()) / "ring-lang-compiler-anchor-cache-v3"
+    Path(tempfile.gettempdir()) / "vorton-lang-compiler-anchor-cache-v3"
 )
-COMPILER_CACHE_ENV = "RING_TEST_COMPILER_CACHE"
-IDENTITY_CANDIDATE_ENV = "RING_IDENTITY_CANDIDATE_EXE"
-IDENTITY_EVIDENCE_ROOT_ENV = "RING_IDENTITY_EVIDENCE_ROOT"
-COMPILER_CACHE_SCHEMA = "ring.test-runner-compiler-anchor-cache.v3"
+COMPILER_CACHE_ENV = "VORTON_TEST_COMPILER_CACHE"
+IDENTITY_CANDIDATE_ENV = "VORTON_IDENTITY_CANDIDATE_EXE"
+IDENTITY_EVIDENCE_ROOT_ENV = "VORTON_IDENTITY_EVIDENCE_ROOT"
+COMPILER_CACHE_SCHEMA = "vorton.test-runner-compiler-anchor-cache.v3"
 COMPILER_CACHE_VERSION = 3
-COMPILER_CACHE_POISON_SCHEMA = "ring.test-runner-compiler-anchor-poison.v1"
+COMPILER_CACHE_POISON_SCHEMA = "vorton.test-runner-compiler-anchor-poison.v1"
 COMPILER_CACHE_POISON_VERSION = 1
 COMPILER_CACHE_MAX_ENTRIES = 16
 COMPILER_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024
@@ -74,8 +74,8 @@ COMPILER_CACHE_STALE_SECONDS = 24 * 60 * 60
 COMPILER_CACHE_MAX_CONFLICTS = 32
 PARITY_MATRIX = REPO / "tests" / "parity_matrix.json"
 STRUCTURAL_DIR = CASES_DIR / "structural"
-CODEGEN_C_SOURCE = REPO / "compiler" / "codegen_c.ring"
-NATIVE_REAL_PROGRAM = REPO / "tests" / "native" / "real_program.ring"
+CODEGEN_C_SOURCE = REPO / "compiler" / "codegen_c.vorton"
+NATIVE_REAL_PROGRAM = REPO / "tests" / "native" / "real_program.vorton"
 NATIVE_REAL_PROGRAM_EXPECTED = NATIVE_REAL_PROGRAM.with_suffix(".expected")
 
 sys.path.insert(0, str(REPO / ".agents" / "scripts"))
@@ -92,32 +92,32 @@ from one_shot_gate import (  # noqa: E402
 # harness.  Keeping them explicit prevents companion discovery from silently
 # dropping parser-recovery and rich-diagnostic coverage.
 RECOVERY_CASES = (
-    "error_recovery_match.ring",
-    "error_recovery_handle.ring",
-    "error_recovery_if.ring",
+    "error_recovery_match.vorton",
+    "error_recovery_handle.vorton",
+    "error_recovery_if.vorton",
 )
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 # Generated-C evidence owned by the structural suite.  This map is also the
-# parity contract: every fixture below must exist, every structural .ring file
+# parity contract: every fixture below must exist, every structural .vorton file
 # must appear exactly once, and the matching matrix row must list the same set.
 C_LINE_BUILD_CASES = (
     (
         "single-file",
-        "tests/cases/structural/c_line_single.ring",
-        ("tests/cases/structural/c_line_single.ring",),
+        "tests/cases/structural/c_line_single.vorton",
+        ("tests/cases/structural/c_line_single.vorton",),
     ),
     (
         "minimal-project",
-        "tests/cases/structural/c_line_project/main.ring",
+        "tests/cases/structural/c_line_project/main.vorton",
         (
-            "tests/cases/structural/c_line_project/main.ring",
-            "tests/cases/structural/c_line_project/probe.ring",
+            "tests/cases/structural/c_line_project/main.vorton",
+            "tests/cases/structural/c_line_project/probe.vorton",
         ),
     ),
 )
-EXTERN_RC_FIXTURE = "tests/cases/structural/extern_handle_rc.ring"
+EXTERN_RC_FIXTURE = "tests/cases/structural/extern_handle_rc.vorton"
 STRUCTURAL_ORACLE_FIXTURES = {
     "backend.c_line_directives": tuple(
         fixture
@@ -130,14 +130,14 @@ STRUCTURAL_ORACLE_FIXTURES = {
 # Subdirectories within tests/cases/ that also contain negative test cases.
 EXTRA_NEG_DIRS = ["negative", "errors"]
 
-TIMEOUT_COMPILE = 60   # seconds, for ring.exe build / check
+TIMEOUT_COMPILE = 60   # seconds, for vorton.exe build / check
 TIMEOUT_LINK = 60      # seconds, for clang link
 TIMEOUT_COMPILER_LINK = 300  # cold ThinLTO link on slower CI hosts
 TIMEOUT_RUN = 30       # seconds, per test program execution
 TIMEOUT_SELFCOMPILE = 1200  # seconds; 900 was exceeded after B-170, and clean
                             # self-compiles take about 18 minutes
 
-PHASE_TIMING_SCHEMA = "ring.test-runner-phase.v1"
+PHASE_TIMING_SCHEMA = "vorton.test-runner-phase.v1"
 PHASE_TIMING_VERSION = 1
 PHASE_TIMING_FIELDS = frozenset({
     "schema", "version", "sequence", "suite", "case", "stage",
@@ -148,7 +148,7 @@ PHASE_TIMING_FIELDS = frozenset({
 # Every retained gap carries an actionable reason instead of a bare skip name.
 SHARED_POSITIVE_GAPS = {}
 
-# Positive cases whose `ring check` itself fails today.  Unlike shared
+# Positive cases whose `vorton check` itself fails today.  Unlike shared
 # execution gaps, these are frontend blockers, so every lane that would compile
 # the case (golden/e2e/native/module) must skip it with the same actionable reason.
 CHECK_BLOCKED_POSITIVE_GAPS = {}
@@ -171,7 +171,7 @@ CLANG_LINK_FLAGS = [
 ]
 
 # The self-hosted compiler is CPU-bound. O3 + ThinLTO is about 20% faster on a
-# compiler/main.ring check than the former O2 build. The content-addressed LLD
+# compiler/main.vorton check than the former O2 build. The content-addressed LLD
 # cache makes repeat links effectively free while bounding cache growth.
 COMPILER_COMPILE_FLAGS = ["-O3", "-flto=thin"]
 COMPILER_LINK_FLAGS = [
@@ -447,8 +447,8 @@ def _phase_timing_path(value: str) -> str:
 
 
 def _phase_command_category(stage: str) -> str:
-    if stage in {"ring_check", "ring_build"}:
-        return "ring"
+    if stage in {"vorton_check", "vorton_build"}:
+        return "vorton"
     if stage == "run_exe":
         return "generated-program"
     return "clang"
@@ -829,7 +829,7 @@ def _compiler_build_plan() -> Optional[_CompilerBuildPlan]:
         # The ordinary path preserves clang's own -fuse-ld=lld discovery.
         # Only the controlled Windows cache path requires an explicit linker.
         linker=linker or "",
-        exe_name="ring.exe" if sys.platform == "win32" else "ring",
+        exe_name="vorton.exe" if sys.platform == "win32" else "vorton",
         compile_flags=tuple(COMPILER_COMPILE_FLAGS),
         test_link_flags=tuple(CLANG_LINK_FLAGS),
         compiler_link_flags=tuple(COMPILER_LINK_FLAGS),
@@ -912,7 +912,7 @@ def _canonical_compiler_recipes(plan: _CompilerBuildPlan) -> Dict[str, List[str]
         "anchor_dependency_scan": [
             *anchor_arguments,
             "-E", "-dM", "-MD",
-            "-MT", "ring-cache-probe", "-MF", "$depfile",
+            "-MT", "vorton-cache-probe", "-MF", "$depfile",
             "$tracked_anchor_snapshot",
         ],
         "anchor_compile": [
@@ -936,7 +936,7 @@ def _canonical_compiler_recipes(plan: _CompilerBuildPlan) -> Dict[str, List[str]
 
 def _parse_make_dependencies(text: str) -> List[str]:
     flattened = re.sub(r"\\\r?\n", " ", text)
-    prefix = "ring-cache-probe:"
+    prefix = "vorton-cache-probe:"
     if not flattened.startswith(prefix):
         raise CompilerPreparationError(
             "compiler dependency output has an unexpected target"
@@ -983,7 +983,7 @@ def _scan_anchor_dependencies(
             plan.clang,
             *_anchor_driver_arguments(plan, anchor_snapshot),
             "-E", "-dM", "-MD",
-            "-MT", "ring-cache-probe", "-MF", str(depfile),
+            "-MT", "vorton-cache-probe", "-MF", str(depfile),
             str(anchor_snapshot),
         ]
         result = _run_subprocess(
@@ -1811,7 +1811,7 @@ def _lookup_cached_anchor(
 
 
 def _prepare_compiler(plan: _CompilerBuildPlan) -> str:
-    run_dir = Path(tempfile.mkdtemp(prefix="ring_build_"))
+    run_dir = Path(tempfile.mkdtemp(prefix="vorton_build_"))
     try:
         if not plan.controlled:
             _compile_anchor(plan, run_dir, plan.anchor_source)
@@ -1891,7 +1891,7 @@ def _prepare_compiler(plan: _CompilerBuildPlan) -> str:
     return str(executable)
 
 
-def find_ring_exe() -> Optional[str]:
+def find_vorton_exe() -> Optional[str]:
     """Prepare the compiler from the tracked C anchor in a fresh run dir."""
     plan = _compiler_build_plan()
     if plan is None:
@@ -1906,7 +1906,7 @@ def _subprocess_output_text(value: Any) -> str:
 
 
 def _report_compiler_preparation_failure(exc: BaseException) -> None:
-    print("ERROR: failed to build ring.exe from tracked inputs.", file=sys.stderr)
+    print("ERROR: failed to build vorton.exe from tracked inputs.", file=sys.stderr)
     if isinstance(exc, subprocess.CalledProcessError):
         command = exc.cmd
         if isinstance(command, (list, tuple)):
@@ -1935,7 +1935,7 @@ def _report_compiler_preparation_failure(exc: BaseException) -> None:
 
 
 def ensure_runtime(clang: str) -> bool:
-    """Build ring_runtime.o from ring_runtime.cpp if missing or stale."""
+    """Build vorton_runtime.o from vorton_runtime.cpp if missing or stale."""
     tracer = _PHASE_TRACER
     prepare_started_ns = (
         time.perf_counter_ns() if tracer is not None else None
@@ -2047,10 +2047,10 @@ def is_expect_panic(expected_raw: str) -> bool:
     return first == "// EXPECT_PANIC"
 
 
-def case_expects_panic(ring_file: Path, expected_raw: str) -> bool:
+def case_expects_panic(vorton_file: Path, expected_raw: str) -> bool:
     """EXPECT_PANIC is valid only for the handwritten native-only lane."""
     return (
-        ring_file.resolve().parent == NATIVE_ONLY_DIR.resolve()
+        vorton_file.resolve().parent == NATIVE_ONLY_DIR.resolve()
         and is_expect_panic(expected_raw)
     )
 
@@ -2069,49 +2069,49 @@ def expected_panic_diagnostic(expected_raw: str) -> str:
 # Compile + link + run helpers
 # ---------------------------------------------------------------------------
 
-# Ring diagnostics and program output are UTF-8 contracts.  Windows CI's
+# Vorton diagnostics and program output are UTF-8 contracts.  Windows CI's
 # locale may be a legacy code page, so every decoded child-process stream must
 # opt into UTF-8 instead of inheriting locale.getpreferredencoding().
 
-def ring_build(ring_exe: str, ring_file: str, *,
+def vorton_build(vorton_exe: str, vorton_file: str, *,
                out_dir: Optional[str] = None,
                extra_args: Optional[List[str]] = None,
                timeout: int = TIMEOUT_COMPILE,
                phase_suite: Optional[str] = None,
                phase_case: Optional[str] = None,
                cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
-    """Run the C-only ring.exe build with optional extra flags."""
-    cmd = [ring_exe, "build", ring_file, "--target=c"]
+    """Run the C-only vorton.exe build with optional extra flags."""
+    cmd = [vorton_exe, "build", vorton_file, "--target=c"]
     if out_dir:
-        # Use --out-dir=<path> (equals-sign) form; ring.exe CLI parser does
+        # Use --out-dir=<path> (equals-sign) form; vorton.exe CLI parser does
         # not accept --out-dir <path> as two separate arguments.
         cmd.append(f"--out-dir={out_dir}")
     if extra_args:
         cmd.extend(extra_args)
     if _PHASE_TRACER is not None and phase_case is None:
-        phase_case = _phase_file_identity(ring_file)
+        phase_case = _phase_file_identity(vorton_file)
     return _run_subprocess(
-        "ring_build", cmd,
+        "vorton_build", cmd,
         phase_suite=phase_suite, phase_case=phase_case,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout, cwd=str(cwd or REPO),
     )
 
 
-def ring_check(ring_exe: str, ring_file: str, *,
+def vorton_check(vorton_exe: str, vorton_file: str, *,
                extra_args: Optional[List[str]] = None,
                timeout: int = TIMEOUT_COMPILE,
                phase_suite: Optional[str] = None,
                phase_case: Optional[str] = None,
                cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
-    """Run ring.exe check <file> [extra_args...]."""
-    cmd = [ring_exe, "check", ring_file]
+    """Run vorton.exe check <file> [extra_args...]."""
+    cmd = [vorton_exe, "check", vorton_file]
     if extra_args:
         cmd.extend(extra_args)
     if _PHASE_TRACER is not None and phase_case is None:
-        phase_case = _phase_file_identity(ring_file)
+        phase_case = _phase_file_identity(vorton_file)
     return _run_subprocess(
-        "ring_check", cmd, phase_suite=phase_suite, phase_case=phase_case,
+        "vorton_check", cmd, phase_suite=phase_suite, phase_case=phase_case,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout, cwd=str(cwd or REPO),
     )
@@ -2144,13 +2144,13 @@ def run_exe(exe_path: str, timeout: int = TIMEOUT_RUN, *,
 # Test-case helpers
 # ---------------------------------------------------------------------------
 
-def compile_link_run(ring_exe: str, clang_path: str, ring_file: str,
+def compile_link_run(vorton_exe: str, clang_path: str, vorton_file: str,
                      tmpdir: str, *,
                      expect_panic: bool = False,
                      phase_suite: Optional[str] = None,
                      phase_case: Optional[str] = None,
                      cwd: Optional[Path] = None) -> Tuple[bool, str, str]:
-    """Compile a .ring file, link, run, return (ok, stdout, error_detail).
+    """Compile a .vorton file, link, run, return (ok, stdout, error_detail).
 
     On success, ok=True and stdout contains the program output.
     On failure, ok=False and error_detail describes the failure.
@@ -2159,14 +2159,14 @@ def compile_link_run(ring_exe: str, clang_path: str, ring_file: str,
     <tmpdir>/<base>.c and <tmpdir>/<base>.o) so no artifacts land next to the
     test sources.
     """
-    base = Path(ring_file).stem
+    base = Path(vorton_file).stem
 
     out_dir = tmpdir
 
     # Compile
     try:
-        r = ring_build(
-            ring_exe, ring_file, out_dir=out_dir,
+        r = vorton_build(
+            vorton_exe, vorton_file, out_dir=out_dir,
             phase_suite=phase_suite, phase_case=phase_case,
             cwd=cwd,
         )
@@ -2222,23 +2222,23 @@ def compile_link_run(ring_exe: str, clang_path: str, ring_file: str,
 # ---------------------------------------------------------------------------
 
 def discover_positive_cases(directory: Path) -> List[Path]:
-    """Return sorted list of .ring files that have a corresponding .expected."""
+    """Return sorted list of .vorton files that have a corresponding .expected."""
     if not directory.is_dir():
         return []
     cases = []
     for f in sorted(directory.iterdir()):
-        if f.suffix == ".ring" and f.with_suffix(".expected").is_file():
+        if f.suffix == ".vorton" and f.with_suffix(".expected").is_file():
             cases.append(f)
     return cases
 
 
 def discover_negative_cases(directory: Path) -> List[Path]:
-    """Return sorted list of .ring files that have a corresponding .error."""
+    """Return sorted list of .vorton files that have a corresponding .error."""
     if not directory.is_dir():
         return []
     cases = []
     for f in sorted(directory.iterdir()):
-        if f.suffix == ".ring" and f.with_suffix(".error").is_file():
+        if f.suffix == ".vorton" and f.with_suffix(".error").is_file():
             cases.append(f)
     return cases
 
@@ -2285,13 +2285,13 @@ def error_contract_failure(contract_text: str, output: str) -> Optional[str]:
 
 
 def discover_module_positive(modules_dir: Path) -> List[Path]:
-    """Return sorted list of module main.ring files that have main.expected."""
+    """Return sorted list of module main.vorton files that have main.expected."""
     if not modules_dir.is_dir():
         return []
     cases = []
     for d in sorted(modules_dir.iterdir()):
         if d.is_dir():
-            main = d / "main.ring"
+            main = d / "main.vorton"
             expected = d / "main.expected"
             if main.is_file() and expected.is_file():
                 cases.append(main)
@@ -2309,7 +2309,7 @@ def module_check_positive_census(
     markers = sorted(modules_dir.glob("*/main.check"))
     for marker in markers:
         directory = marker.parent
-        main = directory / "main.ring"
+        main = directory / "main.vorton"
         expected = directory / "main.expected"
         error = directory / "main.error"
         valid = True
@@ -2317,7 +2317,7 @@ def module_check_positive_census(
             errors.append(f"{directory.name}: main.check is not a regular file")
             valid = False
         if main.is_symlink() or not main.is_file():
-            errors.append(f"{directory.name}: main.check has no sibling main.ring")
+            errors.append(f"{directory.name}: main.check has no sibling main.vorton")
             valid = False
         if (
             expected.exists() or expected.is_symlink()
@@ -2352,7 +2352,7 @@ def discover_module_check_positive(modules_dir: Path) -> List[Path]:
 def module_check_positive_discovery_errors(modules_dir: Path) -> List[str]:
     """Validate explicit marker ownership for the generic check-only lane."""
     discovered, errors = module_check_positive_census(modules_dir)
-    required = modules_dir / "plan_namespace_empty_growth_cycle" / "main.ring"
+    required = modules_dir / "plan_namespace_empty_growth_cycle" / "main.vorton"
     if not errors and required not in discovered:
         errors.append(
             "plan_namespace_empty_growth_cycle is absent from module check-only discovery")
@@ -2360,21 +2360,21 @@ def module_check_positive_discovery_errors(modules_dir: Path) -> List[str]:
 
 
 def module_check_positive_discovery_unit_errors() -> List[str]:
-    """Exercise overlap and orphan marker rejection without invoking Ring."""
+    """Exercise overlap and orphan marker rejection without invoking Vorton."""
     errors: List[str] = []
-    with tempfile.TemporaryDirectory(prefix="ring_module_check_discovery_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="vorton_module_check_discovery_") as tmp:
         root = Path(tmp)
         orphan = root / "orphan"
         overlap = root / "overlap"
         orphan.mkdir()
         overlap.mkdir()
         (orphan / "main.check").write_bytes(b"OK\n")
-        (overlap / "main.ring").write_text("fn main() {}\n", encoding="utf-8")
+        (overlap / "main.vorton").write_text("fn main() {}\n", encoding="utf-8")
         (overlap / "main.check").write_bytes(b"OK\n")
         (overlap / "main.expected").write_text("unused\n", encoding="utf-8")
         discovered, findings = module_check_positive_census(root)
     expected = [
-        "orphan: main.check has no sibling main.ring",
+        "orphan: main.check has no sibling main.vorton",
         "overlap: main.check overlaps main.expected/main.error",
     ]
     if discovered:
@@ -2389,13 +2389,13 @@ def module_check_positive_discovery_unit_errors() -> List[str]:
 
 
 def discover_module_negative(modules_dir: Path) -> List[Path]:
-    """Return sorted list of module main.ring files that have main.error."""
+    """Return sorted list of module main.vorton files that have main.error."""
     if not modules_dir.is_dir():
         return []
     cases = []
     for d in sorted(modules_dir.iterdir()):
         if d.is_dir():
-            main = d / "main.ring"
+            main = d / "main.vorton"
             error = d / "main.error"
             if main.is_file() and error.is_file():
                 cases.append(main)
@@ -2403,7 +2403,7 @@ def discover_module_negative(modules_dir: Path) -> List[Path]:
 
 
 def run_cli_diagnostic_contracts(
-    ring_exe: str,
+    vorton_exe: str,
     collector: ResultCollector,
     *,
     name_filter: Optional[str] = None,
@@ -2425,8 +2425,8 @@ def run_cli_diagnostic_contracts(
             ))
             return
         try:
-            result = ring_check(
-                ring_exe, str(fixture), extra_args=args,
+            result = vorton_check(
+                vorton_exe, str(fixture), extra_args=args,
                 phase_suite=suite, phase_case=label,
             )
         except subprocess.TimeoutExpired:
@@ -2660,86 +2660,86 @@ def run_cli_diagnostic_contracts(
 
     execute(
         "warning:catch-pure-W0001",
-        CASES_DIR / "catch_pure_expr.ring",
+        CASES_DIR / "catch_pure_expr.vorton",
         [],
         lambda result: warning_failure(result, "W0001", llm=False),
     )
     execute(
         "warning:where-W0002-human",
-        CASES_DIR / "where_clause_warning.ring",
+        CASES_DIR / "where_clause_warning.vorton",
         [],
         lambda result: warning_failure(result, "W0002", llm=False, line=11),
     )
     execute(
         "warning:where-W0002-llm",
-        CASES_DIR / "where_clause_warning.ring",
+        CASES_DIR / "where_clause_warning.vorton",
         ["--error-format=llm"],
         lambda result: warning_failure(result, "W0002", llm=True, line=11),
     )
     execute(
         "diagnostic:type-suggestion-human",
-        CASES_DIR / "error_with_suggestion.ring",
+        CASES_DIR / "error_with_suggestion.vorton",
         [],
         suggestion_human_failure,
     )
     execute(
         "diagnostic:type-suggestion-llm",
-        CASES_DIR / "error_with_suggestion.ring",
+        CASES_DIR / "error_with_suggestion.vorton",
         ["--error-format=llm"],
         suggestion_llm_failure,
     )
     execute(
         "diagnostic:return-notes-llm",
-        CASES_DIR / "error_diagnostic_notes.ring",
+        CASES_DIR / "error_diagnostic_notes.vorton",
         ["--error-format=llm"],
         return_notes_failure,
     )
     execute(
         "diagnostic:empty-list-suggestion-llm",
-        CASES_DIR / "error_empty_list_suggestion.ring",
+        CASES_DIR / "error_empty_list_suggestion.vorton",
         ["--error-format=llm"],
         empty_list_failure,
     )
     execute(
         "diagnostic:effect-suggestion-llm",
-        CASES_DIR / "error_effect_suggestion.ring",
+        CASES_DIR / "error_effect_suggestion.vorton",
         ["--error-format=llm"],
         effect_failure,
     )
     execute(
         "diagnostic:parse-errors-llm-schema",
-        CASES_DIR / "error_multi_parse.ring",
+        CASES_DIR / "error_multi_parse.vorton",
         ["--error-format=llm"],
         parse_llm_failure,
     )
     execute(
         "diagnostic:json-derive-E0503-span-llm",
-        CASES_DIR / "error_json_derive_field_missing.ring",
+        CASES_DIR / "error_json_derive_field_missing.vorton",
         ["--error-format=llm"],
         json_derive_span_failure,
     )
     execute(
         "diagnostic:clean-check-llm",
-        CASES_DIR / "hello.ring",
+        CASES_DIR / "hello.vorton",
         ["--error-format=llm"],
         clean_llm_failure,
     )
     execute(
         "diagnostic:module-resolver-E0702-llm",
-        MODULES_DIR / "error_not_found" / "main.ring",
+        MODULES_DIR / "error_not_found" / "main.vorton",
         ["--error-format=llm"],
         lambda result: module_llm_failure(result, "E0702"),
     )
     execute(
         "diagnostic:module-checker-E0703-llm",
-        MODULES_DIR / "error_symbol_not_found" / "main.ring",
+        MODULES_DIR / "error_symbol_not_found" / "main.vorton",
         ["--error-format=llm"],
         lambda result: module_llm_failure(result, "E0703"),
     )
 
 
 def run_native_real_program_contract(
-    ring_exe: str,
+    vorton_exe: str,
     clang_path: str,
     collector: ResultCollector,
     *,
@@ -2747,7 +2747,7 @@ def run_native_real_program_contract(
 ) -> None:
     """Exercise the production resource plan/certificate once, then run it."""
     suite = "e2e"
-    key = "tests/native/real_program.ring"
+    key = "tests/native/real_program.vorton"
     label = "native-real-program:resource-planner+certificate"
     if not (
         matches_filter("native-real-program", name_filter)
@@ -2758,13 +2758,13 @@ def run_native_real_program_contract(
     if not NATIVE_REAL_PROGRAM.is_file() or not NATIVE_REAL_PROGRAM_EXPECTED.is_file():
         collector.add(TestResult(
             TestResult.FAIL, suite, "native-real-program",
-            "real_program.ring or its .expected companion is missing",
+            "real_program.vorton or its .expected companion is missing",
         ))
         return
 
     try:
-        result = ring_check(
-            ring_exe, str(NATIVE_REAL_PROGRAM),
+        result = vorton_check(
+            vorton_exe, str(NATIVE_REAL_PROGRAM),
             phase_suite=suite, phase_case=label,
         )
     except subprocess.TimeoutExpired:
@@ -2786,9 +2786,9 @@ def run_native_real_program_contract(
         ))
 
     expected = norm(NATIVE_REAL_PROGRAM_EXPECTED.read_text(encoding="utf-8"))
-    with tempfile.TemporaryDirectory(prefix="ring_real_program_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="vorton_real_program_") as tmpdir:
         ok, stdout, detail = compile_link_run(
-            ring_exe, clang_path, str(NATIVE_REAL_PROGRAM), tmpdir,
+            vorton_exe, clang_path, str(NATIVE_REAL_PROGRAM), tmpdir,
             phase_suite=suite,
             phase_case="native-real-program:execute 1/3",
         )
@@ -2832,7 +2832,7 @@ def run_native_real_program_contract(
             ))
 
 
-def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
+def run_e2e(vorton_exe: str, clang_path: str, collector: ResultCollector, *,
             name_filter: Optional[str] = None) -> None:
     """Run the E2E test suite."""
     suite = "e2e"
@@ -2856,26 +2856,26 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
     # Hand-written native semantic oracles, including EXPECT_PANIC cases.
     positive.extend(discover_positive_cases(NATIVE_ONLY_DIR))
 
-    with tempfile.TemporaryDirectory(prefix="ring_e2e_") as tmpdir:
-        for ring_file in positive:
-            name = ring_file.name
-            rel = ring_file.relative_to(CASES_DIR)
+    with tempfile.TemporaryDirectory(prefix="vorton_e2e_") as tmpdir:
+        for vorton_file in positive:
+            name = vorton_file.name
+            rel = vorton_file.relative_to(CASES_DIR)
 
             if not matches_filter(str(rel), name_filter):
                 continue
 
-            gap_reason = positive_gap_reason(ring_file)
+            gap_reason = positive_gap_reason(vorton_file)
             if gap_reason:
                 collector.add(TestResult(
                     TestResult.SKIP, suite, str(rel), gap_reason))
                 continue
 
-            expected_file = ring_file.with_suffix(".expected")
+            expected_file = vorton_file.with_suffix(".expected")
             expected_raw = expected_file.read_text(encoding="utf-8")
-            expect_panic = case_expects_panic(ring_file, expected_raw)
+            expect_panic = case_expects_panic(vorton_file, expected_raw)
             expected = norm(expected_raw)
 
-            ok, stdout, detail = compile_link_run(ring_exe, clang_path, str(ring_file),
+            ok, stdout, detail = compile_link_run(vorton_exe, clang_path, str(vorton_file),
                                                   tmpdir,
                                                   expect_panic=expect_panic,
                                                   phase_suite=suite,
@@ -2917,27 +2917,27 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
         subdir = CASES_DIR / subdir_name
         negative.extend(discover_negative_cases(subdir))
 
-    for ring_file in negative:
-        rel = ring_file.relative_to(CASES_DIR)
-        name = ring_file.name
+    for vorton_file in negative:
+        rel = vorton_file.relative_to(CASES_DIR)
+        name = vorton_file.name
 
-        # Negative cases go through `ring check` only -- backend-independent.
+        # Negative cases go through `vorton check` only -- backend-independent.
         if not matches_filter(str(rel), name_filter):
             continue
 
-        check_key = normalized_repo_path(ring_file)
+        check_key = normalized_repo_path(vorton_file)
         if check_key in CHECK_ONLY_GAPS:
             collector.add(TestResult(
                 TestResult.SKIP, suite, f"neg:{rel}",
                 f"known check-only gap: {CHECK_ONLY_GAPS[check_key]}"))
             continue
 
-        error_file = ring_file.with_suffix(".error")
+        error_file = vorton_file.with_suffix(".error")
         contract = error_file.read_text(encoding="utf-8")
 
         try:
-            r = ring_check(
-                ring_exe, str(ring_file), phase_suite=suite,
+            r = vorton_check(
+                vorton_exe, str(vorton_file), phase_suite=suite,
                 phase_case=_phase_relative_identity(rel, "neg:"),
             )
         except subprocess.TimeoutExpired:
@@ -2957,7 +2957,7 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
 
     # --- Module positive ---
     mod_positive = discover_module_positive(MODULES_DIR)
-    with tempfile.TemporaryDirectory(prefix="ring_mod_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="vorton_mod_") as tmpdir:
         for main_file in mod_positive:
             mod_name = main_file.parent.name
 
@@ -2973,7 +2973,7 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
             case_dir = os.path.join(tmpdir, mod_name)
             os.makedirs(case_dir, exist_ok=True)
             ok, stdout, detail = compile_link_run(
-                ring_exe, clang_path, str(main_file), case_dir,
+                vorton_exe, clang_path, str(main_file), case_dir,
                 phase_suite=suite, phase_case=f"mod:{mod_name}",
             )
             if not ok:
@@ -2997,8 +2997,8 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
         if not matches_filter(label, name_filter):
             continue
         try:
-            result = ring_check(
-                ring_exe, str(main_file), phase_suite=suite,
+            result = vorton_check(
+                vorton_exe, str(main_file), phase_suite=suite,
                 phase_case=label)
         except subprocess.TimeoutExpired:
             collector.add(TestResult(
@@ -3028,8 +3028,8 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
         contract = error_file.read_text(encoding="utf-8")
 
         try:
-            r = ring_check(
-                ring_exe, str(main_file), phase_suite=suite,
+            r = vorton_check(
+                vorton_exe, str(main_file), phase_suite=suite,
                 phase_case=f"mod-neg:{mod_name}",
             )
         except subprocess.TimeoutExpired:
@@ -3047,10 +3047,10 @@ def run_e2e(ring_exe: str, clang_path: str, collector: ResultCollector, *,
                 f"{contract_failure}; output: {combined[:300]}"))
 
     run_cli_diagnostic_contracts(
-        ring_exe, collector, name_filter=name_filter,
+        vorton_exe, collector, name_filter=name_filter,
     )
     run_native_real_program_contract(
-        ring_exe, clang_path, collector, name_filter=name_filter,
+        vorton_exe, clang_path, collector, name_filter=name_filter,
     )
 
 
@@ -3075,7 +3075,7 @@ def run_normal_diagnostic_exit_contract(
         (0xC0000374, False),
     ):
         result = subprocess.CompletedProcess(
-            args=["ring", "check"], returncode=returncode,
+            args=["vorton", "check"], returncode=returncode,
             stdout=diagnostic, stderr="",
         )
         failure = normal_diagnostic_contract_failure(
@@ -3092,7 +3092,7 @@ def run_normal_diagnostic_exit_contract(
 
 
 def run_prelude_a1_oracles(
-    ring_exe: str, clang_path: str, collector: ResultCollector, *,
+    vorton_exe: str, clang_path: str, collector: ResultCollector, *,
     name_filter: Optional[str] = None,
 ) -> None:
     """Run the four prelude-only A1 acceptance canaries."""
@@ -3104,7 +3104,7 @@ def run_prelude_a1_oracles(
     if not any(matches_filter(value, name_filter) for value in (group, *labels)):
         return
     case_dir = CASES_DIR / "prelude_a1"
-    probe = case_dir / "probe.ring"
+    probe = case_dir / "probe.vorton"
 
     def overlay(root: Path, name: str, fragments) -> Path:
         cwd, std = root / name, root / name / "std"
@@ -3118,19 +3118,19 @@ def run_prelude_a1_oracles(
         return cwd
 
     observed: List[str] = []
-    with tempfile.TemporaryDirectory(prefix="ring_prelude_a1_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="vorton_prelude_a1_") as tmpdir:
         root = Path(tmpdir)
-        for label, fragment in zip(labels[:2], ("self_first.ring", "mutual_first.ring")):
+        for label, fragment in zip(labels[:2], ("self_first.vorton", "mutual_first.vorton")):
             try:
-                cwd = overlay(root, label[:2], (("str.ring", fragment),))
+                cwd = overlay(root, label[:2], (("str.vorton", fragment),))
                 output = root / f"{label[:2]}-out"
                 output.mkdir()
                 ok, stdout, detail = compile_link_run(
-                    ring_exe, clang_path, str(probe), str(output), cwd=cwd,
+                    vorton_exe, clang_path, str(probe), str(output), cwd=cwd,
                     phase_suite=suite, phase_case=label)
             except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
                 ok, stdout, detail = False, "", str(exc)
-            if ok and norm(stdout) == "P_PRELUDE_A1_OK:3/ring/10\n":
+            if ok and norm(stdout) == "P_PRELUDE_A1_OK:3/vorton/10\n":
                 observed.append(norm(stdout))
                 collector.add(TestResult(TestResult.PASS, suite, label))
             else:
@@ -3143,24 +3143,24 @@ def run_prelude_a1_oracles(
             suite, "parity:P-prelude-A1-source-order"))
 
         negatives = (
-            (labels[2], "reverse_early.ring", "reverse_late.ring",
+            (labels[2], "reverse_early.vorton", "reverse_late.vorton",
              "prelude_reverse_early' -> 'prelude_reverse_late"),
-            (labels[3], "cycle_early.ring", "cycle_late.ring",
+            (labels[3], "cycle_early.vorton", "cycle_late.vorton",
              "prelude_cycle_early' -> 'prelude_cycle_late"),
         )
         for label, early, late, expected in negatives:
             try:
                 cwd = overlay(root, label[:2], (
-                    ("str.ring", early), ("io.ring", late)))
-                result = ring_check(
-                    ring_exe, str(probe), cwd=cwd,
+                    ("str.vorton", early), ("io.vorton", late)))
+                result = vorton_check(
+                    vorton_exe, str(probe), cwd=cwd,
                     phase_suite=suite, phase_case=label)
                 output = process_output(result)
             except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
                 result, output = None, str(exc)
             passed = (
                 result is not None and result.returncode != 0
-                and "ring panic: prelude file DAG: reverse edge" in output
+                and "vorton panic: prelude file DAG: reverse edge" in output
                 and expected in output and "'$prelude$::str'" in output
             )
             collector.add(TestResult(
@@ -3168,7 +3168,7 @@ def run_prelude_a1_oracles(
                 suite, label, "" if passed else output[:300]))
 
 def run_ownership_vertical_suite(
-    ring_exe: str,
+    vorton_exe: str,
     clang_path: str,
     collector: ResultCollector,
     *,
@@ -3180,15 +3180,15 @@ def run_ownership_vertical_suite(
     run_normal_diagnostic_exit_contract(
         collector, name_filter=name_filter)
     run_prelude_a1_oracles(
-        ring_exe, clang_path, collector, name_filter=name_filter)
+        vorton_exe, clang_path, collector, name_filter=name_filter)
 
     def add_result(status: str, name: str, detail: str) -> None:
         collector.add(TestResult(status, suite, name, detail))
 
     def run_internal_canary(canary, label: str) -> ExactPanicObservation:
         entry = CASES_DIR / "ownership_vertical" / canary.input_path
-        result = ring_check(
-            ring_exe, str(entry), extra_args=[f"--rc-mutate={canary.mutation}"],
+        result = vorton_check(
+            vorton_exe, str(entry), extra_args=[f"--rc-mutate={canary.mutation}"],
             phase_suite=suite, phase_case=label,
         )
         return ExactPanicObservation(
@@ -3199,10 +3199,10 @@ def run_ownership_vertical_suite(
 
     context = RunnerContext(
         manifest_path=CASES_DIR / "ownership_vertical" / "manifest.json",
-        check=lambda entry, label: ring_check(
-            ring_exe, str(entry), phase_suite=suite, phase_case=label),
+        check=lambda entry, label: vorton_check(
+            vorton_exe, str(entry), phase_suite=suite, phase_case=label),
         native=lambda entry, output_dir, label: compile_link_run(
-            ring_exe, clang_path, str(entry), str(output_dir),
+            vorton_exe, clang_path, str(entry), str(output_dir),
             phase_suite=suite, phase_case=label),
         add_result=add_result,
         matches_filter=matches_filter,
@@ -3215,7 +3215,7 @@ def run_ownership_vertical_suite(
 # Golden-snapshot suite
 # ---------------------------------------------------------------------------
 
-def run_golden(ring_exe: str, clang_path: str, collector: ResultCollector,
+def run_golden(vorton_exe: str, clang_path: str, collector: ResultCollector,
                *, update_golden: bool = False,
                name_filter: Optional[str] = None) -> None:
     """Run the C-native golden-snapshot regression suite."""
@@ -3225,21 +3225,21 @@ def run_golden(ring_exe: str, clang_path: str, collector: ResultCollector,
         print(f"WARNING: no golden cases found in {GOLDEN_CASES_DIR}", file=sys.stderr)
         return
 
-    with tempfile.TemporaryDirectory(prefix="ring_golden_") as tmpdir:
-        for ring_file in cases:
-            name = ring_file.name
-            expected_file = ring_file.with_suffix(".expected")
+    with tempfile.TemporaryDirectory(prefix="vorton_golden_") as tmpdir:
+        for vorton_file in cases:
+            name = vorton_file.name
+            expected_file = vorton_file.with_suffix(".expected")
 
             if not matches_filter(name, name_filter):
                 continue
 
-            gap_reason = positive_gap_reason(ring_file)
+            gap_reason = positive_gap_reason(vorton_file)
             if gap_reason:
                 collector.add(TestResult(
                     TestResult.SKIP, suite, name, gap_reason))
                 continue
 
-            ok, stdout, detail = compile_link_run(ring_exe, clang_path, str(ring_file),
+            ok, stdout, detail = compile_link_run(vorton_exe, clang_path, str(vorton_file),
                                                   tmpdir, phase_suite=suite,
                                                   phase_case=name)
             if not ok:
@@ -3276,23 +3276,23 @@ C_LINE_DIRECTIVE_RE = re.compile(
 
 
 def structural_fixture_paths() -> set[str]:
-    """Return every .ring fixture owned by the structural suite."""
+    """Return every .vorton fixture owned by the structural suite."""
     if not STRUCTURAL_DIR.is_dir():
         return set()
     return {
         repo_relative(path)
-        for path in STRUCTURAL_DIR.rglob("*.ring")
+        for path in STRUCTURAL_DIR.rglob("*.vorton")
         if path.is_file()
     }
 
 
-def ring_line_markers(path: Path) -> Tuple[List[Tuple[str, int]], Optional[str]]:
+def vorton_line_markers(path: Path) -> Tuple[List[Tuple[str, int]], Optional[str]]:
     """Find real-code line markers, ignoring lookalikes in strings/comments."""
     try:
         source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         return [], f"cannot read {display_path(path)}: {exc}"
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     markers = []
     for match in C_LINE_MARKER_RE.finditer(masked):
         line = masked.count("\n", 0, match.start(1)) + 1
@@ -3300,23 +3300,23 @@ def ring_line_markers(path: Path) -> Tuple[List[Tuple[str, int]], Optional[str]]
     return markers, None
 
 
-def extract_ring_function_body(
+def extract_vorton_function_body(
     source: str,
     function_name: str,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Extract one named Ring fixture function body, ignoring decoy text."""
-    masked = mask_ring_strings_and_comments(source)
+    """Extract one named Vorton fixture function body, ignoring decoy text."""
+    masked = mask_vorton_strings_and_comments(source)
     pattern = re.compile(
         rf"\bfn\s+{re.escape(function_name)}\s*"
         rf"\([^{{}}]*\)[^{{}}\n]*\{{")
     matches = list(pattern.finditer(masked))
     if len(matches) != 1:
-        return None, f"Ring function {function_name} found {len(matches)} times"
+        return None, f"Vorton function {function_name} found {len(matches)} times"
     open_index = masked.rfind("{", matches[0].start(), matches[0].end())
     try:
         close_index = matching_delimiter(masked, open_index, "{", "}")
     except ValueError as exc:
-        return None, f"Ring function {function_name}: {exc}"
+        return None, f"Vorton function {function_name}: {exc}"
     return source[open_index + 1:close_index], None
 
 
@@ -3396,7 +3396,7 @@ EXTERN_FUNCTION_BODY_CONTRACTS = {
 def extern_fixture_source_errors(extern_source: str) -> List[str]:
     """Validate that every named fixture body still performs its probe."""
     errors: List[str] = []
-    masked = mask_ring_strings_and_comments(extern_source)
+    masked = mask_vorton_strings_and_comments(extern_source)
     for description, pattern in EXTERN_FIXTURE_CONTRACTS:
         count = len(re.findall(pattern, masked))
         if count != 1:
@@ -3404,12 +3404,12 @@ def extern_fixture_source_errors(extern_source: str) -> List[str]:
                 f"{EXTERN_RC_FIXTURE}: {description} contract matched "
                 f"{count} times (expected 1)")
     for function_name, body_pattern in EXTERN_FUNCTION_BODY_CONTRACTS.items():
-        body, extract_error = extract_ring_function_body(
+        body, extract_error = extract_vorton_function_body(
             extern_source, function_name)
         if extract_error:
             errors.append(f"{EXTERN_RC_FIXTURE}: {extract_error}")
             continue
-        masked_body = mask_ring_strings_and_comments(body)
+        masked_body = mask_vorton_strings_and_comments(body)
         if re.fullmatch(body_pattern, masked_body) is None:
             errors.append(
                 f"{EXTERN_RC_FIXTURE}: {function_name} body no longer "
@@ -3447,7 +3447,7 @@ def structural_fixture_integrity_errors() -> List[str]:
         case_markers: List[Tuple[str, int, str]] = []
         for fixture in fixtures:
             path = REPO / fixture
-            markers, error = ring_line_markers(path)
+            markers, error = vorton_line_markers(path)
             if error:
                 errors.append(error)
                 continue
@@ -3484,7 +3484,7 @@ def structural_fixture_integrity_errors() -> List[str]:
     except (OSError, UnicodeError) as exc:
         errors.append(f"cannot read {display_path(CODEGEN_C_SOURCE)}: {exc}")
     else:
-        masked_codegen = mask_ring_strings_and_comments(codegen_source)
+        masked_codegen = mask_vorton_strings_and_comments(codegen_source)
         if re.search(r"\bfallback_tag\b", masked_codegen):
             errors.append("Json enum codegen still contains fallback_tag")
         fail_loud = re.search(
@@ -3723,7 +3723,7 @@ def _ledger_unescape(value: str) -> str:
 
 
 def serialize_identity_ledger(events: Sequence[IdentityLedgerEvent]) -> bytes:
-    lines = ["RING-C-IDENTITY-LEDGER|1"]
+    lines = ["VORTON-C-IDENTITY-LEDGER|1"]
     for event in events:
         lines.append("|".join((
             "E", str(event.event_id), _ledger_escape(event.kind),
@@ -3748,7 +3748,7 @@ def parse_identity_ledger(
     if not text.endswith("\n"):
         errors.append("identity ledger lacks final newline")
     lines = text.splitlines()
-    if not lines or lines[0] != "RING-C-IDENTITY-LEDGER|1":
+    if not lines or lines[0] != "VORTON-C-IDENTITY-LEDGER|1":
         return None, ["identity ledger header/version mismatch"]
     events: List[IdentityLedgerEvent] = []
     for ordinal, line in enumerate(lines[1:], 1):
@@ -3937,20 +3937,20 @@ def identity_ledger_mutation_matrix_errors() -> List[str]:
                             "fresh", -1, "", "closure-edge:child_b",
                             "t_env_b", "t_cl_b", 0, 0),
         IdentityLedgerEvent(7, "dict-receiver-load", 0, 1, "child_a", "",
-                            "name-only", -1, "__ring_T_Ord", "",
+                            "name-only", -1, "__vorton_T_Ord", "",
                             "r_shared", "t_method", 1, 0),
         IdentityLedgerEvent(8, "closure-call", 0, 1, "child_a", "",
                             "computed", -1, "", "dict-receiver-load",
                             "t_method", "t_result", 0, 2),
         IdentityLedgerEvent(9, "effect-receiver-load", 0, 2, "child_b", "",
-                            "name-only", -1, "__ring_ev_E", "",
+                            "name-only", -1, "__vorton_ev_E", "",
                             "r_effect", "t_effect", 1, 0),
         IdentityLedgerEvent(10, "closure-call", 0, 2, "child_b", "",
                             "computed", -1, "", "effect-receiver-load",
                             "t_effect", "t_effect_result", 0, 2),
         IdentityLedgerEvent(11, "dict-receiver-load", 0, 3, "parent", "",
                             "static", -1, "__Int_Ord", "",
-                            "ring___Int_Ord", "t_static", 1, 0),
+                            "vorton___Int_Ord", "t_static", 1, 0),
         IdentityLedgerEvent(12, "closure-call", 0, 3, "parent", "",
                             "computed", -1, "", "dict-receiver-load",
                             "t_static", "t_static_result", 0, 2),
@@ -3963,8 +3963,8 @@ def identity_ledger_mutation_matrix_errors() -> List[str]:
         IdentityLedgerEvent(15, "closure-call", 0, 0, "parent", "",
                             "exact", 41, "x", "", "r_shared", "t_exact", 0, 1),
         IdentityLedgerEvent(16, "closure-call", 0, 0, "parent", "",
-                            "name-only", -1, "__ring_T_Ord", "",
-                            "r___ring_T_Ord", "t_name", 0, 1),
+                            "name-only", -1, "__vorton_T_Ord", "",
+                            "r___vorton_T_Ord", "t_name", 0, 1),
         IdentityLedgerEvent(17, "closure-call", 0, 0, "parent", "",
                             "computed", -1, "", "expression-closure",
                             "t_expr", "t_computed", 0, 1),
@@ -4131,11 +4131,11 @@ def extract_c_switch_cases(
 
 
 def c_rc_counts(c_body: str) -> Tuple[int, int]:
-    """Return exact (ring_dup, ring_drop) call counts in a local C body."""
+    """Return exact (vorton_dup, vorton_drop) call counts in a local C body."""
     masked = mask_c_strings_and_comments(c_body)
     return (
-        len(re.findall(r"\bring_dup\s*\(", masked)),
-        len(re.findall(r"\bring_drop\s*\(", masked)),
+        len(re.findall(r"\bvorton_dup\s*\(", masked)),
+        len(re.findall(r"\bvorton_drop\s*\(", masked)),
     )
 
 
@@ -4168,15 +4168,15 @@ class CProbeProgram:
 
 
 C_PROBE_CALL_ARITIES = {
-    "ring_list_new": 0,
-    "ring_List_push": 2,
+    "vorton_list_new": 0,
+    "vorton_List_push": 2,
 }
 C_PROBE_VALUE_ROOT = "parameter:r_value"
-C_PROBE_UNIT_ROOT = "constant:RING_UNIT"
+C_PROBE_UNIT_ROOT = "constant:VORTON_UNIT"
 # Intentionally lock the complete alpha-normalized lowering.  Independent
 # semantic/RC summaries admitted use-after-drop reorderings in these probes.
 C_PROBE_TEMPLATES = {
-    "ring_structural_raw_identity": (
+    "vorton_structural_raw_identity": (
         ("declare", "v0"),
         ("declare", "v1"),
         ("declare", "v2"),
@@ -4185,36 +4185,36 @@ C_PROBE_TEMPLATES = {
         ("alias", "v2", "v1"),
         ("return", "v2"),
     ),
-    "ring_structural_owned_identity": (
+    "vorton_structural_owned_identity": (
         ("declare", "v0"),
         ("declare", "v1"),
         ("declare", "v2"),
         ("declare", "v3"),
         ("declare", "v4"),
         ("alias", "v0", "$value"),
-        ("rc", "ring_dup", "v0"),
+        ("rc", "vorton_dup", "v0"),
         ("alias", "v1", "v0"),
         ("alias", "v2", "v1"),
-        ("rc", "ring_dup", "v2"),
+        ("rc", "vorton_dup", "v2"),
         ("alias", "v3", "v2"),
-        ("rc", "ring_drop", "v1"),
+        ("rc", "vorton_drop", "v1"),
         ("alias", "v4", "v3"),
         ("return", "v4"),
     ),
-    "ring_structural_raw_list": (
+    "vorton_structural_raw_list": (
         ("declare", "v0"),
         ("declare", "v1"),
         ("declare", "v2"),
         ("declare", "v3"),
         ("declare", "v4"),
-        ("call", "v0", "ring_list_new"),
+        ("call", "v0", "vorton_list_new"),
         ("alias", "v1", "v0"),
         ("alias", "v2", "$value"),
         ("alias", "v3", "v1"),
-        ("call", "v4", "ring_List_push", "v3", "v2"),
+        ("call", "v4", "vorton_List_push", "v3", "v2"),
         ("return", "$unit"),
     ),
-    "ring_structural_owned_list": (
+    "vorton_structural_owned_list": (
         ("declare", "v0"),
         ("declare", "v1"),
         ("declare", "v2"),
@@ -4222,13 +4222,13 @@ C_PROBE_TEMPLATES = {
         ("declare", "v4"),
         ("declare", "v5"),
         ("declare", "v6"),
-        ("call", "v0", "ring_list_new"),
+        ("call", "v0", "vorton_list_new"),
         ("alias", "v1", "v0"),
         ("alias", "v2", "$value"),
         ("alias", "v3", "v1"),
-        ("call", "v4", "ring_List_push", "v3", "v2"),
+        ("call", "v4", "vorton_List_push", "v3", "v2"),
         ("alias", "v5", "$unit"),
-        ("rc", "ring_drop", "v1"),
+        ("rc", "vorton_drop", "v1"),
         ("alias", "v6", "v5"),
         ("return", "v6"),
     ),
@@ -4336,7 +4336,7 @@ def parse_c_probe_statements(
             args = (
                 tuple(arg.strip() for arg in args_text.split(","))
                 if args_text.strip() else ())
-            if callee not in {"ring_dup", "ring_drop"}:
+            if callee not in {"vorton_dup", "vorton_drop"}:
                 errors.append(
                     f"{symbol}: standalone call {callee} is outside "
                     "finite grammar")
@@ -4377,7 +4377,7 @@ def evaluate_c_probe_statements(
     assigned = set()
     origins = {
         "r_value": C_PROBE_VALUE_ROOT,
-        "RING_UNIT": C_PROBE_UNIT_ROOT,
+        "VORTON_UNIT": C_PROBE_UNIT_ROOT,
     }
     events: List[CProbeEvent] = []
     executable_seen = False
@@ -4462,7 +4462,7 @@ def canonical_c_probe_events(
     def identifier(name: str, offset: int) -> str:
         if name == "r_value":
             return "$value"
-        if name == "RING_UNIT":
+        if name == "VORTON_UNIT":
             return "$unit"
         local = locals_by_name.get(name)
         if local is None:
@@ -4549,58 +4549,58 @@ def validate_c_probe_body(symbol: str, c_body: str) -> List[str]:
 C_PROBE_MUTATION_MATRIX = (
     (
         "identity-wrong-rc-roots",
-        "ring_structural_owned_identity",
+        "vorton_structural_owned_identity",
         """void* t1; void* r_local; void* t2; void* r_scope;
 void* t3; void* r_decoy;
-t1 = r_value; r_decoy = RING_UNIT; ring_dup(r_decoy);
-r_local = t1; t2 = r_local; ring_dup(r_decoy); r_scope = t2;
-ring_drop(r_decoy); t3 = r_scope; return t3;""",
+t1 = r_value; r_decoy = VORTON_UNIT; vorton_dup(r_decoy);
+r_local = t1; t2 = r_local; vorton_dup(r_decoy); r_scope = t2;
+vorton_drop(r_decoy); t3 = r_scope; return t3;""",
         "normalized event template mismatch",
     ),
     (
         "list-wrong-drop-root",
-        "ring_structural_owned_list",
+        "vorton_structural_owned_list",
         """void* t1; void* r_values; void* t2; void* t3; void* t4;
-t1 = ring_list_new(); r_values = t1; t2 = r_value; t3 = r_values;
-t4 = ring_List_push(t3, t2); ring_drop(r_value); return RING_UNIT;""",
+t1 = vorton_list_new(); r_values = t1; t2 = r_value; t3 = r_values;
+t4 = vorton_List_push(t3, t2); vorton_drop(r_value); return VORTON_UNIT;""",
         "normalized event template mismatch",
     ),
     (
         "list-use-after-drop",
-        "ring_structural_owned_list",
+        "vorton_structural_owned_list",
         """void* t1; void* r_values; void* t2; void* t3; void* t4;
 void* r_scope; void* t5;
-t1 = ring_list_new(); r_values = t1; t2 = r_value; t3 = r_values;
-ring_drop(r_values); t4 = ring_List_push(t3, t2);
-r_scope = RING_UNIT; t5 = r_scope; return t5;""",
+t1 = vorton_list_new(); r_values = t1; t2 = r_value; t3 = r_values;
+vorton_drop(r_values); t4 = vorton_List_push(t3, t2);
+r_scope = VORTON_UNIT; t5 = r_scope; return t5;""",
         "normalized event template mismatch",
     ),
     (
         "identity-wrong-return-root",
-        "ring_structural_raw_identity",
+        "vorton_structural_raw_identity",
         """void* t1; void* t2;
-t1 = r_value; t2 = RING_UNIT; return t2;""",
+t1 = r_value; t2 = VORTON_UNIT; return t2;""",
         "normalized event template mismatch",
     ),
     (
         "list-wrong-push-receiver",
-        "ring_structural_raw_list",
+        "vorton_structural_raw_list",
         """void* t1; void* r_values; void* t2; void* t3;
-t1 = ring_list_new(); r_values = t1; t2 = r_value;
-t3 = ring_List_push(t2, t2); return RING_UNIT;""",
+t1 = vorton_list_new(); r_values = t1; t2 = r_value;
+t3 = vorton_List_push(t2, t2); return VORTON_UNIT;""",
         "normalized event template mismatch",
     ),
     (
         "list-missing-push",
-        "ring_structural_raw_list",
+        "vorton_structural_raw_list",
         """void* t1; void* r_values;
-t1 = ring_list_new(); r_values = t1; return RING_UNIT;""",
+t1 = vorton_list_new(); r_values = t1; return VORTON_UNIT;""",
         "normalized event template mismatch",
     ),
     (
         "non-null-declaration-initializer",
-        "ring_structural_raw_identity",
-        """void* t1 = RING_UNIT; void* r_local; void* t2;
+        "vorton_structural_raw_identity",
+        """void* t1 = VORTON_UNIT; void* r_local; void* t2;
 t1 = r_value; r_local = t1; t2 = r_local; return t2;""",
         "statement is outside finite grammar",
     ),
@@ -4614,7 +4614,7 @@ def c_probe_mutation_matrix_errors() -> List[str]:
 void* r_local = NULL; void* t2 = NULL;
 t1 = r_value; r_local = t1; t2 = r_local; return t2;"""
     positive_errors = validate_c_probe_body(
-        "ring_structural_raw_identity", null_initialized_canonical)
+        "vorton_structural_raw_identity", null_initialized_canonical)
     if positive_errors:
         errors.append(
             "NULL-initialized canonical probe was rejected: "
@@ -4691,7 +4691,7 @@ def without_c_line_directives(data: bytes) -> bytes:
 
 
 def build_c_artifacts_fresh(
-    ring_exe: str,
+    vorton_exe: str,
     entry_text: str,
     temp_root: Path,
     *,
@@ -4706,8 +4706,8 @@ def build_c_artifacts_fresh(
     entry = (REPO / entry_text).resolve()
     extra_args = ["--no-c-lines"] if no_c_lines else None
     try:
-        result = ring_build(
-            ring_exe, str(entry), out_dir=str(out_dir),
+        result = vorton_build(
+            vorton_exe, str(entry), out_dir=str(out_dir),
             extra_args=extra_args, phase_suite="structural",
             phase_case=phase_case)
     except subprocess.TimeoutExpired:
@@ -4812,7 +4812,7 @@ def validate_line_directive_pair(
 
 
 def run_c_line_oracle(
-    ring_exe: str,
+    vorton_exe: str,
     temp_root: Path,
     entry: str,
     fixtures: Tuple[str, ...],
@@ -4822,7 +4822,7 @@ def run_c_line_oracle(
     markers: List[Tuple[Path, str, int]] = []
     for fixture in fixtures:
         path = REPO / fixture
-        found, error = ring_line_markers(path)
+        found, error = vorton_line_markers(path)
         if error:
             return [error]
         markers.extend((path, marker_id, line) for marker_id, line in found)
@@ -4830,12 +4830,12 @@ def run_c_line_oracle(
         return [f"{entry}: expected one real-code marker, found {len(markers)}"]
 
     default_c, _, error = build_c_artifacts_fresh(
-        ring_exe, entry, temp_root, no_c_lines=False,
+        vorton_exe, entry, temp_root, no_c_lines=False,
         phase_case=phase_case)
     if error:
         return [error]
     off_c, _, error = build_c_artifacts_fresh(
-        ring_exe, entry, temp_root, no_c_lines=True,
+        vorton_exe, entry, temp_root, no_c_lines=True,
         phase_case=phase_case)
     if error:
         return [error]
@@ -4849,17 +4849,17 @@ def exact_rc_error(symbol: str, body: str,
     actual = c_rc_counts(body)
     if actual != expected:
         return (
-            f"{symbol}: expected ring_dup/ring_drop {expected[0]}/{expected[1]}, "
+            f"{symbol}: expected vorton_dup/vorton_drop {expected[0]}/{expected[1]}, "
             f"found {actual[0]}/{actual[1]}")
     return None
 
 
-def run_extern_rc_oracle(ring_exe: str, temp_root: Path,
+def run_extern_rc_oracle(vorton_exe: str, temp_root: Path,
                          phase_case: Optional[str] = None) -> List[str]:
     """Inspect local generated-C bodies without executing any raw handle."""
     errors = c_probe_mutation_matrix_errors()
     c_path, _, error = build_c_artifacts_fresh(
-        ring_exe, EXTERN_RC_FIXTURE, temp_root, no_c_lines=True,
+        vorton_exe, EXTERN_RC_FIXTURE, temp_root, no_c_lines=True,
         phase_case=phase_case)
     if error:
         return [error]
@@ -4872,7 +4872,7 @@ def run_extern_rc_oracle(ring_exe: str, temp_root: Path,
 
     function_expectations = {
         **{symbol: None for symbol in C_PROBE_TEMPLATES},
-        "ring_drop_StructuralHolder": (0, 1),
+        "vorton_drop_StructuralHolder": (0, 1),
     }
     bodies: dict[str, str] = {}
     for symbol, expected in function_expectations.items():
@@ -4888,46 +4888,46 @@ def run_extern_rc_oracle(ring_exe: str, temp_root: Path,
         if symbol in C_PROBE_TEMPLATES:
             errors.extend(validate_c_probe_body(symbol, body))
 
-    holder_body = bodies.get("ring_drop_StructuralHolder")
+    holder_body = bodies.get("vorton_drop_StructuralHolder")
     if holder_body is not None:
         masked_holder = mask_c_strings_and_comments(holder_body)
         holder_slots = re.findall(
-            r"\bring_drop\s*\(\s*\(\(void\s*\*\s*\*\)p\)"
+            r"\bvorton_drop\s*\(\s*\(\(void\s*\*\s*\*\)p\)"
             r"\s*\[\s*([0-9]+)\s*\]\s*\)",
             masked_holder,
         )
         if holder_slots != ["1"]:
             errors.append(
-                "ring_drop_StructuralHolder must drop exactly owned slot 1; "
+                "vorton_drop_StructuralHolder must drop exactly owned slot 1; "
                 f"found slots {holder_slots}")
 
     choice_body, extract_error = extract_c_function_body(
-        c_source, "ring_drop_StructuralChoice")
+        c_source, "vorton_drop_StructuralChoice")
     if extract_error:
         errors.append(extract_error)
     else:
         count_error = exact_rc_error(
-            "ring_drop_StructuralChoice", choice_body, (0, 1))
+            "vorton_drop_StructuralChoice", choice_body, (0, 1))
         if count_error:
             errors.append(count_error)
         cases, case_error = extract_c_switch_cases(choice_body)
         if case_error:
-            errors.append(f"ring_drop_StructuralChoice: {case_error}")
+            errors.append(f"vorton_drop_StructuralChoice: {case_error}")
         elif set(cases) != {"0", "1", "default"}:
             errors.append(
-                "ring_drop_StructuralChoice labels differ from "
+                "vorton_drop_StructuralChoice labels differ from "
                 f"0/1/default: {sorted(cases)}")
         else:
             for label, expected in (("0", (0, 0)), ("1", (0, 1)),
                                     ("default", (0, 0))):
                 count_error = exact_rc_error(
-                    f"ring_drop_StructuralChoice case {label}",
+                    f"vorton_drop_StructuralChoice case {label}",
                     cases[label], expected)
                 if count_error:
                     errors.append(count_error)
             masked_owned = mask_c_strings_and_comments(cases["1"])
             owned_slots = re.findall(
-                r"\bring_drop\s*\(\s*\(\(void\s*\*\s*\*\)p\)"
+                r"\bvorton_drop\s*\(\s*\(\(void\s*\*\s*\*\)p\)"
                 r"\s*\[\s*([0-9]+)\s*\]\s*\)",
                 masked_owned,
             )
@@ -4987,7 +4987,7 @@ def identity_ledger_contract_errors(
             r"closure_ref: CTypedRef,", cexpr):
         errors.append("gen_c_closure_call regained an untyped/raw overload")
 
-    domain_shape_body, domain_shape_error = extract_ring_function_body(
+    domain_shape_body, domain_shape_error = extract_vorton_function_body(
         cctx, "validate_identity_domain_shape")
     if domain_shape_error:
         errors.append(domain_shape_error)
@@ -5000,7 +5000,7 @@ def identity_ledger_contract_errors(
             if token not in domain_shape_body:
                 errors.append(
                     f"validate_identity_domain_shape: missing {token!r}")
-    typed_ref_body, typed_ref_error = extract_ring_function_body(
+    typed_ref_body, typed_ref_error = extract_vorton_function_body(
         cctx, "validate_c_typed_ref")
     if typed_ref_error:
         errors.append(typed_ref_error)
@@ -5040,7 +5040,7 @@ def identity_ledger_contract_errors(
         ),
     }
     for function_name, tokens in atomic_helpers.items():
-        body, extract_error = extract_ring_function_body(cexpr, function_name)
+        body, extract_error = extract_vorton_function_body(cexpr, function_name)
         if extract_error:
             errors.append(extract_error)
             continue
@@ -5050,7 +5050,7 @@ def identity_ledger_contract_errors(
                     f"{function_name}: atomic C/event token {token!r} "
                     f"matched {body.count(token)} times")
 
-    receiver_body, receiver_error = extract_ring_function_body(
+    receiver_body, receiver_error = extract_vorton_function_body(
         cexpr, "emit_c_receiver_load")
     if receiver_error:
         errors.append(receiver_error)
@@ -5071,7 +5071,7 @@ def identity_ledger_contract_errors(
                 receiver_body.index(domain_anchor) > receiver_body.index(emit_anchor)):
             errors.append("receiver role/domain validation occurs after C emission")
 
-    shape_body, shape_error = extract_ring_function_body(
+    shape_body, shape_error = extract_vorton_function_body(
         cctx, "validate_identity_event_shape")
     if shape_error:
         errors.append(shape_error)
@@ -5094,7 +5094,7 @@ def identity_ledger_contract_errors(
                 errors.append(
                     f"validate_identity_event_shape: missing {token!r}")
 
-    relation_body, relation_error = extract_ring_function_body(
+    relation_body, relation_error = extract_vorton_function_body(
         cctx, "validate_identity_ledger")
     if relation_error:
         errors.append(relation_error)
@@ -5121,10 +5121,10 @@ def identity_ledger_contract_errors(
         errors.append("all seven typed-reference constructors must validate shape")
     for token in (
         "exact local has an empty source name",
-        "exact local '${ring_name}' has sentinel DefId",
+        "exact local '${vorton_name}' has sentinel DefId",
         "name-only local has an empty canonical key",
         "exact parameter has an empty source name",
-        "exact parameter '${ring_name}' has sentinel DefId",
+        "exact parameter '${vorton_name}' has sentinel DefId",
         "name-only parameter has an empty canonical key",
         "name-only registration has an empty key/slot",
         "typed reference has an empty slot/invalid load id",
@@ -5149,7 +5149,7 @@ def identity_ledger_contract_errors(
             errors.append(
                 f"H+T event {token!r} has caller-created/bypassed count "
                 f"{cexpr.count(token)}")
-        owner_body, owner_error = extract_ring_function_body(cexpr, owner)
+        owner_body, owner_error = extract_vorton_function_body(cexpr, owner)
         if owner_error is None and token not in owner_body:
             errors.append(f"H+T event {token!r} is not owned by {owner}")
         if token in cgen or token in cli:
@@ -5191,7 +5191,7 @@ def identity_ledger_contract_errors(
         ("gen_c_dict_closure_wrapper", 1),
         ("ensure_c_wrapped_method_thunk", 2),
     ):
-        body, extract_error = extract_ring_function_body(cexpr, function_name)
+        body, extract_error = extract_vorton_function_body(cexpr, function_name)
         if extract_error:
             errors.append(extract_error)
         elif body.count(wrapper_env_token) != expected:
@@ -5205,7 +5205,7 @@ def identity_ledger_contract_errors(
         errors.append("hidden ledger flag is not one exact boolean parser arm")
     if "--internal-c-identity-ledger=" in cli:
         errors.append("hidden ledger flag regained a value/path form")
-    usage_body, usage_error = extract_ring_function_body(cli, "usage")
+    usage_body, usage_error = extract_vorton_function_body(cli, "usage")
     if usage_error:
         errors.append(usage_error)
     elif "internal-c-identity-ledger" in usage_body:
@@ -5222,7 +5222,7 @@ def identity_ledger_contract_errors(
         errors.append("ledger relation/write boundary missing")
     elif cgen.index(relation_anchor) > cgen.index(write_anchor):
         errors.append("ledger write can precede relation validation")
-    write_body, write_error = extract_ring_function_body(
+    write_body, write_error = extract_vorton_function_body(
         cgen, "c_write_and_compile")
     if write_error:
         errors.append(write_error)
@@ -5298,7 +5298,7 @@ def identity_ledger_contract_errors(
         "if ledger_path.exists()",
         "create_one_shot_archive(case_root, archive_path)",
         "canonicalize_identity_stdout_root(",
-        'IDENTITY_EVIDENCE_ROOT_ENV = "RING_IDENTITY_EVIDENCE_ROOT"',
+        'IDENTITY_EVIDENCE_ROOT_ENV = "VORTON_IDENTITY_EVIDENCE_ROOT"',
         "evidence_root, evidence_error = identity_checkpoint_evidence_root()",
         "callable_identity_generated_c_errors(\n            candidate, evidence_root, evidence_log)",
         "audit_one_shot_attempt(evidence_dir)",
@@ -5343,8 +5343,8 @@ def identity_ledger_contract_errors(
     ) is None:
         errors.append("identity candidate lacks executable exclusive archive path")
     for rejected in (
-        "TemporaryDirectory" + '(prefix="ring_identity_ledger_"',
-        "TemporaryDirectory" + '(prefix="ring_identity_rc_"',
+        "TemporaryDirectory" + '(prefix="vorton_identity_ledger_"',
+        "TemporaryDirectory" + '(prefix="vorton_identity_rc_"',
     ):
         if rejected in runner:
             errors.append("identity candidate evidence regained auto-cleanup root")
@@ -5387,12 +5387,12 @@ def identity_ledger_contract_errors(
         r"(?:\{(?!\s*\.\.\s*\})[^{}\n]+\}|"
         r"\(\s*(?!\s*\))[^()\n]+\))\s*\|(?!\|)")
     for source_name, function_name in h_t_functions:
-        body, extract_error = extract_ring_function_body(
+        body, extract_error = extract_vorton_function_body(
             sources[source_name], function_name)
         if extract_error:
             errors.append(extract_error)
             continue
-        if payload_or_pattern.search(mask_ring_strings_and_comments(body)):
+        if payload_or_pattern.search(mask_vorton_strings_and_comments(body)):
             errors.append(
                 f"{source_name}.{function_name}: payload-binding OrPattern "
                 "breaks tracked-gen0 crossing")
@@ -5602,15 +5602,15 @@ def identity_checkpoint_contract_errors(
             "--internal-c-identity-ledger is single-file only",
         ),
         "provenance_fixture": (
-            "fn __ring_T_Ord(mut value: Int)",
+            "fn __vorton_T_Ord(mut value: Int)",
             "fn direct_global_with_ord_evidence<T: Ord>",
             "fn nested_trait_collision<T: Ord>",
-            "let __ring_T_Ord = fn(value: Int)",
-            "let __ring_self_ProvenanceTrait = fn()",
-            "let __ring_ev_E = fn()",
+            "let __vorton_T_Ord = fn(value: Int)",
+            "let __vorton_self_ProvenanceTrait = fn()",
+            "let __vorton_ev_E = fn()",
             "let inner = fn()",
             "trait dictlocal_1",
-            "enum ring",
+            "enum vorton",
             "fn dynamic_static_dict_collision<T: Eq>",
         ),
     }
@@ -5648,10 +5648,10 @@ def identity_checkpoint_contract_errors(
             ("cgen", "compute_transitive_effect_closure"),
             ("cgen", "compute_project_effect_closure"),
             ("cgen", "register_effect_ops_c")):
-        if token in mask_ring_strings_and_comments(sources[label]):
+        if token in mask_vorton_strings_and_comments(sources[label]):
             errors.append(f"{label}: retired effect authority {token!r} remains")
     for token in (
-            '"Effect operation bodies are not supported in Ring 0.1"',
+            '"Effect operation bodies are not supported in Vorton 0.1"',
             "let _ = self.parse_block_expr()",
             "ops.push(EffectOpDecl { name: op_name, params: params,"):
         if token not in sources["parser"]:
@@ -5662,7 +5662,7 @@ def identity_checkpoint_contract_errors(
         if count != expected:
             errors.append(
                 f"{label}: CalleeRef transport count was {count}, expected {expected}")
-    builtin_value_body, builtin_value_error = extract_ring_function_body(
+    builtin_value_body, builtin_value_error = extract_vorton_function_body(
         sources["builtins"], "checker_only_builtin_values")
     if builtin_value_error:
         errors.append(builtin_value_error)
@@ -5687,7 +5687,7 @@ def identity_checkpoint_contract_errors(
             [name for _, name in builtin_fields] != ["name", "symbol"] or
             any(is_public for is_public, _ in builtin_fields)):
         errors.append("builtins: checker-only value carrier is forgeable")
-    checker_ctx_body, checker_ctx_error = extract_ring_function_body(
+    checker_ctx_body, checker_ctx_error = extract_vorton_function_body(
         sources["checker"], "new_infer_ctx")
     if checker_ctx_error:
         errors.append(checker_ctx_error)
@@ -5753,7 +5753,7 @@ def identity_checkpoint_contract_errors(
         key = (label, function_name)
         body = crossing_bodies.get(key)
         if body is None:
-            body, extract_error = extract_ring_function_body(
+            body, extract_error = extract_vorton_function_body(
                 sources[label], function_name)
             if extract_error:
                 errors.append(extract_error)
@@ -5771,7 +5771,7 @@ def identity_checkpoint_contract_errors(
                 f"{body.count(helper)} times")
         combined = re.compile(
             rf"{re.escape(left)}\s*\|\s*{re.escape(right)}")
-        if combined.search(mask_ring_strings_and_comments(body)):
+        if combined.search(mask_vorton_strings_and_comments(body)):
             errors.append(
                 f"{function_name}: payload-binding OrPattern arm regained")
 
@@ -5780,7 +5780,7 @@ def identity_checkpoint_contract_errors(
         r"(?:\{(?!\s*\.\.\s*\})[^{}\n]+\}|"
         r"\(\s*(?!\s*\))[^()\n]+\))\s*\|(?!\|)")
     for (label, function_name), body in crossing_bodies.items():
-        match = payload_or_pattern.search(mask_ring_strings_and_comments(body))
+        match = payload_or_pattern.search(mask_vorton_strings_and_comments(body))
         if match is not None:
             errors.append(
                 f"{label}.{function_name}: payload-binding source OrPattern "
@@ -5791,7 +5791,7 @@ def identity_checkpoint_contract_errors(
             "C or-pattern lowering must have one shared-slot helper and "
             "two success-edge calls")
 
-    assign_body, assign_error = extract_ring_function_body(
+    assign_body, assign_error = extract_vorton_function_body(
         sources["cexpr"], "emit_c_assign")
     if assign_error:
         errors.append(assign_error)
@@ -5801,7 +5801,7 @@ def identity_checkpoint_contract_errors(
         if "ctx.named_values" in assign_body:
             errors.append("DefId-bearing C assignment regained a name fallback")
 
-    call_body, call_error = extract_ring_function_body(
+    call_body, call_error = extract_vorton_function_body(
         sources["cexpr"], "gen_c_call")
     if call_error:
         errors.append(call_error)
@@ -5833,7 +5833,7 @@ def identity_checkpoint_contract_errors(
             "let name_only_local_callee = match callee"):
         errors.append("exact callee miss panic occurs after a name/global route")
 
-    direct_body, direct_error = extract_ring_function_body(
+    direct_body, direct_error = extract_vorton_function_body(
         sources["cexpr"], "gen_c_direct_call")
     if direct_error:
         errors.append(direct_error)
@@ -5843,7 +5843,7 @@ def identity_checkpoint_contract_errors(
     ):
         errors.append("direct/global call regained ambient name-only lookup")
 
-    zonk_direct_body, zonk_direct_error = extract_ring_function_body(
+    zonk_direct_body, zonk_direct_error = extract_vorton_function_body(
         sources["zonk"], "zonk_direct_callee")
     if zonk_direct_error:
         errors.append(zonk_direct_error)
@@ -5856,7 +5856,7 @@ def identity_checkpoint_contract_errors(
             "                            clear_zonk_local_callee_marker(ident)")):
         errors.append("final zonk direct/extern/local marker authority drifted")
 
-    marker_body, marker_error = extract_ring_function_body(
+    marker_body, marker_error = extract_vorton_function_body(
         sources["zonk"], "mark_zonk_direct_callee")
     if marker_error:
         errors.append(marker_error)
@@ -5866,14 +5866,14 @@ def identity_checkpoint_contract_errors(
     ):
         errors.append("direct callee marker regained spelling-based authority")
 
-    clear_marker_body, clear_marker_error = extract_ring_function_body(
+    clear_marker_body, clear_marker_error = extract_vorton_function_body(
         sources["zonk"], "clear_zonk_local_callee_marker")
     if clear_marker_error:
         errors.append(clear_marker_error)
     elif "dict_closure_dicts: none" not in clear_marker_body:
         errors.append("LocalBorrow direct callee can retain a direct marker")
 
-    resolve_value_body, resolve_value_error = extract_ring_function_body(
+    resolve_value_body, resolve_value_error = extract_vorton_function_body(
         sources["infer_helpers"], "resolve_value_ident")
     if resolve_value_error:
         errors.append(resolve_value_error)
@@ -5883,7 +5883,7 @@ def identity_checkpoint_contract_errors(
             "callee: getter")):
         errors.append("ConstGetter synthetic direct Call lacks explicit marker")
 
-    map_index_body, map_index_error = extract_ring_function_body(
+    map_index_body, map_index_error = extract_vorton_function_body(
         sources["infer"], "infer_index_expr")
     if map_index_error:
         errors.append(map_index_error)
@@ -5899,7 +5899,7 @@ def identity_checkpoint_contract_errors(
             'let mut sig_parts: List<Str> = ["void* env"]',
             "let edge = c_new_closure_edge(ctx, lambda_name)",
             "emit_c_capture_extract(ctx, edge, identity, dest, i + 1)",
-            'c_emit(ctx, "${env} = ring_alloc((int64_t)(sizeof(int64_t) + ${captures.len()} * sizeof(void*)), 15);")',
+            'c_emit(ctx, "${env} = vorton_alloc((int64_t)(sizeof(int64_t) + ${captures.len()} * sizeof(void*)), 15);")',
             'c_emit(ctx, "*(int64_t*)${env} = ${captures.len()};")',
             "emit_c_capture_store(ctx, edge, identity, env_ref, i + 1)",
             "emit_c_closure_construction(\n        ctx, edge, env_ref, lambda_name)",
@@ -5928,7 +5928,7 @@ def identity_checkpoint_contract_errors(
         )),
     )
     for function_name, manifest in emitter_manifests:
-        body, extract_error = extract_ring_function_body(
+        body, extract_error = extract_vorton_function_body(
             sources["cexpr"], function_name)
         if extract_error:
             errors.append(extract_error)
@@ -5939,7 +5939,7 @@ def identity_checkpoint_contract_errors(
                     f"{function_name}: finite C grammar anchor {token!r} "
                     f"matched {body.count(token)} times")
 
-    stmt_body, stmt_error = extract_ring_function_body(
+    stmt_body, stmt_error = extract_vorton_function_body(
         sources["cexpr"], "emit_c_stmt")
     if stmt_error:
         errors.append(stmt_error)
@@ -5951,7 +5951,7 @@ def identity_checkpoint_contract_errors(
         # One Let and one Var arm; the Let arm must have no second init read.
         errors.append("statement lowering changed the exact one-read-per-init contract")
 
-    lambda_body, lambda_error = extract_ring_function_body(
+    lambda_body, lambda_error = extract_vorton_function_body(
         sources["cexpr"], "gen_c_lambda")
     if lambda_error:
         errors.append(lambda_error)
@@ -6005,7 +6005,7 @@ def identity_checkpoint_contract_errors(
             "none => {}",
         )),
     ):
-        body, extract_error = extract_ring_function_body(
+        body, extract_error = extract_vorton_function_body(
             sources["cexpr"], function_name)
         if extract_error:
             errors.append(extract_error)
@@ -6019,14 +6019,14 @@ def identity_checkpoint_contract_errors(
             errors.append(
                 f"{function_name}: exact/global route consults name-only state")
 
-    dict_id_body, dict_id_error = extract_ring_function_body(
+    dict_id_body, dict_id_error = extract_vorton_function_body(
         sources["cexpr"], "c_is_name_only_dict_def_id")
     if dict_id_error:
         errors.append(dict_id_error)
     elif "is_synthetic_dict_def_id(id)" not in dict_id_body:
         errors.append("Dict name-only provenance is not the synthetic DefId namespace")
 
-    resolve_dict_body, resolve_dict_error = extract_ring_function_body(
+    resolve_dict_body, resolve_dict_error = extract_vorton_function_body(
         sources["cexpr"], "c_resolve_dict_ref")
     if resolve_dict_error:
         errors.append(resolve_dict_error)
@@ -6048,7 +6048,7 @@ def identity_checkpoint_contract_errors(
         if "DictRef::Static(n) => c_ref_static(resolve_c_static_dict(ctx, n), n)" not in resolve_dict_body:
             errors.append("DictRef::Static no longer selects singleton resolution")
 
-    dispatch_body, dispatch_error = extract_ring_function_body(
+    dispatch_body, dispatch_error = extract_vorton_function_body(
         sources["cexpr"], "resolve_c_dispatch_dict")
     if dispatch_error:
         errors.append(dispatch_error)
@@ -6060,7 +6060,7 @@ def identity_checkpoint_contract_errors(
     elif "DictRef::Simple(dict)" in dispatch_body:
         errors.append("TraitDispatch::Direct base regained name-only resolution")
 
-    dispatch_capture_body, dispatch_capture_error = extract_ring_function_body(
+    dispatch_capture_body, dispatch_capture_error = extract_vorton_function_body(
         sources["cexpr"], "collect_c_dispatch_dict")
     if dispatch_capture_error:
         errors.append(dispatch_capture_error)
@@ -6072,7 +6072,7 @@ def identity_checkpoint_contract_errors(
     elif "ctx, dict" in dispatch_capture_body:
         errors.append("TraitDispatch::Direct static base is captured")
 
-    dictref_capture_body, dictref_capture_error = extract_ring_function_body(
+    dictref_capture_body, dictref_capture_error = extract_vorton_function_body(
         sources["cexpr"], "collect_c_dictref_names")
     if dictref_capture_error:
         errors.append(dictref_capture_error)
@@ -6084,7 +6084,7 @@ def identity_checkpoint_contract_errors(
     elif "ctx, dict" in dictref_capture_body:
         errors.append("DictRef::Wrapped static base is captured")
 
-    bound_dispatch_body, bound_dispatch_error = extract_ring_function_body(
+    bound_dispatch_body, bound_dispatch_error = extract_vorton_function_body(
         sources["cexpr"], "gen_c_bound_method_call")
     if bound_dispatch_error:
         errors.append(bound_dispatch_error)
@@ -6097,7 +6097,7 @@ def identity_checkpoint_contract_errors(
             "method_call_ref_name", "trait_method_order", "c_builtin_method_index")):
         errors.append("bound method dispatch regained name/order fallback")
 
-    derived_resolve_body, derived_resolve_error = extract_ring_function_body(
+    derived_resolve_body, derived_resolve_error = extract_vorton_function_body(
         sources["cgen"], "resolve_c_dict_for_derived")
     if derived_resolve_error:
         errors.append(derived_resolve_error)
@@ -6108,11 +6108,11 @@ def identity_checkpoint_contract_errors(
     ):
         errors.append("derived FieldAction base does not retain DictRef provenance")
 
-    wildcard_body, wildcard_error = extract_ring_function_body(
+    wildcard_body, wildcard_error = extract_vorton_function_body(
         sources["cexpr"], "c_for_binding_local")
     if wildcard_error:
         errors.append(wildcard_error)
-    elif "fresh_tmp(ctx)" not in wildcard_body or "__ring_for_wildcard" in wildcard_body:
+    elif "fresh_tmp(ctx)" not in wildcard_body or "__vorton_for_wildcard" in wildcard_body:
         errors.append("for wildcard regained an ambient name-only binding")
 
     for source_name in ("hir", "infer", "infer_decl", "dict", "cexpr"):
@@ -6144,7 +6144,7 @@ def identity_checkpoint_contract_errors(
             "                    trait_bound_param_name(param_name, \"Hash\"))"
         )),
     ):
-        body, extract_error = extract_ring_function_body(
+        body, extract_error = extract_vorton_function_body(
             sources["derive"], function_name)
         if extract_error:
             errors.append(extract_error)
@@ -6154,13 +6154,13 @@ def identity_checkpoint_contract_errors(
 
     direct_fixture_contract = (
         "fn direct_global_with_ord_evidence<T: Ord>(left: T, right: T) -> Int {\n"
-        "    if left < right { __ring_T_Ord(5) } else { 0 }\n"
+        "    if left < right { __vorton_T_Ord(5) } else { 0 }\n"
         "}")
     if sources["provenance_fixture"].count(direct_fixture_contract) != 1:
         errors.append(
             "direct global/evidence fixture regained a same-named local or lost a route")
 
-    mut_flags_body, mut_flags_error = extract_ring_function_body(
+    mut_flags_body, mut_flags_error = extract_vorton_function_body(
         sources["cexpr"], "c_lookup_call_mut_flags")
     if mut_flags_error:
         errors.append(mut_flags_error)
@@ -6181,7 +6181,7 @@ def identity_checkpoint_contract_errors(
             errors.append(
                 "exact/local callable mut flags are not gated before module metadata")
 
-    name_match_body, name_match_error = extract_ring_function_body(
+    name_match_body, name_match_error = extract_vorton_function_body(
         sources["cexpr"], "c_match_name_only_slot")
     if name_match_error:
         errors.append(name_match_error)
@@ -6198,7 +6198,7 @@ def identity_checkpoint_contract_errors(
         elif name_match_body.index(resolved_lookup) > name_match_body.index(bare_lookup):
             errors.append("bare name-only key precedes resolved canonical key")
 
-    name_only_body, name_only_error = extract_ring_function_body(
+    name_only_body, name_only_error = extract_vorton_function_body(
         sources["cctx"], "c_name_only_value")
     if name_only_error:
         errors.append(name_only_error)
@@ -6208,16 +6208,16 @@ def identity_checkpoint_contract_errors(
     ):
         errors.append("backend name-only lookup is not an independent slot map")
 
-    exact_local_body, exact_local_error = extract_ring_function_body(
+    exact_local_body, exact_local_error = extract_vorton_function_body(
         sources["cctx"], "c_local_def")
     if exact_local_error:
         errors.append(exact_local_error)
     elif "name_only_slots" in exact_local_body:
         errors.append("exact source local registration contaminates name-only slots")
 
-    push_body, push_error = extract_ring_function_body(
+    push_body, push_error = extract_vorton_function_body(
         sources["cctx"], "c_push_fn")
-    pop_body, pop_error = extract_ring_function_body(
+    pop_body, pop_error = extract_vorton_function_body(
         sources["cctx"], "c_pop_fn")
     if push_error:
         errors.append(push_error)
@@ -6235,7 +6235,7 @@ def identity_checkpoint_contract_errors(
                 errors.append(
                     f"c_push/c_pop does not independently restore {domain}")
 
-    direct_predicate_body, direct_predicate_error = extract_ring_function_body(
+    direct_predicate_body, direct_predicate_error = extract_vorton_function_body(
         sources["hir"], "is_exact_direct_call_ident")
     if direct_predicate_error:
         errors.append(direct_predicate_error)
@@ -6255,7 +6255,7 @@ def identity_checkpoint_contract_errors(
             "def_id: some(trait_param_def_id)",
         )),
     ):
-        body, extract_error = extract_ring_function_body(
+        body, extract_error = extract_vorton_function_body(
             sources["infer_decl"], function_name)
         if extract_error:
             errors.append(extract_error)
@@ -6266,7 +6266,7 @@ def identity_checkpoint_contract_errors(
                         f"{function_name}: exact declaration parameter contract "
                         f"{token!r} matched {body.count(token)} times")
 
-    bind_pattern_body, bind_pattern_error = extract_ring_function_body(
+    bind_pattern_body, bind_pattern_error = extract_vorton_function_body(
         sources["infer_ctx"], "bind_pattern")
     if bind_pattern_error:
         errors.append(bind_pattern_error)
@@ -6293,7 +6293,7 @@ def identity_checkpoint_contract_errors(
         ("infer_catch", "catch_pattern"),
         ("infer_if_let_from_result", "iflet_pattern"),
     ):
-        body, extract_error = extract_ring_function_body(
+        body, extract_error = extract_vorton_function_body(
             sources["infer"], function_name)
         if extract_error:
             errors.append(extract_error)
@@ -6320,7 +6320,7 @@ def identity_checkpoint_contract_errors(
         ),
         "cctx": ("exact_value_names", "name_only_values"),
         "cexpr": (
-            'starts_with("__ring_dictlocal_")',
+            'starts_with("__vorton_dictlocal_")',
             "let is_name_only_dict = match init",
             "c_is_name_only_dict_init",
             "init_for_classification",
@@ -6328,7 +6328,7 @@ def identity_checkpoint_contract_errors(
             "cap.def_id",
             "cap.name",
             "DictRef::Simple(dict)",
-            'c_local(ctx, "__ring_for_wildcard")',
+            'c_local(ctx, "__vorton_for_wildcard")',
         ),
         "cgen": ("FieldAction::Call { dict_name",),
     }
@@ -6354,7 +6354,7 @@ def identity_candidate_case_root(parent: Path, case_name: str) -> Path:
     return case_root
 
 
-_IDENTITY_ROOT_TOKEN = b"@RING_IDENTITY_FRESH_ROOT@"
+_IDENTITY_ROOT_TOKEN = b"@VORTON_IDENTITY_FRESH_ROOT@"
 
 
 def canonicalize_identity_stdout_root(
@@ -6422,11 +6422,11 @@ def identity_stdout_canonicalization_errors() -> List[str]:
         changed_diagnostic, root, expected_count=1)
     if changed_error or changed == canonical:
         errors.append("non-path diagnostic mutation was normalized away")
-    unrelated = b"candidate=C:/tools/ring.exe source=C:/src/input.ring\n" + valid
+    unrelated = b"candidate=C:/tools/vorton.exe source=C:/src/input.vorton\n" + valid
     unrelated_canonical, unrelated_error = canonicalize_identity_stdout_root(
         unrelated, root, expected_count=1)
     if unrelated_error or unrelated_canonical is None or not unrelated_canonical.startswith(
-            b"candidate=C:/tools/ring.exe source=C:/src/input.ring\n"):
+            b"candidate=C:/tools/vorton.exe source=C:/src/input.vorton\n"):
         errors.append("canonicalizer touched candidate/source/tool paths")
     return errors
 
@@ -6447,7 +6447,7 @@ class IdentityCandidateArtifacts:
 
 
 def run_identity_candidate_mode(
-    ring_exe: str, fixture: str, case_root: Path, evidence_log: List[str],
+    vorton_exe: str, fixture: str, case_root: Path, evidence_log: List[str],
     *, ledger: bool,
 ) -> Tuple[Optional[IdentityCandidateArtifacts], Optional[str]]:
     mode = "on" if ledger else "off"
@@ -6475,7 +6475,7 @@ def run_identity_candidate_mode(
     environment.pop(IDENTITY_CANDIDATE_ENV, None)
     environment.pop(IDENTITY_EVIDENCE_ROOT_ENV, None)
     argv = [
-        str(Path(ring_exe).resolve()), "build", str(fixture_path),
+        str(Path(vorton_exe).resolve()), "build", str(fixture_path),
         "--target=c", f"--out-dir={out_dir}", "--no-c-lines",
     ]
     if ledger:
@@ -6621,12 +6621,12 @@ def coff_object_timestamp_equality_errors(
 
 
 def callable_identity_generated_c_errors(
-    ring_exe: str, evidence_root: Path, evidence_log: List[str],
+    vorton_exe: str, evidence_root: Path, evidence_log: List[str],
 ) -> List[str]:
     """Run off/on/on H+T acceptance through durable one-shot receipts."""
     errors: List[str] = []
-    fixture = "tests/cases/provenance_b_capture_identity.ring"
-    candidate_before = _sha256_file(Path(ring_exe))
+    fixture = "tests/cases/provenance_b_capture_identity.vorton"
+    candidate_before = _sha256_file(Path(vorton_exe))
     runs: List[IdentityCandidateArtifacts] = []
     for case_name, ledger in (("off", False), ("on1", True), ("on2", True)):
         try:
@@ -6635,7 +6635,7 @@ def callable_identity_generated_c_errors(
             errors.append(str(exc))
             return errors
         artifacts, run_error = run_identity_candidate_mode(
-            ring_exe, fixture, case_root, evidence_log, ledger=ledger)
+            vorton_exe, fixture, case_root, evidence_log, ledger=ledger)
         if run_error:
             errors.append(run_error)
             return errors
@@ -6687,23 +6687,23 @@ def callable_identity_generated_c_errors(
                         f"identity ledger fixture omitted {required} domain")
             keys = {event.canonical_key for event in ledger_events}
             for required_key in (
-                "__ring_T_Ord", "__ring_self_ProvenanceTrait", "__ring_ev_E"):
+                "__vorton_T_Ord", "__vorton_self_ProvenanceTrait", "__vorton_ev_E"):
                 if required_key not in keys:
                     errors.append(
                         f"identity ledger omitted receiver key {required_key}")
         ledger_path_token = str(on1.case_root).encode("utf-8")
         for label, data in (
             ("C", on1.c_bytes), ("object", on1.object_bytes)):
-            if b"RING-C-IDENTITY-LEDGER" in data or ledger_path_token in data:
+            if b"VORTON-C-IDENTITY-LEDGER" in data or ledger_path_token in data:
                 errors.append(f"identity ledger path/content leaked into {label}")
 
-    if _sha256_file(Path(ring_exe)) != candidate_before:
+    if _sha256_file(Path(vorton_exe)) != candidate_before:
         errors.append("candidate executable changed across off/on ledger runs")
     return errors
 
 
-IR_IDENTITY_F0_PATH = REPO / "compiler" / "ir_identity.ring"
-RESOURCE_MODEL_F0_PATH = REPO / "compiler" / "resource_model.ring"
+IR_IDENTITY_F0_PATH = REPO / "compiler" / "ir_identity.vorton"
+RESOURCE_MODEL_F0_PATH = REPO / "compiler" / "resource_model.vorton"
 F0_SEMANTIC_MUTATION_COUNT = 42
 F0_SCOPE_GUARD_COUNT = 9
 
@@ -6711,7 +6711,7 @@ F0_SCOPE_GUARD_COUNT = 9
 def _f0_function_span(
     source: str, function_name: str,
 ) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     pattern = re.compile(
         rf"\bfn\s+{re.escape(function_name)}\s*"
         rf"\([^{{}}]*\)[^{{}}\n]*\{{")
@@ -6756,7 +6756,7 @@ def _f0_mutate_function_once(
 def _f0_const_list_span(
     source: str, name: str,
 ) -> Tuple[Optional[Tuple[int, int]], Optional[str]]:
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     pattern = re.compile(
         rf"\bconst\s+{re.escape(name)}\s*:\s*List<(?:Int|Bool)>\s*=\s*\[")
     matches = list(pattern.finditer(masked))
@@ -6823,7 +6823,7 @@ def _f0_replace_const_list(
 def _f0_struct_fields(
     source: str, name: str,
 ) -> Tuple[Optional[List[Tuple[bool, str]]], Optional[str]]:
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     pattern = re.compile(rf"\bpub\s+struct\s+{re.escape(name)}\s*\{{")
     matches = list(pattern.finditer(masked))
     if len(matches) != 1:
@@ -6900,7 +6900,7 @@ def _f0_require_function_tokens(
 
 def ir_identity_f0_contract_errors(source: str) -> List[str]:
     errors: List[str] = []
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     if re.search(r"(?m)^\s*use\s+", masked):
         errors.append("IR identity F0 imports another compiler module")
     for forbidden in (
@@ -7049,7 +7049,7 @@ def ir_identity_f0_contract_errors(source: str) -> List[str]:
 
 def resource_lattice_f0_contract_errors(source: str) -> List[str]:
     errors: List[str] = []
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     if re.search(r"(?m)^\s*use\s+", masked):
         errors.append("resource lattice F0 imports another compiler module")
     for forbidden in (
@@ -7442,14 +7442,14 @@ def resource_model_f0_source_errors() -> List[str]:
     return errors
 
 
-def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
+def resource_model_f0_compile_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    compiler = Path(ring_exe)
+    compiler = Path(vorton_exe)
     before = _sha256_file(compiler)
-    environment = dict(_controlled_environment(ring_exe))
+    environment = dict(_controlled_environment(vorton_exe))
     for source_path in (IR_IDENTITY_F0_PATH, RESOURCE_MODEL_F0_PATH):
         completed = subprocess.run(
-            [ring_exe, "check", str(source_path)],
+            [vorton_exe, "check", str(source_path)],
             cwd=REPO, env=environment, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="strict", check=False,
@@ -7457,27 +7457,27 @@ def resource_model_f0_compile_errors(ring_exe: str) -> List[str]:
         )
         if completed.returncode != 0:
             errors.append(
-                f"pinned Ring check failed for {display_path(source_path)}: "
+                f"pinned Vorton check failed for {display_path(source_path)}: "
                 f"exit={completed.returncode} stdout={completed.stdout!r} "
                 f"stderr={completed.stderr!r}")
         elif completed.stdout.strip() != "OK" or completed.stderr:
             errors.append(
-                f"pinned Ring check output drifted for "
+                f"pinned Vorton check output drifted for "
                 f"{display_path(source_path)}: stdout={completed.stdout!r} "
                 f"stderr={completed.stderr!r}")
     if _sha256_file(compiler) != before:
-        errors.append("pinned Ring compiler changed across F0 checks")
+        errors.append("pinned Vorton compiler changed across F0 checks")
     return errors
 
 
-IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.ring"
+IR_INVENTORY_F1_PATH = REPO / "compiler" / "ir_inventory.vorton"
 F1_EXECUTABLE_KIND_COUNT = 17
 F1_BINDER_KIND_COUNT = 25
 F1_SEMANTIC_MUTATION_COUNT = 70
 F1_SCOPE_GUARD_COUNT = 13
 
-F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.ring"
-F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.ring"
+F2_U1A_RESOLVER_PATH = REPO / "compiler" / "resolver.vorton"
+F2_U1A_INFER_CTX_PATH = REPO / "compiler" / "infer_ctx.vorton"
 F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT = 55
 F2_U1A_SCOPE_GUARD_COUNT = 8
 F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT = 20
@@ -7550,7 +7550,7 @@ def _f1_require_function_tokens(
 
 def ir_inventory_f1_contract_errors(source: str) -> List[str]:
     errors: List[str] = []
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     imports = re.findall(r"(?m)^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)", masked)
     if imports != ["ir_identity"]:
         errors.append(f"F1 import authority drifted: {imports!r}")
@@ -8110,12 +8110,12 @@ def llm_warning_contract_error(
     return None
 
 
-def _f1_run_ring_check(
-    ring_exe: str, source_path: Path, environment: dict[str, str],
+def _f1_run_vorton_check(
+    vorton_exe: str, source_path: Path, environment: dict[str, str],
     timeout_seconds: int = 120,
     expected_warnings: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Optional[str]:
-    command = [ring_exe, "check", str(source_path)]
+    command = [vorton_exe, "check", str(source_path)]
     if expected_warnings is not None:
         command.append("--error-format=llm")
     try:
@@ -8126,40 +8126,40 @@ def _f1_run_ring_check(
             check=False, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         return (
-            f"pinned Ring check timed out for {source_path} after "
+            f"pinned Vorton check timed out for {source_path} after "
             f"{timeout_seconds}s")
     if completed.returncode != 0:
         return (
-            f"pinned Ring check failed for {source_path}: "
+            f"pinned Vorton check failed for {source_path}: "
             f"exit={completed.returncode} stdout={completed.stdout!r} "
             f"stderr={completed.stderr!r}")
     if completed.stdout != "OK\n":
         return (
-            f"pinned Ring check output drifted for {source_path}: "
+            f"pinned Vorton check output drifted for {source_path}: "
             f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
     if expected_warnings is None:
         if completed.stderr:
             return (
-                f"pinned Ring check output drifted for {source_path}: "
+                f"pinned Vorton check output drifted for {source_path}: "
                 f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
     else:
         warning_error = llm_warning_contract_error(
             completed.stderr, expected_warnings)
         if warning_error is not None:
-            return f"pinned Ring warning drift for {source_path}: {warning_error}"
+            return f"pinned Vorton warning drift for {source_path}: {warning_error}"
     return None
 
 
-def ir_inventory_f1_compile_errors(ring_exe: str) -> List[str]:
+def ir_inventory_f1_compile_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    compiler = Path(ring_exe)
+    compiler = Path(vorton_exe)
     compiler_before = _sha256_file(compiler)
     source = IR_INVENTORY_F1_PATH.read_text(encoding="utf-8")
     identity_source = IR_IDENTITY_F0_PATH.read_text(encoding="utf-8")
-    environment = dict(_controlled_environment(ring_exe))
+    environment = dict(_controlled_environment(vorton_exe))
 
-    original_error = _f1_run_ring_check(
-        ring_exe, IR_INVENTORY_F1_PATH, environment)
+    original_error = _f1_run_vorton_check(
+        vorton_exe, IR_INVENTORY_F1_PATH, environment)
     if original_error:
         errors.append(original_error)
 
@@ -8178,23 +8178,23 @@ def ir_inventory_f1_compile_errors(ring_exe: str) -> List[str]:
             errors.append(
                 f"F1 material mutation findings were {findings!r}, "
                 f"expected only {expected!r}")
-        with tempfile.TemporaryDirectory(prefix="ring_ir_inventory_f1_") as temp:
+        with tempfile.TemporaryDirectory(prefix="vorton_ir_inventory_f1_") as temp:
             compiler_dir = Path(temp) / "compiler"
             compiler_dir.mkdir(parents=False, exist_ok=False)
-            identity_path = compiler_dir / "ir_identity.ring"
-            inventory_path = compiler_dir / "ir_inventory.ring"
+            identity_path = compiler_dir / "ir_identity.vorton"
+            inventory_path = compiler_dir / "ir_inventory.vorton"
             identity_path.write_text(identity_source, encoding="utf-8", newline="\n")
             inventory_path.write_text(mutated, encoding="utf-8", newline="\n")
-            mutation_check_error = _f1_run_ring_check(
-                ring_exe, inventory_path, environment)
+            mutation_check_error = _f1_run_vorton_check(
+                vorton_exe, inventory_path, environment)
             if mutation_check_error:
                 errors.append(mutation_check_error)
     if _sha256_file(compiler) != compiler_before:
-        errors.append("pinned Ring compiler changed across F1 checks")
+        errors.append("pinned Vorton compiler changed across F1 checks")
     return errors
 
 
-CORE_HIR_C0_PATH = REPO / "compiler" / "core_hir.ring"
+CORE_HIR_C0_PATH = REPO / "compiler" / "core_hir.vorton"
 CORE_HIR_C0_MUTATION_COUNT = 29
 CORE_HIR_C0_SCOPE_GUARD_COUNT = 3
 
@@ -8203,7 +8203,7 @@ def core_hir_c0_contract_errors(
     core_source: str, identity_source: str, inventory_source: str,
 ) -> List[str]:
     errors: List[str] = []
-    core_masked = mask_ring_strings_and_comments(core_source)
+    core_masked = mask_vorton_strings_and_comments(core_source)
     imports = re.findall(
         r"(?m)^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)", core_masked)
     if imports != ["ir_identity", "ir_inventory"]:
@@ -8351,17 +8351,17 @@ def core_hir_c0_live_consumer_errors(
     errors: List[str] = []
     consumers: List[str] = []
     for name, source in compiler_sources.items():
-        if name == "core_hir.ring":
+        if name == "core_hir.vorton":
             continue
-        masked = mask_ring_strings_and_comments(source)
+        masked = mask_vorton_strings_and_comments(source)
         if re.search(r"(?m)^\s*use\s+core_hir\b", masked) or (
                 "core_hir::" in masked) or "CoreProgram" in masked:
             consumers.append(name)
-    if consumers != ["builtins.ring"]:
+    if consumers != ["builtins.vorton"]:
         errors.append(
             f"C0 live consumer inventory drifted: {consumers!r}")
 
-    builtins_source = compiler_sources.get("builtins.ring", "")
+    builtins_source = compiler_sources.get("builtins.vorton", "")
     shadow_body, shadow_error = _f0_function_body(
         builtins_source, "validate_builtin_method_core_shadow")
     if shadow_error:
@@ -8375,7 +8375,7 @@ def core_hir_c0_live_consumer_errors(
             if token not in shadow_body:
                 errors.append(f"C0 live consumer misses {token!r}")
 
-    checker_source = compiler_sources.get("checker.ring", "")
+    checker_source = compiler_sources.get("checker.vorton", "")
     load_body, load_error = _f0_function_body(
         checker_source, "load_prelude")
     if load_error:
@@ -8511,10 +8511,10 @@ def core_hir_c0_scope_guard_errors(
 ) -> List[str]:
     errors: List[str] = []
     mutations = (
-        ("main import", "main.ring", "\nuse core_hir::{CoreProgram}\n"),
-        ("checker consumer", "checker.ring",
+        ("main import", "main.vorton", "\nuse core_hir::{CoreProgram}\n"),
+        ("checker consumer", "checker.vorton",
          "\nfn consume_core(value: CoreProgram) {}\n"),
-        ("codegen consumer", "codegen_c.ring",
+        ("codegen consumer", "codegen_c.vorton",
          "\nuse core_hir::{CoreProgram}\n"),
     )
     killed = 0
@@ -8539,7 +8539,7 @@ def core_hir_c0_source_errors() -> List[str]:
         inventory_source = IR_INVENTORY_F1_PATH.read_text(encoding="utf-8")
         compiler_sources = {
             path.name: path.read_text(encoding="utf-8")
-            for path in (REPO / "compiler").glob("*.ring")
+            for path in (REPO / "compiler").glob("*.vorton")
         }
     except (OSError, UnicodeError) as exc:
         return [f"cannot read C0 compiler sources: {exc}"]
@@ -8555,74 +8555,74 @@ def core_hir_c0_source_errors() -> List[str]:
     return errors
 
 
-def core_hir_c0_compile_errors(ring_exe: str) -> List[str]:
+def core_hir_c0_compile_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    compiler = Path(ring_exe).resolve(strict=True)
+    compiler = Path(vorton_exe).resolve(strict=True)
     before = _sha256_file(compiler)
     environment = dict(_controlled_environment(str(compiler)))
     for source_path in (IR_IDENTITY_F0_PATH, CORE_HIR_C0_PATH):
-        error = _f1_run_ring_check(
+        error = _f1_run_vorton_check(
             str(compiler), source_path, environment)
         if error:
             errors.append(error)
     if _sha256_file(compiler) != before:
-        errors.append("pinned Ring compiler changed across C0 checks")
+        errors.append("pinned Vorton compiler changed across C0 checks")
     return errors
 
 
 B201_BUILTIN_METHODS = (
-    ("BUILTIN_METHOD_STR_LEN", "Str", "len", "ring_str_len", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_CONTAINS", "Str", "contains", "ring_str_contains", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_STARTS_WITH", "Str", "starts_with", "ring_str_starts_with", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_ENDS_WITH", "Str", "ends_with", "ring_str_ends_with", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_SLICE", "Str", "slice", "ring_str_slice", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_TRIM", "Str", "trim", "ring_str_trim", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_TO_UPPER", "Str", "to_upper", "ring_str_to_upper", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_TO_LOWER", "Str", "to_lower", "ring_str_to_lower", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_REPLACE", "Str", "replace", "ring_str_replace", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_SPLIT", "Str", "split", "ring_str_split", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_CHAR_AT", "Str", "char_at", "ring_str_char_at", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_INDEX_OF", "Str", "index_of", "ring_str_index_of", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_PAD_START", "Str", "pad_start", "ring_str_pad_start", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_PAD_END", "Str", "pad_end", "ring_str_pad_end", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_REPEAT", "Str", "repeat", "ring_str_repeat", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_CHAR_CODE_AT", "Str", "char_code_at", "ring_str_char_code_at", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_TRIM_START", "Str", "trim_start", "ring_str_trim_start", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_TRIM_END", "Str", "trim_end", "ring_str_trim_end", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_IS_EMPTY", "Str", "is_empty", "ring_str_is_empty", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_STR_LAST_INDEX_OF", "Str", "last_index_of", "ring_str_last_index_of", "register_scalar_method_intrinsics", "str_intrinsics"),
-    ("BUILTIN_METHOD_INT_TO_STR", "Int", "to_str", "ring_int_to_str", "register_scalar_method_intrinsics", "int_intrinsics"),
-    ("BUILTIN_METHOD_FLOAT_TO_STR", "Float", "to_str", "ring_float_to_str", "register_scalar_method_intrinsics", "float_intrinsics"),
-    ("BUILTIN_METHOD_OPTION_UNWRAP_OR", "Option", "unwrap_or", "ring_Option_unwrap_or", "register_option", "intrinsics"),
-    ("BUILTIN_METHOD_OPTION_UNWRAP", "Option", "unwrap", "ring_Option_unwrap", "register_option", "intrinsics"),
-    ("BUILTIN_METHOD_OPTION_IS_SOME", "Option", "is_some", "ring_Option_is_some", "register_option", "intrinsics"),
-    ("BUILTIN_METHOD_OPTION_IS_NONE", "Option", "is_none", "ring_Option_is_none", "register_option", "intrinsics"),
-    ("BUILTIN_METHOD_OPTION_MAP", "Option", "map", "ring_Option_map", "register_option_hof", "intrinsics"),
-    ("BUILTIN_METHOD_OPTION_AND_THEN", "Option", "and_then", "ring_Option_and_then", "register_option_hof", "intrinsics"),
-    ("BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE", "Option", "unwrap_or_else", "ring_Option_unwrap_or_else", "register_option_hof", "intrinsics"),
-    ("BUILTIN_METHOD_OPTION_TO_FAIL", "Option", "to_fail", "ring_Option_to_fail", "register_option", "intrinsics"),
-    ("BUILTIN_METHOD_CELL_GET", "Cell", "get", "ring_Cell_get", "register_cell", "intrinsics"),
-    ("BUILTIN_METHOD_CELL_SET", "Cell", "set", "ring_Cell_set", "register_cell", "intrinsics"),
-    ("BUILTIN_METHOD_CELL_UPDATE", "Cell", "update", "ring_Cell_update", "register_cell", "intrinsics"),
-    ("BUILTIN_METHOD_INT_EQ", "Int", "eq", "ring_cl_eq_int", "register_eq_trait", ""),
-    ("BUILTIN_METHOD_FLOAT_EQ", "Float", "eq", "ring_cl_eq_float", "register_eq_trait", ""),
-    ("BUILTIN_METHOD_STR_EQ", "Str", "eq", "ring_cl_eq_str", "register_eq_trait", ""),
-    ("BUILTIN_METHOD_BOOL_EQ", "Bool", "eq", "ring_cl_eq_bool", "register_eq_trait", ""),
-    ("BUILTIN_METHOD_INT_CLONE", "Int", "clone", "ring_dup", "register_clone_trait", ""),
-    ("BUILTIN_METHOD_FLOAT_CLONE", "Float", "clone", "ring_dup", "register_clone_trait", ""),
-    ("BUILTIN_METHOD_STR_CLONE", "Str", "clone", "ring_dup", "register_clone_trait", ""),
-    ("BUILTIN_METHOD_BOOL_CLONE", "Bool", "clone", "ring_dup", "register_clone_trait", ""),
-    ("BUILTIN_METHOD_INT_CMP", "Int", "cmp", "ring_cl_cmp_int", "register_ord_trait", ""),
-    ("BUILTIN_METHOD_FLOAT_CMP", "Float", "cmp", "ring_cl_cmp_float", "register_ord_trait", ""),
-    ("BUILTIN_METHOD_STR_CMP", "Str", "cmp", "ring_cl_cmp_str", "register_ord_trait", ""),
-    ("BUILTIN_METHOD_BOOL_CMP", "Bool", "cmp", "ring_cl_cmp_bool", "register_ord_trait", ""),
-    ("BUILTIN_METHOD_INT_DEBUG", "Int", "debug", "ring_cl_debug_int", "register_debug_trait", ""),
-    ("BUILTIN_METHOD_FLOAT_DEBUG", "Float", "debug", "ring_cl_debug_float", "register_debug_trait", ""),
-    ("BUILTIN_METHOD_STR_DEBUG", "Str", "debug", "ring_cl_debug_str", "register_debug_trait", ""),
-    ("BUILTIN_METHOD_BOOL_DEBUG", "Bool", "debug", "ring_cl_debug_bool", "register_debug_trait", ""),
-    ("BUILTIN_METHOD_INT_HASH", "Int", "hash", "ring_cl_hash_int_export", "register_hash_trait", ""),
-    ("BUILTIN_METHOD_STR_HASH", "Str", "hash", "ring_cl_hash_str_export", "register_hash_trait", ""),
-    ("BUILTIN_METHOD_BOOL_HASH", "Bool", "hash", "ring_cl_hash_bool_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_STR_LEN", "Str", "len", "vorton_str_len", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CONTAINS", "Str", "contains", "vorton_str_contains", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_STARTS_WITH", "Str", "starts_with", "vorton_str_starts_with", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_ENDS_WITH", "Str", "ends_with", "vorton_str_ends_with", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_SLICE", "Str", "slice", "vorton_str_slice", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM", "Str", "trim", "vorton_str_trim", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TO_UPPER", "Str", "to_upper", "vorton_str_to_upper", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TO_LOWER", "Str", "to_lower", "vorton_str_to_lower", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_REPLACE", "Str", "replace", "vorton_str_replace", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_SPLIT", "Str", "split", "vorton_str_split", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CHAR_AT", "Str", "char_at", "vorton_str_char_at", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_INDEX_OF", "Str", "index_of", "vorton_str_index_of", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_PAD_START", "Str", "pad_start", "vorton_str_pad_start", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_PAD_END", "Str", "pad_end", "vorton_str_pad_end", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_REPEAT", "Str", "repeat", "vorton_str_repeat", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_CHAR_CODE_AT", "Str", "char_code_at", "vorton_str_char_code_at", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM_START", "Str", "trim_start", "vorton_str_trim_start", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_TRIM_END", "Str", "trim_end", "vorton_str_trim_end", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_IS_EMPTY", "Str", "is_empty", "vorton_str_is_empty", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_STR_LAST_INDEX_OF", "Str", "last_index_of", "vorton_str_last_index_of", "register_scalar_method_intrinsics", "str_intrinsics"),
+    ("BUILTIN_METHOD_INT_TO_STR", "Int", "to_str", "vorton_int_to_str", "register_scalar_method_intrinsics", "int_intrinsics"),
+    ("BUILTIN_METHOD_FLOAT_TO_STR", "Float", "to_str", "vorton_float_to_str", "register_scalar_method_intrinsics", "float_intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP_OR", "Option", "unwrap_or", "vorton_Option_unwrap_or", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP", "Option", "unwrap", "vorton_Option_unwrap", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_IS_SOME", "Option", "is_some", "vorton_Option_is_some", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_IS_NONE", "Option", "is_none", "vorton_Option_is_none", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_MAP", "Option", "map", "vorton_Option_map", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_AND_THEN", "Option", "and_then", "vorton_Option_and_then", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_UNWRAP_OR_ELSE", "Option", "unwrap_or_else", "vorton_Option_unwrap_or_else", "register_option_hof", "intrinsics"),
+    ("BUILTIN_METHOD_OPTION_TO_FAIL", "Option", "to_fail", "vorton_Option_to_fail", "register_option", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_GET", "Cell", "get", "vorton_Cell_get", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_SET", "Cell", "set", "vorton_Cell_set", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_CELL_UPDATE", "Cell", "update", "vorton_Cell_update", "register_cell", "intrinsics"),
+    ("BUILTIN_METHOD_INT_EQ", "Int", "eq", "vorton_cl_eq_int", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_EQ", "Float", "eq", "vorton_cl_eq_float", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_STR_EQ", "Str", "eq", "vorton_cl_eq_str", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_BOOL_EQ", "Bool", "eq", "vorton_cl_eq_bool", "register_eq_trait", ""),
+    ("BUILTIN_METHOD_INT_CLONE", "Int", "clone", "vorton_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_CLONE", "Float", "clone", "vorton_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_STR_CLONE", "Str", "clone", "vorton_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_BOOL_CLONE", "Bool", "clone", "vorton_dup", "register_clone_trait", ""),
+    ("BUILTIN_METHOD_INT_CMP", "Int", "cmp", "vorton_cl_cmp_int", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_CMP", "Float", "cmp", "vorton_cl_cmp_float", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_STR_CMP", "Str", "cmp", "vorton_cl_cmp_str", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_BOOL_CMP", "Bool", "cmp", "vorton_cl_cmp_bool", "register_ord_trait", ""),
+    ("BUILTIN_METHOD_INT_DEBUG", "Int", "debug", "vorton_cl_debug_int", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_FLOAT_DEBUG", "Float", "debug", "vorton_cl_debug_float", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_STR_DEBUG", "Str", "debug", "vorton_cl_debug_str", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_BOOL_DEBUG", "Bool", "debug", "vorton_cl_debug_bool", "register_debug_trait", ""),
+    ("BUILTIN_METHOD_INT_HASH", "Int", "hash", "vorton_cl_hash_int_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_STR_HASH", "Str", "hash", "vorton_cl_hash_str_export", "register_hash_trait", ""),
+    ("BUILTIN_METHOD_BOOL_HASH", "Bool", "hash", "vorton_cl_hash_bool_export", "register_hash_trait", ""),
     ("BUILTIN_METHOD_PTR_ADDR", "Ptr", "addr", "", "register_ptr_builtins", "intrinsics"),
     ("BUILTIN_METHOD_PTR_CAST", "Ptr", "cast", "", "register_ptr_builtins", "intrinsics"),
     ("BUILTIN_METHOD_PTR_OFFSET", "Ptr", "offset", "", "register_ptr_builtins", "intrinsics"),
@@ -8647,7 +8647,7 @@ def _b201_function_body(
 def _b201_runtime_names(
     source: str,
 ) -> Tuple[Optional[List[str]], Optional[str]]:
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     pattern = re.compile(
         r"\bconst\s+INTRINSIC_RUNTIME_NAMES\s*:\s*List<Str>\s*=\s*\[")
     matches = list(pattern.finditer(masked))
@@ -8670,19 +8670,19 @@ def builtin_method_intrinsic_contract_errors(
     compiler_sources: Mapping[str, str],
 ) -> List[str]:
     errors: List[str] = []
-    identity = compiler_sources["ir_identity.ring"]
-    builtins = compiler_sources["builtins.ring"]
-    env = compiler_sources["env.ring"]
-    hir = compiler_sources["hir.ring"]
-    hir_exact = compiler_sources["hir_exact.ring"]
-    infer = compiler_sources["infer.ring"]
-    infer_helpers = compiler_sources["infer_helpers.ring"]
-    zonk = compiler_sources["zonk.ring"]
-    core = compiler_sources["core_from_hir.ring"]
-    core_expr = compiler_sources["core_expr.ring"]
-    flow_lower = compiler_sources["flow_lower.ring"]
-    codegen = compiler_sources["codegen_c_expr.ring"]
-    runtime = compiler_sources["ring_runtime.cpp"]
+    identity = compiler_sources["ir_identity.vorton"]
+    builtins = compiler_sources["builtins.vorton"]
+    env = compiler_sources["env.vorton"]
+    hir = compiler_sources["hir.vorton"]
+    hir_exact = compiler_sources["hir_exact.vorton"]
+    infer = compiler_sources["infer.vorton"]
+    infer_helpers = compiler_sources["infer_helpers.vorton"]
+    zonk = compiler_sources["zonk.vorton"]
+    core = compiler_sources["core_from_hir.vorton"]
+    core_expr = compiler_sources["core_expr.vorton"]
+    flow_lower = compiler_sources["flow_lower.vorton"]
+    codegen = compiler_sources["codegen_c_expr.vorton"]
+    runtime = compiler_sources["vorton_runtime.cpp"]
 
     if len(B201_BUILTIN_METHODS) != 58:
         errors.append("B-201 test census is not exact58")
@@ -8736,7 +8736,7 @@ def builtin_method_intrinsic_contract_errors(
         if relation not in ptr_producer:
             errors.append(
                 f"B-201 Ptr resource relation misses {relation!r}")
-    if "scalar_trait_intrinsic_tag" in mask_ring_strings_and_comments(builtins):
+    if "scalar_trait_intrinsic_tag" in mask_vorton_strings_and_comments(builtins):
         errors.append("B-201 scalar intrinsic identity is reconstructed by names")
     if "struct BuiltinImplMethodSpec" not in builtins or not all(
             token in builtins for token in (
@@ -8860,7 +8860,7 @@ def builtin_method_intrinsic_contract_errors(
             errors.append(f"B-201 MethodCallRef equality misses {token!r}")
     if re.search(
             r"Call\s*\{[^{}]*\bmethod_ref\s*:\s*MethodCallRef\?",
-            mask_ring_strings_and_comments(hir)) is None:
+            mask_vorton_strings_and_comments(hir)) is None:
         errors.append("B-201 HExpr::Call lacks exact MethodCallRef carrier")
     hir_validator = _b201_function_body(hir, "validate_hir_expr", errors)
     for token in (
@@ -8895,10 +8895,10 @@ def builtin_method_intrinsic_contract_errors(
             errors.append(f"B-201 zonk relation misses {token!r}")
 
     for file_name, function_name, transport in (
-        ("andor_lower.ring", "al_expr", "method_ref: method_ref"),
-        ("dict_lower.ring", "dl_expr",
+        ("andor_lower.vorton", "al_expr", "method_ref: method_ref"),
+        ("dict_lower.vorton", "dl_expr",
          "method_ref: dl_method_call_ref(method_ref, defs, seen)"),
-        ("zonk.ring", "zonk_expr", "method_ref: zonk_method_call_ref(ctx, method_ref)"),
+        ("zonk.vorton", "zonk_expr", "method_ref: zonk_method_call_ref(ctx, method_ref)"),
     ):
         body = _b201_function_body(
             compiler_sources[file_name], function_name, errors)
@@ -8936,7 +8936,7 @@ def builtin_method_intrinsic_contract_errors(
         errors.append(runtime_error)
     elif runtime_names != [entry[3] for entry in B201_BUILTIN_METHODS]:
         errors.append("B-201 exact tag-to-ABI projection drifted")
-    if "fn method_to_runtime_c(" in mask_ring_strings_and_comments(codegen):
+    if "fn method_to_runtime_c(" in mask_vorton_strings_and_comments(codegen):
         errors.append("B-201 retained the type/name runtime method table")
     intrinsic_codegen = _b201_function_body(
         codegen, "gen_c_intrinsic_method_call", errors)
@@ -8964,7 +8964,7 @@ def builtin_method_intrinsic_contract_errors(
         if f"tag == {constant_name}" not in ptr_codegen:
             errors.append(
                 f"B-201 Ptr inline projection misses {constant_name}")
-    masked_codegen = mask_ring_strings_and_comments(codegen)
+    masked_codegen = mask_vorton_strings_and_comments(codegen)
     for forbidden in ('type_name == "Ptr"', "gen_c_ptr_method"):
         if forbidden in masked_codegen:
             errors.append(
@@ -8976,21 +8976,21 @@ def builtin_method_intrinsic_contract_errors(
         errors.append("B-201 exact method consumer does not precede fallback")
 
     cell_update, cell_update_error = extract_c_function_body(
-        runtime, "ring_Cell_update")
+        runtime, "vorton_Cell_update")
     if cell_update_error:
         errors.append(cell_update_error)
     elif cell_update is not None:
         cell_tokens = (
-            "*(void**)cell = nullptr", "ring_dup(old_val)",
-            "cl->env_ptr, old_val, ring_effect_ctx_empty())",
+            "*(void**)cell = nullptr", "vorton_dup(old_val)",
+            "cl->env_ptr, old_val, vorton_effect_ctx_empty())",
             "void* interim = *(void**)cell", "*(void**)cell = new_val",
-            "if (interim) ring_drop(interim)", "ring_drop(old_val)",
+            "if (interim) vorton_drop(interim)", "vorton_drop(old_val)",
         )
         positions = [cell_update.find(token) for token in cell_tokens]
         if (
             any(position < 0 for position in positions)
             or positions != sorted(positions)
-            or cell_update.count("ring_effect_ctx_empty()") != 1
+            or cell_update.count("vorton_effect_ctx_empty()") != 1
         ):
             errors.append("Cell.update reentrant/immortal-empty context path drifted")
 
@@ -9002,70 +9002,70 @@ def builtin_method_intrinsic_mutation_errors(
 ) -> List[str]:
     errors: List[str] = []
     mutations = (
-        ("site count", "ir_identity.ring", None,
+        ("site count", "ir_identity.vorton", None,
          "pub const BUILTIN_METHOD_SITE_COUNT: Int = 58",
          "pub const BUILTIN_METHOD_SITE_COUNT: Int = 57"),
-        ("tag duplicate", "ir_identity.ring", None,
+        ("tag duplicate", "ir_identity.vorton", None,
          "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 1",
          "pub const BUILTIN_METHOD_STR_CONTAINS: Int = 0"),
-        ("symbol payload", "ir_identity.ring", "make_builtin_method_intrinsic_ref",
+        ("symbol payload", "ir_identity.vorton", "make_builtin_method_intrinsic_ref",
          '"builtin-method:${tag.to_str()}"', '"builtin-method"'),
-        ("producer swap", "builtins.ring", "register_scalar_method_intrinsics",
+        ("producer swap", "builtins.vorton", "register_scalar_method_intrinsics",
          "BUILTIN_METHOD_STR_LEN", "BUILTIN_METHOD_STR_CONTAINS"),
-        ("scalar producer swap", "builtins.ring", "register_eq_trait",
+        ("scalar producer swap", "builtins.vorton", "register_eq_trait",
          "BUILTIN_METHOD_INT_EQ", "BUILTIN_METHOD_FLOAT_EQ"),
-        ("option producer", "builtins.ring", "register_option",
+        ("option producer", "builtins.vorton", "register_option",
          "BUILTIN_METHOD_OPTION_UNWRAP, builtin_resource_contract(",
          "BUILTIN_METHOD_OPTION_UNWRAP_OR, builtin_resource_contract("),
-        ("cell producer", "builtins.ring", "register_cell",
+        ("cell producer", "builtins.vorton", "register_cell",
          "BUILTIN_METHOD_CELL_SET, builtin_resource_contract(",
          "BUILTIN_METHOD_CELL_GET, builtin_resource_contract("),
-        ("Ptr producer", "builtins.ring", "register_ptr_builtins",
+        ("Ptr producer", "builtins.vorton", "register_ptr_builtins",
          "BUILTIN_METHOD_PTR_ADDR, builtin_resource_contract(",
          "BUILTIN_METHOD_PTR_CAST, builtin_resource_contract("),
-        ("Ptr resource", "builtins.ring", "register_ptr_builtins",
+        ("Ptr resource", "builtins.vorton", "register_ptr_builtins",
          "BUILTIN_METHOD_PTR_WRITE, builtin_resource_contract(\n"
          "            [callable_resource_role_read(), callable_resource_role_consume()],",
          "BUILTIN_METHOD_PTR_WRITE, builtin_resource_contract(\n"
          "            [callable_resource_role_read(), callable_resource_role_read()],"),
-        ("owner scheme relation", "env.ring", "validate_impl_entry",
+        ("owner scheme relation", "env.vorton", "validate_impl_entry",
          "for intrinsic_entry in entry.method_intrinsics.entries()",
          "for intrinsic_entry in []"),
-        ("owner resource equality", "env.ring", "impl_entry_final_same",
+        ("owner resource equality", "env.vorton", "impl_entry_final_same",
          "method_resource_contract_map_same(", "method_core_map_same("),
-        ("registry intrinsic lookup", "builtins.ring",
+        ("registry intrinsic lookup", "builtins.vorton",
          "registered_intrinsic_source",
          "intrinsic_ref_same(candidate, intrinsic)", "true"),
-        ("registry resource lookup", "builtins.ring",
+        ("registry resource lookup", "builtins.vorton",
          "registered_intrinsic_resource_contract",
          "owner.method_resource_contracts.get(method_name)",
          'owner.method_resource_contracts.get("wrong")'),
-        ("typed fact census", "builtins.ring", "builtin_method_contract_facts",
+        ("typed fact census", "builtins.vorton", "builtin_method_contract_facts",
          "for tag in 0..BUILTIN_METHOD_SITE_COUNT", "for tag in 0..0"),
-        ("Core contract resource", "core_from_hir.ring",
+        ("Core contract resource", "core_from_hir.vorton",
          "add_builtin_method_contracts",
          "builtin_method_contract_resource(fact)",
          "missing_builtin_resource_contract(fact)"),
-        ("call signature kind", "hir_exact.ring", "make_intrinsic_method_call_ref",
+        ("call signature kind", "hir_exact.vorton", "make_intrinsic_method_call_ref",
          "Type::FnType { .. }", "_"),
-        ("infer publish", "infer.ring", "infer_method_call_from_receiver",
+        ("infer publish", "infer.vorton", "infer_method_call_from_receiver",
          "method_ref: exact_method_ref", "method_ref: none"),
-        ("TypedHIR/Core bridge", "core_from_hir.ring", "exact_method_ref",
+        ("TypedHIR/Core bridge", "core_from_hir.vorton", "exact_method_ref",
          "make_exact_intrinsic_method_ref(method_call_ref_intrinsic(value))",
          "make_exact_trait_method_ref(method_call_ref_bound(value))"),
-        ("Core/Flow direct target", "flow_lower.ring", "flow_call_target",
+        ("Core/Flow direct target", "flow_lower.vorton", "flow_call_target",
          "make_direct_flow_call_target(", "make_dynamic_flow_call_target("),
-        ("ABI order", "codegen_c_expr.ring", None,
-         '"ring_str_len", "ring_str_contains"',
-         '"ring_str_contains", "ring_str_len"'),
-        ("Ptr inline", "codegen_c_expr.ring", "gen_c_ptr_intrinsic",
+        ("ABI order", "codegen_c_expr.vorton", None,
+         '"vorton_str_len", "vorton_str_contains"',
+         '"vorton_str_contains", "vorton_str_len"'),
+        ("Ptr inline", "codegen_c_expr.vorton", "gen_c_ptr_intrinsic",
          "tag == BUILTIN_METHOD_PTR_ADDR",
          "tag == BUILTIN_METHOD_PTR_CAST"),
-        ("name fallback", "codegen_c_expr.ring", None,
+        ("name fallback", "codegen_c_expr.vorton", None,
          "fn intrinsic_runtime_name(tag: Int) -> Str {",
          "fn method_to_runtime_c(type_name: Str, method: Str) -> Str? { none }\n\nfn intrinsic_runtime_name(tag: Int) -> Str {"),
-        ("Cell.update context fallback", "ring_runtime.cpp", None,
-         "cl->env_ptr, old_val, ring_effect_ctx_empty());",
+        ("Cell.update context fallback", "vorton_runtime.cpp", None,
+         "cl->env_ptr, old_val, vorton_effect_ctx_empty());",
          "cl->env_ptr, old_val, effect_ctx);"),
     )
     killed = 0
@@ -9102,7 +9102,7 @@ def builtin_method_intrinsic_source_errors() -> List[str]:
     try:
         compiler_sources = {
             path.name: path.read_text(encoding="utf-8")
-            for path in (REPO / "compiler").glob("*.ring")
+            for path in (REPO / "compiler").glob("*.vorton")
         }
         compiler_sources[RUNTIME_CPP.name] = RUNTIME_CPP.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
@@ -9115,22 +9115,22 @@ def builtin_method_intrinsic_source_errors() -> List[str]:
 
 
 B201_IMPL_EXTERN_RECOVERY_CASES = (
-    REPO / "tests" / "cases" / "error_impl_block_duplicate_fn_extern.ring",
-    REPO / "tests" / "cases" / "error_trait_impl_pub_extern_recovery.ring",
+    REPO / "tests" / "cases" / "error_impl_block_duplicate_fn_extern.vorton",
+    REPO / "tests" / "cases" / "error_trait_impl_pub_extern_recovery.vorton",
 )
 
 
-def builtin_impl_extern_recovery_errors(ring_exe: str) -> List[str]:
+def builtin_impl_extern_recovery_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    expected_message = "impl-member extern fn is not part of Ring 0.1"
+    expected_message = "impl-member extern fn is not part of Vorton 0.1"
     for source_path in B201_IMPL_EXTERN_RECOVERY_CASES:
         contract = source_path.with_suffix(".error").read_text(encoding="utf-8")
         for mode, extra_args in (
                 ("human", None), ("llm", ["--error-format=llm"])):
             label = f"{source_path.name}:{mode}"
             try:
-                result = ring_check(
-                    ring_exe, str(source_path), extra_args=extra_args,
+                result = vorton_check(
+                    vorton_exe, str(source_path), extra_args=extra_args,
                     phase_suite="structural",
                     phase_case=f"b201-impl-extern:{label}")
             except subprocess.TimeoutExpired:
@@ -9302,7 +9302,7 @@ def _f2_u1a_require_function_token(
 def _f2_u1a_struct_fields(
     source: str, name: str, expected: List[str], errors: List[str],
 ) -> None:
-    masked = mask_ring_strings_and_comments(source)
+    masked = mask_vorton_strings_and_comments(source)
     pattern = re.compile(
         rf"\b(?:pub\s+)?struct\s+{re.escape(name)}\s*\{{")
     matches = list(pattern.finditer(masked))
@@ -9335,7 +9335,7 @@ def _f2_u1a_call_escaped_function_allowlist(
         if span_error is not None or span is None:
             continue
         allowed_spans.append(span)
-    # Ring string interpolation contains executable expressions.  Scan raw
+    # Vorton string interpolation contains executable expressions.  Scan raw
     # source so an accessor hidden inside "${...}" cannot evade the allowlist.
     for match in re.finditer(re.escape(call_token), source):
         if not any(start <= match.start() < end for start, end in allowed_spans):
@@ -9348,14 +9348,14 @@ def resolver_identity_u1a_contract_errors(
 ) -> List[str]:
     """Cheap layout-sensitive source guards, not semantic acceptance.
 
-    These checks intentionally do not duplicate the Ring parser and make no
+    These checks intentionally do not duplicate the Vorton parser and make no
     claim that formatting-equivalent rewrites cannot evade them.  U1a behavior
     is accepted only from a source-built candidate running targeted project
     fixtures in an external Steward evidence packet.
     """
     errors: List[str] = []
-    resolver_masked = mask_ring_strings_and_comments(resolver_source)
-    infer_masked = mask_ring_strings_and_comments(infer_ctx_source)
+    resolver_masked = mask_vorton_strings_and_comments(resolver_source)
+    infer_masked = mask_vorton_strings_and_comments(infer_ctx_source)
 
     _f2_u1a_struct_fields(resolver_source, "NamespaceSeed", [
         "file_key", "frame_index", "decl_index", "origin_site", "owner",
@@ -9648,46 +9648,46 @@ def resolver_identity_u1a_source_errors() -> List[str]:
     return errors
 
 
-def resolver_identity_u1a_source_check_errors(ring_exe: str) -> List[str]:
+def resolver_identity_u1a_source_check_errors(vorton_exe: str) -> List[str]:
     """Parse/typecheck the two sources; this is not candidate behavior."""
     errors: List[str] = []
-    compiler = Path(ring_exe)
+    compiler = Path(vorton_exe)
     before = _sha256_file(compiler)
-    environment = dict(_controlled_environment(ring_exe))
+    environment = dict(_controlled_environment(vorton_exe))
     for source_path in (F2_U1A_RESOLVER_PATH, F2_U1A_INFER_CTX_PATH):
         completed = subprocess.run(
-            [ring_exe, "check", str(source_path)], cwd=REPO, env=environment,
+            [vorton_exe, "check", str(source_path)], cwd=REPO, env=environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8",
             errors="strict", check=False, timeout=120)
         if completed.returncode != 0:
             errors.append(
-                f"pinned Ring source check failed for "
+                f"pinned Vorton source check failed for "
                 f"{display_path(source_path)}: "
                 f"exit={completed.returncode} stdout={completed.stdout!r} "
                 f"stderr={completed.stderr!r}")
         elif completed.stdout.strip() != "OK":
             errors.append(
-                f"pinned Ring source check output drifted for "
+                f"pinned Vorton source check output drifted for "
                 f"{display_path(source_path)}: stdout={completed.stdout!r}")
     if _sha256_file(compiler) != before:
         errors.append(
-            "pinned Ring compiler changed across F2 U1a source checks")
+            "pinned Vorton compiler changed across F2 U1a source checks")
     return errors
 
 
 F2_U1B_PATHS = {
-    "identity": REPO / "compiler" / "ir_identity.ring",
-    "resolver": REPO / "compiler" / "resolver.ring",
-    "types": REPO / "compiler" / "types.ring",
-    "env": REPO / "compiler" / "env.ring",
-    "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
-    "infer_register": REPO / "compiler" / "infer_register.ring",
-    "hir": REPO / "compiler" / "hir.ring",
-    "infer": REPO / "compiler" / "infer.ring",
-    "core": REPO / "compiler" / "core_from_hir.ring",
-    "core_expr": REPO / "compiler" / "core_expr.ring",
-    "flow": REPO / "compiler" / "flow_lower.ring",
+    "identity": REPO / "compiler" / "ir_identity.vorton",
+    "resolver": REPO / "compiler" / "resolver.vorton",
+    "types": REPO / "compiler" / "types.vorton",
+    "env": REPO / "compiler" / "env.vorton",
+    "infer_ctx": REPO / "compiler" / "infer_ctx.vorton",
+    "infer_register": REPO / "compiler" / "infer_register.vorton",
+    "hir": REPO / "compiler" / "hir.vorton",
+    "infer": REPO / "compiler" / "infer.vorton",
+    "core": REPO / "compiler" / "core_from_hir.vorton",
+    "core_expr": REPO / "compiler" / "core_expr.vorton",
+    "flow": REPO / "compiler" / "flow_lower.vorton",
 }
 
 
@@ -9819,7 +9819,7 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
             "commit_struct_identity_completion(ctx, identity)",
             "committed_def.fields = resolved_fields")),
     ):
-        body, body_error = extract_ring_function_body(
+        body, body_error = extract_vorton_function_body(
             sources[source_name], function_name)
         if body_error:
             errors.append(body_error)
@@ -9829,7 +9829,7 @@ def nominal_field_u1b_contract_errors(sources: dict[str, str]) -> List[str]:
             errors.append(
                 f"F2 U1b {function_name} atomic order drifted")
 
-    hir_masked = mask_ring_strings_and_comments(sources["hir"])
+    hir_masked = mask_vorton_strings_and_comments(sources["hir"])
     for token in (
             "pub enum HFieldAccessKind", "NominalField { owner_ref:",
             "RecordField", "TupleField", "Method", "ErrorRecovery",
@@ -9939,32 +9939,32 @@ def nominal_field_u1b_source_errors() -> List[str]:
     return errors
 
 
-def nominal_field_u1b_source_check_errors(ring_exe: str) -> List[str]:
+def nominal_field_u1b_source_check_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    compiler = Path(ring_exe)
+    compiler = Path(vorton_exe)
     before = _sha256_file(compiler)
-    environment = dict(_controlled_environment(ring_exe))
+    environment = dict(_controlled_environment(vorton_exe))
     for source_path in (F2_U1B_PATHS["identity"], F2_U1B_PATHS["hir"]):
-        error = _f1_run_ring_check(ring_exe, source_path, environment)
+        error = _f1_run_vorton_check(vorton_exe, source_path, environment)
         if error:
             errors.append(error)
     if _sha256_file(compiler) != before:
-        errors.append("pinned Ring compiler changed across F2 U1b checks")
+        errors.append("pinned Vorton compiler changed across F2 U1b checks")
     return errors
 
 
 F2_TRAIT_METHOD_IDENTITY_PATHS = {
-    "identity": REPO / "compiler" / "ir_identity.ring",
-    "resolver": REPO / "compiler" / "resolver.ring",
-    "ctx": REPO / "compiler" / "infer_ctx.ring",
-    "env": REPO / "compiler" / "env.ring",
-    "register": REPO / "compiler" / "infer_register.ring",
-    "builtins": REPO / "compiler" / "builtins.ring",
-    "hir": REPO / "compiler" / "hir.ring",
-    "decl": REPO / "compiler" / "infer_decl.ring",
-    "andor": REPO / "compiler" / "andor_lower.ring",
-    "dict": REPO / "compiler" / "dict_lower.ring",
-    "codegen": REPO / "compiler" / "codegen_c_expr.ring",
+    "identity": REPO / "compiler" / "ir_identity.vorton",
+    "resolver": REPO / "compiler" / "resolver.vorton",
+    "ctx": REPO / "compiler" / "infer_ctx.vorton",
+    "env": REPO / "compiler" / "env.vorton",
+    "register": REPO / "compiler" / "infer_register.vorton",
+    "builtins": REPO / "compiler" / "builtins.vorton",
+    "hir": REPO / "compiler" / "hir.vorton",
+    "decl": REPO / "compiler" / "infer_decl.vorton",
+    "andor": REPO / "compiler" / "andor_lower.vorton",
+    "dict": REPO / "compiler" / "dict_lower.vorton",
+    "codegen": REPO / "compiler" / "codegen_c_expr.vorton",
 }
 F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT = 41
 
@@ -10292,7 +10292,7 @@ def trait_method_identity_u1c_contract_errors(
         if token in sources["codegen"]:
             errors.append(f"backend semantically reads trait identity {token!r}")
     for source_name in ("ctx", "register", "hir", "decl", "andor", "dict"):
-        masked = mask_ring_strings_and_comments(sources[source_name])
+        masked = mask_vorton_strings_and_comments(sources[source_name])
         if re.search(
                 r"Map\s*<\s*Str\s*,\s*(?:TraitMethodRef|RegisteredTraitRef)\s*>",
                 masked):
@@ -10448,18 +10448,18 @@ def trait_method_identity_u1c_source_errors() -> List[str]:
     return errors
 
 
-def trait_method_identity_u1c_fixture_errors(ring_exe: str) -> List[str]:
+def trait_method_identity_u1c_fixture_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    compiler = Path(ring_exe).resolve(strict=True)
+    compiler = Path(vorton_exe).resolve(strict=True)
     compiler_before = _sha256_file(compiler)
     environment = dict(_controlled_environment(str(compiler)))
-    positive = CASES_DIR / "trait_method_identity_assoc_order.ring"
-    negative = CASES_DIR / "error_supertrait_assoc_predicate.ring"
+    positive = CASES_DIR / "trait_method_identity_assoc_order.vorton"
+    negative = CASES_DIR / "error_supertrait_assoc_predicate.vorton"
 
     if positive not in discover_positive_cases(CASES_DIR):
         errors.append("trait identity assoc-order fixture is not runner-discovered")
     else:
-        positive_error = _f1_run_ring_check(
+        positive_error = _f1_run_vorton_check(
             str(compiler), positive, environment)
         if positive_error:
             errors.append(positive_error)
@@ -10492,20 +10492,20 @@ def trait_method_identity_u1c_fixture_errors(ring_exe: str) -> List[str]:
                         "trait identity diagnostic is not clean: "
                         f"{contract_error}; output={combined[:300]!r}")
     if _sha256_file(compiler) != compiler_before:
-        errors.append("pinned Ring compiler changed across trait identity fixtures")
+        errors.append("pinned Vorton compiler changed across trait identity fixtures")
     return errors
 
 
 F2_IMPL_PROVIDER_PATHS = {
-    "identity": REPO / "compiler" / "ir_identity.ring",
-    "resolver": REPO / "compiler" / "resolver.ring",
-    "ctx": REPO / "compiler" / "infer_ctx.ring",
-    "env": REPO / "compiler" / "env.ring",
-    "register": REPO / "compiler" / "infer_register.ring",
-    "builtins": REPO / "compiler" / "builtins.ring",
-    "derive": REPO / "compiler" / "derive.ring",
-    "decl": REPO / "compiler" / "infer_decl.ring",
-    "codegen": REPO / "compiler" / "codegen_c_expr.ring",
+    "identity": REPO / "compiler" / "ir_identity.vorton",
+    "resolver": REPO / "compiler" / "resolver.vorton",
+    "ctx": REPO / "compiler" / "infer_ctx.vorton",
+    "env": REPO / "compiler" / "env.vorton",
+    "register": REPO / "compiler" / "infer_register.vorton",
+    "builtins": REPO / "compiler" / "builtins.vorton",
+    "derive": REPO / "compiler" / "derive.vorton",
+    "decl": REPO / "compiler" / "infer_decl.vorton",
+    "codegen": REPO / "compiler" / "codegen_c_expr.vorton",
 }
 F2_IMPL_PROVIDER_MUTATION_COUNT = 42
 
@@ -10770,7 +10770,7 @@ def impl_provider_u1c1_contract_errors(
             "[ordinal.to_str()]", "path_role_synthetic()",
             "impl_provider_kind_builtin()")):
         errors.append("builtin impl provider domain drifted")
-    builtin_masked = mask_ring_strings_and_comments(builtins)
+    builtin_masked = mask_vorton_strings_and_comments(builtins)
     site_matches = re.findall(
         r"\bstruct\s+BuiltinImplProviderSite\s*\{\s*tag\s*:\s*Int\s*\}",
         builtin_masked)
@@ -11010,13 +11010,13 @@ def impl_provider_u1c1_source_errors() -> List[str]:
 
 
 F2_IMPL_PROVIDER_CARRIER_PATHS = {
-    "hir": REPO / "compiler" / "hir.ring",
-    "checker": REPO / "compiler" / "checker.ring",
-    "exports": REPO / "compiler" / "exports.ring",
-    "decl": REPO / "compiler" / "infer_decl.ring",
-    "core": REPO / "compiler" / "core_from_hir.ring",
-    "core_expr": REPO / "compiler" / "core_expr.ring",
-    "codegen": REPO / "compiler" / "codegen_c.ring",
+    "hir": REPO / "compiler" / "hir.vorton",
+    "checker": REPO / "compiler" / "checker.vorton",
+    "exports": REPO / "compiler" / "exports.vorton",
+    "decl": REPO / "compiler" / "infer_decl.vorton",
+    "core": REPO / "compiler" / "core_from_hir.vorton",
+    "core_expr": REPO / "compiler" / "core_expr.vorton",
+    "codegen": REPO / "compiler" / "codegen_c.vorton",
 }
 F2_IMPL_PROVIDER_CARRIER_MUTATION_COUNT = 15
 F2_IMPL_PROVIDER_CARRIER_SCOPE_COUNT = 1
@@ -11156,7 +11156,7 @@ def impl_provider_u1c2_contract_errors(
             errors.append(f"HIR/Core impl carrier misses {token!r}")
 
     for source_name in ("codegen",):
-        masked = mask_ring_strings_and_comments(sources[source_name])
+        masked = mask_vorton_strings_and_comments(sources[source_name])
         if "ImplProviderRef" in masked or "provider_ref" in masked or (
                 "trait_ref" in masked):
             errors.append(f"{source_name} semantically reads impl provider carrier")
@@ -11260,14 +11260,14 @@ def impl_provider_u1c2_source_errors() -> List[str]:
 
 
 F2_DERIVED_IMPL_CARRIER_PATHS = {
-    "hir": REPO / "compiler" / "hir.ring",
-    "derive": REPO / "compiler" / "derive.ring",
-    "builtins": REPO / "compiler" / "builtins.ring",
-    "checker": REPO / "compiler" / "checker.ring",
-    "project": REPO / "compiler" / "compiler_mod.ring",
-    "dict": REPO / "compiler" / "dict_lower.ring",
-    "core": REPO / "compiler" / "core_from_hir.ring",
-    "codegen": REPO / "compiler" / "codegen_c.ring",
+    "hir": REPO / "compiler" / "hir.vorton",
+    "derive": REPO / "compiler" / "derive.vorton",
+    "builtins": REPO / "compiler" / "builtins.vorton",
+    "checker": REPO / "compiler" / "checker.vorton",
+    "project": REPO / "compiler" / "compiler_mod.vorton",
+    "dict": REPO / "compiler" / "dict_lower.vorton",
+    "core": REPO / "compiler" / "core_from_hir.vorton",
+    "codegen": REPO / "compiler" / "codegen_c.vorton",
 }
 F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT = 17
 
@@ -11452,7 +11452,7 @@ def derived_impl_carrier_u1c4_contract_errors(
         if token not in append_core:
             errors.append(f"Core derived consumer misses {token!r}")
 
-    codegen_masked = mask_ring_strings_and_comments(codegen)
+    codegen_masked = mask_vorton_strings_and_comments(codegen)
     for forbidden in (
         "emit_c_builtin_derived_impls", "c_option_some_variant",
         "c_option_none_variant", "emit_c_derived_impls",
@@ -11558,12 +11558,12 @@ def derived_impl_carrier_u1c4_mutation_errors(
     return errors
 
 
-def derived_impl_carrier_u1c4_fixture_errors(ring_exe: str) -> List[str]:
+def derived_impl_carrier_u1c4_fixture_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    compiler = Path(ring_exe).resolve(strict=True)
+    compiler = Path(vorton_exe).resolve(strict=True)
     compiler_before = _sha256_file(compiler)
     environment = dict(_controlled_environment(str(compiler)))
-    negative = CASES_DIR / "error_option_ord_unavailable.ring"
+    negative = CASES_DIR / "error_option_ord_unavailable.vorton"
     if negative not in discover_negative_cases(CASES_DIR):
         errors.append("Option Ord negative fixture is not runner-discovered")
     else:
@@ -11589,7 +11589,7 @@ def derived_impl_carrier_u1c4_fixture_errors(ring_exe: str) -> List[str]:
                         "Option Ord negative contract failed: "
                         f"{contract_error}; output={combined[:300]!r}")
     if _sha256_file(compiler) != compiler_before:
-        errors.append("pinned Ring compiler changed across derived fixtures")
+        errors.append("pinned Vorton compiler changed across derived fixtures")
     return errors
 
 
@@ -11608,17 +11608,17 @@ def derived_impl_carrier_u1c4_source_errors() -> List[str]:
 
 
 F2_U1C0_PATHS = {
-    "hir": REPO / "compiler" / "hir.ring",
-    "env": REPO / "compiler" / "env.ring",
-    "register": REPO / "compiler" / "infer_register.ring",
-    "builtins": REPO / "compiler" / "builtins.ring",
-    "ctx": REPO / "compiler" / "infer_ctx.ring",
-    "helpers": REPO / "compiler" / "infer_helpers.ring",
-    "infer": REPO / "compiler" / "infer.ring",
-    "decl": REPO / "compiler" / "infer_decl.ring",
-    "derive": REPO / "compiler" / "derive.ring",
-    "exports": REPO / "compiler" / "exports.ring",
-    "checker": REPO / "compiler" / "checker.ring",
+    "hir": REPO / "compiler" / "hir.vorton",
+    "env": REPO / "compiler" / "env.vorton",
+    "register": REPO / "compiler" / "infer_register.vorton",
+    "builtins": REPO / "compiler" / "builtins.vorton",
+    "ctx": REPO / "compiler" / "infer_ctx.vorton",
+    "helpers": REPO / "compiler" / "infer_helpers.vorton",
+    "infer": REPO / "compiler" / "infer.vorton",
+    "decl": REPO / "compiler" / "infer_decl.vorton",
+    "derive": REPO / "compiler" / "derive.vorton",
+    "exports": REPO / "compiler" / "exports.vorton",
+    "checker": REPO / "compiler" / "checker.vorton",
 }
 
 F2_U1C0_WARNING_MESSAGE = (
@@ -11649,19 +11649,19 @@ def _u1c0_warning(
 
 
 F2_U1C0_PARSER_WARNINGS = (
-    _u1c0_warning("parser.ring", 1778, 40, 1778, 88),
-    _u1c0_warning("parser.ring", 1721, 33, 1721, 86),
-    _u1c0_warning("parser.ring", 1731, 33, 1731, 82),
-    _u1c0_warning("parser.ring", 1743, 41, 1743, 87),
-    _u1c0_warning("parser.ring", 1751, 41, 1751, 90),
-    _u1c0_warning("parser.ring", 806, 36, 806, 73),
+    _u1c0_warning("parser.vorton", 1778, 40, 1778, 88),
+    _u1c0_warning("parser.vorton", 1721, 33, 1721, 86),
+    _u1c0_warning("parser.vorton", 1731, 33, 1731, 82),
+    _u1c0_warning("parser.vorton", 1743, 41, 1743, 87),
+    _u1c0_warning("parser.vorton", 1751, 41, 1751, 90),
+    _u1c0_warning("parser.vorton", 806, 36, 806, 73),
 )
 F2_U1C0_CHECKER_WARNINGS = (*F2_U1C0_PARSER_WARNINGS,
-    _u1c0_warning("infer.ring", 937, 38, 938, 74),
-    _u1c0_warning("infer.ring", 674, 30, 674, 87),
-    _u1c0_warning("infer.ring", 781, 30, 781, 87),
-    _u1c0_warning("infer.ring", 3434, 22, 3434, 72),
-    _u1c0_warning("infer_decl.ring", 165, 21, 166, 65),
+    _u1c0_warning("infer.vorton", 937, 38, 938, 74),
+    _u1c0_warning("infer.vorton", 674, 30, 674, 87),
+    _u1c0_warning("infer.vorton", 781, 30, 781, 87),
+    _u1c0_warning("infer.vorton", 3434, 22, 3434, 72),
+    _u1c0_warning("infer_decl.vorton", 165, 21, 166, 65),
 )
 F2_U1C0_EXPORTS_WARNINGS = F2_U1C0_PARSER_WARNINGS
 
@@ -11679,13 +11679,13 @@ def _warning_document(
 def llm_warning_document_sequence_probe_errors() -> List[str]:
     errors: List[str] = []
     first = F2_U1C0_PARSER_WARNINGS[0]
-    second = _u1c0_warning("infer.ring", 937, 38, 938, 74)
+    second = _u1c0_warning("infer.vorton", 937, 38, 938, 74)
     first_diag = first["diagnostic"]
     second_diag = second["diagnostic"]
-    single = _warning_document("parser.ring", [first_diag]) + "\n"
+    single = _warning_document("parser.vorton", [first_diag]) + "\n"
     multi = (
-        _warning_document("parser.ring", [first_diag]) + "\n" +
-        _warning_document("infer.ring", [second_diag]) + "\n")
+        _warning_document("parser.vorton", [first_diag]) + "\n" +
+        _warning_document("infer.vorton", [second_diag]) + "\n")
     if llm_warning_contract_error(single, [first]) is not None:
         errors.append("LLM warning probe rejected valid single document")
     if llm_warning_contract_error(multi, [first, second]) is not None:
@@ -11700,23 +11700,23 @@ def llm_warning_document_sequence_probe_errors() -> List[str]:
     if llm_warning_contract_error(single[:-1], [first]) is None:
         errors.append("LLM warning probe accepted missing final newline")
     duplicate_diag = _warning_document(
-        "parser.ring", [first_diag, first_diag]) + "\n"
+        "parser.vorton", [first_diag, first_diag]) + "\n"
     if llm_warning_contract_error(duplicate_diag, [first]) is None:
         errors.append("LLM warning probe accepted duplicate diagnostic")
     extra_warning = _warning_document(
-        "parser.ring", [first_diag, F2_U1C0_PARSER_WARNINGS[1]["diagnostic"]]
+        "parser.vorton", [first_diag, F2_U1C0_PARSER_WARNINGS[1]["diagnostic"]]
     ) + "\n"
     if llm_warning_contract_error(extra_warning, [first]) is None:
         errors.append("LLM warning probe accepted extra W0001")
     w0002 = dict(first_diag)
     w0002["code"] = "W0002"
     if llm_warning_contract_error(
-            _warning_document("parser.ring", [w0002]) + "\n", [first]) is None:
+            _warning_document("parser.vorton", [w0002]) + "\n", [first]) is None:
         errors.append("LLM warning probe accepted W0002")
     error_diag = dict(first_diag)
     error_diag["severity"] = "error"
     if llm_warning_contract_error(
-            _warning_document("parser.ring", [error_diag]) + "\n", [first]
+            _warning_document("parser.vorton", [error_diag]) + "\n", [first]
     ) is None:
         errors.append("LLM warning probe accepted error severity")
     return errors
@@ -12191,7 +12191,7 @@ def impl_predicate_u1c0_contract_errors(
     if "pub impl_methods:" in env_source:
         errors.append("U1c0 TraitRegistry still exposes flat method schemes")
 
-    core_body, core_error = extract_ring_function_body(
+    core_body, core_error = extract_vorton_function_body(
         env_source, "impl_method_core_from_scheme")
     if core_error:
         errors.append(core_error)
@@ -12201,7 +12201,7 @@ def impl_predicate_u1c0_contract_errors(
     )):
         errors.append("U1c0 core conversion does not reject method bounds")
 
-    freeze_body, freeze_error = extract_ring_function_body(
+    freeze_body, freeze_error = extract_vorton_function_body(
         env_source, "freeze_impl_predicate_set")
     if freeze_error:
         errors.append(freeze_error)
@@ -12211,7 +12211,7 @@ def impl_predicate_u1c0_contract_errors(
         "expanded path has no direct root",
     )):
         errors.append("U1c0 frozen predicate validation is incomplete")
-    add_impl_body, add_impl_error = extract_ring_function_body(
+    add_impl_body, add_impl_error = extract_vorton_function_body(
         env_source, "add_impl")
     if add_impl_error:
         errors.append(add_impl_error)
@@ -12219,7 +12219,7 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 owner insertion bypasses relational validation")
     if "expanded predicate path is not a supertrait edge" not in env_source:
         errors.append("U1c0 expanded predicate paths are not relationally validated")
-    validate_owner_body, validate_owner_error = extract_ring_function_body(
+    validate_owner_body, validate_owner_error = extract_vorton_function_body(
         env_source, "validate_impl_entry")
     if validate_owner_error:
         errors.append(validate_owner_error)
@@ -12245,7 +12245,7 @@ def impl_predicate_u1c0_contract_errors(
     ):
         if token not in register_source:
             errors.append(f"U1c0 registration missing {token!r}")
-    super_body, super_error = extract_ring_function_body(
+    super_body, super_error = extract_vorton_function_body(
         register_source, "collect_all_supertraits")
     if super_error:
         errors.append(super_error)
@@ -12253,7 +12253,7 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 supertrait closure still uses LIFO authority")
     if "ctx, mtps, BoundShapeContext::ImplMethodBound, method_span" not in register_source:
         errors.append("U1c0 impl method bound gate is not attached to method registration")
-    canonical_body, canonical_error = extract_ring_function_body(
+    canonical_body, canonical_error = extract_vorton_function_body(
         register_source, "register_impl_canonical")
     if canonical_error:
         errors.append(canonical_error)
@@ -12274,7 +12274,7 @@ def impl_predicate_u1c0_contract_errors(
         "register_type_alias",
         "register_effect_alias",
     ):
-        body, error = extract_ring_function_body(register_source, function_name)
+        body, error = extract_vorton_function_body(register_source, function_name)
         if error:
             errors.append(error)
         elif body is not None and "validate_type_param_bound_shapes(" not in body:
@@ -12293,7 +12293,7 @@ def impl_predicate_u1c0_contract_errors(
             "require_std_hof_seed"):
         if retired in builtins:
             errors.append(f"U1c0 provisional builtin authority returned: {retired}")
-    install_builtin_body, install_builtin_error = extract_ring_function_body(
+    install_builtin_body, install_builtin_error = extract_vorton_function_body(
         builtins, "install_builtin_method_owner")
     if install_builtin_error:
         errors.append(install_builtin_error)
@@ -12305,7 +12305,7 @@ def impl_predicate_u1c0_contract_errors(
                 "provider_ref: some(provider_ref)",
                 "owner_ref: some(owner_ref)")):
         errors.append("U1c0 builtin owner exact closure is incomplete")
-    register_hof_body, register_hof_error = extract_ring_function_body(
+    register_hof_body, register_hof_error = extract_vorton_function_body(
         builtins, "register_hof_intrinsics")
     if register_hof_error:
         errors.append(register_hof_error)
@@ -12316,7 +12316,7 @@ def impl_predicate_u1c0_contract_errors(
             "register_list_hof(", "register_map_hof(", "register_set_hof("):
             if forbidden_call in register_hof_body:
                 errors.append("U1c0 normal path publishes std HOF method cores")
-    fallback_body, fallback_error = extract_ring_function_body(
+    fallback_body, fallback_error = extract_vorton_function_body(
         builtins, "finalize_std_hof_fallbacks")
     if fallback_error:
         errors.append(fallback_error)
@@ -12328,7 +12328,7 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 no-std fallback does not finalize all std HOF owners")
     for function_name in (
         "register_list_hof", "register_map_hof", "register_set_hof"):
-        body, error = extract_ring_function_body(builtins, function_name)
+        body, error = extract_vorton_function_body(builtins, function_name)
         if error:
             errors.append(error)
         elif body is not None and not all(token in body for token in (
@@ -12378,7 +12378,7 @@ def impl_predicate_u1c0_contract_errors(
         errors.append("U1c0 hydration does not install owners before indexes")
     if "assert_no_provisional_impl_owners" in checker_source:
         errors.append("U1c0 checker retained provisional close authority")
-    load_prelude_body, load_prelude_error = extract_ring_function_body(
+    load_prelude_body, load_prelude_error = extract_vorton_function_body(
         checker_source, "load_prelude")
     if load_prelude_error:
         errors.append(load_prelude_error)
@@ -12466,11 +12466,11 @@ def impl_predicate_u1c0_source_errors() -> List[str]:
     return errors
 
 
-def impl_predicate_u1c0_source_check_errors(ring_exe: str) -> List[str]:
+def impl_predicate_u1c0_source_check_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    compiler = Path(ring_exe)
+    compiler = Path(vorton_exe)
     before = _sha256_file(compiler)
-    environment = dict(_controlled_environment(ring_exe))
+    environment = dict(_controlled_environment(vorton_exe))
     for source_path in (
         F2_U1C0_PATHS["env"], F2_U1C0_PATHS["builtins"],
         F2_U1C0_PATHS["hir"], F2_U1C0_PATHS["checker"],
@@ -12483,23 +12483,23 @@ def impl_predicate_u1c0_source_check_errors(ring_exe: str) -> List[str]:
             expected_warnings = F2_U1C0_CHECKER_WARNINGS
         elif source_path == F2_U1C0_PATHS["exports"]:
             expected_warnings = F2_U1C0_EXPORTS_WARNINGS
-        error = _f1_run_ring_check(
-            ring_exe, source_path, environment, timeout_seconds,
+        error = _f1_run_vorton_check(
+            vorton_exe, source_path, environment, timeout_seconds,
             expected_warnings)
         if error:
             errors.append(error)
     if _sha256_file(compiler) != before:
-        errors.append("pinned Ring compiler changed across F2 U1c0 checks")
+        errors.append("pinned Vorton compiler changed across F2 U1c0 checks")
     return errors
 
 
-def impl_predicate_u1c0_no_std_errors(ring_exe: str) -> List[str]:
+def impl_predicate_u1c0_no_std_errors(vorton_exe: str) -> List[str]:
     errors: List[str] = []
-    compiler = Path(ring_exe).resolve(strict=True)
+    compiler = Path(vorton_exe).resolve(strict=True)
     before = _sha256_file(compiler)
-    fixture = CASES_DIR / "no_std_hof_fallback.ring"
+    fixture = CASES_DIR / "no_std_hof_fallback.vorton"
     environment = dict(_controlled_environment(str(compiler)))
-    with tempfile.TemporaryDirectory(prefix="ring_u1c0_no_std_") as temp:
+    with tempfile.TemporaryDirectory(prefix="vorton_u1c0_no_std_") as temp:
         cwd = Path(temp).resolve(strict=True)
         if (cwd / "std").exists() or (cwd.parent / "std").exists():
             return ["U1c0 no-std check root unexpectedly contains std"]
@@ -12518,36 +12518,36 @@ def impl_predicate_u1c0_no_std_errors(ring_exe: str) -> List[str]:
                 f"U1c0 no-std HOF fallback output drifted: "
                 f"stdout={completed.stdout!r} stderr={completed.stderr!r}")
     if _sha256_file(compiler) != before:
-        errors.append("pinned Ring compiler changed across U1c0 no-std check")
+        errors.append("pinned Vorton compiler changed across U1c0 no-std check")
     return errors
 
 
 def identity_checkpoint_source_errors() -> List[str]:
     paths = {
-        "ast": REPO / "compiler" / "ast.ring",
-        "parser": REPO / "compiler" / "parser.ring",
-        "env": REPO / "compiler" / "env.ring",
-        "types": REPO / "compiler" / "types.ring",
-        "inventory": REPO / "compiler" / "ir_inventory.ring",
-        "identity": REPO / "compiler" / "ir_identity.ring",
-        "builtins": REPO / "compiler" / "builtins.ring",
-        "hir": REPO / "compiler" / "hir.ring",
-        "infer": REPO / "compiler" / "infer.ring",
-        "infer_decl": REPO / "compiler" / "infer_decl.ring",
-        "andor": REPO / "compiler" / "andor_lower.ring",
-        "checker": REPO / "compiler" / "checker.ring",
-        "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
-        "infer_helpers": REPO / "compiler" / "infer_helpers.ring",
-        "zonk": REPO / "compiler" / "zonk.ring",
-        "derive": REPO / "compiler" / "derive.ring",
-        "dict": REPO / "compiler" / "dict_lower.ring",
-        "cctx": REPO / "compiler" / "codegen_c_ctx.ring",
-        "cgen": REPO / "compiler" / "codegen_c.ring",
-        "cexpr": REPO / "compiler" / "codegen_c_expr.ring",
-        "cli": REPO / "compiler" / "cli.ring",
+        "ast": REPO / "compiler" / "ast.vorton",
+        "parser": REPO / "compiler" / "parser.vorton",
+        "env": REPO / "compiler" / "env.vorton",
+        "types": REPO / "compiler" / "types.vorton",
+        "inventory": REPO / "compiler" / "ir_inventory.vorton",
+        "identity": REPO / "compiler" / "ir_identity.vorton",
+        "builtins": REPO / "compiler" / "builtins.vorton",
+        "hir": REPO / "compiler" / "hir.vorton",
+        "infer": REPO / "compiler" / "infer.vorton",
+        "infer_decl": REPO / "compiler" / "infer_decl.vorton",
+        "andor": REPO / "compiler" / "andor_lower.vorton",
+        "checker": REPO / "compiler" / "checker.vorton",
+        "infer_ctx": REPO / "compiler" / "infer_ctx.vorton",
+        "infer_helpers": REPO / "compiler" / "infer_helpers.vorton",
+        "zonk": REPO / "compiler" / "zonk.vorton",
+        "derive": REPO / "compiler" / "derive.vorton",
+        "dict": REPO / "compiler" / "dict_lower.vorton",
+        "cctx": REPO / "compiler" / "codegen_c_ctx.vorton",
+        "cgen": REPO / "compiler" / "codegen_c.vorton",
+        "cexpr": REPO / "compiler" / "codegen_c_expr.vorton",
+        "cli": REPO / "compiler" / "cli.vorton",
         "runner": REPO / "tests" / "run_tests.py",
         "provenance_fixture": (
-            REPO / "tests" / "cases" / "provenance_b_capture_identity.ring"
+            REPO / "tests" / "cases" / "provenance_b_capture_identity.vorton"
         ),
         "provenance_contract": REPO / "tests" / "test_provenance_b_contract.py",
     }
@@ -12730,11 +12730,11 @@ def identity_checkpoint_source_errors() -> List[str]:
          "                    trait_bound_param_name(param_name, trait_name))"),
         ("wildcard internal temp", "cexpr",
          "if binding == \"_\" {\n"
-         "        // Wildcards need a C assignment target, not a Ring binding.  Keep the\n"
+         "        // Wildcards need a C assignment target, not a Vorton binding.  Keep the\n"
          "        // internal temp out of exact and name-only registries.\n"
          "        fresh_tmp(ctx)",
          "if binding == \"_\" {\n"
-         "        c_local(ctx, \"__ring_for_wildcard\")"),
+         "        c_local(ctx, \"__vorton_for_wildcard\")"),
         ("pattern wildcard guard deletion", "cexpr",
          "    if name == \"_\" {\n"
          "        return fresh_tmp(ctx)\n"
@@ -12784,7 +12784,7 @@ def identity_checkpoint_source_errors() -> List[str]:
         ("produced domain shape guard", "cctx",
          'def_id != -1 || canonical_key != "" || producer == ""',
          "false"),
-        ("Ring event shape authority", "cctx",
+        ("Vorton event shape authority", "cctx",
          "validate_identity_event_shape(event)",
          "if false { validate_identity_event_shape(event) }"),
         ("closure-edge Fresh provenance", "cctx",
@@ -12828,7 +12828,7 @@ def identity_checkpoint_source_errors() -> List[str]:
          "    environment = dict(os.environ)\n"
          "    environment.pop(IDENTITY_CANDIDATE_ENV, None)\n"
          "    environment.pop(IDENTITY_EVIDENCE_ROOT_ENV, None)",
-         "    environment = dict(_controlled_environment(ring_exe, clang))"),
+         "    environment = dict(_controlled_environment(vorton_exe, clang))"),
         ("COFF timestamp range", "runner",
          "    allowed_offsets = {4, 5, 6, 7}",
          "    allowed_offsets = {4, 5, 6, 7, 8}"),
@@ -12958,7 +12958,7 @@ def preacceptance_source_contract_errors(
     )
     bodies: Dict[str, str] = {}
     for key, source_name, function_name, tokens in specs:
-        body, error = extract_ring_function_body(sources[source_name], function_name)
+        body, error = extract_vorton_function_body(sources[source_name], function_name)
         if error:
             errors.append(error)
             continue
@@ -12994,24 +12994,24 @@ def preacceptance_source_contract_errors(
         "    fn_bounds: List<FnBoundsEntry>," not in sources["infer_ctx"]
     ):
         errors.append("A1 unique CallableInstantiationReceipt carrier drifted")
-    core = mask_ring_strings_and_comments(sources["core"])
+    core = mask_vorton_strings_and_comments(sources["core"])
     for kind in ("pre_anf", "scope_result", "control_result", "assign_temp"):
         if f"binder_kind_{kind}()" in core:
             errors.append(f"Core prebuilt Flow administrative temp {kind}")
     return errors
 
 OWNERSHIP_CUTOVER_PATHS = {
-    "checker": REPO / "compiler" / "checker.ring",
-    "cli": REPO / "compiler" / "cli.ring",
-    "project": REPO / "compiler" / "compiler_mod.ring",
-    "pipeline": REPO / "compiler" / "ownership_pipeline.ring",
-    "hir_exact": REPO / "compiler" / "hir_exact.ring",
-    "infer": REPO / "compiler" / "infer.ring",
-    "infer_decl": REPO / "compiler" / "infer_decl.ring",
-    "infer_ctx": REPO / "compiler" / "infer_ctx.ring",
-    "core": REPO / "compiler" / "core_from_hir.ring",
-    "flow": REPO / "compiler" / "flow_lower.ring",
-    "inventory": REPO / "compiler" / "ir_inventory.ring",
+    "checker": REPO / "compiler" / "checker.vorton",
+    "cli": REPO / "compiler" / "cli.vorton",
+    "project": REPO / "compiler" / "compiler_mod.vorton",
+    "pipeline": REPO / "compiler" / "ownership_pipeline.vorton",
+    "hir_exact": REPO / "compiler" / "hir_exact.vorton",
+    "infer": REPO / "compiler" / "infer.vorton",
+    "infer_decl": REPO / "compiler" / "infer_decl.vorton",
+    "infer_ctx": REPO / "compiler" / "infer_ctx.vorton",
+    "core": REPO / "compiler" / "core_from_hir.vorton",
+    "flow": REPO / "compiler" / "flow_lower.vorton",
+    "inventory": REPO / "compiler" / "ir_inventory.vorton",
 }
 
 
@@ -13027,13 +13027,13 @@ def ownership_cutover_source_errors() -> List[str]:
         return errors
 
     for label in ("cli", "project"):
-        masked = mask_ring_strings_and_comments(sources[label])
+        masked = mask_vorton_strings_and_comments(sources[label])
         if re.search(r"(?m)^\s*use\s+perceus\b", masked):
             errors.append(f"{label}: direct Perceus import survived Core cutover")
         if re.search(r"\bperceus_transform\s*\(", masked):
             errors.append(f"{label}: direct Perceus call survived Core cutover")
 
-    error_result, error_result_error = extract_ring_function_body(
+    error_result, error_result_error = extract_vorton_function_body(
         sources["checker"], "failed_check_result")
     if error_result_error:
         errors.append(error_result_error)
@@ -13042,7 +13042,7 @@ def ownership_cutover_source_errors() -> List[str]:
         errors.append("checker: diagnostic result published frozen facts")
 
     for function_name in ("check", "check_module"):
-        body, body_error = extract_ring_function_body(
+        body, body_error = extract_vorton_function_body(
             sources["checker"], function_name)
         if body_error:
             errors.append(body_error)
@@ -13077,7 +13077,7 @@ def ownership_cutover_source_errors() -> List[str]:
         elif positions != sorted(positions) or len(set(positions)) != len(positions):
             errors.append(f"{label}: ownership stage order drifted")
 
-    pipeline, pipeline_error = extract_ring_function_body(
+    pipeline, pipeline_error = extract_vorton_function_body(
         sources["pipeline"], "run_ownership_pipeline")
     if pipeline_error:
         errors.append(pipeline_error)
@@ -13096,7 +13096,7 @@ def ownership_cutover_source_errors() -> List[str]:
                 errors.append(
                     f"ownership pipeline: outcome closure misses {token!r}")
 
-    diagnostic_adapter, diagnostic_adapter_error = extract_ring_function_body(
+    diagnostic_adapter, diagnostic_adapter_error = extract_vorton_function_body(
         sources["pipeline"], "ownership_pipeline_failure_diagnostics")
     if diagnostic_adapter_error:
         errors.append(diagnostic_adapter_error)
@@ -13110,7 +13110,7 @@ def ownership_cutover_source_errors() -> List[str]:
                 errors.append(
                     f"ownership diagnostics: exact adapter misses {token!r}")
 
-    single_report, single_report_error = extract_ring_function_body(
+    single_report, single_report_error = extract_vorton_function_body(
         sources["cli"], "report_single_ownership_failure")
     if single_report_error:
         errors.append(single_report_error)
@@ -13120,7 +13120,7 @@ def ownership_cutover_source_errors() -> List[str]:
             "failed single-file plan emitted no error")):
         errors.append("cli: single ownership diagnostic route drifted")
 
-    single_materialize, single_materialize_error = extract_ring_function_body(
+    single_materialize, single_materialize_error = extract_vorton_function_body(
         sources["cli"], "materialize_single_verified_ownership")
     if single_materialize_error:
         errors.append(single_materialize_error)
@@ -13132,7 +13132,7 @@ def ownership_cutover_source_errors() -> List[str]:
             "materialize_verified_hir(",
         ))
 
-    project_run, project_run_error = extract_ring_function_body(
+    project_run, project_run_error = extract_vorton_function_body(
         sources["project"], "run_project_ownership")
     if project_run_error:
         errors.append(project_run_error)
@@ -13142,7 +13142,7 @@ def ownership_cutover_source_errors() -> List[str]:
             "run_ownership_pipeline(",
         ))
 
-    project_report, project_report_error = extract_ring_function_body(
+    project_report, project_report_error = extract_vorton_function_body(
         sources["project"], "report_project_ownership_failure")
     if project_report_error:
         errors.append(project_report_error)
@@ -13153,7 +13153,7 @@ def ownership_cutover_source_errors() -> List[str]:
             "failed plan emitted no error")):
         errors.append("compiler_mod: project ownership diagnostic route drifted")
 
-    project, project_error = extract_ring_function_body(
+    project, project_error = extract_vorton_function_body(
         sources["project"], "materialize_verified_project_ownership")
     if project_error:
         errors.append(project_error)
@@ -13177,7 +13177,7 @@ def ownership_cutover_source_errors() -> List[str]:
 
     for function_name in (
             "compile_project", "compile_project_c", "verify_project_rc"):
-        body, body_error = extract_ring_function_body(
+        body, body_error = extract_vorton_function_body(
             sources["project"], function_name)
         if body_error:
             errors.append(body_error)
@@ -13351,7 +13351,7 @@ def identity_checkpoint_errors() -> Tuple[List[str], str]:
     return errors, detail
 
 
-def run_structural(ring_exe: str, collector: ResultCollector, *,
+def run_structural(vorton_exe: str, collector: ResultCollector, *,
                    name_filter: Optional[str] = None) -> None:
     """Run generated-C source-map and extern-handle ownership oracles."""
     suite = "structural"
@@ -13395,7 +13395,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         derived_carrier_errors = derived_impl_carrier_u1c4_source_errors()
         if not derived_carrier_errors:
             derived_carrier_errors.extend(
-                derived_impl_carrier_u1c4_fixture_errors(ring_exe))
+                derived_impl_carrier_u1c4_fixture_errors(vorton_exe))
         detail = (
             f"isolated_mutations={F2_DERIVED_IMPL_CARRIER_MUTATION_COUNT}; "
             "builtin_option_owners=3; proper_negatives=1; "
@@ -13410,7 +13410,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         trait_identity_errors = trait_method_identity_u1c_source_errors()
         if not trait_identity_errors:
             trait_identity_errors.extend(
-                trait_method_identity_u1c_fixture_errors(ring_exe))
+                trait_method_identity_u1c_fixture_errors(vorton_exe))
         detail = (
             f"isolated_mutations="
             f"{F2_TRAIT_METHOD_IDENTITY_MUTATION_COUNT}; "
@@ -13427,10 +13427,10 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         impl_predicate_errors = impl_predicate_u1c0_source_errors()
         if not impl_predicate_errors:
             impl_predicate_errors.extend(
-                impl_predicate_u1c0_source_check_errors(ring_exe))
+                impl_predicate_u1c0_source_check_errors(vorton_exe))
         if not impl_predicate_errors:
             impl_predicate_errors.extend(
-                impl_predicate_u1c0_no_std_errors(ring_exe))
+                impl_predicate_u1c0_no_std_errors(vorton_exe))
         detail = (
             f"source_contract_mutations="
             f"{F2_U1C0_SOURCE_CONTRACT_MUTATION_COUNT}; "
@@ -13449,7 +13449,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         nominal_field_errors = nominal_field_u1b_source_errors()
         if not nominal_field_errors:
             nominal_field_errors.extend(
-                nominal_field_u1b_source_check_errors(ring_exe))
+                nominal_field_u1b_source_check_errors(vorton_exe))
         detail = (
             f"source_contract_mutations="
             f"{F2_U1B_SOURCE_CONTRACT_MUTATION_COUNT}; "
@@ -13466,7 +13466,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         resolver_identity_errors = resolver_identity_u1a_source_errors()
         if not resolver_identity_errors:
             resolver_identity_errors.extend(
-                resolver_identity_u1a_source_check_errors(ring_exe))
+                resolver_identity_u1a_source_check_errors(vorton_exe))
         detail = (
             f"source_contract_mutations="
             f"{F2_U1A_SOURCE_CONTRACT_MUTATION_COUNT}; "
@@ -13482,12 +13482,12 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     if matches_filter(inventory_label, name_filter):
         inventory_errors = ir_inventory_f1_source_errors()
         if not inventory_errors:
-            inventory_errors.extend(ir_inventory_f1_compile_errors(ring_exe))
+            inventory_errors.extend(ir_inventory_f1_compile_errors(vorton_exe))
         detail = (
             f"executable_kinds={F1_EXECUTABLE_KIND_COUNT}; "
             f"binder_kinds={F1_BINDER_KIND_COUNT}; "
             f"semantic_mutations={F1_SEMANTIC_MUTATION_COUNT}; "
-            f"scope_guards={F1_SCOPE_GUARD_COUNT}; pinned_ring_checks=2")
+            f"scope_guards={F1_SCOPE_GUARD_COUNT}; pinned_vorton_checks=2")
         collector.add(TestResult(
             TestResult.PASS if not inventory_errors else TestResult.FAIL,
             suite, inventory_label,
@@ -13497,7 +13497,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     if matches_filter(core_c0_label, name_filter):
         core_c0_errors = core_hir_c0_source_errors()
         if not core_c0_errors:
-            core_c0_errors.extend(core_hir_c0_compile_errors(ring_exe))
+            core_c0_errors.extend(core_hir_c0_compile_errors(vorton_exe))
         detail = (
             f"source_mutations={CORE_HIR_C0_MUTATION_COUNT}; "
             f"scope_guards={CORE_HIR_C0_SCOPE_GUARD_COUNT}; "
@@ -13526,7 +13526,7 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
 
     impl_extern_label = "compiler.impl_extern_local_recovery"
     if matches_filter(impl_extern_label, name_filter):
-        recovery_errors = builtin_impl_extern_recovery_errors(ring_exe)
+        recovery_errors = builtin_impl_extern_recovery_errors(vorton_exe)
         collector.add(TestResult(
             TestResult.PASS if not recovery_errors else TestResult.FAIL,
             suite, impl_extern_label,
@@ -13539,10 +13539,10 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
     if matches_filter(resource_label, name_filter):
         resource_errors = resource_model_f0_source_errors()
         if not resource_errors:
-            resource_errors.extend(resource_model_f0_compile_errors(ring_exe))
+            resource_errors.extend(resource_model_f0_compile_errors(vorton_exe))
         detail = (
             f"semantic_mutations={F0_SEMANTIC_MUTATION_COUNT}; "
-            f"scope_guards={F0_SCOPE_GUARD_COUNT}; pinned_ring_checks=2")
+            f"scope_guards={F0_SCOPE_GUARD_COUNT}; pinned_vorton_checks=2")
         collector.add(TestResult(
             TestResult.PASS if not resource_errors else TestResult.FAIL,
             suite, resource_label,
@@ -13583,14 +13583,14 @@ def run_structural(ring_exe: str, collector: ResultCollector, *,
         or matches_filter(EXTERN_RC_FIXTURE, name_filter)
     ):
         jobs.append((feature_id, "extern", EXTERN_RC_FIXTURE, (EXTERN_RC_FIXTURE,)))
-    with tempfile.TemporaryDirectory(prefix="ring_structural_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="vorton_structural_") as tmpdir:
         temp_root = Path(tmpdir)
         for label, kind, entry, fixtures in jobs:
             if kind == "line":
                 errors = run_c_line_oracle(
-                    ring_exe, temp_root, entry, fixtures, label)
+                    vorton_exe, temp_root, entry, fixtures, label)
             else:
-                errors = run_extern_rc_oracle(ring_exe, temp_root, label)
+                errors = run_extern_rc_oracle(vorton_exe, temp_root, label)
             if errors:
                 collector.add(TestResult(
                     TestResult.FAIL, suite, label, "; ".join(errors)))
@@ -13647,7 +13647,7 @@ def parity_lane_members() -> dict[str, set[str]]:
         "native-c": native,
         "module-c": modules,
         "check": checks,
-        "self-compile-c": {"compiler/main.ring"},
+        "self-compile-c": {"compiler/main.vorton"},
         "c-structural": structural,
     }
 
@@ -13669,10 +13669,10 @@ def companion_integrity_errors(
     for companion in cases_dir.rglob("*"):
         if not companion.is_file() or companion.suffix not in {".expected", ".error"}:
             continue
-        ring_file = companion.with_suffix(".ring")
-        if not ring_file.is_file():
+        vorton_file = companion.with_suffix(".vorton")
+        if not vorton_file.is_file():
             errors.append(
-                f"orphan companion without same-stem .ring: "
+                f"orphan companion without same-stem .vorton: "
                 f"{display_path(companion)}"
             )
         if companion.suffix != ".expected":
@@ -13692,7 +13692,7 @@ def companion_integrity_errors(
     return errors
 
 
-def mask_ring_strings_and_comments(source: str) -> str:
+def mask_vorton_strings_and_comments(source: str) -> str:
     """Blank strings and // comments while preserving offsets and newlines."""
     masked: List[str] = []
     state = "code"
@@ -13743,12 +13743,12 @@ def mask_ring_strings_and_comments(source: str) -> str:
 
 
 def extract_enum_variants(source_path: Path, enum_name: str) -> set[str]:
-    """Extract top-level variants from a Ring enum declaration.
+    """Extract top-level variants from a Vorton enum declaration.
 
     The parser is deliberately small but brace-aware: commas inside struct
     fields, tuples, lists, or generic arguments do not split variants.
     """
-    source = mask_ring_strings_and_comments(
+    source = mask_vorton_strings_and_comments(
         source_path.read_text(encoding="utf-8"))
     match = re.search(
         rf"\bpub\s+enum\s+{re.escape(enum_name)}\s*\{{", source)
@@ -14253,10 +14253,10 @@ def validate_parity_matrix(
     # The compiler enum declarations are the authority: adding a variant makes
     # this suite fail until an evidence mapping is added.
     enum_specs = [
-        ("HExpr", REPO / "compiler" / "hir.ring"),
-        ("HStmt", REPO / "compiler" / "hir.ring"),
-        ("HDecl", REPO / "compiler" / "hir.ring"),
-        ("Pattern", REPO / "compiler" / "ast.ring"),
+        ("HExpr", REPO / "compiler" / "hir.vorton"),
+        ("HStmt", REPO / "compiler" / "hir.vorton"),
+        ("HDecl", REPO / "compiler" / "hir.vorton"),
+        ("Pattern", REPO / "compiler" / "ast.vorton"),
     ]
     for enum_name, source_path in enum_specs:
         try:
@@ -14320,27 +14320,27 @@ def run_parity(collector: ResultCollector, *,
 # Self-compile suite
 # ---------------------------------------------------------------------------
 
-def run_self_compile(ring_exe: str, collector: ResultCollector, *,
+def run_self_compile(vorton_exe: str, collector: ResultCollector, *,
                      name_filter: Optional[str] = None) -> None:
     """Regenerate the tracked C anchor and require an exact fixed point."""
     suite = "self-compile"
     # Coarse-grained: the whole suite is one unit; filter matches the suite name.
     if not matches_filter(suite, name_filter):
         return
-    compiler_main = REPO / "compiler" / "main.ring"
+    compiler_main = REPO / "compiler" / "main.vorton"
     if not compiler_main.is_file():
         collector.add(TestResult(TestResult.FAIL, suite, "source",
-                                 "compiler/main.ring not found"))
+                                 "compiler/main.vorton not found"))
         return
     if not DIST_C_MAIN.is_file():
         collector.add(TestResult(TestResult.FAIL, suite, "anchor",
                                  "tracked compiler/dist-c/main.c not found"))
         return
 
-    with tempfile.TemporaryDirectory(prefix="ring_selfcompile_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="vorton_selfcompile_") as tmpdir:
         try:
-            r = ring_build(
-                ring_exe,
+            r = vorton_build(
+                vorton_exe,
                 str(compiler_main),
                 out_dir=tmpdir,
                 extra_args=["--no-c-lines"],
@@ -14430,17 +14430,17 @@ def _run_selected(args: argparse.Namespace) -> int:
     ]
 
     # --- Tool discovery ---
-    needs_ring = any(
+    needs_vorton = any(
         suite in suites
         for suite in [
             "e2e", "golden", "self-compile", "structural",
             "ownership-vertical",
         ]
     )
-    needs_clang = needs_ring
+    needs_clang = needs_vorton
     clang_path = find_clang() if needs_clang else None
     try:
-        ring_exe = find_ring_exe() if needs_ring else None
+        vorton_exe = find_vorton_exe() if needs_vorton else None
     except (
         subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
@@ -14450,8 +14450,8 @@ def _run_selected(args: argparse.Namespace) -> int:
         _report_compiler_preparation_failure(exc)
         return 1
 
-    if needs_ring and ring_exe is None:
-        print("ERROR: ring.exe not found.", file=sys.stderr)
+    if needs_vorton and vorton_exe is None:
+        print("ERROR: vorton.exe not found.", file=sys.stderr)
         print("  Expected tracked compiler/dist-c/main.c and a working C toolchain.",
               file=sys.stderr)
         return 1
@@ -14466,11 +14466,11 @@ def _run_selected(args: argparse.Namespace) -> int:
         suite in suites for suite in ["e2e", "golden", "ownership-vertical"])
     if needs_runtime and clang_path:
         if not ensure_runtime(clang_path):
-            print("ERROR: failed to build ring_runtime.o from ring_runtime.cpp.", file=sys.stderr)
+            print("ERROR: failed to build vorton_runtime.o from vorton_runtime.cpp.", file=sys.stderr)
             return 1
 
-    if ring_exe:
-        print(f"ring.exe: {ring_exe}")
+    if vorton_exe:
+        print(f"vorton.exe: {vorton_exe}")
     if clang_path:
         print(f"clang:    {clang_path}")
     print(f"suites:   {', '.join(suites)}")
@@ -14482,25 +14482,25 @@ def _run_selected(args: argparse.Namespace) -> int:
 
     if "e2e" in suites:
         _run_timed_suite("e2e", lambda: run_e2e(
-            ring_exe, clang_path or "", collector,
+            vorton_exe, clang_path or "", collector,
             name_filter=args.name_filter,
         ))
 
     if "golden" in suites:
         _run_timed_suite("golden", lambda: run_golden(
-            ring_exe, clang_path or "", collector,
+            vorton_exe, clang_path or "", collector,
             update_golden=args.update_golden,
             name_filter=args.name_filter,
         ))
 
     if "self-compile" in suites:
         _run_timed_suite("self-compile", lambda: run_self_compile(
-            ring_exe, collector, name_filter=args.name_filter,
+            vorton_exe, collector, name_filter=args.name_filter,
         ))
 
     if "structural" in suites:
         _run_timed_suite("structural", lambda: run_structural(
-            ring_exe, collector, name_filter=args.name_filter,
+            vorton_exe, collector, name_filter=args.name_filter,
         ))
 
     if "parity" in suites:
@@ -14510,7 +14510,7 @@ def _run_selected(args: argparse.Namespace) -> int:
 
     if "ownership-vertical" in suites:
         _run_timed_suite("ownership-vertical", lambda: run_ownership_vertical_suite(
-            ring_exe, clang_path or "", collector,
+            vorton_exe, clang_path or "", collector,
             name_filter=args.name_filter,
         ))
 
@@ -14525,7 +14525,7 @@ def _run_selected(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Ring-lang Python test runner (B-151 P2)")
+        description="vorton-lang Python test runner (B-151 P2)")
     parser.add_argument(
         "--suite",
         choices=[

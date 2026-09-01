@@ -1,0 +1,25 @@
+// Test: Result<T,E>, Ok, Err, to_result are available without explicit import
+// Verifies that result.vorton is included in STD_FILES prelude
+
+fn main() {
+    // Ok and Err constructors work without import
+    let ok_val: Result<Int, Str> = Ok(42)
+    let err_val: Result<Int, Str> = Err("oops")
+
+    // Result methods work
+    assert(ok_val.is_ok(), "Ok should be ok")
+    assert(err_val.is_err(), "Err should be err")
+    assert(ok_val.unwrap_or(0) == 42, "unwrap_or Ok")
+    assert(err_val.unwrap_or(0) == 0, "unwrap_or Err")
+
+    // to_result is available without import (type-check only; runtime test
+    // requires effect evidence threading which is a separate concern)
+    let r1 = to_result(fn() -> Int { 42 })
+    assert(r1.is_ok(), "to_result success")
+
+    // map works
+    let mapped = ok_val.map(fn(x: Int) -> Str { "${x}" })
+    assert(mapped.is_ok(), "map preserves Ok")
+
+    print("pass: result prelude")
+}

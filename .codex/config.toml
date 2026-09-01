@@ -15,15 +15,15 @@ default_subagent_reasoning_effort = "max"
 interrupt_message = true
 
 [agents.implementer]
-description = "Implement, maintain, or refactor one scoped Ring-lang item in a root-assigned worktree; route blockers to root and keep the same identity through review and fixes."
+description = "Implement, maintain, or refactor one scoped vorton-lang item in a root-assigned worktree; route blockers to root and keep the same identity through review and fixes."
 config_file = "agents/implementer.toml"
 
 [agents.reviewer]
-description = "Read-only review of Ring-lang implementation, maintenance, refactor, risk, or Argument evidence against specs and invariants."
+description = "Read-only review of vorton-lang implementation, maintenance, refactor, risk, or Argument evidence against specs and invariants."
 config_file = "agents/reviewer.toml"
 
 [agents.finder]
-description = "Read-only Ring-lang risk-audit or Argument evidence finder assigned explicit lenses on a fixed main snapshot."
+description = "Read-only vorton-lang risk-audit or Argument evidence finder assigned explicit lenses on a fixed main snapshot."
 config_file = "agents/finder.toml"
 
 [agents.skeptic]

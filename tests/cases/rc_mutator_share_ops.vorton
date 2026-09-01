@@ -1,0 +1,74 @@
+// B-103 e2e (escape + scope-end pattern): binding a Unit-typed mutator result
+// (`let r = xs.push(v)`) and deriving fresh containers (filter/concat/slice/
+// flat_map/map_from) must leave the source containers fully usable after the
+// bindings go out of scope.  Semantic twin of the LLVM differential cases
+// mutator_result_binding.vorton + list_share_ops_rc.vorton (which additionally lock
+// the native RC behaviour); this one locks the language-level semantics.
+
+fn bind_push(mut xs: List<Str>) -> Int {
+    let r = xs.push("d")
+    xs.len()
+}
+
+fn bind_map_insert(mut m: Map<Str, Str>) -> Int {
+    let r = m.insert("b", "two")
+    m.len()
+}
+
+fn drop_filtered(xs: List<Str>) -> Int {
+    let ys = xs.filter(fn(x) { x != "b" })
+    ys.len()
+}
+
+fn drop_concat(a: List<Str>, b: List<Str>) -> Int {
+    let c = a.concat(b)
+    c.len()
+}
+
+fn drop_slice(xs: List<Str>) -> Str {
+    let s = xs.slice(1, 3)
+    s[0]
+}
+
+fn drop_flat(nested: List<List<Str>>) -> Int {
+    let flat = nested.flat_map(fn(l) { l })
+    flat.len()
+}
+
+fn drop_map_from() -> Str {
+    let m = map_from([("a", "x"), ("b", "y")])
+    m["a"]
+}
+
+fn main() {
+    let mut xs = ["a", "b", "c"]
+    assert(bind_push(xs) == 4, "push inside helper appends")
+    assert(xs.len() == 4, "source list alive after mutator-result binding dropped")
+    assert(xs[3] == "d", "appended element visible in caller")
+
+    let mut m = map_new()
+    let r0 = m.insert("a", "one")
+    assert(bind_map_insert(m) == 2, "insert inside helper lands")
+    assert(m["a"] == "one", "existing entry alive after binding dropped")
+    assert(m["b"] == "two", "inserted entry visible in caller")
+
+    assert(drop_filtered(xs) == 3, "filter result correct")
+    assert(xs.len() == 4, "source alive after filtered copy dropped")
+    assert(xs[1] == "b", "source elements alive after filtered copy dropped")
+
+    let ys = ["e", "f"]
+    assert(drop_concat(xs, ys) == 6, "concat result correct")
+    assert(xs[0] == "a", "left source alive after concat copy dropped")
+    assert(ys[1] == "f", "right source alive after concat copy dropped")
+
+    assert(drop_slice(xs) == "b", "slice result correct")
+    assert(xs[2] == "c", "source alive after slice copy dropped")
+
+    let nested = [["1", "2"], ["3"]]
+    assert(drop_flat(nested) == 3, "flat_map result correct")
+    assert(nested[0][1] == "2", "inner lists alive after flattened copy dropped")
+
+    assert(drop_map_from() == "x", "map_from values readable")
+
+    print("rc_mutator_share_ops: all tests passed")
+}

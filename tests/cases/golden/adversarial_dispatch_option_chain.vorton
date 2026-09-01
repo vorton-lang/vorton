@@ -1,0 +1,86 @@
+// B-100 P1.3 adversarial: Option method chains (non-and_then subset).
+// Tests Option.map, Option.unwrap_or, Option.unwrap_or_else,
+// is_some, is_none, and chained combinations.
+// NOTE: Option.and_then is tested separately in adversarial_dispatch_option_and_then.vorton
+// because it is missing from the LLVM runtime (discovered gap).
+
+fn main() {
+    // ── Basic Option methods ──
+    let s = some(42)
+    print("is_some=${s.is_some()}")                     // is_some=true
+    print("is_none=${s.is_none()}")                     // is_none=false
+    print("unwrap_or=${s.unwrap_or(0)}")                // unwrap_or=42
+
+    let n: Option<Int> = none
+    print("n_is_some=${n.is_some()}")                   // n_is_some=false
+    print("n_is_none=${n.is_none()}")                   // n_is_none=true
+    print("n_unwrap_or=${n.unwrap_or(99)}")             // n_unwrap_or=99
+
+    // ── Option.map ──
+    let mapped = some(10).map(fn(x) { x * 2 })
+    print("map_some=${mapped.unwrap_or(0)}")            // map_some=20
+
+    let mapped_none: Option<Int> = none
+    let mapped_n = mapped_none.map(fn(x) { x * 2 })
+    print("map_none=${mapped_n.is_none()}")             // map_none=true
+
+    // ── Option.unwrap_or_else ──
+    let uoe = some(7).unwrap_or_else(fn() { 100 })
+    print("uoe_some=${uoe}")                            // uoe_some=7
+
+    let uoe2: Option<Int> = none
+    let uoe2r = uoe2.unwrap_or_else(fn() { 100 })
+    print("uoe_none=${uoe2r}")                          // uoe_none=100
+
+    // ── Chained: map then unwrap_or ──
+    let chain1 = some(3).map(fn(x) { x + 7 }).unwrap_or(0)
+    print("chain_map_unwrap=${chain1}")                 // chain_map_unwrap=10
+
+    // ── String Option ──
+    let so = some("hello").map(fn(s) { s.to_upper() })
+    print("str_map=${so.unwrap_or("?")}")               // str_map=HELLO
+
+    let sn: Option<Str> = none
+    let snr = sn.map(fn(s) { s.to_upper() })
+    print("str_map_none=${snr.unwrap_or("default")}")   // str_map_none=default
+
+    // ── Option from list.find ──
+    let xs = [10, 20, 30, 40]
+    let found = xs.find(fn(x) { x > 25 })
+    let found_val = found.map(fn(x) { x + 1 }).unwrap_or(-1)
+    print("find_chain=${found_val}")                    // find_chain=31
+
+    let miss = xs.find(fn(x) { x > 100 })
+    let miss_val = miss.map(fn(x) { x + 1 }).unwrap_or(-1)
+    print("miss_chain=${miss_val}")                     // miss_chain=-1
+
+    // ── Option from list.get ──
+    let g1 = xs.get(2).map(fn(x) { x * 2 }).unwrap_or(0)
+    print("get_chain=${g1}")                            // get_chain=60
+
+    let g2 = xs.get(99).map(fn(x) { x * 2 }).unwrap_or(0)
+    print("get_oob_chain=${g2}")                        // get_oob_chain=0
+
+    // ── map.map chain (double map) ──
+    let double_map = some(5)
+        .map(fn(x) { x + 10 })
+        .map(fn(x) { x * 2 })
+    print("double_map=${double_map.unwrap_or(0)}")      // double_map=30
+
+    // ── map on none chain ──
+    let none_chain: Option<Int> = none
+    let nc = none_chain
+        .map(fn(x) { x + 1 })
+        .map(fn(x) { x * 2 })
+    print("none_chain=${nc.is_none()}")                 // none_chain=true
+
+    // ── unwrap_or_else with side-effect-like computation ──
+    let compute = some(100).unwrap_or_else(fn() { 1 + 2 + 3 })
+    print("compute_some=${compute}")                    // compute_some=100
+
+    let compute2: Option<Int> = none
+    let c2 = compute2.unwrap_or_else(fn() { 1 + 2 + 3 })
+    print("compute_none=${c2}")                         // compute_none=6
+
+    print("done")
+}

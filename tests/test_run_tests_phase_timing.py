@@ -33,13 +33,13 @@ class PhaseTimingTests(unittest.TestCase):
     def test_default_mode_does_not_construct_trace_or_read_clock(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             absent_trace = Path(temp_dir) / "not-created.jsonl"
-            runtime_cpp = Path(temp_dir) / "ring_runtime.cpp"
-            runtime_o = Path(temp_dir) / "ring_runtime.o"
+            runtime_cpp = Path(temp_dir) / "vorton_runtime.cpp"
+            runtime_o = Path(temp_dir) / "vorton_runtime.o"
             runtime_cpp.write_text("runtime", encoding="utf-8")
             runtime_o.write_bytes(b"object")
             os.utime(runtime_cpp, (10, 10))
             os.utime(runtime_o, (20, 20))
-            completed = subprocess.CompletedProcess(["ring", "check"], 0, "", "")
+            completed = subprocess.CompletedProcess(["vorton", "check"], 0, "", "")
             with (
                 patch.object(sys, "argv", ["run_tests.py", "--suite", "parity"]),
                 patch.object(runner, "_run_selected", return_value=0),
@@ -50,7 +50,7 @@ class PhaseTimingTests(unittest.TestCase):
                 patch.object(runner, "RUNTIME_O", runtime_o),
             ):
                 self.assertEqual(runner.main(), 0)
-                result = runner.ring_check("ring", "case.ring")
+                result = runner.vorton_check("vorton", "case.vorton")
                 self.assertTrue(runner.ensure_runtime("clang"))
 
             self.assertEqual(result.returncode, 0)
@@ -61,8 +61,8 @@ class PhaseTimingTests(unittest.TestCase):
     def test_child_classification_sequence_schema_and_partial_flush(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             trace_path = Path(temp_dir) / "child.jsonl"
-            success = subprocess.CompletedProcess(["ring", "check"], 0, "", "")
-            nonzero = subprocess.CompletedProcess(["ring", "build"], 7, "", "")
+            success = subprocess.CompletedProcess(["vorton", "check"], 0, "", "")
+            nonzero = subprocess.CompletedProcess(["vorton", "build"], 7, "", "")
             timeout = subprocess.TimeoutExpired(["program.exe"], 30)
             with (
                 patch.object(
@@ -78,17 +78,17 @@ class PhaseTimingTests(unittest.TestCase):
                 tracer = runner.PhaseTimingTrace(str(trace_path))
                 runner._PHASE_TRACER = tracer
                 runner._run_subprocess(
-                    "ring_check", ["ring", "check", "a.ring"],
-                    phase_suite="e2e", phase_case="a.ring",
+                    "vorton_check", ["vorton", "check", "a.vorton"],
+                    phase_suite="e2e", phase_case="a.vorton",
                 )
                 runner._run_subprocess(
-                    "ring_build", ["ring", "build", "b.ring"],
-                    phase_suite="e2e", phase_case="b.ring",
+                    "vorton_build", ["vorton", "build", "b.vorton"],
+                    phase_suite="e2e", phase_case="b.vorton",
                 )
                 with self.assertRaises(subprocess.TimeoutExpired):
                     runner._run_subprocess(
                         "run_exe", ["program.exe"],
-                        phase_suite="e2e", phase_case="c.ring",
+                        phase_suite="e2e", phase_case="c.vorton",
                     )
 
                 # Every record is flushed before control returns to the runner,
@@ -105,7 +105,7 @@ class PhaseTimingTests(unittest.TestCase):
                  ("timeout", False, None)],
             )
             self.assertEqual([row["case"] for row in records],
-                             ["a.ring", "b.ring", "c.ring"])
+                             ["a.vorton", "b.vorton", "c.vorton"])
             for row in records:
                 self.assertEqual(set(row), runner.PHASE_TIMING_FIELDS)
                 self.assertEqual(row["schema"], runner.PHASE_TIMING_SCHEMA)
@@ -115,7 +115,7 @@ class PhaseTimingTests(unittest.TestCase):
     def test_suite_and_runner_totals_partition_residual(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             trace_path = Path(temp_dir) / "accounting.jsonl"
-            child = subprocess.CompletedProcess(["ring"], 0, "", "")
+            child = subprocess.CompletedProcess(["vorton"], 0, "", "")
             with (
                 patch.object(
                     runner.time,
@@ -129,10 +129,10 @@ class PhaseTimingTests(unittest.TestCase):
 
                 def run_children() -> None:
                     runner._run_subprocess(
-                        "ring_check", ["ring"], phase_case="first",
+                        "vorton_check", ["vorton"], phase_case="first",
                     )
                     runner._run_subprocess(
-                        "ring_build", ["ring"], phase_case="second",
+                        "vorton_build", ["vorton"], phase_case="second",
                     )
 
                 tracer.run_suite("parity", run_children)
@@ -144,7 +144,7 @@ class PhaseTimingTests(unittest.TestCase):
                              list(range(1, 7)))
             suite_rows = [row for row in records if row["suite"] == "parity"]
             children = [row for row in suite_rows
-                        if row["stage"] in {"ring_check", "ring_build"}]
+                        if row["stage"] in {"vorton_check", "vorton_build"}]
             suite_residual = next(
                 row for row in suite_rows
                 if row["stage"] == "orchestration_residual"
@@ -179,7 +179,7 @@ class PhaseTimingTests(unittest.TestCase):
     def test_unhandled_suite_exception_keeps_incomplete_partial_trace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             trace_path = Path(temp_dir) / "partial.jsonl"
-            child = subprocess.CompletedProcess(["ring"], 0, "", "")
+            child = subprocess.CompletedProcess(["vorton"], 0, "", "")
             with (
                 patch.object(
                     runner.time, "perf_counter_ns",
@@ -192,7 +192,7 @@ class PhaseTimingTests(unittest.TestCase):
 
                 def fail_after_child() -> None:
                     runner._run_subprocess(
-                        "ring_check", ["ring"], phase_case="partial-case",
+                        "vorton_check", ["vorton"], phase_case="partial-case",
                     )
                     raise RuntimeError("fixture failure")
 
@@ -219,21 +219,21 @@ class PhaseTimingTests(unittest.TestCase):
             runner._phase_timing_path("relative.jsonl")
 
     def test_production_relative_case_identity_uses_forward_slashes(self) -> None:
-        relative = PureWindowsPath("negative", "join_non_str.ring")
+        relative = PureWindowsPath("negative", "join_non_str.vorton")
         self.assertEqual(
             runner._phase_relative_identity(relative),
-            "negative/join_non_str.ring",
+            "negative/join_non_str.vorton",
         )
         self.assertEqual(
             runner._phase_relative_identity(relative, "neg:"),
-            "neg:negative/join_non_str.ring",
+            "neg:negative/join_non_str.vorton",
         )
 
     def test_runtime_prepare_cache_hit_is_explicit_non_child(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            runtime_cpp = temp_root / "ring_runtime.cpp"
-            runtime_o = temp_root / "ring_runtime.o"
+            runtime_cpp = temp_root / "vorton_runtime.cpp"
+            runtime_o = temp_root / "vorton_runtime.o"
             trace_path = temp_root / "cached.jsonl"
             runtime_cpp.write_text("runtime", encoding="utf-8")
             runtime_o.write_bytes(b"object")
@@ -268,8 +268,8 @@ class PhaseTimingTests(unittest.TestCase):
     def test_runtime_prepare_rebuild_records_real_child(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            runtime_cpp = temp_root / "ring_runtime.cpp"
-            runtime_o = temp_root / "ring_runtime.o"
+            runtime_cpp = temp_root / "vorton_runtime.cpp"
+            runtime_o = temp_root / "vorton_runtime.o"
             trace_path = temp_root / "rebuilt.jsonl"
             runtime_cpp.write_text("runtime", encoding="utf-8")
 

@@ -1,0 +1,37 @@
+effect RecursiveStep {
+    fn apply(value: Int) -> Int
+}
+
+fn repeat_with<T>(
+    callback: fn(T) -> T,
+    value: T,
+    remaining: Int
+) -> T {
+    if remaining == 0 {
+        value
+    } else {
+        repeat_with(callback, callback(value), remaining - 1)
+    }
+}
+
+fn increment(value: Int) -> Int with {} { value + 1 }
+
+fn keep(value: Str) -> Str with {} { value }
+
+fn recursive_step(value: Int) -> Int with {RecursiveStep} {
+    RecursiveStep.apply(value)
+}
+
+fn main() {
+    let number = repeat_with(increment, 3, 2)
+    let text = repeat_with(keep, "vorton", 2)
+    let handled = handle {
+        repeat_with(recursive_step, 2, 2)
+    } with {
+        RecursiveStep.apply(value) => value + 5,
+    }
+
+    assert(number == 5 && text == "vorton" && handled == 12,
+        "generic self recursion closes before independent type/effect instances")
+    print("D_RECURSIVE_GENERIC_SELF_OK:${number}/${text}/${handled}")
+}

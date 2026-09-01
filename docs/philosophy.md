@@ -1,6 +1,6 @@
-# Ring-lang 设计哲学
+# vorton-lang 设计哲学
 
-不信任程序员的 native 编程语言。编译器是最终权威——不信任你，但也不要求你自证清白；它自己做功课（全推断），查到问题了来找你。写起来像 Python（lv0 零标注），编译器看到 Rust 级别的类型与副作用信息。语义内核 = Rust − borrow checker − 标注负担 + 代数效果 + 可判定推断。主战场：CLI / 服务端 / 系统编程——编译器自身是第一个生产负载。自 2026-08-03 起 main 为 C11-only codegen/bootstrap，`dist-c` 是 tracked stage-0；后端收口不改变这些语言公理。
+不信任程序员的 native 编程语言。编译器是最终权威——不信任你，但也不要求你自证清白；它自己做功课（全推断），查到问题了来找你。写起来像 Python（lv0 零标注），编译器看到 Rust 级别的类型与副作用信息。语义内核 = Rust − borrow checker − 标注负担 + 代数效果 + 可判定推断。主战场：CLI / 服务端 / 系统编程——编译器自身是首个目标生产负载。当前编译器在 Rust 宿主上重建；迁移前的 C11 compiler、tracked C、runtime 与 self-host 结果只作迁移蓝本、语义 oracle 和历史证据，不是当前 bootstrap、CI 或发布 authority。实现路线变化不改变这些语言公理。
 
 ## 出发点（2026-06-12 成文，2026-06-24 重构——原始动机从"agent 验证瓶颈"回溯到"程序员不可信"）
 
@@ -11,13 +11,13 @@
 三种语言哲学的定位：
 - **C** = 信任程序员（你说什么就是什么，错了自己负责）
 - **Rust** = 不信任程序员，要求你自证清白（borrow checker / lifetime 标注 / turbofish）
-- **Ring** = 不信任程序员，编译器自己做功课（全推断——查到问题了来找你，但不要求你提前声明）
+- **Vorton** = 不信任程序员，编译器自己做功课（全推断——查到问题了来找你，但不要求你提前声明）
 
-目标是让编译器成为**严格的教官 + 保姆**：替你追踪类型、副作用、资源、穷尽性，在你犯错时拦截你，但不要求你事先提交证明文件。验证三条路：人工审查（不可扩展）、测试（只覆盖想到的路径）、编译期语义（by construction 排除整类错误）。Ring 选第三条。
+目标是让编译器成为**严格的教官 + 保姆**：替你追踪类型、副作用、资源、穷尽性，在你犯错时拦截你，但不要求你事先提交证明文件。验证三条路：人工审查（不可扩展）、测试（只覆盖想到的路径）、编译期语义（by construction 排除整类错误）。Vorton 选第三条。
 
-**LLM-first 是推论，不是出发点。** LLM 是最不可信、又最不能被要求"自证清白"的程序员——所以"不信任程序员 + 编译器自己做功课"的设计对 LLM 收益最大。加上窗口判断（agent 无学习成本、生态锁定弱 → 新代码的语言选择五十年来第一次解冻），Ring 在 agent 时代有独特竞争位——但这是加分项，不是存在依据。
+**LLM-first 是推论，不是出发点。** LLM 是最不可信、又最不能被要求"自证清白"的程序员——所以"不信任程序员 + 编译器自己做功课"的设计对 LLM 收益最大。加上窗口判断（agent 无学习成本、生态锁定弱 → 新代码的语言选择五十年来第一次解冻），Vorton 在 agent 时代有独特竞争位——但这是加分项，不是存在依据。
 
-最小可兑现版本不依赖外部采用：第一个用户 = 作者本人，第一个生产负载 = 编译器自身（35k 行，已自举）。B-111 给出可证伪结果（Ring vs TS：首次通过率/到绿轮数/运行时错误率）——数字不行 = 干净的实验结论而非失败（外加留下一门顺手的语言）；数字行且窗口开 = 别家 AI-native 语言没有的凭据（实测数据 + native + 自举）。两头都不空。
+最小可兑现版本不依赖外部采用：第一个用户 = 作者本人，第一个目标生产负载 = 编译器自身。迁移前实现曾以约 35k 行 Vorton 完成 C11 self-host；这是历史结果，当前 Rust 重建路线不把它当作现行 compiler gate。后续可证伪比较仍看首次通过率、到绿轮数与运行时错误率——数字不行 = 干净的实验结论而非失败（外加留下一门顺手的语言）；数字行且窗口开 = 别家 AI-native 语言没有的凭据。两头都不空。
 
 核心赌注（两层）：(1) 编译器自己做功课（全推断 + effect 追踪 + 穷尽性 + 确定性资源）比"信任程序员"和"要求程序员自证"都能拦截更多错误；(2) 在此基础上，LLM 在零训练数据的情况下 vibe coding 大规模代码库，运行时错误率与总迭代轮数干掉主流语言——首先是「够用就行」的 JS/TS/Python。
 
@@ -71,7 +71,7 @@ Bidirectional + constraint solving + effect inference。写代码的体验接近
 
 演进主线即此公理的逐项兑现：effect 推断（"有副作用吗"）→ 穷尽匹配（"case 全了吗"）→ 静态 leak verifier（"泄露了吗"，B-104 D2）→ refinement（"参数合法吗"，B-001）。新特性的取舍判据 = 能否把又一个人类判断移交编译期判定。
 
-推论：**失真必须响**（静默行为差异对程序员不可见，必须以编译错误浮现——B-110）；**优化不可观测**（引擎优化绝不改变可观测语义——COW 原则）；**人类审查面可枚举**（审查没有被消灭的地方压缩为可枚举集合 = unsafe discharge 点清单，`ring audit unsafe`，design.md §7.12）。
+推论：**失真必须响**（静默行为差异对程序员不可见，必须以编译错误浮现——B-110）；**优化不可观测**（引擎优化绝不改变可观测语义——COW 原则）；**人类审查面可枚举**（审查没有被消灭的地方压缩为可枚举集合 = unsafe discharge 点清单，`vorton audit unsafe`，design.md §7.12）。
 
 ### 5. 编译器必须终止（层 1 · 硬约束）
 
@@ -89,11 +89,11 @@ Bidirectional + constraint solving + effect inference。写代码的体验接近
 - **语义层费用 GC 省不掉**：公理 2/4 独立强迫 ownership 语义——无别名追踪的引用语义使 aliasing bug 类对无人回路永久开放；Drop/RAII 强迫 move-only 类型存在。即便换 GC 引擎，所有权的用户面几乎原样保留，省下的只有引擎层。Mutation 同时由别名/参数/捕获信息与多实例 `mut<T>` effect 建模，见 design.md §7.9。
 - **引擎层四收益**：① 无 runtime——C ABI FFI 零摩擦、二进制小、WASM/嵌入式/GPU（远期场景，正典清单见上 ④）路径不堵死（2026-06-12 升格为公理⑦）；② 内存占用 = live set（GC 需 2-3× heap headroom，agent 并行 ×N 进程放大）；③ Perceus 特有——FBIP 原地复用、garbage-free 定理、D2 静态 verifier（"编译期证明 0 泄露"GC 给不了）；④ 竞争位——AI-native 同辈（Mojo/MoonBit/Zero）全选 ownership/no-GC；GC 化 = 进 Go/TS"够用就行"修罗场（效果推断差异化最弱处），no-GC 打的是"Rust 人体工学"这个公认无解痛点。
 - **不可逆性不对称（最硬一条）**：GC→确定性 retrofit 史上无成功案例（D 的 @nogc 残废、finalizer ≠ destructor）；RC→GC 级人体工学 = 当前设计纲领且已基本兑现（所有权仅 5 浮现点、全部 fail-safe）。要错就错在 no-GC 这边。
-- **可证伪锚点**：B-089 re-measure = Ring 首个 RC vs GC footprint 实测（native RC plateau vs V8 自编译基线）；若完整 RC 不优于 V8，此账重算。
+- **可证伪锚点**：B-089 re-measure = Vorton 首个 RC vs GC footprint 实测（native RC plateau vs V8 自编译基线）；若完整 RC 不优于 V8，此账重算。
 
 ### 7. 场景不可堵死（层 1 · 硬约束）
 
-对 ④ 具名场景集的部署路径，设计决策不得不可逆地堵死。当前兑现形式：native、零强制 runtime、C ABI FFI；C11 是可审计的 reference/stage-0 信道，未来第二后端不得取代它或把语义重新锁进进程内私有 API。与 ⑤⑥ 同为当场可检验——「这个设计需要强制 runtime 吗」是今天即可裁定的架构事实，无需等测量。不可逆性是本条成立的根基：堵死是单向门（与 ⑥ GC 记录的「不可逆性不对称」同一逻辑）。
+对 ④ 具名场景集的部署路径，设计决策不得不可逆地堵死。目标兑现形式是native、零强制 runtime 与 C ABI FFI；迁移前 C11 曾提供可审计的 reference/stage-0 信道，当前 Rust 重建必须重新建立相应真实 gate，不能把旧 oracle 冒充现行实现。未来第二后端不得取代可审计 reference 信道或把语义重新锁进进程内私有 API。与 ⑤⑥ 同为当场可检验——「这个设计需要强制 runtime 吗」是今天即可裁定的架构事实，无需等测量。不可逆性是本条成立的根基：堵死是单向门（与 ⑥ GC 记录的「不可逆性不对称」同一逻辑）。
 
 实例：⑥ GC 取舍记录的引擎收益①（runtime-free → WASM/嵌入式/GPU 路径不堵死）即本条在该仲裁中的出场；B-007/B-116 选 evidence-passing async effect 而非 GC 续体 runtime 调度器——绿色线程对 agent 可能更友好（层 2 议题），但堵死嵌入式/GPU/零摩擦 FFI（层 1 否决）。2026-06-12 自 ⑥ 的 GC 记录升格成文。
 
@@ -105,11 +105,11 @@ Bidirectional + constraint solving + effect inference。写代码的体验接近
 
 ### 9. 语法借用，最大化知识迁移（层 2 · 策略）
 
-不发明新关键字，除非语义确实是新的——Ring 特有语法仅 `handle...with` 与 `catch { arms }`（algebraic effect handler 在主流语言无对应物）。这是核心赌注第二层最大风险（零训练数据）的主要缓解：LLM 的先验知识直接可用，错误率不因语法陌生而上升。借用清单见下文「语法原则」。2026-06-12 D-6 自「语法原则」升格成文。
+不发明新关键字，除非语义确实是新的——Vorton 特有语法仅 `handle...with` 与 `catch { arms }`（algebraic effect handler 在主流语言无对应物）。这是核心赌注第二层最大风险（零训练数据）的主要缓解：LLM 的先验知识直接可用，错误率不因语法陌生而上升。借用清单见下文「语法原则」。2026-06-12 D-6 自「语法原则」升格成文。
 
 ### 性能的地位（非公理，2026-06-12 D-6 拍板）
 
-没有任何公理承诺速度——这是显式决定，不是疏漏。性能是工程目标：与任何公理冲突时性能让步；但受 ⑥（确定性资源 = RC 无 GC headroom、FBIP 路径）与 ⑦（native、零强制 runtime）间接保护——按公理推导出的架构天然不慢。perf 项的优先级锚点 = 层 0 判据（开发回路的实际瓶颈），不独立成轴。2026-08-03 当前 check/验证时延已实际阻塞迭代，用户据此把 B-176/B-180 排在 critical 清零之后、其余非 critical 工作之前；这是阶段性工程排序，不允许降低公理、correctness 或测试覆盖门槛，也不等于提前启动生成程序/JIT 优化。
+没有任何公理承诺速度——这是显式决定，不是疏漏。性能是工程目标：与任何公理冲突时性能让步；但受 ⑥（确定性资源 = RC 无 GC headroom、FBIP 路径）与 ⑦（native、零强制 runtime）间接保护——按公理推导出的架构天然不慢。perf 项的优先级锚点 = 层 0 判据（开发回路的实际瓶颈），不独立成轴。历史上 2026-08-03 的 C/self-host check 时延曾实际阻塞迭代，并据此形成当时的性能排序；该记录不建立当前 Rust compiler 的性能基线，也不允许降低公理、correctness 或测试覆盖门槛。
 
 ---
 
@@ -119,12 +119,12 @@ Bidirectional + constraint solving + effect inference。写代码的体验接近
 
 ### 一种事只有一种写法
 
-TS 里定义数据结构有 interface/type/class/literal 四种写法，LLM 每次选不同的导致大型代码库风格混乱。Ring 中：
+TS 里定义数据结构有 interface/type/class/literal 四种写法，LLM 每次选不同的导致大型代码库风格混乱。Vorton 中：
 
 - 数据定义只有 `struct`
 - 错误只有 `fail.raise`
 - 方法调用只有 `.method()` 链式风格（无管道运算符）
-- Option 类型只有 `Option<T>`；当前编译器仍接受的 `T?` 是待 B-191 原子删除的历史语法，不用于新代码
+- Option 类型只有 `Option<T>`；迁移前编译器接受的 `T?` 是历史语法，不用于新代码，当前 Rust 重建不得把它作为默认表面恢复
 - Option 操作只有方法链（`.map()`, `.and_then()`, `.unwrap_or()`）——无关键字
 - 函数/闭包统一用 `fn` 关键字（无第二种 lambda 语法）
 
@@ -139,7 +139,7 @@ TS 里定义数据结构有 interface/type/class/literal 四种写法，LLM 每�
 - `//` 行注释 ← C/JS/Rust
 - `.unwrap_or()` / `.and_then()` / `.unwrap()` ← Rust Option API
 
-只有 `handle...with` 和 `catch { arms }` 是 Ring 特有语法——因为 algebraic effect handler 在主流语言中确实没有对应物。`.to_fail(error)` 是 Ring 独有方法——桥接 Option 和 fail effect。
+只有 `handle...with` 和 `catch { arms }` 是 Vorton 特有语法——因为 algebraic effect handler 在主流语言中确实没有对应物。`.to_fail(error)` 是 Vorton 独有方法——桥接 Option 和 fail effect。
 
 ### 扁平优于嵌套
 
@@ -219,7 +219,7 @@ Trait 定义行为接口，`impl` 块实现它。没有子类化，没有菱形�
 
 ### 编译器严格度 = LLM 安全网面积
 
-同样的 prompt，TS 编译器放行的代码中藏着运行时炸弹，Ring 编译器在 LLM 提交前就拦截了。首次编译通过率可能低于 TS（更严格），但运行时错误率和总迭代轮数远低于 TS。
+同样的 prompt，TS 编译器放行的代码中藏着运行时炸弹，Vorton 编译器在 LLM 提交前就拦截了。首次编译通过率可能低于 TS（更严格），但运行时错误率和总迭代轮数远低于 TS。
 
 ### 前馈控制替代人类审查
 
@@ -234,7 +234,7 @@ Trait 定义行为接口，`impl` 块实现它。没有子类化，没有菱形�
 
 ### 模块签名 = 完美的上下文压缩
 
-TS 要读完实现才知道函数会抛什么异常。Ring 的模块签名包含完整契约（类型+效果），一行顶 TS 几十行。LLM 用更少 token 获得更多 API 信息。
+TS 要读完实现才知道函数会抛什么异常。Vorton 的模块签名包含完整契约（类型+效果），一行顶 TS 几十行。LLM 用更少 token 获得更多 API 信息。
 
 ---
 
@@ -248,4 +248,4 @@ TS 要读完实现才知道函数会抛什么异常。Ring 的模块签名包含
 | 数据结构 | struct + enum + trait，不造 class 层级 |
 | 内存 | Perceus RC + ownership 推断（无 borrow checker），零标注负担；无 GC |
 | 注释 | `//` 单行（无块注释），默认不写注释 |
-| 编译目标 | native；C11 为唯一产品 codegen 与 tracked bootstrap，未来第二信道门见 design.md §10.4 |
+| 编译目标 | 目标为 native；产品后端与 bootstrap gate 由当前 Rust 重建路线的 GitHub Issue 建立，迁移前 C11 codegen 与 tracked anchor 仅作 oracle |

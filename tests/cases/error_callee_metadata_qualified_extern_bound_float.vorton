@@ -1,0 +1,25 @@
+// expect error: E0503
+// A qualified two-hop ExternCallable validates bounds but has no Vorton dict ABI.
+
+pub mod origin {
+    pub extern fn print<T: Hash>(value: T) -> Unit with {console}
+}
+
+pub mod middle {
+    pub use super::origin::print as relay
+}
+
+pub mod facade {
+    pub use super::middle::relay as emit
+}
+
+fn call_float(
+    emit: fn(Float) -> Unit with {console},
+    value: Float
+) -> Unit with {console} {
+    emit(value)
+}
+
+fn main() {
+    call_float(facade::emit, 1.5)
+}

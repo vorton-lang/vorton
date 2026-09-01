@@ -1,0 +1,7 @@
+use a::{run as run_a}
+use vorton_a::{run as run_vorton_a}
+
+fn main() {
+    run_a()
+    run_vorton_a()
+}

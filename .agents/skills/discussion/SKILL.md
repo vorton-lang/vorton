@@ -17,4 +17,4 @@ Read `AGENTS.md`, `docs/workflow.md`, and the repository-execution-decisions ski
 - Issue titles never contain manual IDs, old B/A/D IDs, sequence prefixes, or similar numbering.
 - Keep plans minimal for a solo project. Reject security/hardening infrastructure without a current concrete need.
 - When asked for project status, report only current gate, durable result, next gate, main risk and needed user decision.
-- Run `python .agents/scripts/validate_workflow.py` after governance changes.
+- Run `python .agents/scripts/validate_naming.py` and `python .agents/scripts/validate_workflow.py` after governance or naming changes.

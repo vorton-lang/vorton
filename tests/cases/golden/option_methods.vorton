@@ -1,0 +1,47 @@
+// Option built-in method chaining: map / unwrap_or / is_none / is_some, plus
+// chained Option lookups via nested match. Locks Option-builtin parity on the
+// LLVM backend.
+//
+// NOTE: Option.to_fail() (none -> fail effect) is now covered separately by
+// option_to_fail.vorton (B-086). Mixing Option-method chains with user-enum result
+// chaining in one program still intermittently double-frees on LLVM — recorded
+// under B-087 in docs/worker_feedback.md.
+
+fn find_user(id: Int) -> Option<Str> {
+    if id == 1 { some("alice") }
+    else if id == 2 { some("bob") }
+    else { none }
+}
+
+fn find_age(name: Str) -> Option<Int> {
+    if name == "alice" { some(30) }
+    else { none }
+}
+
+fn main() {
+    let u = find_user(1)
+    print("user1 len: ${u.map(fn(s) { s.len() }).unwrap_or(0)}")  // user1 len: 5
+    print("user9 none: ${find_user(9).is_none()}")               // user9 none: true
+    print("user2 some: ${find_user(2).is_some()}")               // user2 some: true
+    print("user2 val: ${find_user(2).unwrap_or("?")}")           // user2 val: bob
+    print("user9 val: ${find_user(9).unwrap_or("none")}")        // user9 val: none
+
+    // chained Option lookups via nested match
+    let age = match find_user(1) {
+        some(name) => find_age(name).unwrap_or(-1),
+        none => -1
+    }
+    print("alice age: ${age}")                                   // alice age: 30
+
+    let age2 = match find_user(2) {
+        some(name) => find_age(name).unwrap_or(-1),              // bob -> none -> -1
+        none => -1
+    }
+    print("bob age: ${age2}")                                    // bob age: -1
+
+    let age3 = match find_user(9) {
+        some(name) => find_age(name).unwrap_or(-1),
+        none => -99
+    }
+    print("missing age: ${age3}")                                // missing age: -99
+}

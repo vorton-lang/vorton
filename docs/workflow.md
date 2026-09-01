@@ -76,7 +76,7 @@ Issue #N → 一个 active PR → PR head branch → merge → Issue 自动关�
 - Fixed candidate 的 machine execution 与 review 同时启动。Machine FAIL 立即作为开发反馈；Machine PASS 在 review CLEAR 前保持 quarantine，Review BLOCK 使该 PASS 失效。
 - 结果绑定同一 EvidenceKey：source SHA、artifact/patch SHA、producer command/receipt、observed stage。不同 SHA 的结果不得拼接。
 - 未知时长任务不得使用预测式 kill wall；资源门、输出门和用户明确 deadline 仍然有效。
-- 当前 CI 只运行 `python .agents/scripts/validate_workflow.py`，验证仓库治理真值。Rust workspace 落地后，再由对应 Issue 添加真实 Cargo/compiler gate。
+- 当前 CI 运行 `python .agents/scripts/validate_naming.py` 与 `python .agents/scripts/validate_workflow.py`，分别验证 tracked tree 技术命名 clean break 与仓库治理真值。Rust workspace 落地后，再由对应 Issue 添加真实 Cargo/compiler gate。
 
 ## 用户保留决定
 

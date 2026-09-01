@@ -1,4 +1,4 @@
-# Ring-lang 设计文档
+# vorton-lang 设计文档
 
 **Rust 的安全性 + Python 的书写体验 + 效果系统让编译器知道一切，然后用这些信息优化性能。**
 
@@ -14,6 +14,8 @@
 
 额外目标：让 LLM 也喜欢写这门语言——模块签名信息密度最大化，LLM 在零训练数据的情况下只需签名即可正确使用 API。
 
+**当前实现状态**：编译器正在 Rust 宿主上重建，先闭合 `source → token → AST → diagnostic` 最小纵切，再按 GitHub Issue 推进 checker、IR、ownership、C11 后端与 CLI。迁移前的 `compiler/*.vorton`、`compiler/dist-c/main.c`、`vorton_runtime.cpp` 与旧测试只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 compiler build、CI、bootstrap 或发布 authority。以下涉及旧 C/self-host 实现的段落记录历史设计与可复用约束，不表示当前 Rust compiler 已实现或通过相应门。
+
 ## 设计公理
 
 **全文唯一真值源 = `docs/philosophy.md`（本节只留速记，消除双真值源）**：**层 0 目标** ④ 不信任程序员 · 编译器是最终权威（渐近表达 = 无人回路 × 全场景；推论：失真必须响 / 优化不可观测 / 人类审查面可枚举）。**层 1 硬约束** ⑤ 编译器必须终止（可判定片段 + fuel）⑥ 确定性资源语义（Drop = scope-end 语义 + as-if 条款；RC 无 GC；环用 Weak）⑦ 场景不可堵死（native / 零强制 runtime / C ABI）。**层 2 策略** ① 类型即模型，不是谜题 ② 效果即可见性 ③ 推断为王，标注为仆 ⑧ 一种事一种写法 ⑨ 语法借用。仲裁：策略让位约束；约束修订由用户决定。
@@ -24,9 +26,9 @@
 
 ## 确定性求值顺序
 
-Ring 在同一 evaluation region 内按源码 **从左到右** 求值同级子表达式，不采用 C 式 unspecified operand / argument order。callable/receiver 先于 arguments；二元运算数、参数、List/tuple/constructor 字段、字符串插值片段按源码顺序；index 先 receiver 后 index，range 先 start 后 end。`&&` / `||` 保持左侧优先与短路；条件表达式先求 condition 且只求选中分支；match 先求 scrutinee，再从上到下检查 arm，模式成功后才求 guard。任一子表达式产生 `fail`、panic 或 diverge 后，后续子表达式不执行。
+Vorton 在同一 evaluation region 内按源码 **从左到右** 求值同级子表达式，不采用 C 式 unspecified operand / argument order。callable/receiver 先于 arguments；二元运算数、参数、List/tuple/constructor 字段、字符串插值片段按源码顺序；index 先 receiver 后 index，range 先 start 后 end。`&&` / `||` 保持左侧优先与短路；条件表达式先求 condition 且只求选中分支；match 先求 scrutinee，再从上到下检查 arm，模式成功后才求 guard。任一子表达式产生 `fail`、panic 或 diverge 后，后续子表达式不执行。
 
-优化器只有在证明观测等价时才可重排；观测包括 effect、mutation、fail/panic、资源 transfer 与 Drop 时点，而不只包括最终数值。C 后端必须把需要定序的子表达式先按 Ring 顺序物化为 temporary，再发出 C operator/call，不能把 Ring 语义委托给 C 自身未规定的求值顺序。现有 CoreHIR → FlowIR 的 evaluation-region lowering 是该公开语义的唯一 operational authority，不新增平行 pass。
+优化器只有在证明观测等价时才可重排；观测包括 effect、mutation、fail/panic、资源 transfer 与 Drop 时点，而不只包括最终数值。C 后端必须把需要定序的子表达式先按 Vorton 顺序物化为 temporary，再发出 C operator/call，不能把 Vorton 语义委托给 C 自身未规定的求值顺序。现有 CoreHIR → FlowIR 的 evaluation-region lowering 是该公开语义的唯一 operational authority，不新增平行 pass。
 
 ---
 
@@ -217,7 +219,7 @@ greet(Company { ... })    // ✓ 单态化为 greet__Company
 
 ### 1.5 错误的生命周期模型
 
-Ring 的错误处理基于一个核心洞察：**错误有生命周期——诞生（raise）、流动（propagate）、有时落地（materialize）。** effect 是错误的运动形态，Result 是错误的静止形态。两者不是竞争关系，是同一个错误在不同阶段的表现。
+Vorton 的错误处理基于一个核心洞察：**错误有生命周期——诞生（raise）、流动（propagate）、有时落地（materialize）。** effect 是错误的运动形态，Result 是错误的静止形态。两者不是竞争关系，是同一个错误在不同阶段的表现。
 
 - **`fail<E>` effect 是主模型** —— 错误默认以 effect 形式存在和流动，零语法自动传播
 - **`to_result()` 是"物化"操作** —— 当需要存储、序列化、收集多个错误时，将 effect 转为数据
@@ -268,7 +270,7 @@ let result: Result<Config, Str> = to_result(fn() { load_config(path) })
 
 ### 1.6 可变性模型
 
-Ring 的可变性由唯一关键字 `mut` 统一管理。设计原则：**局部 mutation 不是 side effect，共享 mutation 才是。**
+Vorton 的可变性由唯一关键字 `mut` 统一管理。设计原则：**局部 mutation 不是 side effect，共享 mutation 才是。**
 
 **`let` vs `let mut`：**
 
@@ -425,7 +427,7 @@ Auto-boxing 是 codegen 实现细节，对 HIR linearity checker 透明。被闭
 
 **显式组合 × Associated Types**
 
-包装类型通过普通trait impl完成组合，并显式声明associated type与forwarding method。Ring 0.1不从字段自动生成impl，也不推导wrapper的associated binding。
+包装类型通过普通trait impl完成组合，并显式声明associated type与forwarding method。Vorton 0.1不从字段自动生成impl，也不推导wrapper的associated binding。
 
 **Associated Types × Supertrait（自然组合）**
 
@@ -437,11 +439,11 @@ GADT 的 scoped type equality 是编译期 unification，effect evidence 是运�
 
 **mut\<T\> × Ownership（隐式借用 + 无 borrow checker）**
 
-`mut self` 方法调用 Drop 值时，语义为隐式借用（不消耗所有权）。Drop 值在 scope 内可通过 `mut self` 被修改，scope 结束时自动 drop（RAII）或提前 `drop(x)` / `x.close()` 显式消耗。Ring 不引入 borrow checker——Perceus RC + Ownership + mut\<T\> + Drop 已覆盖安全性需求（内存安全由 Perceus RC 保证，资源安全由 Ownership + Drop 保证，mutation 追踪由 mut\<T\> effect 保证，数据竞争由结构化并发 + move 语义排除）。不设 borrow checker 的残余可变别名窗口（`f(xs, mut xs)` 同值双借）由句法禁止收口；其余别名由 move 语义（§7.5，use-after-move 编译错误）杜绝，COW 因此为不可观测的内部优化（2026-06-11 拍板，B-110）。
+`mut self` 方法调用 Drop 值时，语义为隐式借用（不消耗所有权）。Drop 值在 scope 内可通过 `mut self` 被修改，scope 结束时自动 drop（RAII）或提前 `drop(x)` / `x.close()` 显式消耗。Vorton 不引入 borrow checker——Perceus RC + Ownership + mut\<T\> + Drop 已覆盖安全性需求（内存安全由 Perceus RC 保证，资源安全由 Ownership + Drop 保证，mutation 追踪由 mut\<T\> effect 保证，数据竞争由结构化并发 + move 语义排除）。不设 borrow checker 的残余可变别名窗口（`f(xs, mut xs)` 同值双借）由句法禁止收口；其余别名由 move 语义（§7.5，use-after-move 编译错误）杜绝，COW 因此为不可观测的内部优化（2026-06-11 拍板，B-110）。
 
 ### 1.7 语义规范（后端无关，2026-05-24 确定）
 
-Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2，commit `5df6c99`）；自 2026-08-03 起 main 只保留 C11 codegen，覆盖单文件、project/module 与 self-host，`compiler/dist-c/main.c` 是唯一 tracked bootstrap anchor。最后 LLVM lane 只由 `llvm-c-backend-final` tag 保存，不属于现行实现或验证门。
+Vorton 语言的语义规范与后端无关。历史实现中，JS 后端已归档（B-100 Phase 2，commit `5df6c99`），随后 main 曾只保留 C11 codegen，覆盖单文件、project/module 与 self-host，`compiler/dist-c/main.c` 曾是 tracked bootstrap anchor；最后 LLVM lane 只由 `llvm-c-backend-final` tag 保存。当前路线是在 Rust 宿主上重建编译器，这些旧后端与 anchor 仅作迁移 oracle，不属于现行 compiler、CI、bootstrap 或发布门。
 
 #### 数值类型（2026-05-25 更新）
 
@@ -467,13 +469,13 @@ Ring 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2�
 
 通过 trait 实现。算术（`Add/Sub/Mul/Div/Rem/Neg`）、比较（`Eq/Ord`，`Ord: Eq`）、位运算（`BitAnd/BitOr/BitXor/BitNot/Shl/Shr`）与索引读取（`Index`）。不支持跨类型运算。14 个数值类型各自 impl 全套 trait（编译器内置）。0.1 不支持 `IndexMut` 或 `x[i] = value`；容器 mutation 使用具名方法，完整 index-assignment 语义仅由 post-0.1 B-202 在真实 consumer 下重新设计。
 
-Ring 0.1 的 builtin public `Eq` contract 只有 exact `eq` member。`==` dispatch 到 `Eq.eq`，`!=` 固定降低为同一 exact dispatch 的 Bool 取反；不存在 `Eq.ne`、独立 `Ne` intrinsic、override slot、derived body 或默认特化。一般source trait method body也已由convergence clean break删除；builtin/derived exact ordinary impl body仍保留。
+Vorton 0.1 的 builtin public `Eq` contract 只有 exact `eq` member。`==` dispatch 到 `Eq.eq`，`!=` 固定降低为同一 exact dispatch 的 Bool 取反；不存在 `Eq.ne`、独立 `Ne` intrinsic、override slot、derived body 或默认特化。一般source trait method body也已由convergence clean break删除；builtin/derived exact ordinary impl body仍保留。
 
 #### 尾调用优化（2026-05-24 决策）
 
 编译器自动检测，无新语法。尾位置 + 无 Drop + 签名匹配 → 保证 TCO（debug/release 都做）。自递归转循环；互递归/间接尾调用由后端使用受保证的 tail-call 机制或 trampoline 实现，不能把优化器“碰巧消除”当作语义保证。
 
-| 维度 | Ring 语义 | 备注 |
+| 维度 | Vorton 语义 | 备注 |
 |------|----------|------|
 | **整数范围** | 各类型固定宽度（I64 = ±2^63，I32 = ±2^31 等） | 与 host 整数宽度无关 |
 | **整数溢出** | Debug panic / Release 二补数回绕 | 后端必须避免 C signed-overflow UB |
@@ -525,7 +527,7 @@ EffectAtom
 
 ### 2.2 0.1 无用户 default handler
 
-```ring
+```vorton
 effect Logger {
     fn log(msg: Str) -> Unit
 }
@@ -659,11 +661,11 @@ handle {
 }
 ```
 
-**一等 effectful function value 的调用点动态 evidence（2026-08-28 用户批准 R1，0.1 最终语义）**：lambda/closure 创建本身是 pure，body effect只进入函数类型；ordinary user closure 永不捕获定义处的 handled-effect evidence。所有 Ring callable 统一接收一个显式 borrowed `EffectCtx*`，每次 direct/method/indirect 调用传入当前 dynamic handler context；当前调用点没有对应 handler 时 context 中没有该 typed entry，effect 继续向外传播，不能被创建处状态或 unknown open tail 静默消除。
+**一等 effectful function value 的调用点动态 evidence（2026-08-28 用户批准 R1，0.1 最终语义）**：lambda/closure 创建本身是 pure，body effect只进入函数类型；ordinary user closure 永不捕获定义处的 handled-effect evidence。所有 Vorton callable 统一接收一个显式 borrowed `EffectCtx*`，每次 direct/method/indirect 调用传入当前 dynamic handler context；当前调用点没有对应 handler 时 context 中没有该 typed entry，effect 继续向外传播，不能被创建处状态或 unknown open tail 静默消除。
 
 `handle` 安装的 evidence 只在其动态调用范围内生效。closure 即使在 `handle` 内创建，逃逸后调用也不得继续使用已经结束的 handler；若在另一层 handler 内调用，则使用新的当前 evidence。实现 handler arm/re-perform 的内部 runtime handler object 可持有其显式 outer evidence 和普通词法值，但该内部对象不得与返回给用户的 ordinary closure capture 规则混用。
 
-**P2 统一 evidence context ABI（2026-08-28 用户批准）**：共享 callable ABI 固定为 `closure env`（仅 indirect closure）→ ordinary arguments → trait dictionaries → `EffectCtx*`。Pure 与 system-only Ring callable同样接收 immortal empty context。普通用户 top-level extern 与不会回调 Ring callable 的普通 HostImport leaf 保持原 ABI，Ring wrapper接收但不向其转发context；这条边界不适用于必须从 C 回调 Ring closure 的 exact compiler-owned bridge。Context key是完整typed handled instance（exact `HandledEffectRef`及其exact type arguments），由TypedHIR/Core/AbiIR产生并跨import/re-export原样运输；runtime/C不得按name、nominal leaf、import顺序或临时hash重建。
+**P2 统一 evidence context ABI（2026-08-28 用户批准）**：共享 callable ABI 固定为 `closure env`（仅 indirect closure）→ ordinary arguments → trait dictionaries → `EffectCtx*`。Pure 与 system-only Vorton callable同样接收 immortal empty context。普通用户 top-level extern 与不会回调 Vorton callable 的普通 HostImport leaf 保持原 ABI，Vorton wrapper接收但不向其转发context；这条边界不适用于必须从 C 回调 Vorton closure 的 exact compiler-owned bridge。Context key是完整typed handled instance（exact `HandledEffectRef`及其exact type arguments），由TypedHIR/Core/AbiIR产生并跨import/re-export原样运输；runtime/C不得按name、nominal leaf、import顺序或临时hash重建。
 
 **D1 fully-closed runtime handled instance（2026-08-28 用户批准）**：generic custom effect声明与`Reader<Int>`、`Reader<Str>`等closed concrete实例继续合法；但任何进入runtime token census的custom handled instance，其type arguments在TypedHIR最终化时必须递归fully closed。它们不得含callable自身、impl/trait inherited、outer callable或nested lambda owner chain中的type formal，不得含nested callable effect formal/open row、open structural row，或任何会被后续instantiation改变的formal。因此`fn relay<T>() with {NestedPort<T>}`、`NestedPort<List<T>>`及返回执行`Probe<T>`的generic factory在0.1稳定hard-fail。`fail<T>`、`mut<T>`不属于handled token，generic effect alias在Core前展开后按本规则检查；callable顶层effect-row formal仍可原样forward，因为callee不会以它执行runtime token lookup。
 
@@ -671,9 +673,9 @@ Generic custom effect声明只是interface/template，不因bodyless operation h
 
 `EffectCtx`是显式typed overlay：empty context为never-drop singleton；每个`handle`拥有一个child overlay，记录其安装的ordered exact entries并引用parent，inner exact typed match优先；ordinary call只borrow一个context指针，不逐effect改变prototype，也不在closure env捕获context。Closed/fixed contract可用冻结layout的静态位置；open effect-row formal只以同一context pointer转发，Core中的typed view只证明layout关系而不物化runtime remap。禁止stack remap view、closure remap descriptor、handler ABI cutover、variadic、TLS/global/root handler或runtime name lookup。Planner只处理overlay/evidence的Borrow/Own与all-exit cleanup，不求解effect；handler arm/re-perform内部对象可显式持parent context，但与ordinary callable ABI分域。
 
-**Exact compiler-owned callback intrinsic set（2026-08-28 用户批准）**：任何0.1 exact compiler-owned runtime intrinsic leaf，只要会调用Ring callable，就必须显式接收并按统一Ring closure ABI转发borrowed `EffectCtx*`。当前穷尽集合固定为 `ring_list_sort_bridge`/`ring_list_sort`、`Option.map`、`Option.and_then`、`Option.unwrap_or_else` 与 `Cell.update`；前四项转发调用点current context，`Cell.update`因callback typed contract为pure而传immortal empty context。身份只由exact `CompilerExternRef`/`IntrinsicRef` tag裁决，missing或extra callback tag必须fail closed，runtime/C不得按symbol name猜测。调用同步完成，leaf不得保存或retain context；不得建立临时thunk、adapter object、通用adapter inventory或第二套function-pointer ABI。无tracked 0.1 producer的legacy `ring_fn_*` List HOF不构成保活理由，用户extern callback能力不随本集合扩大，纯Ring重写这些方法也不并入#268/#269。P1 mixed trailing-args+formal-pack因prototype不兼容删除，P3双ABI+adapter inventory因更大authority与维护成本拒绝。R1/B-167纵切按P2前移并入#268/#269；B-168 failure/control与B-169其余研究仍按原排期并兼容该ABI。
+**Exact compiler-owned callback intrinsic set（2026-08-28 用户批准）**：任何0.1 exact compiler-owned runtime intrinsic leaf，只要会调用Vorton callable，就必须显式接收并按统一Vorton closure ABI转发borrowed `EffectCtx*`。当前穷尽集合固定为 `vorton_list_sort_bridge`/`vorton_list_sort`、`Option.map`、`Option.and_then`、`Option.unwrap_or_else` 与 `Cell.update`；前四项转发调用点current context，`Cell.update`因callback typed contract为pure而传immortal empty context。身份只由exact `CompilerExternRef`/`IntrinsicRef` tag裁决，missing或extra callback tag必须fail closed，runtime/C不得按symbol name猜测。调用同步完成，leaf不得保存或retain context；不得建立临时thunk、adapter object、通用adapter inventory或第二套function-pointer ABI。无tracked 0.1 producer的legacy `vorton_fn_*` List HOF不构成保活理由，用户extern callback能力不随本集合扩大，纯Vorton重写这些方法也不并入#268/#269。P1 mixed trailing-args+formal-pack因prototype不兼容删除，P3双ABI+adapter inventory因更大authority与维护成本拒绝。R1/B-167纵切按P2前移并入#268/#269；B-168 failure/control与B-169其余研究仍按原排期并兼容该ABI。
 
-> **边界**：Ring 不计划实现 post-resume / multi-resume Full Algebraic Effects。现行公开模型固定为 tail-resumptive + abort；需要并发挂起的场景由 async 设计单独建模。
+> **边界**：Vorton 不计划实现 post-resume / multi-resume Full Algebraic Effects。现行公开模型固定为 tail-resumptive + abort；需要并发挂起的场景由 async 设计单独建模。
 
 ### 2.7 Effect 冒泡可见性
 
@@ -746,26 +748,26 @@ TypedHIR/PreCore必须把直接constructor语法按resolver/registry已选定的
 
 一次 scheme instantiation 只产生一份完整 mapping receipt。type actual、effect formal→actual 与 trait dictionary/evidence 必须共同消费这份 receipt；禁止任何消费者再用 `build_scheme_var_map`、类型结构匹配或等价算法重建替换关系。receipt 是当前调用/函数值的 typed provenance，不是新 solver，最终随 HIR/Core 的 exact instantiation 关系运输。
 
-Ring 0.1 明确不支持 **polymorphic recursion**：递归环中的同一 callable 不能以彼此不可统一的类型实例调用自己或 peer。普通泛型递归仍支持，只要递归环内共享同一组类型参数；函数离开递归组后仍是正常泛型 scheme。Post-0.1 只有真实 consumer 证明该限制无法由普通泛型递归、显式数据建模或非递归 wrapper 表达时，才由 B-203 重新评估；0.1 不预留相关 IR、annotation 或 fallback。
+Vorton 0.1 明确不支持 **polymorphic recursion**：递归环中的同一 callable 不能以彼此不可统一的类型实例调用自己或 peer。普通泛型递归仍支持，只要递归环内共享同一组类型参数；函数离开递归组后仍是正常泛型 scheme。Post-0.1 只有真实 consumer 证明该限制无法由普通泛型递归、显式数据建模或非递归 wrapper 表达时，才由 B-203 重新评估；0.1 不预留相关 IR、annotation 或 fallback。
 
-**函数默认参数（2026-08-23 用户决定）**：Ring 0.1 不支持 `fn f(x: T = expr)`。默认参数只省略调用点实参，显式 wrapper 函数可完整表达，却要求保存/复制 typed HIR template、freshen 全部 binder identity 并给每个下游阶段保留 default-specialization authority；compiler/std/examples 当前无 consumer。0.1 clean break 删除该语法与 call-site expansion，不影响 trait method default body。未来若出现独立 API 建模价值，再作为新 feature 评估，不保留兼容路径。
+**函数默认参数（2026-08-23 用户决定）**：Vorton 0.1 不支持 `fn f(x: T = expr)`。默认参数只省略调用点实参，显式 wrapper 函数可完整表达，却要求保存/复制 typed HIR template、freshen 全部 binder identity 并给每个下游阶段保留 default-specialization authority；compiler/std/examples 当前无 consumer。0.1 clean break 删除该语法与 call-site expansion，不影响 trait method default body。未来若出现独立 API 建模价值，再作为新 feature 评估，不保留兼容路径。
 
 ### 3.2 Formatter：标注密度管理器
 
-Ring 的 formatter 不只是语法格式化工具（缩进/空白/换行），它同时管理**标注密度**——基于编译器的类型推断结果，在源码上增删类型和 effect 标注。源码是规范形式，标注是可增减的文档层。
+Vorton 的 formatter 不只是语法格式化工具（缩进/空白/换行），它同时管理**标注密度**——基于编译器的类型推断结果，在源码上增删类型和 effect 标注。源码是规范形式，标注是可增减的文档层。
 
-**核心设计原则：标注是文档，不是语义。** 编译器永远从函数体推断 convention，标注不改变编译行为（编译产物与无标注时相同）。标注缺失 = 最多 warning；标注存在即检查，**与推断不一致 = 编译错误**——统一信号「标注过期了」，修复手段是 `ring fmt` 刷新（内部标注）或人工确认 pub 契约变更（见 3.2.3/3.2.4），而非改代码迁就标注。lv0 能编译的代码补全**正确**标注后编译行为不变。（2026-06-11 订正：原「不一致 = warning 从不 error」表述与 3.2.3「不匹配 = 编译错误」矛盾，以 3.2.3 为准。）
+**核心设计原则：标注是文档，不是语义。** 编译器永远从函数体推断 convention，标注不改变编译行为（编译产物与无标注时相同）。标注缺失 = 最多 warning；标注存在即检查，**与推断不一致 = 编译错误**——统一信号「标注过期了」，修复手段是 `vorton fmt` 刷新（内部标注）或人工确认 pub 契约变更（见 3.2.3/3.2.4），而非改代码迁就标注。lv0 能编译的代码补全**正确**标注后编译行为不变。（2026-06-11 订正：原「不一致 = warning 从不 error」表述与 3.2.3「不匹配 = 编译错误」矛盾，以 3.2.3 为准。）
 
 #### 3.2.1 Git 存储模型：lv0 / lv2（2026-05-24 确定）
 
-Ring 采用两级标注模型管理源码的标注密度：
+Vorton 采用两级标注模型管理源码的标注密度：
 
 | 等级 | 场景 | 标注密度 | 说明 |
 |------|------|----------|------|
 | **lv0** | 写时 | 零标注 | 编译器全推断。开发者本地编辑用 |
 | **lv2** | Git 存储/推荐 | 完整语义标注 | 所有标注项均为合法可选语法 |
 
-`ring fmt` 将 lv0 自动补全为 lv2，幂等确定性。
+`vorton fmt` 将 lv0 自动补全为 lv2，幂等确定性。
 
 **lv2 具体标注内容**：
 
@@ -787,7 +789,7 @@ Ring 采用两级标注模型管理源码的标注密度：
 
 | 标注项 | 规则 | 说明 |
 |--------|------|------|
-| return type | 必须有 | `ring check` 缺失报 warning |
+| return type | 必须有 | `vorton check` 缺失报 warning |
 | effect row | 必须有 | 纯函数省略 with = 空 effect |
 | move 参数 | 必须有 | 有 move 推断但无标注 → warning |
 | mut 参数 | 必须有 | 已有 |
@@ -796,7 +798,7 @@ Ring 采用两级标注模型管理源码的标注密度：
 
 **pub fn Formatter 策略**：
 
-| 源码状态 | `ring fmt` | `ring fmt --force` | `ring check` |
+| 源码状态 | `vorton fmt` | `vorton fmt --force` | `vorton check` |
 |---------|-----------|-------------------|-------------|
 | 无标注（新 fn） | 直接补全 | 直接补全 | ⚠ warning "missing" |
 | 标注正确 | 无操作 | 无操作 | ✅ |
@@ -812,13 +814,13 @@ Breaking change 附加提示（不影响编译，只影响 warning 措辞）：
 - IDE：clean view 写 lv0，保存/提交时 fmt 补全为 lv2
 - vim/emacs + LSP：inlay hints + 保存时 fmt
 - GitHub 网页端：直接看 lv2（Git 存的就是）
-- 纯文本编辑器：文件中是 lv2，手动 `ring fmt` 补全
+- 纯文本编辑器：文件中是 lv2，手动 `vorton fmt` 补全
 
 #### 3.2.2 扩展预设（不同上下文的查看模式）
 
 lv0/lv2 是 Git 存储模型。在此之上，formatter 提供更多预设用于不同查看场景：
 
-配置 `.ringfmt.toml`：
+配置 `.vortonfmt.toml`：
 
 ```toml
 [annotations]
@@ -856,7 +858,7 @@ preset = "api"
 
 同一份代码在不同等级下的表现：
 
-```ring
+```vorton
 // preset = "none" — 零噪音
 fn process(items) {
     items.filter(fn(x) { x.age > 18 }).map(fn(x) { x.name })
@@ -878,10 +880,10 @@ fn process(items: List<User>) -> List<Str> with {console} {
 降级/升级标注只需一个命令：
 
 ```bash
-ring fmt --preset=full    # code review 时全展开
-ring fmt --preset=none    # 日常开发最简洁
-ring fmt                  # 使用 .ringfmt.toml 配置
-ring fmt --check          # CI 检查：是否符合配置（不修改文件）
+vorton fmt --preset=full    # code review 时全展开
+vorton fmt --preset=none    # 日常开发最简洁
+vorton fmt                  # 使用 .vortonfmt.toml 配置
+vorton fmt --check          # CI 检查：是否符合配置（不修改文件）
 ```
 
 #### 3.2.3 标注语义：pub 契约 vs. 内部文档
@@ -907,17 +909,17 @@ ring fmt --check          # CI 检查：是否符合配置（不修改文件）
 
 ```
 编辑代码
-  → ring fmt        # 内部标注自动刷新；pub 不一致的报 warning
-  → ring check      # pub 标注仍不一致 → 编译错误
+  → vorton fmt        # 内部标注自动刷新；pub 不一致的报 warning
+  → vorton check      # pub 标注仍不一致 → 编译错误
   → 人决定是否更新 pub 签名
-  → ring fmt        # 确认一致
+  → vorton fmt        # 确认一致
 ```
 
 **Intentional breaking change**：改了 pub fn 的 body 后，编译器报"标注 Int，推断 Option\<Int\>"。开发者主动修改标注 → 这个改标注的动作本身就是 breaking change 的显式声明。
 
-**Force mode**（绕过 pub 保护）：`ring fmt --level=0` 去掉所有标注 → `ring fmt --level=N` 重新生成 → pub 签名被重置为推断结果。两步操作 = 显式意图，不需要额外 flag。
+**Force mode**（绕过 pub 保护）：`vorton fmt --level=0` 去掉所有标注 → `vorton fmt --level=N` 重新生成 → pub 签名被重置为推断结果。两步操作 = 显式意图，不需要额外 flag。
 
-**不想管标注的人**：工作在 Level 0，没标注就没不一致的问题。需要时一键 `ring fmt --level=4` 全量生成。
+**不想管标注的人**：工作在 Level 0，没标注就没不一致的问题。需要时一键 `vorton fmt --level=4` 全量生成。
 
 #### 3.2.5 机械约束
 
@@ -931,7 +933,7 @@ ring fmt --check          # CI 检查：是否符合配置（不修改文件）
 - **语义不变**：`compile(fmt(level=0, code)) == compile(fmt(level=N, code))` — 任何 level 编译到相同结果
 - **规范化**：effect 排序、类型表示、空白 — formatter 输出唯一确定
 
-**3. CI**：`ring fmt --check` 验证文件是否符合配置等级，不符合 → 非零退出码。
+**3. CI**：`vorton fmt --check` 验证文件是否符合配置等级，不符合 → 非零退出码。
 
 #### 3.2.6 架构：Formatter 是 Checker 的下游
 
@@ -945,7 +947,7 @@ Formatter 需要类型推断结果才能生成标注，因此它在编译管线�
                              格式化后的源码
 ```
 
-纯语法格式化（`ring fmt` 不带 `--level`）只需要 AST，不需要 checker。标注密度调整需要 checker 结果。Formatter 与 LSP 共享 checker 基础设施。
+纯语法格式化（`vorton fmt` 不带 `--level`）只需要 AST，不需要 checker。标注密度调整需要 checker 结果。Formatter 与 LSP 共享 checker 基础设施。
 
 ```toml
 [annotations.effects]
@@ -959,12 +961,12 @@ materialize_as = "comment"      # comment | annotation | none
 
 ### 4.1 方法调用与 `::` 模块路径——两个独立范畴
 
-Ring 没有 UFCS（Uniform Function Call Syntax）。`::` 和 `.method()` 是两个不互通的世界：
+Vorton 没有 UFCS（Uniform Function Call Syntax）。`::` 和 `.method()` 是两个不互通的世界：
 
 - **`::`（模块路径）**：解析模块内的函数/常量/类型。`std::fs::read_file(path)` 调用 `std/fs` 模块的自由函数。
 - **`.method()`（方法调用）**：解析 receiver 的方法。解析链：impl 方法 > trait 方法 > builtin 方法。**不**回退到自由函数。
 
-```ring
+```vorton
 impl List<T> {
     fn map<U>(self, f: fn(T) -> U) -> List<U> { ... }
 }
@@ -974,7 +976,7 @@ my_list.map(fn(x) { x + 1 })   // 解析到 List.map（impl 方法）
 
 **自由函数不能通过 `.method()` 调用**：
 
-```ring
+```vorton
 fn double(x: I64) -> I64 { x * 2 }
 42.double()   // ❌ 编译错误——double 是自由函数，不在方法解析链中
 double(42)    // ✅ 唯一正确写法
@@ -982,7 +984,7 @@ double(42)    // ✅ 唯一正确写法
 
 **方法不能通过 `::` 调用**：
 
-```ring
+```vorton
 List::map(my_list, f)   // ❌ 不存在——:: 是模块路径，不是类型限定符
 ```
 
@@ -1004,7 +1006,7 @@ Trait 方法声明 = effect 上界（契约）。实现可以更窄：
 
 ### 4.4 Trait 系统约束（2026-05-24 确定）
 
-Ring 有意选择简单 trait 系统，换取更强推断能力：
+Vorton 有意选择简单 trait 系统，换取更强推断能力：
 
 - 支持 blanket impl（`impl<T: A> B for T`），不允许 overlap
 - 不支持 specialization（blanket impl + 具体类型覆盖）
@@ -1048,7 +1050,7 @@ impl Describable for User {
 }
 ```
 
-Ring 0.1不允许trait method body；每个impl显式实现完整contract。共同逻辑提取为普通generic helper，而不是由trait声明生成隐藏body。
+Vorton 0.1不允许trait method body；每个impl显式实现完整contract。共同逻辑提取为普通generic helper，而不是由trait声明生成隐藏body。
 
 ### 5.2 Trait 组合（"多继承"无菱形问题）
 
@@ -1093,7 +1095,7 @@ impl Describable for Admin {
 admin.describe()    // 显式转发到 base.describe()
 ```
 
-Ring 0.1不提供`delegate`surface。需要组合复用时写普通impl与普通method call；编译器不生成wrapper、associated binding或evidence forwarding。
+Vorton 0.1不提供`delegate`surface。需要组合复用时写普通impl与普通method call；编译器不生成wrapper、associated binding或evidence forwarding。
 
 ### 5.4 Row Poly + Trait 交叉
 
@@ -1135,12 +1137,12 @@ process_all(things)
 
 ## 6. 模块系统
 
-文件即模块。每个 `.ring` 文件是一个模块，通过 `use` 导入、`pub` 控制可见性。
+文件即模块。每个 `.vorton` 文件是一个模块，通过 `use` 导入、`pub` 控制可见性。
 
 ### 6.1 文件级模块
 
 ```
-// config.ring
+// config.vorton
 pub struct Config {
     pub db_url: Str,
     pub port:   Int,
@@ -1159,8 +1161,8 @@ pub fn load(path: Str) -> Config {
 ### 6.2 导入与可见性
 
 ```
-// main.ring
-use config                          // 导入 config.ring
+// main.vorton
+use config                          // 导入 config.vorton
 
 let cfg = config::load("app.toml")
 
@@ -1172,7 +1174,7 @@ pub use config
 
 ### 6.2a Inline module 声明唯一性（2026-08-22 用户决定）
 
-Ring 0.1 不支持 partial/reopened inline module。同一 direct parent scope 的 module namespace 中，`mod name { ... }` 只能有一个 source declaration；第二个同名 `mod` 在其 AstSite 直接报 `E0207 Duplicate definition`，不得因两段具有相同 canonical owner/payload 而合并，也不得把 source duplicate 降为 `E0707 Ambiguous import`。不同 parent 下的同名 leaf（例如 `outer::inner` 与顶层 `inner`）仍是不同 logical module。
+Vorton 0.1 不支持 partial/reopened inline module。同一 direct parent scope 的 module namespace 中，`mod name { ... }` 只能有一个 source declaration；第二个同名 `mod` 在其 AstSite 直接报 `E0207 Duplicate definition`，不得因两段具有相同 canonical owner/payload 而合并，也不得把 source duplicate 降为 `E0707 Ambiguous import`。不同 parent 下的同名 leaf（例如 `outer::inner` 与顶层 `inner`）仍是不同 logical module。
 
 Import、re-export 与 same-origin diamond 是同一既有 declaration 的重复 delivery，可按 exact origin 幂等复用，不属于 source declaration reopening。多个 `impl` block 也不是 partial module，继续服从既有 impl/coherence 规则。若公开发布后出现跨文件 aggregation、generated extension 或 conditional compilation 等真实需求，必须以显式 `partial mod`、`namespace` 或 extension 设计重新立项；不能让普通重复 `mod` 静默获得第二种含义。
 
@@ -1180,11 +1182,11 @@ Import、re-export 与 same-origin diamond 是同一既有 declaration 的重复
 
 文件本身是隐式模块。0.1 允许一个可选的 `requires {effects}` 文件头；它必须是文件中第一项非注释语法、每文件至多一次，并与 inline `mod name requires {effects}` 使用同一 capability checker：
 
-```ring
+```vorton
 requires {unsafe}
 
 use std::ptr
-extern fn ring_raw_alloc(count: Int) -> Ptr<Int>
+extern fn vorton_raw_alloc(count: Int) -> Ptr<Int>
 ```
 
 存在 header 时，它是该文件模块的 effect ceiling；`requires {}` 表示纯文件模块。省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 从不隐式授权：使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效的文件/inline-module `requires` 集合显式包含 `unsafe`。`unsafe {}` 仍是逐块责任签字，header 不能替代它；extern 声明本身是 ABI 签字，调用点保持 safe。拒绝再增加逐声明 `unsafe extern fn` 第二套授权语法。实现与仓内迁移由 B-156 跟踪。
@@ -1206,11 +1208,11 @@ extern fn ring_raw_alloc(count: Int) -> Ptr<Int>
 
 ### 7.1 设计目标
 
-用户心智模型和 Rust 一致——值有 owner，赋值有 move 语义，传参是 borrow，Drop 在 scope-end 执行。Ring 不要求 lifetime 标注，没有 borrow checker，没有 `&T`/`&mut T` 一等类型。
+用户心智模型和 Rust 一致——值有 owner，赋值有 move 语义，传参是 borrow，Drop 在 scope-end 执行。Vorton 不要求 lifetime 标注，没有 borrow checker，没有 `&T`/`&mut T` 一等类型。
 
 **与 Rust 的核心差异**：
 
-| | Rust | Ring |
+| | Rust | Vorton |
 |---|---|---|
 | 内存安全保证 | borrow checker（静态） | Perceus RC（运行时） |
 | 引用类型 | `&T` / `&mut T` 一等类型 | 无——borrow 是调用约定，mutation 是推断 |
@@ -1233,7 +1235,7 @@ extern fn ring_raw_alloc(count: Int) -> Ptr<Int>
 | y 是左值，Drop 类型 | auto-move（编译器推断） | y 失效（use-after-move 编译错误） |
 | y 是标量（Int/Float/Bool/Char） | auto-copy（memcpy） | y 仍可用 |
 
-```ring
+```vorton
 // 非 Drop：rc+1 共享
 let xs = [1, 2, 3]
 let ys = xs            // rc+1，两者指向同一 List
@@ -1258,9 +1260,9 @@ let zs = xs.clone()    // 递归深拷贝，完全独立
 
 求值顺序固定为：`base` 只求值一次但暂不消费；随后所有显式 override RHS 按源码顺序完整求值，此时可继续读取或借用 `base`；只有全部 RHS 成功后，未覆盖字段才以 Own transfer 进入 fresh result，被覆盖字段在 `base` 中的旧值执行 Drop，override temporary 再转入对应结果字段，最后 `base` 整体失活。若任一 RHS 产生 `fail`，不得留下部分 move 的 `base`。override RHS 若试图在提交前 ownership-move `base` 的子字段，则按既有 partial-move 禁令拒绝；要保留该字段就省略 override，要保留整个 base 则显式写 `Type { ..base.clone(), ... }`。
 
-**0.1 internal-checkpoint Known Issue（2026-08-30 用户决定）**：上述是目标语义，不是当前0.1 compiler对所有字段形状的已验证保证。当前self-host只依赖8处全shareable spread；这一路径继续使用physical RC dup并保留base完整。若未覆盖字段为owning或其资源行为依赖type parameter、因而需要exact Take，compiler仍可能接受源码但错误处理source clear/Drop，产生leak、double-drop、UAF或错误析构顺序；0.1不要求为它新增诊断，也不实现partial/open-drop、`Live`/`Moved` occupancy或专用moved-shell operation。外部程序在迁仓后修复前应显式destructure并重建全部字段。现有反例进入GitHub Known Issues；internal checkpoint与公开preview都不得宣称owning spread已正确。
+**迁移前 0.1 internal-checkpoint Known Issue（2026-08-30 用户决定）**：上述是目标语义，迁移前 compiler并未对所有字段形状建立验证保证。当时的self-host只依赖8处全shareable spread；该历史路径使用physical RC dup并保留base完整。若未覆盖字段为owning或其资源行为依赖type parameter、因而需要exact Take，旧 compiler可能接受源码但错误处理source clear/Drop，产生leak、double-drop、UAF或错误析构顺序。该缺陷与反例作为迁移 oracle/已知问题保留；当前 Rust 重建只有在相应 Issue 与真实 gate 闭合后才能宣称 owning spread 已正确，不从旧 internal checkpoint 推导现行保证。
 
-Ring 0.1 不支持 named enum / variant update spread。`Variant { ..base, field: value }` 稳定产生 source diagnostic；在已经匹配出 exact variant 的 arm 中，显式重建全部字段，例如 `Circle { radius, color: next }`。这不影响 named-field variant construction、generic enum、pattern matching、字段 move 或普通 struct spread。编译器不为该纯缩写引入 runtime tag check、variant-refinement carrier、fallback 或第二条 MoveUpdate 路径。
+Vorton 0.1 不支持 named enum / variant update spread。`Variant { ..base, field: value }` 稳定产生 source diagnostic；在已经匹配出 exact variant 的 arm 中，显式重建全部字段，例如 `Circle { radius, color: next }`。这不影响 named-field variant construction、generic enum、pattern matching、字段 move 或普通 struct spread。编译器不为该纯缩写引入 runtime tag check、variant-refinement carrier、fallback 或第二条 MoveUpdate 路径。
 
 ### 7.3 参数传递
 
@@ -1280,7 +1282,7 @@ Ring 0.1 不支持 named enum / variant update spread。`Variant { ..base, field
 
 **extern fn 必须显式标注 `mut`**：编译器无法分析 FFI 函数体，mutation 必须由声明者标注。未标注 = 只读借用。
 
-```ring
+```vorton
 // extern fn 的 mut 标注
 extern fn sort_in_place(arr: mut List<Int>)          // mutates arr
 extern fn read_all(path: Str) -> Str / {fs, fail<FsError>} // path is readonly
@@ -1319,13 +1321,13 @@ Parse / project Resolver / Type+Effect
 
 **唯一 Planner 的固定内部顺序**：
 
-1. `Logical OwnershipShape` 与 `Physical RcShape` 分轴求有限最小不动点。前者记录 direct Drop / may-unique-own / type-parameter 依赖，决定 compile-time失效与 `Take`；后者分别记录 aggregate shell RC、direct payload 的 `NoRc/RingRc`、boxing/drop glue 与参数依赖，决定物理 `Clone/Drop`。Foreign/raw payload只能令对应字段或formal为`NoRc`，不得抑制外层aggregate shell或managed sibling的cleanup。Int/Ptr 的显式 FORCE 可逻辑失效但不参与 RC；shareable RC 的 Own edge 产生 `Clone`，unique Resource 的 Own edge 产生 whole-slot `Take`。
+1. `Logical OwnershipShape` 与 `Physical RcShape` 分轴求有限最小不动点。前者记录 direct Drop / may-unique-own / type-parameter 依赖，决定 compile-time失效与 `Take`；后者分别记录 aggregate shell RC、direct payload 的 `NoRc/VortonRc`、boxing/drop glue 与参数依赖，决定物理 `Clone/Drop`。Foreign/raw payload只能令对应字段或formal为`NoRc`，不得抑制外层aggregate shell或managed sibling的cleanup。Int/Ptr 的显式 FORCE 可逻辑失效但不参与 RC；shareable RC 的 Own edge 产生 `Clone`，unique Resource 的 Own edge 产生 whole-slot `Take`。
 2. Project-wide callable graph在solve前一次冻结，统一direct/member/extern/effect/dictionary、explicit ImplFn、function value/HOF、Lambda、factory/call-result、re-export/diamond与extern bridge。Enum construction只贡献其显式字段Own/value-result edge，不伪装为callable node。参数格为有限`Borrow < MutBorrow < Own`，FORCE独立；返回值保留owned/borrowed contract。Worklist从bottom单调求least fixed point，solve期间禁止新增node/edge，也不回写或重跑type/effect inference。
 3. 每个 executable body 建 ephemeral CFG，以 `Empty / Live / Moved / MaybeMoved` 做 branch/loop/catch join，并一次性输出 `Clone/Take/Drop/Cleanup`。每个 value edge 必须精确分类 Borrow/MutBorrow/Own/Discard；may-own projection 的 partial move 按现行设计 fail loud，只有完整 slot 可 `Take`。
 
-**0.1 raw generic aggregate clean break（2026-08-30 用户批准）**：`Ptr`或non-RC extern payload不得递归进入generic aggregate storage。Checker在TypedHIR/Core publish前稳定拒绝`List<Ptr<T>>`、`Option<ForeignHandle>`、`Map<K, Ptr<V>>`及用户generic struct/enum的同类actual；direct raw value与普通Ring-managed generic container/HOF保持。由此B-min hidden evidence、packed shell mask、payload-policy LFP与runtime `NoRc/RingRc`分支全部不存在，也不得以name/header sniff、function table或第二solver恢复。Aggregate shell继续按普通owner规则release；该规则不授权whole-value foreign cleanup veto。
+**0.1 raw generic aggregate clean break（2026-08-30 用户批准）**：`Ptr`或non-RC extern payload不得递归进入generic aggregate storage。Checker在TypedHIR/Core publish前稳定拒绝`List<Ptr<T>>`、`Option<ForeignHandle>`、`Map<K, Ptr<V>>`及用户generic struct/enum的同类actual；direct raw value与普通Vorton-managed generic container/HOF保持。由此B-min hidden evidence、packed shell mask、payload-policy LFP与runtime `NoRc/VortonRc`分支全部不存在，也不得以name/header sniff、function table或第二solver恢复。Aggregate shell继续按普通owner规则release；该规则不授权whole-value foreign cleanup veto。
 
-**A′ 与 S′ 统一**：exact source clear、overwrite old-value Drop、exact-none 与 scope/early-exit cleanup属于同一个 slot-state machine，不再有独立 S′ producer/tail analysis。所有可能 physical-own 的 storage 在 normalization 预建并初始化为空；Assign 固定为“完整求值 RHS → ownership转入预建 temp → Drop旧target → temp写入target → 清temp ownership”，RHS divergence无后继。`Take` 固定为保存 exact source 值并立即清空 source；normal/return/break/continue/current-frame catch/handler exit按逆词法序显式 cleanup。`ring_drop(NULL)`、tagged scalar与never-drop `Option::none`均no-op；Extern/Ptr/NoDrop仍由Physical RcShape排除。
+**A′ 与 S′ 统一**：exact source clear、overwrite old-value Drop、exact-none 与 scope/early-exit cleanup属于同一个 slot-state machine，不再有独立 S′ producer/tail analysis。所有可能 physical-own 的 storage 在 normalization 预建并初始化为空；Assign 固定为“完整求值 RHS → ownership转入预建 temp → Drop旧target → temp写入target → 清temp ownership”，RHS divergence无后继。`Take` 固定为保存 exact source 值并立即清空 source；normal/return/break/continue/current-frame catch/handler exit按逆词法序显式 cleanup。`vorton_drop(NULL)`、tagged scalar与never-drop `Option::none`均no-op；Extern/Ptr/NoDrop仍由Physical RcShape排除。
 
 **Planner 后职责**：RcIR 的 binder set 与 FlowIR 完全相同，资源操作全部显式；旧 Perceus 不再是独立 ownership pass，不造 `__anf/__rc_scope`、不猜 fresh/escape/sink/producer。Verifier不运行resolver或第二solver：certificate记录frozen graph hash、seeds、final cells、每次提升的rule/premises/严格较低rank、CFG states与每个RC op witness；检查全部约束与有限推导两侧，从而证明 claimed 解恰是least fixed point，并验证每条路径的owner守恒。Codegen只接受verified RcIR，机械lower `Clone`、`Take(save; source=NULL)`、`Drop`与cleanup。
 
@@ -1337,7 +1339,7 @@ Parse / project Resolver / Type+Effect
 
 非 Drop 类型的 `let x = y` 创建别名（rc+1，同一对象）。编译器在函数内追踪别名关系，**mutation 后旧别名失效**：
 
-```ring
+```vorton
 let xs = [1, 2, 3]
 let ys = xs             // ys 别名 xs
 print(ys.len())         // ✅ mutation 之前，ys 有效
@@ -1364,10 +1366,10 @@ print(ys)               // ❌ 编译错误：ys 在 xs mutation 后失效
 
 **别名在循环中的行为**：参考 Rust 的循环别名规则——循环体内的 mutation 使循环外定义的别名在**整个循环体**内失效（保守假设循环体执行多次）。
 
-**NLL 设计探针（待完成）**：Rust 从词法作用域（1.0）演进到 Non-Lexical Lifetimes（1.31，2018 edition），使用 CFG-based liveness 精确计算引用生存期。Ring 需要研究：(1) Rust NLL 的实现复杂度（CFG 构建 + dataflow）；(2) 简化版（块级 liveness，不做完整 CFG）是否够用；(3) 对用户体验的影响（哪些 pattern 在哪种精度下会被拒绝）。决策后更新本节。
+**NLL 设计探针（待完成）**：Rust 从词法作用域（1.0）演进到 Non-Lexical Lifetimes（1.31，2018 edition），使用 CFG-based liveness 精确计算引用生存期。Vorton 需要研究：(1) Rust NLL 的实现复杂度（CFG 构建 + dataflow）；(2) 简化版（块级 liveness，不做完整 CFG）是否够用；(3) 对用户体验的影响（哪些 pattern 在哪种精度下会被拒绝）。决策后更新本节。
 
 **修复方式**：
-```ring
+```vorton
 // 方式 1：clone 拿独立副本
 let ys = xs.clone()     // 递归深拷贝，完全独立
 xs.push(4)              // ✅
@@ -1391,7 +1393,7 @@ xs.push(4)              // ✅
 
 `mut` 在用户代码中**只有一个含义**：rebind（重新绑定）。
 
-```ring
+```vorton
 let x = 5               // 不可 rebind
 let mut x = 5            // 可 rebind
 x = 10                   // ✅
@@ -1403,7 +1405,7 @@ x = 10                   // ✅
 
 ### 7.6 Drop / RAII
 
-```ring
+```vorton
 impl Drop for FileHandle {
     fn drop(self) {
         self.close_internal()
@@ -1426,7 +1428,7 @@ impl Drop for FileHandle {
 
 **`Rc<T>`**：非 Drop 包装器，用于共享 Drop 类型。
 
-```ring
+```vorton
 let f = Rc.new(File.open("data.txt"))
 let g = f              // rc+1（Rc 本身是非 Drop 类型），两边都活
 // 最后一个 Rc 引用消亡时，内部 File 的 Drop 执行
@@ -1436,7 +1438,7 @@ let g = f              // rc+1（Rc 本身是非 Drop 类型），两边都活
 
 **`.clone()` = 递归深拷贝**（Rust Clone trait 语义）：
 
-```ring
+```vorton
 let a = [[1, 2], [3, 4]]
 let b = a.clone()        // 新外层 List，新内层 List，元素 copy
 b[0].push(5)
@@ -1455,7 +1457,7 @@ print(a)                 // [[1, 2], [3, 4]]——不受影响
 
 闭包捕获由编译器推断。lv2 formatter 展示捕获列表：
 
-```ring
+```vorton
 // lv0
 let mut counter = 0
 let name = "hello"
@@ -1472,7 +1474,7 @@ let inc = fn() [mut counter: Int, name: Str] { ... }
 
 当前普通 closure 没有 FnOnce/consume-call 形态，也没有在 `FnType` 中携带 capture ownership shape。因此 ordinary borrow/mut capture 不得接收 may-own 外部 binding；未解析 TypeVar 按 may-own fail closed。需要把资源交给 closure 的代码必须等待显式 consume-capture 模型，不能通过隐式 rc+1 延后 Drop，也不能把所有普通函数值统一线性化。该限制不影响 closure 内部新建并在自身作用域内消费的资源；nested closure 仍按各自 exact free-binding identity 独立检查。
 
-Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又可能由 handler 内创建的 effectful function value 持有并逃出 `handle`。因此 handler 构造时必须按 exact `DefId` 检查 outer capture：Resource、transitive may-own wrapper、`Any` 与未解析 TypeVar 一律 fail loud，不能把借用藏进可逃逸 evidence。已证明 non-may-own 的捕获仍按现行词法 evidence ABI 保留；其中只有 physical-RC-eligible 值取得 `ring_dup` 并在 env mask 中标为 owned，`Ptr`、direct extern 与 contains-extern 值保持 RC-excluded。`fail.raise` abort arm 由 C 后端在 `setjmp`/`longjmp` catch path 内联执行，不创建 handler closure；它保留现有 outer-move 禁令，并在当前函数作用域读取外层值。
+Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又可能由 handler 内创建的 effectful function value 持有并逃出 `handle`。因此 handler 构造时必须按 exact `DefId` 检查 outer capture：Resource、transitive may-own wrapper、`Any` 与未解析 TypeVar 一律 fail loud，不能把借用藏进可逃逸 evidence。已证明 non-may-own 的捕获仍按现行词法 evidence ABI 保留；其中只有 physical-RC-eligible 值取得 `vorton_dup` 并在 env mask 中标为 owned，`Ptr`、direct extern 与 contains-extern 值保持 RC-excluded。`fail.raise` abort arm 由 C 后端在 `setjmp`/`longjmp` catch path 内联执行，不创建 handler closure；它保留现有 outer-move 禁令，并在当前函数作用域读取外层值。
 
 **可变捕获豁免别名规则**：闭包的 mut 捕获创建共享可变绑定（原变量和闭包双方均可修改），不适用 §7.4 的别名失效规则——这是共享可变的 explicit opt-in。lv2 捕获列表 `[mut counter]` 标明。
 
@@ -1498,7 +1500,7 @@ Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又�
 |----|------|------|---------|
 | **L0 RC 核心** | dup/drop 插入，归零即 free | ✅ | B-012 |
 | **L1 借用引擎** | clone-all-escape，参数 borrow 不 dup | ✅ | B-098 |
-| **L0/L1 完整化** | total drop pass + 静态 leak verifier（verify_rc.ring） | ✅ | B-104 |
+| **L0/L1 完整化** | total drop pass + 静态 leak verifier（verify_rc.vorton） | ✅ | B-104 |
 | **L4 标记指针** | 标量低位 tag，不进堆 | ✅ | B-080 |
 | **L2 Drop/RAII** | 用户 impl Drop，abort unwind，Weak\<T\>，**含简单 move checker**（consumed-flag） | 待做 | B-002 |
 | **L1.5 别名追踪** | §7.4 非 Drop 类型 mutation 安全 + mutation 推断 + NLL（deferred: L2） | 待做 | B-110 |
@@ -1506,11 +1508,11 @@ Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又�
 | **L5 RC 消除** | 编译器证明 rc 恒 1 → 跳过 dup/drop | 未排期 | — |
 
 **关键映射**：
-- `let x = y`（非 Drop）→ perceus 发 `ring_dup`（rc+1）
+- `let x = y`（非 Drop）→ perceus 发 `vorton_dup`（rc+1）
 - `let x = y`（Drop）→ perceus 不 dup（move，指针转移）
 - 参数传递 → 不 dup（borrow 调用约定）
 - 逃逸（return / 存入容器）→ clone（`HExpr::Clone`，rc+1）
-- scope-end → `ring_drop`（rc-1，rc=0 则释放）
+- scope-end → `vorton_drop`（rc-1，rc=0 则释放）
 - Drop 类型 rc 恒 1 → scope-end drop 总是释放 = Rust 语义
 
 **循环引用策略**：`Weak<T>` 配合 `Rc<T>`（§7.7）。不引入 cycle collector（破坏 RAII 确定性析构）。图结构推荐 arena + index 模式。
@@ -1538,14 +1540,14 @@ Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又�
 | **B unsafe 区**（库作者，少数）| 零拷贝视图（指进 buffer 的 slice）、自引用/侵入式结构、RIIR 容器底层（malloc/指针算术/未初始化内存）、FFI 裸指针 |
 | **C 明确不做** | first-class 借用 / lifetime 标注 / borrow checker；安全区的跨函数零拷贝视图；cycle collector |
 
-栏 C 的可信度由栏 B 背书：「X 不在安全区」的回答是「去 unsafe 区」，与 Rust 同构——撤销旧「Ring 用类型系统消除 unsafe 的需求」立场（原 backlog「不做的控制力」表）。
+栏 C 的可信度由栏 B 背书：「X 不在安全区」的回答是「去 unsafe 区」，与 Rust 同构——撤销旧「Vorton 用类型系统消除 unsafe 的需求」立场（原 backlog「不做的控制力」表）。
 
 **形态 = `unsafe` effect**：unsafe 原语操作产生 `unsafe` effect，签名可见、自动冒泡。不可被普通 handler 处理——唯一消除方式是 discharge。
 
 **Discharge 模型 = 两级，关键字与 Rust 一致（2026-06-11 用户拍板）**：
 - **模块级 = 许可**：文件模块用第一项 `requires {unsafe}` header，inline module 用 `mod name requires {unsafe}`；未显式授权的模块内不可使用 unsafe 原语；
 - **块级 = 责任**：`unsafe { ... }` 吸收块内 unsafe effect，块 = 作者签字「此处不变量已人工验证」，等价 Rust unsafe block。安全封装因此成立：std 容器内部 unsafe、pub 签名纯净；
-- 配套 `ring audit unsafe`：列出全代码库 discharge 点。
+- 配套 `vorton audit unsafe`：列出全代码库 discharge 点。
 
 **与公理④（不信任程序员）的接法**：discharge 点清单 = 整个代码库需要人类审查的全部位置——有限、可枚举、签名可定位。agent 在安全区自由工作；lint 可配「agent 不得新增 unsafe 块」，使人类审查面的增长本身受控。Rust 只有隔离（靠人 grep），effect 系统补上类型层自动追踪。
 
@@ -1553,7 +1555,7 @@ Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又�
 
 **B-106 正文拍定（2026-06-13 Discussion，下列即真值）**：
 
-**`Ptr<T>` 形态**：typed（offset 按 `size_of<T>` 步进，reinterpret 走显式 `cast`）；**单一类型不分 const/mut**（Rust `*const`/`*mut` 三作用中 variance 与借用来源追踪对 Ring 不存在，仅剩文档价值——公理⑧不分，const 意图归注释与封装 API 命名）；`Ptr<T>` 是**普通值**——copy 语义、不参与 RC、存字段/传参/比较皆 safe，**操作才产生 unsafe effect**（effect 挂操作不挂类型，与 fail 同构；安全封装因此成立——RIIR 容器 struct `{data: Ptr<T>, len, cap}` 定义本身不被感染）。
+**`Ptr<T>` 形态**：typed（offset 按 `size_of<T>` 步进，reinterpret 走显式 `cast`）；**单一类型不分 const/mut**（Rust `*const`/`*mut` 三作用中 variance 与借用来源追踪对 Vorton 不存在，仅剩文档价值——公理⑧不分，const 意图归注释与封装 API 命名）；`Ptr<T>` 是**普通值**——copy 语义、不参与 RC、存字段/传参/比较皆 safe，**操作才产生 unsafe effect**（effect 挂操作不挂类型，与 fail 同构；安全封装因此成立——RIIR 容器 struct `{data: Ptr<T>, len, cap}` 定义本身不被感染）。
 
 **原语集 v1**（由栏 B 四场景倒推）：
 
@@ -1571,14 +1573,14 @@ Tail-resumptive handler arm 会被物化进 effect evidence；该 evidence 又�
 
 **read/take/write 所有权语义 = Perceus 接口承重墙**（2026-06-27 Discussion 拍板 read/take 拆分）：
 
-- **`read`（peek）**：读出值 + `ring_dup`（RC+1），buffer slot 保持有效。可重复读。Perceus 视为「产 owned」——落进 B-103 return-mode 既有分类，零特殊化。RIIR 容器 `get()` = `self.data.offset(i).read()`，一行搞定。
+- **`read`（peek）**：读出值 + `vorton_dup`（RC+1），buffer slot 保持有效。可重复读。Perceus 视为「产 owned」——落进 B-103 return-mode 既有分类，零特殊化。RIIR 容器 `get()` = `self.data.offset(i).read()`，一行搞定。
 - **`take`（move out）**：读出值、不 dup。buffer slot 作废（重复 take 同位 = double-free，签字内容）。等价 Rust `ptr::read` 契约。RIIR 容器 `pop()` = `self.data.offset(self.len-1).take()`、`drop` 清理 = 逐元素 take。
 - **`write`（move in）**：v 按位写入裸内存，不 drop 旧值（旧值可能未初始化）。v 从 RC 世界移出。RIIR 容器 `push()` = `self.data.offset(self.len).write(v)`。
 - **`replace` = `take` + `write`**：RIIR 容器 `set(i, v)` = `self.data.offset(i).take(); self.data.offset(i).write(v)`——take 旧值（scope-end drop）+ write 新值，两步显式。
 
-buffer 内的值 = RC 世界之外、所有权由封装作者人工记账。拆分 read/take 的设计动机：Rust 的 `ptr::read`（= Ring 的 `take`）是 move 语义，但 RIIR 容器的 `get()`（非破坏性读取）是最高频操作——如果 "read" 是 move，get 需要 read+dup+write_back 三步，啰嗦且易错；拆为 read（peek）+ take（move）后，高频路径一行完成，低频路径（pop/drop）用 take 同样清晰。
+buffer 内的值 = RC 世界之外、所有权由封装作者人工记账。拆分 read/take 的设计动机：Rust 的 `ptr::read`（= Vorton 的 `take`）是 move 语义，但 RIIR 容器的 `get()`（非破坏性读取）是最高频操作——如果 "read" 是 move，get 需要 read+dup+write_back 三步，啰嗦且易错；拆为 read（peek）+ take（move）后，高频路径一行完成，低频路径（pop/drop）用 take 同样清晰。
 
-**相对 Rust 的三处简化（明确不做）**：① 无 `MaybeUninit`——Rust 需要它是因为 safe 区要能持有未初始化值，Ring 的未初始化内存只活在 Ptr 后面、永不以值形态进安全区，「read 前已 init」即签字内容；② 无泛型 `transmute`——99% 用例 = 指针 reinterpret（走 cast）+ 标量 bits 互转（具体 intrinsic 按需提供），最危险的门开最窄；③ v1 无 volatile/atomic——§8 并发定型后随 B-007 系再议。
+**相对 Rust 的三处简化（明确不做）**：① 无 `MaybeUninit`——Rust 需要它是因为 safe 区要能持有未初始化值，Vorton 的未初始化内存只活在 Ptr 后面、永不以值形态进安全区，「read 前已 init」即签字内容；② 无泛型 `transmute`——99% 用例 = 指针 reinterpret（走 cast）+ 标量 bits 互转（具体 intrinsic 按需提供），最危险的门开最窄；③ v1 无 volatile/atomic——§8 并发定型后随 B-007 系再议。
 
 **extern fn 边界 = 声明处签字**：extern fn 声明要求所在文件 header 或 inline module clause 的有效 `requires` 集合显式包含 `unsafe`，声明 = 签字「签名忠实于 C 实现」，调用点 safe（与现状 std extern 调用兼容；Rust 2024 `unsafe extern` 同方向）。**`extern type` 与 `Ptr<T>` 并存两层**：extern type = 不透明句柄（不可 deref/offset，持有传递天然 safe）；`Ptr<T>` = 可算术可解引用的真指针。大量 FFI 永远停留在句柄层，分层本身是缩小 unsafe 面的杠杆。
 
@@ -1586,34 +1588,34 @@ buffer 内的值 = RC 世界之外、所有权由封装作者人工记账。拆�
 
 **`@repr(C)` 的精确角色**：read/write 按位搬 **T 的值表示**（box 指针或 unboxed 标量），任意 T 永远合法（容器场景无需布局承诺）；需要 `@repr(C)` 门票的是**字段级解释**（把 C 填的内存按字段读、字段指针投影）——默认布局编译器自由重排。投影形态（`offset_of` intrinsic vs 投影语法）归实现项 B-125。
 
-**验收工具 v1** = ASan 两档纪律 + `ring audit unsafe`；miri 类解释器远期挂账不立项。
+**验收工具 v1** = ASan 两档纪律 + `vorton audit unsafe`；miri 类解释器远期挂账不立项。
 
-**RIIR 边界已定（2026-06-13 拍板）= 全部自己实现**：容器底层（vector/string/unordered_map）全部用纯 Ring + `Ptr<T>` 重写，不保留 C++ STL 依赖（「系统语言标准库借 C++ = 玩具」）。unsafe 原语实现 = B-125（P3，XL）；容器 RIIR = B-125 后立项。
+**RIIR 边界已定（2026-06-13 拍板）= 全部自己实现**：容器底层（vector/string/unordered_map）全部用纯 Vorton + `Ptr<T>` 重写，不保留 C++ STL 依赖（「系统语言标准库借 C++ = 玩具」）。unsafe 原语实现 = B-125（P3，XL）；容器 RIIR = B-125 后立项。
 
-**RIIR 最终形态（2026-06-30 拍板）= `ring_runtime.c` 纯 C ~400 行**：
+**RIIR 最终形态（2026-06-30 拍板）= `vorton_runtime.c` 纯 C ~400 行**：
 
-作为 native 语言，runtime 中不应有 C++ 成分。RIIR 完成后 `ring_runtime.cpp` 改为 `ring_runtime.c`（纯 C11），消除全部 C++ STL 依赖（`std::string` / `std::unordered_map` / `std::unordered_set` / `std::vector` / `std::algorithm` / `std::sstream`）。最终 runtime 只保留以下纯 C 内容：
+作为 native 语言，runtime 中不应有 C++ 成分。RIIR 完成后 `vorton_runtime.cpp` 改为 `vorton_runtime.c`（纯 C11），消除全部 C++ STL 依赖（`std::string` / `std::unordered_map` / `std::unordered_set` / `std::vector` / `std::algorithm` / `std::sstream`）。最终 runtime 只保留以下纯 C 内容：
 
 | 层 | 内容 | 约行数 | 理由 |
 |----|------|--------|------|
-| RC 核心 | `ring_alloc` / `ring_dup` / `ring_drop` / `drop_table` / typeid 常量 | ~150 | 自举循环依赖——Ring 的 RC 系统无法管理自己的 RC 系统；这是唯一不可消除的 C 层 |
-| Boxing | `ring_box_int` / `ring_unbox_int` / `ring_box_float` / `ring_box_bool` | ~30 | 极简 C，codegen 内联调用频繁 |
-| IO / OS | `ring_print` / `ring_read_file` / `ring_write_file` / `ring_args` / `ring_cwd` / `ring_exit` / `ring_path_*` / `ring_file_exists` | ~100 | C ABI syscall wrapper，本来就是纯 C |
-| Fail effect | `ring_catch_push` / `ring_catch_pop` / `ring_raise` / `ring_try` + `setjmp`/`longjmp` | ~60 | C ABI，Ring 无对应原语 |
-| Ptr 原语 | `ring_raw_alloc` / `ring_raw_dealloc` / `ring_ptr_copy` / `ring_slot_*` | ~30 | `malloc`/`free`/`memmove` 薄 wrapper |
-| 初始化 | `ring_runtime_init` / `main` | ~30 | 入口 |
+| RC 核心 | `vorton_alloc` / `vorton_dup` / `vorton_drop` / `drop_table` / typeid 常量 | ~150 | 自举循环依赖——Vorton 的 RC 系统无法管理自己的 RC 系统；这是唯一不可消除的 C 层 |
+| Boxing | `vorton_box_int` / `vorton_unbox_int` / `vorton_box_float` / `vorton_box_bool` | ~30 | 极简 C，codegen 内联调用频繁 |
+| IO / OS | `vorton_print` / `vorton_read_file` / `vorton_write_file` / `vorton_args` / `vorton_cwd` / `vorton_exit` / `vorton_path_*` / `vorton_file_exists` | ~100 | C ABI syscall wrapper，本来就是纯 C |
+| Fail effect | `vorton_catch_push` / `vorton_catch_pop` / `vorton_raise` / `vorton_try` + `setjmp`/`longjmp` | ~60 | C ABI，Vorton 无对应原语 |
+| Ptr 原语 | `vorton_raw_alloc` / `vorton_raw_dealloc` / `vorton_ptr_copy` / `vorton_slot_*` | ~30 | `malloc`/`free`/`memmove` 薄 wrapper |
+| 初始化 | `vorton_runtime_init` / `main` | ~30 | 入口 |
 
-**迁移到 Ring 侧的内容**（B-152 P0–P5）：
+**迁移到 Vorton 侧的内容**（B-152 P0–P5）：
 
 | 内容 | 迁出方式 |
 |------|---------|
-| Map / MapInt（`std::unordered_map`） | P3：Ring 开放寻址哈希表 + Hash trait |
+| Map / MapInt（`std::unordered_map`） | P3：Vorton 开放寻址哈希表 + Hash trait |
 | Set / SetInt（`std::unordered_set`） | P4：`Map<T, Unit>` wrapper；公开操作要求 `Hash + Eq`，expected O(1)，无隐式线性 fallback |
 | StringBuilder（`std::string`） | P0（pilot） |
 | Str 操作中的 `std::string` 临时计算（replace/pad_start/pad_end） | P1 Step 2 |
-| List HOF（map/filter/fold/any/all/find 等） | 已部分迁移（P2），HOF 可全迁 Ring |
-| `ring_get_builtin_dict` + primitive trait closures | primitive `impl Eq/Ord/Debug/Hash for Int/Str/...` 全用 Ring 写后自然消失 |
-| 诊断 profiling（`RING_BOX_PROFILE` / `RING_ALLOC_STATS`） | P5 清理时删除或用 Ring 重写 |
+| List HOF（map/filter/fold/any/all/find 等） | 已部分迁移（P2），HOF 可全迁 Vorton |
+| `vorton_get_builtin_dict` + primitive trait closures | primitive `impl Eq/Ord/Debug/Hash for Int/Str/...` 全用 Vorton 写后自然消失 |
+| 诊断 profiling（`VORTON_BOX_PROFILE` / `VORTON_ALLOC_STATS`） | P5 清理时删除或用 Vorton 重写 |
 
 **P5 清理步骤**：B-152 P0–P4 完成后，(1) 删除所有 C++ 残留（`#include <string>` 等、placement new、析构调用）；(2) 将 `.cpp` 改为 `.c`，编译命令从 `clang++` 改为 `clang`；(3) 验证自举 + 全量测试。
 
@@ -1707,7 +1709,7 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 
 ### 10.4 后端策略
 
-**当前状态（2026-08-03）**：C11 是 main 唯一 codegen 与 bootstrap lane，支持单文件、project/module 与 self-host；`compiler/dist-c/main.c` 是 tracked stage-0，并以字节固定点验证。LLVM-C/addon、`codegen_llvm*`、旧 `compiler/dist/` 与 `dist-llvm/` 已从 main 删除；`llvm-c-backend-final` tag 是唯一历史恢复点，不是产品依赖。
+**迁移前 C11 后端状态（历史，2026-08-03）**：C11 曾是 main 唯一 codegen 与 bootstrap lane，支持单文件、project/module 与 self-host；`compiler/dist-c/main.c` 曾作为 tracked stage-0 做字节固定点验证。LLVM-C/addon、`codegen_llvm*`、旧 `compiler/dist/` 与 `dist-llvm/` 已从当时的 main 删除；`llvm-c-backend-final` tag 是历史恢复点。当前编译器在 Rust 宿主上重建，以上 C/self-host 资产只作 oracle，不是产品依赖或现行 gate。
 
 **C11 主路径的长期契约**：
 
@@ -1718,9 +1720,9 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 - match/catch 按源码 arm 顺序，穷尽失败 fail loud；Drop、cleanup 与 evidence 生命周期在嵌套函数边界隔离，并由共享 RC/verifier 契约审计。
 - 编译器进程只生成文本并调用外部编译器，不恢复 LLVM-C 式进程内 FFI/IR builder 信道。
 
-**内部检查点与发布边界（2026-08-30 用户决定）**：当前0.1只要求C-only tracked anchor生成可用current compiler、连续self-host到文本fixed point并完成B-183仓库/GitHub治理迁移；不要求critical correctness清零，也不是公开preview。迁仓后B-176/B-180先恢复可接受的check/验证反馈速度，Known Issues与剩余correctness/ABI在GitHub继续，再由B-174/B-177/B-175承担CLI闭环、版本化agent contract与candidate打包产品面；生成程序性能证据由B-181承担。未来第二后端只能消费同一HIR/ABI契约，不能恢复进程内LLVM-C FFI或成为唯一bootstrap。
+**迁移前内部检查点与发布边界（历史，2026-08-30 用户决定）**：当时的0.1检查点只要求C-only tracked anchor生成可用 compiler、连续self-host到文本fixed point并完成仓库/GitHub治理迁移；它不要求critical correctness清零，也不是公开preview。相关反馈速度、Known Issues、CLI/agent contract、candidate打包与生成程序性能事项现只按 GitHub Issue 追踪。当前 Rust 重建不恢复连续self-host门；未来后端仍只能消费同一HIR/ABI契约，不能恢复进程内LLVM-C FFI或成为未经新用户决定的唯一bootstrap。
 
-**未来 LLVM target 重启门**：只有代表性负载证明 C 不可表达的性能瓶颈、Ring 级调试信息刚需，或目标平台缺少成熟 C 工具链时才重新立项。届时 C 后端永久保留为 reference/stage-0，LLVM 只能是第二信道，并且只发文本 `.ll`，不得恢复进程内 LLVM-C FFI。
+**未来 LLVM target 重启门**：只有代表性负载证明 C 不可表达的性能瓶颈、Vorton 级调试信息刚需，或目标平台缺少成熟 C 工具链时才重新立项。届时 C 后端永久保留为 reference/stage-0，LLVM 只能是第二信道，并且只发文本 `.ll`，不得恢复进程内 LLVM-C FFI。
 
 **信任阶梯**：确定性 C + 工具链指纹 → clang/gcc/MSVC 交叉差分 → 按需 Diverse Double-Compiling → 远期朴素信任种子后端。自有机器码后端若实施，只能作为可审计的第三信道/DDC 种子，不进入生产工具链，也不做性能优化。
 
@@ -1786,7 +1788,7 @@ unsafe原语（`Ptr<T>` + alloc/read/write等）已设计定案（§7.12），�
 
 **前馈控制——编译器替代观测器和判决器：**
 
-控制论中前馈控制在错误发生前阻止，反馈控制在错误发生后纠正。Ring 的安全特性本质上是把反馈控制（测试、review、监控）转化为前馈控制（编译时拦截）：
+控制论中前馈控制在错误发生前阻止，反馈控制在错误发生后纠正。Vorton 的安全特性本质上是把反馈控制（测试、review、监控）转化为前馈控制（编译时拦截）：
 
 | 语言特性 | 替代人类的哪个判断 |
 |----------|------------------|
@@ -1802,7 +1804,7 @@ unsafe原语（`Ptr<T>` + alloc/read/write等）已设计定案（§7.12），�
 
 前馈控制（编译器）不可能覆盖全部——编译通过 ≠ 语义正确。反馈回路仍然必要：
 
-- **自举 dogfooding**：Ring 编译器用 Ring 写，编译器自身的 bug 是最直接的反馈信号——修类型系统 → 同类 bug 永远消失。这比测试驱动更强，因为修的是约束本身
+- **自举 dogfooding**：Vorton 编译器用 Vorton 写，编译器自身的 bug 是最直接的反馈信号——修类型系统 → 同类 bug 永远消失。这比测试驱动更强，因为修的是约束本身
 - **Property-based testing / fuzzing**：编译器保证类型正确，自动测试保证语义正确，两层叠加后 LLM 输出才能不经人审就上线
 - **Effect 系统作为可观测性**：副作用被类型追踪后，运行时行为变得可预测，等于自带观测器
 
@@ -1820,7 +1822,7 @@ unsafe原语（`Ptr<T>` + alloc/read/write等）已设计定案（§7.12），�
 
 当前性能路线分两类，不再混用一份 baseline：
 
-1. **开发反馈性能**：B-176 测 `ring check`、RC/self-verify、runner/clang 调度与 self-compile，B-180 以 2× wall-time 改善为退出门；可以优化编译器算法、缓存和有界并行，但不得减少测试覆盖或吞掉原始失败。
+1. **开发反馈性能**：B-176 测 `vorton check`、RC/self-verify、runner/clang 调度与 self-compile，B-180 以 2× wall-time 改善为退出门；可以优化编译器算法、缓存和有界并行，但不得减少测试覆盖或吞掉原始失败。
 2. **生成程序性能**：B-181 测 runtime、内存/分配和产物尺寸，再决定 RcIR reuse、dict 缓存等优化；仍以 backend-neutral TypedHIR/CoreHIR/FlowIR/RcIR → AbiIR → C11/clang 为主，见 §14.6。
 
 退役实现的性能分析只留 Git 历史。两类工作都记录 cold/warm、CPU/RSS、compiler/anchor/toolchain 指纹，禁止用并行 wall-time、编译器构建优化或 microbenchmark 混报产品 runtime 收益。
@@ -1829,17 +1831,17 @@ unsafe原语（`Ptr<T>` + alloc/read/write等）已设计定案（§7.12），�
 
 详细分析见 [`docs/competitive-analysis.md`](competitive-analysis.md)。核心结论：
 
-截至 2026-07-28，尚未发现一个项目**同时交付** Ring 的完整默认路径：面向应用开发的低标注表面 + HM 类型/effect inference + system/fail/mut/handled-effect 行为签名 + tail-resumptive/abort handler + Perceus RC/native/自举 + 可测量的 agent 闭环。这里的差异是**组合与默认体验**，不是任何单项机制无人实现；也不能用搜索空集证明「无竞品」。
+截至 2026-07-28，尚未发现一个项目**同时交付** Vorton 的完整默认路径：面向应用开发的低标注表面 + HM 类型/effect inference + system/fail/mut/handled-effect 行为签名 + tail-resumptive/abort handler + Perceus RC/native/自举 + 可测量的 agent 闭环。这里的差异是**组合与默认体验**，不是任何单项机制无人实现；也不能用搜索空集证明「无竞品」。
 
-最近邻必须按不同轴描述：Koka/Flix/Effekt 是 effect 与 handler 机制近邻，Unison 是 abilities + semantic codebase 近邻，MoonBit 是应用语言产品与实验性验证近邻，Zero 是 graph-native agent workflow 近邻，Verus 是权限/SMT/AI proof 近邻；TypeScript 7、Python 与 Rust 则构成强大的「够用就行」替代。Ring 对外定位因此收窄为：**把可推断的行为契约、确定性资源语义和 agent 验证闭环放在同一条 application-native 默认路径上，并用 B-111 的可复现实验证明收益。**
+最近邻必须按不同轴描述：Koka/Flix/Effekt 是 effect 与 handler 机制近邻，Unison 是 abilities + semantic codebase 近邻，MoonBit 是应用语言产品与实验性验证近邻，Zero 是 graph-native agent workflow 近邻，Verus 是权限/SMT/AI proof 近邻；TypeScript 7、Python 与 Rust 则构成强大的「够用就行」替代。Vorton 对外定位因此收窄为：**把可推断的行为契约、确定性资源语义和 agent 验证闭环放在同一条 application-native 默认路径上，并用 B-111 的可复现实验证明收益。**
 
-当前已发货边界也必须诚实陈述：旧宽泛 `io`、`fail/mut`、有限 handler、C11 native/self-host 与 tracked `dist-c` 已有；0.1 的 system/handled clean break 尚待 B-194/B-195/B-196，不能提前宣传为完成。Async 尚未实现，full AE 不计划实现，refinement 仍在 B-001，Drop abort-unwind/Weak 与 RIIR 收尾仍待 B-168/B-002/B-152。
+迁移前已发货边界也必须按历史事实陈述：旧宽泛 `io`、`fail/mut`、有限 handler、C11 native/self-host 与 tracked `dist-c` 曾存在，但现在只作迁移 oracle。当前 Rust 重建不得据此宣传 system/handled clean break、Async、refinement、Drop abort-unwind/Weak 或 RIIR 已实现；这些能力的活动范围与验收只查对应 GitHub Issue。
 
 ---
 
 ## 14. 企业级性能路线
 
-核心研究问题已有 Koka 等参考实现；Ring 仍需用自身 workload 与当前 native 路径验证。
+核心研究问题已有 Koka 等参考实现；Vorton 仍需用自身 workload 与当前 native 路径验证。
 
 ### 14.1 Koka 的启示
 
@@ -1849,7 +1851,7 @@ Koka（微软研究院）通过两项技术达到 C 性能的 75-85%：
 
 ### 14.2 编译目标
 
-native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only（JS 已归档，最后 LLVM lane 只在历史 tag）。性能数据必须注明 compiler commit、`dist-c` 指纹、C compiler/version、生成程序与 runtime 优化级别、机器和冷/热缓存状态；旧的单点“native 自编译 290s”不再作为当前基线。开发反馈基线由 B-176 建立并由 B-180 优化，生成程序 baseline/release budget 由 B-181 建立。
+native 仍是目标产品编译方向；迁移前 codegen/bootstrapping 曾为 C11-only（JS 已归档，最后 LLVM lane 只在历史 tag），但当前 Rust compiler 尚未建立发布后端 gate。旧性能证据必须注明 compiler commit、`dist-c` 指纹、C compiler/version、生成程序与 runtime 优化级别、机器和冷/热缓存状态，且不作为当前基线。新的开发反馈、生成程序 baseline 与 release budget 只能由对应 GitHub Issue 在 Rust 路线上重新建立。
 
 ### 14.3 泛型单态化策略（2026-05-24 决策）
 
@@ -1869,7 +1871,7 @@ native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only
 | Release + PGO | 上面 + profile 驱动的热路径单态化 | 两次编译 | 很好 |
 | JIT（远期） | 运行时 tiered compilation | — | 最佳 |
 
-**与 Rust 的根本差异**：Ring 只要求值类型单态化，引用类型默认共享代码；能否显著降低编译膨胀必须由 B-105 与性能基线验证，不能只凭架构推断。
+**与 Rust 的根本差异**：Vorton 只要求值类型单态化，引用类型默认共享代码；能否显著降低编译膨胀必须由 B-105 与性能基线验证，不能只凭架构推断。
 
 **与generic raw payload边界的关系**：0.1已禁止raw/non-RC payload进入generic aggregate storage，因此单态化路线不承担删除B-min mask的前置责任——mask在0.1中根本不存在。Full reachable monomorphization feasibility只评估普通generic callable/body的正确性、代码规模与性能收益，不得借机恢复raw generic aggregate surface。
 
@@ -1897,11 +1899,11 @@ effect、linearity、refinement 与 purity 必须先在相应的 TypedHIR/CoreHI
 
 ```text
 TypedHIR / CoreHIR / FlowIR 契约
-→ Ring passes（RC/reuse、bounds、specialize、dead effect）
+→ Vorton passes（RC/reuse、bounds、specialize、dead effect）
 → AbiIR / C11 受控形态与属性 → clang → native
 ```
 
-| 静态事实 | Ring 层责任 | 下游可选提示 |
+| 静态事实 | Vorton 层责任 | 下游可选提示 |
 |---|---|---|
 | 无 effect / 只读 | 证明重排与消除合法 | pure/readonly 属性 |
 | refinement range | 决定检查能否删除 | range assumption |
@@ -1915,7 +1917,7 @@ TypedHIR / CoreHIR / FlowIR 契约
 
 ## 15. 编译器实现
 
-编译器已用 Ring 自举；当前 main 仍经 legacy HIR → Perceus RC → static verifier → C11 codegen 生成 tracked `dist-c` 固定点，迁移终态由下述分层架构固定。长期后端契约以 §10.4 为准；历史 TypeScript/JS/LLVM 翻译过程与里程碑留在 Git/tag，不在设计真值重复维护。
+迁移前编译器曾用 Vorton 自举，并经 legacy HIR → Perceus RC → static verifier → C11 codegen 生成 tracked `dist-c` 固定点；这些结果现在只作迁移 oracle 与历史证据。当前 main 的 compiler 路线是在 Rust 宿主上重建，下述分层架构描述目标契约而非已通过实现。长期后端契约以 §10.4 为准；历史 TypeScript/JS/LLVM 翻译过程与里程碑留在 Git/tag，不在设计真值重复维护。
 
 ### 15.1 分层 IR 总架构（2026-08-22 用户批准）
 
@@ -1945,7 +1947,7 @@ Source
 | `AbiIR` | 只把已验证语义降为 typeid/tag/field layout、symbol、prototype、closure/dict/evidence layout、drop glue、exact HostImport、extern 与 failure ABI；不得新增调用、控制边、owner、effect class 或语言 fallback。 |
 | `C11` | 对 AbiIR 做确定性序列化并调用工具链；不再选择方法、求 effect closure、解释 pattern、生成未规划 executable body 或分配语义 identity。 |
 
-**术语与物理形态（2026-08-23 用户最终命名）**：`CoreHIR` 名称保留；它是广义 IR，也是最后的 Ring semantic representation，其物理形态仍是 structured typed expression/tree，而非 basic-block graph。原 `FinalHIR` clean break 命名为 `FlowIR`，原 `RcHIR` 命名为 `RcIR`；不保留alias或双口径。`CoreHIR → FlowIR` 是唯一 operational lowering：把 structured control、canonical typed pattern 与隐含 evaluation order 变为 fixed blocks/instructions/terminators，创建仅供执行编排的 ANF temp、scope/control result slot，以及 control/data/call/projection/capture/exit edge。它可以新增这些 administrative binder/block/edge，但不得新增语言级 operation、executable、impl、callee/evidence 选择或其他 semantic obligation。
+**术语与物理形态（2026-08-23 用户最终命名）**：`CoreHIR` 名称保留；它是广义 IR，也是最后的 Vorton semantic representation，其物理形态仍是 structured typed expression/tree，而非 basic-block graph。原 `FinalHIR` clean break 命名为 `FlowIR`，原 `RcHIR` 命名为 `RcIR`；不保留alias或双口径。`CoreHIR → FlowIR` 是唯一 operational lowering：把 structured control、canonical typed pattern 与隐含 evaluation order 变为 fixed blocks/instructions/terminators，创建仅供执行编排的 ANF temp、scope/control result slot，以及 control/data/call/projection/capture/exit edge。它可以新增这些 administrative binder/block/edge，但不得新增语言级 operation、executable、impl、callee/evidence 选择或其他 semantic obligation。
 
 `FlowIR` 是第一层传统 MIR/CFG-style IR，但不要求 LLVM 式 SSA/phi，也不含 `Clone/Take/Drop/Cleanup`、目标 layout 或 ABI。FlowIR freeze 后，ResourcePlanner 不得创建或改变 semantic CFG、call graph 或 reachability；只可在既有 topology 上决定资源流，并把既有 edge 物化为保持相同端点/可达性的显式 cleanup sequence。`RcIR → AbiIR` 才继续进入资源已验证后的物理表示下降。
 
@@ -1957,11 +1959,11 @@ Source
 
 **渐进迁移而非平行重写**：#268/#269 先建立通用 typed identity、executable inventory、neutral normalization、FlowIR/RcIR 与 validator 骨架；后续 type/effect/evidence、failure/control、RIIR/FFI、optimization 各自在既有 backlog 里迁入其唯一所属层。一个事实切换到新层时必须原子迁移全部消费者并删除旧 fallback/side map；禁止长期双写、shadow authority 或以“兼容”保留旧解释路径。B-190 负责在相应消费者已迁移并有证据后删除遗留重复 authority，不把本架构变成一次无界全仓 rewrite。
 
-**0.1 internal self-host implementation boundary（2026-08-30 supersede）**：#268/#269当前只实现tracked anchor、current compiler连续self-host/fixed point、compiler/hello最小smoke与B-183迁仓的真实consumer。其他外部程序缺陷可保留为Known Issues而不新增source diagnostic；对应IR纵切、完整matrix、full/RC/ASan与一般correctness/safety/ownership证明迁到Vorton GitHub继续，不能被描述成0.1检查点已通过。未来能力仍不得要求当前IR预留空节点、unknown占位、fallback或双authority。
+**迁移前 0.1 internal self-host implementation boundary（历史，2026-08-30 supersede）**：当时的#268/#269只覆盖tracked anchor、连续self-host/fixed point、compiler/hello最小smoke与迁仓 consumer；其他外部程序缺陷继续作为Known Issues。当前 Rust 重建不继承这些完成声明，IR纵切、matrix、full/RC/ASan与一般correctness/ownership证明必须由现行 GitHub Issue 和真实 gate 重新建立。未来能力仍不得要求当前IR预留空节点、unknown占位、fallback或双authority。
 
 **Koka 作为参考实现**：Effect 推断（`InferEffect.hs`）和 evidence passing（`Evidence.hs`）的算法翻译自 Koka 编译器（MIT 许可）。Perceus 引用计数已翻译其 POPL'21 实现落地（§7.11）。
 
-自举证明 Ring 能承载自身编译器；LLM 开发效率主张必须由 B-111 的对照实验验证。
+迁移前自举是 Vorton 曾承载自身编译器的历史证据，不是当前 Rust compiler gate；LLM 开发效率主张仍必须由现行 Issue 下的可复现实验验证。
 
 ---
 
@@ -1993,9 +1995,9 @@ Source
 | 2026-06-12 | ⑤ 做实（D-5）：HM 最坏指数与「耗时可预期」字面冲突；B-001 SMT 半可判定预定碰撞；trait instance 终止性未证 | 推断 fuel/深度上限、超限=编译错误（B-119）；B-001 spec 补具名可判定片段条款（QF_LIA 类，超出=要求 runtime check）；trait 终止性审计（B-119） | ⑤ 自身做实（约束内修正） | B-119 验收 |
 | 2026-06-12 | 公理名单与实战否决记录错位 + 性能地位空白（D-6） | ⑧「一种事一种写法」⑨「语法借用」自「语法原则」升格为层 2 公理；性能成文为非公理工程目标（让位全部公理，受 ⑥⑦ 间接保护，优先级锚点=层 0 判据） | 元决策 | — |
 | 2026-06-12 | ② 可见性载体失真：「IDE 幽灵标注」对主受众LLM无效 | 主载体改写为formatter物化标注、模块签名与`--error-format=llm`；IDE只作人类适配层 | 规则 2 | — |
-| 2026-06-12 | B-111 优先级（D-7）：层 0 判据（公理④「LLM 写 Ring 优于 TS」）至今零测量、缺测量仪 | B-111 P2→P1，地位等价公理⑥的 B-089 锚点；只改优先级不动排程（B-104 里程碑照旧先行）。条目见 backlog B-111 | 规则 2（层 0 判据） | B-111 验收 |
+| 2026-06-12 | B-111 优先级（D-7）：层 0 判据（公理④「LLM 写 Vorton 优于 TS」）至今零测量、缺测量仪 | B-111 P2→P1，地位等价公理⑥的 B-089 锚点；只改优先级不动排程（B-104 里程碑照旧先行）。条目见 backlog B-111 | 规则 2（层 0 判据） | B-111 验收 |
 | 2026-06-15 | 字符串编码模型：code point API 与既有后端行为失真 | 选 A（UTF-8 字节串）：`len`=字节数 O(1)、`chars()`/`char_count()` 提供 code point API；否决 B（code point）理由=O(n) len + 需 ByteStr 补位违反⑧。§1.7 已修正，实现归 B-133 | ⑥⑦⑧（5/7 判据 A 胜出） | B-133 按 backlog 的 C/native、Unicode 与 FFI gate 验收 |
-| 2026-06-24 | 层 0 重构：④ 原名「无人回路 × 全场景」绑定 LLM 叙事——核心 claim 应比 agent 窗口更根本 | ④ 改名「不信任程序员 · 编译器是最终权威」；「无人回路 × 全场景」降为渐近表达；出发点从「agent 验证瓶颈」回溯到「程序员不可信是永恒事实」（C/Rust/Ring 三角定位）；LLM-first 降格为推论；核心赌注分两层 | 元决策 | — |
+| 2026-06-24 | 层 0 重构：④ 原名「无人回路 × 全场景」绑定 LLM 叙事——核心 claim 应比 agent 窗口更根本 | ④ 改名「不信任程序员 · 编译器是最终权威」；「无人回路 × 全场景」降为渐近表达；出发点从「agent 验证瓶颈」回溯到「程序员不可信是永恒事实」（C/Rust/Vorton 三角定位）；LLM-first 降格为推论；核心赌注分两层 | 元决策 | — |
 | 2026-08-22 | 纯缩写语法糖准入与历史 `T?`：少写字符是否足以换取第二种公开类型拼写 | 否。语法糖必须提供独立建模/认知/验证/组合价值；`Option<T>` 为唯一目标拼写，`T?` 由 B-191 在 B-180 后、B-174 前 clean break 删除；当前 correctness/性能主线不被打断 | ⑧（层 2 策略，用户方向） | B-191 的负例、仓内原子迁移与 self-host fixed point |
 | 2026-08-23 | 0.1 effect/capability surface：宽泛 `io`、host root handler、user default operation body与隐式effectful Drop会形成重复authority并隐藏能力 | SystemEffectRef=`console/fs/process`且不进evidence/不可handle/无root；HandledEffectRef才显式handle；host call只经AbiIR HostImport。0.1删除user effect default body与effectful Drop，后两者在post-0.1有真实consumer时分别由B-197/B-198重审。Refinement占位语法同步删除；已批准匿名union语义保留但实现顺延post-0.1 | ②④⑤⑧（可见性、失真必须响、有限authority、一种写法） | B-193~B-198及system/handled crossing mutations |
 

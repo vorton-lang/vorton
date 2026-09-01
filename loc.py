@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ring-lang lines-of-code counter. Usage: python loc.py [dir...]  (default: compiler/ std/)"""
+"""vorton-lang lines-of-code counter. Usage: python loc.py [dir...]  (default: compiler/ std/)"""
 
 import sys
 from pathlib import Path
@@ -14,7 +14,7 @@ print(header)
 print(sep)
 
 for d in dirs:
-    for f in sorted(Path(d).glob("*.ring")):
+    for f in sorted(Path(d).glob("*.vorton")):
         if not f.is_file():
             continue
         text = f.read_text(encoding="utf-8")

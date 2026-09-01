@@ -1,0 +1,73 @@
+// B-100 P1.1 parity: module variants — nested modules, const in module,
+// trait in module, struct pattern matching in module scope.
+
+
+
+// --- Nested module ---
+
+mod outer {
+    pub mod inner {
+        pub fn greet(name: Str) -> Str {
+            "hello ${name}"
+        }
+
+        pub fn add(a: Int, b: Int) -> Int {
+            a + b
+        }
+    }
+}
+
+// --- Const and trait in module ---
+
+mod config {
+    pub const VERSION: Int = 42
+    pub const NAME: Str = "vorton"
+
+    pub struct Info {
+        pub tag: Str,
+    }
+
+    pub trait Describe {
+        fn describe(self) -> Str
+    }
+
+    pub impl Describe for Info {
+        fn describe(self) -> Str {
+            "${self.tag}-v${config::VERSION.to_str()}"
+        }
+    }
+}
+
+// --- Struct pattern in module ---
+
+mod inner {
+    pub struct Pair { a: Str, b: Str }
+
+    pub fn swap(p: Pair) -> Pair {
+        match p {
+            Pair { a, b } => Pair { a: b, b: a },
+        }
+    }
+}
+
+fn main() {
+    // Nested module function calls
+    let msg = outer::inner::greet("world")
+    print("nested_greet=${msg}")
+    let sum = outer::inner::add(1, 2)
+    print("nested_add=${sum}")
+
+    // Const in module
+    print("version=${config::VERSION}")
+    print("name=${config::NAME}")
+
+    // Trait in module
+    let info = config::Info { tag: "release" }
+    print("describe=${info.describe()}")
+
+    // Struct pattern in module
+    let p = inner::Pair { a: "hello", b: "world" }
+    let swapped = inner::swap(p)
+    print("swap_a=${swapped.a}")
+    print("swap_b=${swapped.b}")
+}

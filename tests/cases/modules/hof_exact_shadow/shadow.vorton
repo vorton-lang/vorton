@@ -1,0 +1,13 @@
+pub fn print(value: Int) -> Int {
+    value + 1
+}
+
+pub fn Cell(value: Int) -> Int {
+    value + 2
+}
+
+pub fn direct_pair(value: Int) -> Int {
+    // Direct calls must use these exact Vorton declarations before either raw
+    // prelude runtime fallback is considered.
+    print(value) + Cell(value)
+}

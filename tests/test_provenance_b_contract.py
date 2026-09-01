@@ -130,7 +130,7 @@ class ProvenanceBContractTests(unittest.TestCase):
             errors,
             [f"{runner.IDENTITY_EVIDENCE_ROOT_ENV} is required with candidate"],
         )
-        self.assertIn("RING_IDENTITY_EVIDENCE_ROOT=invalid", detail)
+        self.assertIn("VORTON_IDENTITY_EVIDENCE_ROOT=invalid", detail)
         candidate_gate.assert_not_called()
 
     def test_invalid_evidence_root_stops_before_candidate_call(self) -> None:
@@ -187,7 +187,7 @@ class ProvenanceBContractTests(unittest.TestCase):
             ):
                 artifacts, error = runner.run_identity_candidate_mode(
                     sys.executable,
-                    "tests/cases/provenance_b_capture_identity.ring",
+                    "tests/cases/provenance_b_capture_identity.vorton",
                     case_root,
                     evidence_log,
                     ledger=False,
@@ -206,7 +206,7 @@ class ProvenanceBContractTests(unittest.TestCase):
 
     def test_later_comparison_failure_retains_all_case_evidence(self) -> None:
         def completed_mode(
-            _ring_exe: str,
+            _vorton_exe: str,
             _fixture: str,
             case_root: Path,
             evidence_log: list[str],
@@ -234,7 +234,7 @@ class ProvenanceBContractTests(unittest.TestCase):
                 stderr=b"",
                 c_bytes=c_bytes,
                 object_bytes=coff_object(),
-                ledger_bytes=(b"RING-C-IDENTITY-LEDGER|1\n" if ledger else None),
+                ledger_bytes=(b"VORTON-C-IDENTITY-LEDGER|1\n" if ledger else None),
                 verdict={"status": "success"},
                 audit={"state": "complete", "status": "success"},
                 archive_path=archive_path,

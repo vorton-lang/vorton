@@ -1,4 +1,4 @@
-"""Bounded, replayable measurement harness for Ring ``check`` feedback."""
+"""Bounded, replayable measurement harness for Vorton ``check`` feedback."""
 
 from __future__ import annotations
 
@@ -28,21 +28,21 @@ BENCH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BENCH_DIR.parents[1]
 DEFAULT_MANIFEST = BENCH_DIR / "manifest.json"
 DEFAULT_RESULT_SCHEMA = BENCH_DIR / "result.schema.json"
-MANIFEST_SCHEMA = "ring.check-benchmark.manifest.v4"
-RESULT_SCHEMA = "ring.check-benchmark.invocation.v3"
-ENVIRONMENT_SCHEMA = "ring.check-benchmark.environment.v2"
-SUMMARY_SCHEMA = "ring.check-benchmark.summary.v1"
-COMPILER_PHASE_SCHEMA = "ring.compiler-phase-timing.v1"
-RUNNER_PHASE_SCHEMA = "ring.test-runner-phase.v1"
-BOOTSTRAP_PHASE_SCHEMA = "ring.check-benchmark.bootstrap-phase.v1"
-RUNNER_SUMMARY_CONTRACT_SCHEMA = "ring.check-benchmark.runner-summary-contract.v2"
-WARM_CACHE_RECEIPT_SCHEMA = "ring.check-benchmark.warm-cache-seed.v2"
+MANIFEST_SCHEMA = "vorton.check-benchmark.manifest.v4"
+RESULT_SCHEMA = "vorton.check-benchmark.invocation.v3"
+ENVIRONMENT_SCHEMA = "vorton.check-benchmark.environment.v2"
+SUMMARY_SCHEMA = "vorton.check-benchmark.summary.v1"
+COMPILER_PHASE_SCHEMA = "vorton.compiler-phase-timing.v1"
+RUNNER_PHASE_SCHEMA = "vorton.test-runner-phase.v1"
+BOOTSTRAP_PHASE_SCHEMA = "vorton.check-benchmark.bootstrap-phase.v1"
+RUNNER_SUMMARY_CONTRACT_SCHEMA = "vorton.check-benchmark.runner-summary-contract.v2"
+WARM_CACHE_RECEIPT_SCHEMA = "vorton.check-benchmark.warm-cache-seed.v2"
 # Updated mechanically after result.schema.json changes.  The constant pins the
 # complete nested contract, not merely its public $id.
-RESULT_SCHEMA_CANONICAL_SHA256 = "79fec93925e6cc703b89a55e0162a20ab4a81654b2930e9e659a8dfa7d0b055e"
+RESULT_SCHEMA_CANONICAL_SHA256 = "9670c7d8abed8584f83b9024d82c65f9019d2b4ca8db43d957afc54565e4843c"
 # Formal runs and the baseline combiner accept only these exact checked-in
 # manifest bytes.  The value is updated mechanically with manifest.json.
-CANONICAL_MANIFEST_SHA256 = "c1e179aec7d9d43ee2c9a2bc200a2b2bd1602bb31963d76f493b0cec9b3aebc2"
+CANONICAL_MANIFEST_SHA256 = "f559213127506f5a1b3033d5e8132c4e5f2f23e328fbf074faa821524d587b47"
 COMPILER_PHASE_ORDER = (
     "input_entry_load",
     "entry_parse",
@@ -76,12 +76,12 @@ BOOTSTRAP_REQUIRES = (
     "tool:lld_link",
     "path:{repo}/bench/check/bootstrap.py",
     "path:{repo}/compiler/dist-c/main.c",
-    "path:{repo}/ring_runtime.cpp",
+    "path:{repo}/vorton_runtime.cpp",
 )
 BOOTSTRAP_ARTIFACTS = (
-    "{sample_dir}/bootstrap/ring_compiler_lto.o",
-    "{sample_dir}/bootstrap/ring_runtime_lto.o",
-    "{sample_dir}/bootstrap/ring.exe",
+    "{sample_dir}/bootstrap/vorton_compiler_lto.o",
+    "{sample_dir}/bootstrap/vorton_runtime_lto.o",
+    "{sample_dir}/bootstrap/vorton.exe",
     "{sample_dir}/bootstrap/linker-binding.json",
     "{sample_dir}/bootstrap/linker-probe.stdout.txt",
     "{sample_dir}/bootstrap/linker-probe.stderr.txt",
@@ -119,19 +119,19 @@ RUNNER_COMPILER_STAGES = (
     "compiler_link",
 )
 RUNNER_CHILD_STAGE_CATEGORY = {
-    "ring_build": "ring",
-    "ring_check": "ring",
+    "vorton_build": "vorton",
+    "vorton_check": "vorton",
     "clang_link": "clang",
     "run_exe": "generated-program",
 }
 RUNNER_TRACE_PATH = "{sample_dir}/runner-phase-timing.jsonl"
-RING_INT_MAX = (1 << 62) - 1
+VORTON_INT_MAX = (1 << 62) - 1
 ALLOWED_POLICIES = {"direct_short", "adaptive", "full_gate"}
 ALLOWED_CACHE_STATES = {"cold", "warm"}
 ALLOWED_PLACEHOLDERS = {
     "repo",
     "python",
-    "ring",
+    "vorton",
     "clang",
     "clangxx",
     "lld_link",
@@ -149,13 +149,13 @@ MAX_EXTRA_ATTEMPTS = 2
 LONG_LANE_THRESHOLD_NS = 300 * 1_000_000_000
 RSS_POLL_MS = 10
 WARM_CACHE_SEED_TIMEOUT_SECONDS = 600
-WARM_CACHE_RECEIPT_NAME = "ring-lang-b176-warm-seed-receipt.json"
-WARM_CACHE_OUTPUT_NAME = "ring-lang-b176-warm-seed-output"
-LINKER_BINDING_SCHEMA = "ring.check-benchmark.linker-binding.v1"
+WARM_CACHE_RECEIPT_NAME = "vorton-lang-b176-warm-seed-receipt.json"
+WARM_CACHE_OUTPUT_NAME = "vorton-lang-b176-warm-seed-output"
+LINKER_BINDING_SCHEMA = "vorton.check-benchmark.linker-binding.v1"
 WARM_CACHE_BUILD_FILES = {
-    "compiler_object": "ring_compiler_lto.o",
-    "runtime_object": "ring_runtime_lto.o",
-    "ring": "ring.exe",
+    "compiler_object": "vorton_compiler_lto.o",
+    "runtime_object": "vorton_runtime_lto.o",
+    "vorton": "vorton.exe",
     "phase_trace": "phase-trace.jsonl",
     "linker_binding": "linker-binding.json",
     "linker_probe_stdout": "linker-probe.stdout.txt",
@@ -593,11 +593,11 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         if lane["compiler_phase_timing"]:
             if (
                 len(lane["argv"]) < 3
-                or lane["argv"][0] != "{ring}"
+                or lane["argv"][0] != "{vorton}"
                 or lane["argv"][1] != "check"
             ):
                 raise HarnessError(
-                    f"{prefix}.compiler_phase_timing requires a direct ring check lane"
+                    f"{prefix}.compiler_phase_timing requires a direct vorton check lane"
                 )
             if lane["expected_exit_codes"] not in ([0], [1]):
                 raise HarnessError(
@@ -828,10 +828,10 @@ def _windows_power() -> dict[str, Any]:
     return result
 
 
-def build_tools(ring_override: str | None) -> dict[str, str | None]:
+def build_tools(vorton_override: str | None) -> dict[str, str | None]:
     return {
         "python": str(Path(sys.executable).resolve()),
-        "ring": _tool_path("ring.exe", ring_override or str(REPO_ROOT / "ring.exe")),
+        "vorton": _tool_path("vorton.exe", vorton_override or str(REPO_ROOT / "vorton.exe")),
         "clang": _tool_path("clang"),
         "clangxx": _tool_path("clang++"),
         "lld_link": _tool_path("lld-link"),
@@ -882,9 +882,9 @@ def _cache_inventory(cache: Path) -> dict[str, Any]:
 
 def _warm_cache_paths(cache: Path) -> tuple[Path, Path]:
     resolved = cache.resolve()
-    if resolved.name != "ring-lang-thinlto-cache":
+    if resolved.name != "vorton-lang-thinlto-cache":
         raise HarnessError(
-            "warm cache must be a directory named 'ring-lang-thinlto-cache'"
+            "warm cache must be a directory named 'vorton-lang-thinlto-cache'"
         )
     return (
         resolved.parent / WARM_CACHE_RECEIPT_NAME,
@@ -957,7 +957,7 @@ def _warm_cache_source_identity() -> dict[str, Any]:
             _git(REPO_ROOT, "status", "--porcelain", "--untracked-files=no")
         ),
         "dist_c": _file_record(REPO_ROOT / "compiler" / "dist-c" / "main.c"),
-        "runtime": _file_record(REPO_ROOT / "ring_runtime.cpp"),
+        "runtime": _file_record(REPO_ROOT / "vorton_runtime.cpp"),
         "bootstrap": _file_record(BENCH_DIR / "bootstrap.py"),
     }
 
@@ -994,10 +994,10 @@ def _expected_warm_cache_build_commands(
 ) -> list[tuple[str, list[str]]]:
     _receipt, output = _warm_cache_paths(cache)
     anchor = REPO_ROOT / "compiler" / "dist-c" / "main.c"
-    runtime = REPO_ROOT / "ring_runtime.cpp"
+    runtime = REPO_ROOT / "vorton_runtime.cpp"
     compiler_object = output / WARM_CACHE_BUILD_FILES["compiler_object"]
     runtime_object = output / WARM_CACHE_BUILD_FILES["runtime_object"]
-    ring = output / WARM_CACHE_BUILD_FILES["ring"]
+    vorton = output / WARM_CACHE_BUILD_FILES["vorton"]
     required = {name: tools.get(name) for name in ("clang", "clangxx", "lld_link")}
     if any(not isinstance(path, str) or not path for path in required.values()):
         raise HarnessError("warm-cache build tools are incomplete")
@@ -1031,7 +1031,7 @@ def _expected_warm_cache_build_commands(
             "link",
             [
                 str(required["clang"]), str(compiler_object), str(runtime_object),
-                "-o", str(ring), *link_flags,
+                "-o", str(vorton), *link_flags,
             ],
         ),
     ]
@@ -1107,7 +1107,7 @@ def _validate_warm_cache_receipt_shape(receipt: Any) -> None:
     if (
         not isinstance(cache_path, str)
         or not Path(cache_path).is_absolute()
-        or Path(cache_path).name != "ring-lang-thinlto-cache"
+        or Path(cache_path).name != "vorton-lang-thinlto-cache"
     ):
         raise HarnessError("warm-cache receipt cache path is malformed")
     if not isinstance(receipt["source"], dict) or set(receipt["source"]) != {
@@ -1334,12 +1334,12 @@ def formal_tools_from_seed(
     """Select only the compiler executable proven by the formal seed receipt."""
 
     _validate_warm_cache_receipt_shape(receipt)
-    ring = receipt["build_output"]["ring"]
-    actual = _actual_file_record(Path(ring["path"]), "formal seed compiler")
-    if actual != ring:
+    vorton = receipt["build_output"]["vorton"]
+    actual = _actual_file_record(Path(vorton["path"]), "formal seed compiler")
+    if actual != vorton:
         raise HarnessError("formal seed compiler bytes drifted from the build receipt")
     selected = dict(tools)
-    selected["ring"] = ring["path"]
+    selected["vorton"] = vorton["path"]
     return selected
 
 
@@ -1408,12 +1408,12 @@ def validate_retained_warm_cache_seed(
     )
     if replayed_build_output != identity["build_output"]:
         raise HarnessError("warm-cache seed build output provenance drifted")
-    ring = tools.get("ring")
-    built_ring = identity["build_output"]["ring"]
+    vorton = tools.get("vorton")
+    built_vorton = identity["build_output"]["vorton"]
     if (
-        not isinstance(ring, dict)
-        or ring.get("path") != built_ring["path"]
-        or ring.get("sha256") != built_ring["sha256"]
+        not isinstance(vorton, dict)
+        or vorton.get("path") != built_vorton["path"]
+        or vorton.get("sha256") != built_vorton["sha256"]
     ):
         raise HarnessError("formal compiler is not the seed receipt build output")
     return identity
@@ -1432,7 +1432,7 @@ def capture_environment(
     source_sha = _git(REPO_ROOT, "rev-parse", "HEAD")
     dirty = bool(_git(REPO_ROOT, "status", "--porcelain", "--untracked-files=no"))
     anchor = REPO_ROOT / "compiler" / "dist-c" / "main.c"
-    runtime = REPO_ROOT / "ring_runtime.cpp"
+    runtime = REPO_ROOT / "vorton_runtime.cpp"
     tool_records: dict[str, Any] = {}
     for name, path in tools.items():
         tool_records[name] = {
@@ -1497,10 +1497,10 @@ def prepare_runner_runtime(
     tools: Mapping[str, str | None],
     run_dir: Path,
 ) -> dict[str, Any]:
-    """Prepare an isolated runner ``ring_runtime.o`` state outside measurement."""
+    """Prepare an isolated runner ``vorton_runtime.o`` state outside measurement."""
 
-    root_object = REPO_ROOT / "ring_runtime.o"
-    source = REPO_ROOT / "ring_runtime.cpp"
+    root_object = REPO_ROOT / "vorton_runtime.o"
+    source = REPO_ROOT / "vorton_runtime.cpp"
     needs_object = any(lane.get("isolate_runner_runtime", False) for lane in lanes)
     flags = list(manifest["fingerprint_flags"]["runner_runtime"])
     setup: dict[str, Any] = {
@@ -1524,7 +1524,7 @@ def prepare_runner_runtime(
 
     prepared_dir = run_dir / "prepared" / "runner-runtime"
     prepared_dir.mkdir(parents=True, exist_ok=False)
-    prepared_object = prepared_dir / "ring_runtime.o"
+    prepared_object = prepared_dir / "vorton_runtime.o"
     stdout_path = prepared_dir / "stdout.txt"
     stderr_path = prepared_dir / "stderr.txt"
     command = [
@@ -1570,8 +1570,8 @@ def _begin_runner_runtime_isolation(
     applies = bool(lane.get("isolate_runner_runtime", False))
     root_object = Path(setup["root_path"])
     token = re.sub(r"[^a-zA-Z0-9_-]", "_", sample_dir.name)
-    backup = root_object.with_name(f"ring_runtime.b176-{token}.backup.o")
-    staging = root_object.with_name(f"ring_runtime.b176-{token}.install.o")
+    backup = root_object.with_name(f"vorton_runtime.b176-{token}.backup.o")
+    staging = root_object.with_name(f"vorton_runtime.b176-{token}.install.o")
     transaction = {
         "root": root_object,
         "backup": backup,
@@ -1635,7 +1635,7 @@ def _begin_runner_runtime_isolation(
             if _sha256_file(staging) != prepared["sha256"]:
                 raise HarnessError("runner runtime install staging hash mismatch")
             os.replace(staging, root_object)
-            source = REPO_ROOT / "ring_runtime.cpp"
+            source = REPO_ROOT / "vorton_runtime.cpp"
             if root_object.stat().st_mtime_ns < source.stat().st_mtime_ns:
                 timestamp = source.stat().st_mtime_ns + 1_000_000_000
                 os.utime(root_object, ns=(timestamp, timestamp))
@@ -1698,7 +1698,7 @@ def _finish_runner_runtime_isolation(
         record["post_exists"] = post["exists"]
         record["post_sha256"] = post["sha256"]
         if not post["exists"]:
-            record["errors"].append("runner did not materialize ring_runtime.o")
+            record["errors"].append("runner did not materialize vorton_runtime.o")
         if record["mode"] == "warm" and post["exists"]:
             prepared = setup.get("prepared")
             expected_hash = prepared.get("sha256") if isinstance(prepared, dict) else None
@@ -2002,8 +2002,8 @@ def _classify_compiler_phase_rows(
         if row["unit"] != "ns":
             hard.append(f"{prefix} unit must be ns")
         duration = row["duration_ns"]
-        if not _is_trace_int(duration) or not 0 <= duration <= RING_INT_MAX:
-            hard.append(f"{prefix} duration_ns is outside Ring Int nanoseconds")
+        if not _is_trace_int(duration) or not 0 <= duration <= VORTON_INT_MAX:
+            hard.append(f"{prefix} duration_ns is outside Vorton Int nanoseconds")
         if not isinstance(row["executed"], bool):
             hard.append(f"{prefix} executed must be boolean")
         if not isinstance(row["complete"], bool):
@@ -2203,7 +2203,7 @@ def _classify_runner_phase_rows(
         category = row["command_category"]
         if category is not None and (
             not isinstance(category, str)
-            or category not in {"ring", "clang", "generated-program"}
+            or category not in {"vorton", "clang", "generated-program"}
         ):
             hard.append(f"{prefix} has unknown command_category {category!r}")
             topology_safe = False
@@ -2591,7 +2591,7 @@ def _classify_phase_trace_records(
             )
             continue
         if compiler_expected:
-            compiler_sha = environment.get("tools", {}).get("ring", {}).get("sha256")
+            compiler_sha = environment.get("tools", {}).get("vorton", {}).get("sha256")
             source_sha = environment.get("source_sha")
             if not isinstance(compiler_sha, str) or not compiler_sha:
                 hard.append("compiler executable identity is unavailable")
@@ -2840,7 +2840,7 @@ def _attempt_replay_context(
         context[name] = path if isinstance(path, str) and path else f"<missing:{name}>"
     cache_path = environment.get("thinlto_cache_path")
     if expected_lane["cache"]["thinlto_cache"] == "cold":
-        invocation_cache = sample_dir / "temp" / "ring-lang-thinlto-cache"
+        invocation_cache = sample_dir / "temp" / "vorton-lang-thinlto-cache"
     elif isinstance(cache_path, str) and cache_path:
         invocation_cache = Path(cache_path)
     else:
@@ -2905,8 +2905,8 @@ def _validate_runner_runtime_provenance(
         raise HarnessError("environment runner runtime root is unavailable")
     root = Path(root_text)
     token = re.sub(r"[^a-zA-Z0-9_-]", "_", sample_dir.name)
-    backup = root.with_name(f"ring_runtime.b176-{token}.backup.o").resolve()
-    staging = root.with_name(f"ring_runtime.b176-{token}.install.o").resolve()
+    backup = root.with_name(f"vorton_runtime.b176-{token}.backup.o").resolve()
+    staging = root.with_name(f"vorton_runtime.b176-{token}.install.o").resolve()
     original = setup.get("original_root")
     if not isinstance(original, dict):
         raise HarnessError("environment original runtime state is unavailable")
@@ -3062,7 +3062,7 @@ def validate_attempt_boundary(
     expected_argv = [_format(item, context) for item in expected_lane["argv"]]
     phase_paths = resolve_phase_trace_paths(expected_lane, expected_sample_dir)
     if expected_lane.get("compiler_phase_timing", False):
-        compiler_sha = environment.get("tools", {}).get("ring", {}).get("sha256")
+        compiler_sha = environment.get("tools", {}).get("vorton", {}).get("sha256")
         if not isinstance(compiler_sha, str) or not compiler_sha:
             raise HarnessError("compiler executable identity is unavailable")
         expected_argv.extend(
@@ -3214,7 +3214,7 @@ def execute_invocation(
     stderr_path = sample_dir / "stderr.txt"
     cache_state = lane["cache"]["thinlto_cache"]
     invocation_cache = (
-        sample_temp / "ring-lang-thinlto-cache"
+        sample_temp / "vorton-lang-thinlto-cache"
         if cache_state == "cold"
         else thinlto_cache
     )
@@ -3224,7 +3224,7 @@ def execute_invocation(
     artifact_paths = [Path(_format(item, context)) for item in lane["artifacts"]]
     phase_paths = resolve_phase_trace_paths(lane, sample_dir)
     if lane.get("compiler_phase_timing", False):
-        compiler_sha = environment["tools"]["ring"]["sha256"]
+        compiler_sha = environment["tools"]["vorton"]["sha256"]
         if not compiler_sha:
             raise HarnessError("selected compiler executable has no SHA-256 identity")
         argv.extend(
@@ -3239,8 +3239,8 @@ def execute_invocation(
     temp_root = sample_temp if cache_state == "cold" else thinlto_cache.parent
     child_env["TEMP"] = str(temp_root)
     child_env["TMP"] = str(temp_root)
-    child_env["RING_BENCH_RUN_ID"] = run_id
-    child_env["RING_BENCH_SAMPLE_ID"] = sample_id
+    child_env["VORTON_BENCH_RUN_ID"] = run_id
+    child_env["VORTON_BENCH_SAMPLE_ID"] = sample_id
 
     measurement: dict[str, Any] | None = None
     measurement_error: str | None = None
@@ -3792,11 +3792,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--result-schema", type=Path, default=DEFAULT_RESULT_SCHEMA)
     parser.add_argument("--case", action="append", dest="cases", default=[])
-    parser.add_argument("--ring", help="explicit ring.exe for direct lanes")
+    parser.add_argument("--vorton", help="explicit vorton.exe for direct lanes")
     parser.add_argument(
         "--thinlto-cache",
         type=Path,
-        default=Path(tempfile.gettempdir()) / "ring-lang-thinlto-cache",
+        default=Path(tempfile.gettempdir()) / "vorton-lang-thinlto-cache",
     )
     parser.add_argument("--confirm-cache-state", choices=sorted(ALLOWED_CACHE_STATES))
     parser.add_argument(
@@ -3822,13 +3822,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_schema_definition(result_schema)
     lanes = expand_lanes(manifest)
 
-    if args.ring is not None and not args.probe:
+    if args.vorton is not None and not args.probe:
         raise HarnessError(
-            "--ring is restricted to --probe; formal runs use the seed build receipt"
+            "--vorton is restricted to --probe; formal runs use the seed build receipt"
         )
     if not args.list and not args.probe:
         validate_formal_manifest_bytes(manifest_path)
-    tools = build_tools(args.ring)
+    tools = build_tools(args.vorton)
     if args.prepare_warm_cache:
         if (
             args.cases or args.list or args.preflight or args.probe
@@ -3917,7 +3917,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise HarnessError("retained warm-cache receipt differs from preflight")
         if state == "warm":
             active_cache = (
-                run_dir / "prepared" / "warm-cache" / "ring-lang-thinlto-cache"
+                run_dir / "prepared" / "warm-cache" / "vorton-lang-thinlto-cache"
             ).resolve()
             active_cache.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(args.thinlto_cache.resolve(), active_cache)

@@ -1,0 +1,24 @@
+fn ascending(left: Int, right: Int) -> Int with {} {
+    left - right
+}
+
+fn main() {
+    let source: Ptr<Int> = vorton_slot_alloc(2)
+    let destination: Ptr<Int> = vorton_slot_alloc(1)
+    vorton_slot_write(source, 0, 10)
+    vorton_slot_write(source, 1, 20)
+    assert(vorton_slot_read(source, 0) == 10, "slot read")
+    vorton_slot_replace(source, 0, 11)
+    vorton_slot_swap(source, 0, 1)
+    vorton_slot_move(source, 0, destination, 0, 1)
+    assert(vorton_slot_take(source, 1) == 11, "slot take")
+    vorton_slot_drop(destination, 0)
+    vorton_slot_dealloc(source, 2)
+    vorton_slot_dealloc(destination, 1)
+
+    let values = [3, 1, 2]
+    vorton_list_sort_bridge(values, ascending)
+    assert(values[0] == 1 && values[1] == 2 && values[2] == 3,
+        "list sort bridge")
+    print("E_EXTERN_MANIFEST_10_OF_10_OK")
+}

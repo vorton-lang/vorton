@@ -29,7 +29,7 @@ class StrictCombineTests(unittest.TestCase):
             "resource_plan_verify": 0,
             "command_total": 100,
         }
-        entry = str((harness.REPO_ROOT / "tests" / "cases" / "hello.ring").resolve())
+        entry = str((harness.REPO_ROOT / "tests" / "cases" / "hello.vorton").resolve())
         return [
             {
                 "schema": harness.COMPILER_PHASE_SCHEMA,
@@ -139,11 +139,11 @@ class StrictCombineTests(unittest.TestCase):
                     "description": "fixture",
                     "policy": "full_gate",
                     "cache_states": ["cold", "warm"],
-                    "argv": ["{ring}", "check", "{repo}/fixture.ring"],
+                    "argv": ["{vorton}", "check", "{repo}/fixture.vorton"],
                     "cwd": "{repo}",
                     "timeout_seconds": 10,
                     "expected_exit_codes": [0],
-                    "requires": ["tool:ring"],
+                    "requires": ["tool:vorton"],
                     "runner_summary": None,
                     "compiler_phase_timing": False,
                     "runner_phase_timing": False,
@@ -160,7 +160,7 @@ class StrictCombineTests(unittest.TestCase):
     def _seed_receipt(
         self, root: Path, source_sha: str, manifest: dict
     ) -> dict:
-        cache = (root / "ring-lang-thinlto-cache").resolve()
+        cache = (root / "vorton-lang-thinlto-cache").resolve()
         cache.mkdir(exist_ok=True)
         seed_file = cache / "seed.bin"
         if not seed_file.exists():
@@ -184,7 +184,7 @@ class StrictCombineTests(unittest.TestCase):
         tool_paths = {name: record["path"] for name, record in tools.items()}
         _receipt_path, output = harness._warm_cache_paths(cache)
         output.mkdir(exist_ok=True)
-        for name in ("compiler_object", "runtime_object", "ring"):
+        for name in ("compiler_object", "runtime_object", "vorton"):
             (output / harness.WARM_CACHE_BUILD_FILES[name]).write_bytes(
                 name.encode("utf-8")
             )
@@ -218,7 +218,7 @@ class StrictCombineTests(unittest.TestCase):
         probe_stdout.write_bytes(b"")
         lld = Path(tools["lld_link"]["path"])
         probe_stderr.write_bytes(
-            f'{json.dumps(str(lld.with_suffix("")))} "-out:ring.exe"\n'.encode(
+            f'{json.dumps(str(lld.with_suffix("")))} "-out:vorton.exe"\n'.encode(
                 "utf-8"
             )
         )
@@ -380,11 +380,11 @@ class StrictCombineTests(unittest.TestCase):
                     (
                         run_dir.parent
                         / harness.WARM_CACHE_OUTPUT_NAME
-                        / harness.WARM_CACHE_BUILD_FILES["ring"]
+                        / harness.WARM_CACHE_BUILD_FILES["vorton"]
                     ).resolve()
                 ),
                 "check",
-                f"{harness.REPO_ROOT}/fixture.ring",
+                f"{harness.REPO_ROOT}/fixture.vorton",
             ]
             runner_summary = None
             artifacts = harness._artifact_records([artifact_path])
@@ -524,21 +524,21 @@ class StrictCombineTests(unittest.TestCase):
             "dist_c_sha256": "b" * 64,
             "runtime_sha256": "c" * 64,
             "tools": {
-                "ring": {
+                "vorton": {
                     "path": self._seed_receipt(root, source_sha, manifest)[
                         "build_output"
-                    ]["ring"]["path"],
+                    ]["vorton"]["path"],
                     "version": "v",
                     "sha256": self._seed_receipt(root, source_sha, manifest)[
                         "build_output"
-                    ]["ring"]["sha256"],
+                    ]["vorton"]["sha256"],
                 },
                 **self._seed_receipt(root, source_sha, manifest)["tools"],
             },
             "flags": manifest["fingerprint_flags"],
             "cache_state": state,
             "thinlto_cache_path": str(
-                (root / "ring-lang-thinlto-cache").resolve()
+                (root / "vorton-lang-thinlto-cache").resolve()
             ),
             "thinlto_cache_inventory": self._seed_receipt(
                 root, source_sha, manifest
@@ -734,7 +734,7 @@ class StrictCombineTests(unittest.TestCase):
             }
             environment = {
                 "source_sha": "a" * 40,
-                "tools": {"ring": {"sha256": "d" * 64}},
+                "tools": {"vorton": {"sha256": "d" * 64}},
             }
             errors = phase_errors(harness._classify_phase_trace_records(
                 wrappers,
@@ -743,7 +743,7 @@ class StrictCombineTests(unittest.TestCase):
                 lane=lane,
                 environment=environment,
                 expected_entry_file=str(
-                    (harness.REPO_ROOT / "tests" / "cases" / "hello.ring").resolve()
+                    (harness.REPO_ROOT / "tests" / "cases" / "hello.vorton").resolve()
                 ),
                 exit_code=0,
                 wall_ns=150,
@@ -757,7 +757,7 @@ class StrictCombineTests(unittest.TestCase):
                 lane=lane,
                 environment=environment,
                 expected_entry_file=str(
-                    (harness.REPO_ROOT / "tests" / "cases" / "hello.ring").resolve()
+                    (harness.REPO_ROOT / "tests" / "cases" / "hello.vorton").resolve()
                 ),
                 exit_code=0,
                 wall_ns=150,
@@ -807,7 +807,7 @@ class StrictCombineTests(unittest.TestCase):
     def test_rejects_old_or_lax_schema_before_reading_raw_samples(self) -> None:
         mutations = {
             "old_v1": lambda schema: schema.update(
-                {"$id": "ring.check-benchmark.invocation.v1"}
+                {"$id": "vorton.check-benchmark.invocation.v1"}
             ),
             "same_id_lax": lambda schema: schema["properties"]["runner_summary"][
                 "properties"

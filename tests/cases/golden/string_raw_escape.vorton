@@ -1,0 +1,60 @@
+// B-100 P1.1 parity: raw strings, escape sequences, multiline strings —
+// r"..." raw strings, \n \t \\ \" escapes, multiline string literals.
+// Avoids non-ASCII per spec.
+
+fn main() {
+    // Basic escape sequences
+    let newline = "hello\nworld"
+    print("nl_len=${newline.len()}")
+
+    let tab = "a\tb"
+    print("tab_len=${tab.len()}")
+
+    let backslash = "a\\b"
+    print("bs_len=${backslash.len()}")
+
+    let quote = "a\"b"
+    print("quote_len=${quote.len()}")
+
+    // Empty string
+    let empty = ""
+    print("empty_len=${empty.len()}")
+
+    // Raw string — no escape processing
+    let raw = r"hello\nworld"
+    print("raw_has_bs=${raw.contains("\\")}")
+    print("raw_len=${raw.len()}")
+
+    // Raw string — no interpolation
+    let raw2 = r"${not_a_var}"
+    print("raw2_len=${raw2.len()}")
+
+    // r#"..."# can contain double quotes
+    let raw3 = r#"say "hi""#
+    let dq = "\""
+    print("raw3_has_quote=${raw3.contains(dq)}")
+    print("raw3_len=${raw3.len()}")
+
+    // Raw string — backslash sequences are literal
+    let raw_esc = r"a\tb\nc"
+    print("raw_esc_len=${raw_esc.len()}")
+
+    // Multiline string
+    let ml = "hello
+world"
+    print("ml_has_hello=${ml.contains("hello")}")
+    print("ml_has_world=${ml.contains("world")}")
+    print("ml_len=${ml.len()}")
+
+    // Multiline with interpolation
+    let name = "Vorton"
+    let greeting = "Hi,
+${name}!"
+    print("ml_interp=${greeting.contains("Vorton")}")
+
+    // String concatenation via interpolation
+    let a = "abc"
+    let b = "def"
+    let combined = "${a}${b}"
+    print("concat=${combined}")
+}

@@ -1,2 +1,2 @@
 // EXPECT_PANIC
-ring panic: ring_slot_move negative count (request=-1)
+vorton panic: vorton_slot_move negative count (request=-1)

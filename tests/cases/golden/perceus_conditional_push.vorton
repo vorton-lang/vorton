@@ -1,0 +1,36 @@
+// B-140 regression: for-loop conditional push + later list.filter/any with closures.
+//
+// Pattern from infer.vorton cancel_local_mut_effects: Call results are
+// conditionally pushed into a mut list, then the list is captured by a
+// closure (.filter/.any) after the loop.  If Clone/Drop are unbalanced
+// the elements are freed while still in the list → UAF when the closure
+// iterates.
+
+fn make_pair(n: Int) -> (Int, Int) { (n, n * 10) }
+
+fn items_equal(a: (Int, Int), b: (Int, Int)) -> Bool {
+    a.0 == b.0
+}
+
+fn main() {
+    // Phase 1: conditionally push Call results into a list
+    let mut collected: List<(Int, Int)> = []
+    let source = [1, 2, 3, 4, 5]
+    for item in source {
+        let val = make_pair(item)
+        if item % 2 == 0 {
+            collected.push(val)
+        }
+    }
+
+    // Phase 2: use collected in .filter + .any (closures capture collected)
+    let all_items = [1, 2, 3, 4, 5, 6]
+    let filtered = all_items.filter(fn(x) {
+        let pair = make_pair(x)
+        !collected.any(fn(c) { items_equal(c, pair) })
+    })
+
+    for f in filtered {
+        print("${f}")
+    }
+}

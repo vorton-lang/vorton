@@ -16,20 +16,20 @@ tests/scratch/
 tests/cases/**/*.js
 
 # Native compiler build artifacts
-/ring_runtime.o
-/ring_compiler.o
-/ring_output.ll
-compiler/ring_output.ll
+/vorton_runtime.o
+/vorton_compiler.o
+/vorton_output.ll
+compiler/vorton_output.ll
 tests/cases/**/*.o
 tests/cases/**/*.exe
 examples/*.o
 /test_minimal.o
-/test_minimal.ring
+/test_minimal.vorton
 
 # native self-host build / debug scratch (repo root) — 链接产物 + 调试变体 + tmp 复现目录
-/ring*.exe
-/ring*.map
-/ring*.o
+/vorton*.exe
+/vorton*.map
+/vorton*.o
 /hello.exe
 /test_output*.txt
 /tmp*/

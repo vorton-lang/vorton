@@ -37,7 +37,7 @@ class CompilerAnchorCacheTests(unittest.TestCase):
         cache_supported: bool = True,
     ) -> runner._CompilerBuildPlan:
         anchor = root / "compiler" / "dist-c" / "main.c"
-        runtime = root / "ring_runtime.cpp"
+        runtime = root / "vorton_runtime.cpp"
         clang = root / "tool chain" / "clang.exe"
         clangxx = root / "tool chain" / "clang++.exe"
         linker = root / "tool chain" / "lld-link.exe"
@@ -77,7 +77,7 @@ class CompilerAnchorCacheTests(unittest.TestCase):
             runtime_compiler=str(clangxx),
             runtime_frontend_flags=(),
             linker=str(linker),
-            exe_name="ring.exe",
+            exe_name="vorton.exe",
             compile_flags=("-O3", "-flto=thin"),
             test_link_flags=("-fuse-ld=lld", "-lmsvcrt"),
             compiler_link_flags=("-flto=thin",),
@@ -117,7 +117,7 @@ class CompilerAnchorCacheTests(unittest.TestCase):
             depfile = Path(command[command.index("-MF") + 1])
             anchor = Path(command[-1])
             depfile.write_text(
-                "ring-cache-probe: "
+                "vorton-cache-probe: "
                 f"{cls.makefile_escape(anchor)} \\\n "
                 f"{cls.makefile_escape(header)}\n",
                 encoding="utf-8",
@@ -178,7 +178,7 @@ class CompilerAnchorCacheTests(unittest.TestCase):
 
     def test_dependency_parser_preserves_windows_paths_and_escapes(self) -> None:
         dependencies = runner._parse_make_dependencies(
-            "ring-cache-probe: "
+            "vorton-cache-probe: "
             "C:\\repo\\main.c C:/Program\\ Files/SDK/header\\#1.h "
             "C:/cash$$dir/value.h \\\n C:/next/header.h\n"
         )
@@ -1067,7 +1067,7 @@ class CompilerAnchorCacheTests(unittest.TestCase):
                     anchor = Path(command[-1])
                     header = plan.anchor_source.parent / "anchor_support.h"
                     depfile.write_text(
-                        "ring-cache-probe: "
+                        "vorton-cache-probe: "
                         f"{self.makefile_escape(anchor)} "
                         f"{self.makefile_escape(header)}\n",
                         encoding="utf-8",
@@ -1151,7 +1151,7 @@ class CompilerAnchorCacheTests(unittest.TestCase):
                     anchor = Path(command[-1])
                     header = plan.anchor_source.parent / "anchor_support.h"
                     depfile.write_text(
-                        "ring-cache-probe: "
+                        "vorton-cache-probe: "
                         f"{self.makefile_escape(anchor)} "
                         f"{self.makefile_escape(header)}\n",
                         encoding="utf-8",

@@ -175,9 +175,9 @@ class ManifestAndPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(harness.HarnessError, "recipe boundary"):
             harness.validate_manifest(drifted)
 
-    def test_explicit_ring_is_probe_only(self) -> None:
+    def test_explicit_vorton_is_probe_only(self) -> None:
         with self.assertRaisesRegex(harness.HarnessError, "restricted to --probe"):
-            harness.main(["--list", "--ring", str(Path(sys.executable).resolve())])
+            harness.main(["--list", "--vorton", str(Path(sys.executable).resolve())])
 
     def test_result_schema_rejects_unknown_root_field(self) -> None:
         schema = harness._load_json(harness.DEFAULT_RESULT_SCHEMA)
@@ -196,7 +196,7 @@ class ManifestAndPolicyTests(unittest.TestCase):
     def test_result_schema_v3_definition_is_pinned_before_data_load(self) -> None:
         schema = harness._load_json(harness.DEFAULT_RESULT_SCHEMA)
         old = json.loads(json.dumps(schema))
-        old["$id"] = "ring.check-benchmark.invocation.v1"
+        old["$id"] = "vorton.check-benchmark.invocation.v1"
         old["properties"]["schema"]["const"] = old["$id"]
         with self.assertRaisesRegex(harness.HarnessError, r"\$id"):
             harness.validate_schema_definition(old)
@@ -265,8 +265,8 @@ class ManifestAndPolicyTests(unittest.TestCase):
 
     def test_runner_case_identity_status_and_skip_reason_are_exact(self) -> None:
         valid = (
-            "[PASS] e2e: alpha.ring\n"
-            "[SKIP] e2e: beta.ring -- known limitation\n"
+            "[PASS] e2e: alpha.vorton\n"
+            "[SKIP] e2e: beta.vorton -- known limitation\n"
             "Exit code: 0 (all 1 tests passed)\n"
         )
         expected = harness.runner_cases_contract(valid)
@@ -290,13 +290,13 @@ class ManifestAndPolicyTests(unittest.TestCase):
 
         drifts = {
             "identity/status swap": (
-                "[SKIP] e2e: alpha.ring -- known limitation\n"
-                "[PASS] e2e: beta.ring\n"
+                "[SKIP] e2e: alpha.vorton -- known limitation\n"
+                "[PASS] e2e: beta.vorton\n"
                 "Exit code: 0 (all 1 tests passed)\n"
             ),
             "skip reason": (
-                "[PASS] e2e: alpha.ring\n"
-                "[SKIP] e2e: beta.ring -- different limitation\n"
+                "[PASS] e2e: alpha.vorton\n"
+                "[SKIP] e2e: beta.vorton -- different limitation\n"
                 "Exit code: 0 (all 1 tests passed)\n"
             ),
         }
@@ -329,14 +329,14 @@ class ManifestAndPolicyTests(unittest.TestCase):
         self.assertEqual(full["full_gate_cold"], full["full_gate_warm"])
         self.assertEqual(full["full_gate_cold"]["expected_total"], 1556)
         expected_digests = {
-            "filtered_e2e_bool_ops_cold": "3df33c0e37cd2bec720e432441dd1d09a0750beb28b0061b19de05b47c2e8503",
-            "suite_e2e_cold": "7d8e8a19103851cc33b23c3a76e36bf80ca85448dbba6c488194b8aa3be6b65a",
-            "suite_golden_cold": "c1a306e53f5d4fa15d577105ed3e9faafcd83606e7d9154be9f4df689b308cb4",
-            "suite_rc_cold": "2f0a06a5e1bbfb3ce3533323581abfdd645d765f2468bda60a4bbadc79a13260",
+            "filtered_e2e_bool_ops_cold": "c24956c9f289e20271d588326f63849a20cd3567f341980909353d5cf94db693",
+            "suite_e2e_cold": "94dd2398e67dcd493be0bc72834fed04e0abeb0e6f7cee7e47055170ad8eac49",
+            "suite_golden_cold": "898cb7eb066ec50aedb0f7c4c338d954c80cb39b7e9e2d69557ae790d2304935",
+            "suite_rc_cold": "24025bea17882a363e0bef31403fbc593ceb7a2cbf67db15ea6dbf29b9059c55",
             "suite_structural_cold": "3ff7ba79cfc784ed524a8535c93673856771ab6613484634c7b9c5947a20870f",
             "suite_parity_cold": "ae4ee4b1e28d27e79ea6143a199ead811e680bb3d097a19068904744af43c744",
             "suite_self_compile_cold": "9f0035d2c3dec96c0c5f702722da3302dce7a4c4afbc62ded164fcab9257151e",
-            "full_gate_cold": "2a5806e6b037289e9456efa616c61dee966d6e4e51ed451dc4ab5f3ef8bc4dad",
+            "full_gate_cold": "60d5f969d5ea1dbe245779498aaa53854e99621cfc9a9e207390404609b97c63",
         }
         self.assertEqual(
             {
@@ -360,7 +360,7 @@ class ManifestAndPolicyTests(unittest.TestCase):
                 "--suite",
                 "e2e",
                 "--filter",
-                "bool_ops.ring",
+                "bool_ops.vorton",
                 "--phase-timing={sample_dir}/runner-phase-timing.jsonl",
             ],
         )
@@ -369,9 +369,9 @@ class ManifestAndPolicyTests(unittest.TestCase):
             lane["runner_summary"]["expected_status_counts"],
             {"pass": 1, "fail": 0, "skip": 0},
         )
-        expected_digest = "3df33c0e37cd2bec720e432441dd1d09a0750beb28b0061b19de05b47c2e8503"
+        expected_digest = "c24956c9f289e20271d588326f63849a20cd3567f341980909353d5cf94db693"
         self.assertEqual(
-            harness.runner_cases_contract("[PASS] e2e: bool_ops.ring\n")["sha256"],
+            harness.runner_cases_contract("[PASS] e2e: bool_ops.vorton\n")["sha256"],
             expected_digest,
         )
         self.assertEqual(
@@ -381,7 +381,7 @@ class ManifestAndPolicyTests(unittest.TestCase):
     def test_warm_cache_receipt_rejects_wrong_recipe_and_byte_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
-            cache = root / "ring-lang-thinlto-cache"
+            cache = root / "vorton-lang-thinlto-cache"
             cache.mkdir()
             (cache / "seed.bin").write_bytes(b"seed")
             manifest = {
@@ -462,8 +462,8 @@ class ManifestAndPolicyTests(unittest.TestCase):
                     harness.validate_warm_cache_seed(manifest, tools, cache)
 
                 selected = harness.formal_tools_from_seed(tools, receipt)
-                self.assertEqual(selected["ring"], build_output["ring"]["path"])
-                Path(build_output["ring"]["path"]).write_bytes(b"forged")
+                self.assertEqual(selected["vorton"], build_output["vorton"]["path"])
+                Path(build_output["vorton"]["path"]).write_bytes(b"forged")
                 with self.assertRaisesRegex(
                     harness.HarnessError, "compiler bytes drifted"
                 ):
@@ -472,7 +472,7 @@ class ManifestAndPolicyTests(unittest.TestCase):
     def test_warm_cache_build_output_replays_raw_lld_selection(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
-            cache = root / "ring-lang-thinlto-cache"
+            cache = root / "vorton-lang-thinlto-cache"
             cache.mkdir()
             _receipt, output = harness._warm_cache_paths(cache)
             output.mkdir()
@@ -483,7 +483,7 @@ class ManifestAndPolicyTests(unittest.TestCase):
                 "clangxx": str((root / "tools" / "clang++.exe").resolve()),
                 "lld_link": str(lld),
             }
-            for name in ("compiler_object", "runtime_object", "ring"):
+            for name in ("compiler_object", "runtime_object", "vorton"):
                 (output / harness.WARM_CACHE_BUILD_FILES[name]).write_bytes(
                     name.encode("utf-8")
                 )
@@ -516,7 +516,7 @@ class ManifestAndPolicyTests(unittest.TestCase):
             ]
             probe_stdout.write_bytes(b"")
             probe_stderr.write_bytes(
-                f'{json.dumps(str(lld.with_suffix("")))} "-out:ring.exe"\n'.encode(
+                f'{json.dumps(str(lld.with_suffix("")))} "-out:vorton.exe"\n'.encode(
                     "utf-8"
                 )
             )
@@ -539,7 +539,7 @@ class ManifestAndPolicyTests(unittest.TestCase):
             self.assertEqual(records["linker_probe_stdout"]["bytes"], 0)
 
             probe_stderr.write_bytes(
-                f'{json.dumps(str(root / "other-lld-link"))} "-out:ring.exe"\n'.encode(
+                f'{json.dumps(str(root / "other-lld-link"))} "-out:vorton.exe"\n'.encode(
                     "utf-8"
                 )
             )
@@ -726,8 +726,8 @@ class ManifestAndPolicyTests(unittest.TestCase):
     def test_runner_runtime_isolation_restores_ignored_root_object(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
-            source = repo / "ring_runtime.cpp"
-            root_object = repo / "ring_runtime.o"
+            source = repo / "vorton_runtime.cpp"
+            root_object = repo / "vorton_runtime.o"
             prepared = repo / "prepared.o"
             source.write_text("runtime", encoding="utf-8")
             root_object.write_bytes(b"original")
@@ -759,8 +759,8 @@ class ManifestAndPolicyTests(unittest.TestCase):
     def _runtime_transaction_fixture(
         self, repo: Path
     ) -> tuple[Path, dict, dict, Path]:
-        source = repo / "ring_runtime.cpp"
-        root_object = repo / "ring_runtime.o"
+        source = repo / "vorton_runtime.cpp"
+        root_object = repo / "vorton_runtime.o"
         prepared = repo / "prepared.o"
         source.write_text("runtime", encoding="utf-8")
         root_object.write_bytes(b"original")
@@ -798,8 +798,8 @@ class ManifestAndPolicyTests(unittest.TestCase):
             ):
                 harness._begin_runner_runtime_isolation(lane, setup, sample)
             self.assertEqual(root.read_bytes(), b"original")
-            self.assertEqual(list(repo.glob("ring_runtime.b176-*.backup.o")), [])
-            self.assertEqual(list(repo.glob("ring_runtime.b176-*.install.o")), [])
+            self.assertEqual(list(repo.glob("vorton_runtime.b176-*.backup.o")), [])
+            self.assertEqual(list(repo.glob("vorton_runtime.b176-*.install.o")), [])
 
     def test_runtime_install_failure_restores_atomic_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -819,8 +819,8 @@ class ManifestAndPolicyTests(unittest.TestCase):
             ):
                 harness._begin_runner_runtime_isolation(lane, setup, sample)
             self.assertEqual(root.read_bytes(), b"original")
-            self.assertEqual(list(repo.glob("ring_runtime.b176-*.backup.o")), [])
-            self.assertEqual(list(repo.glob("ring_runtime.b176-*.install.o")), [])
+            self.assertEqual(list(repo.glob("vorton_runtime.b176-*.backup.o")), [])
+            self.assertEqual(list(repo.glob("vorton_runtime.b176-*.install.o")), [])
 
     def test_runtime_cleanup_failure_does_not_skip_original_restore(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -891,8 +891,8 @@ class AttemptBoundaryTests(unittest.TestCase):
         sample_dir = run_dir / "samples" / case_id / sample_id
         sample_dir.mkdir(parents=True)
         trace = sample_dir / "trace.jsonl"
-        entry = str((harness.REPO_ROOT / "tests" / "cases" / "hello.ring").resolve())
-        compiler = str((root / "ring.exe").resolve())
+        entry = str((harness.REPO_ROOT / "tests" / "cases" / "hello.vorton").resolve())
+        compiler = str((root / "vorton.exe").resolve())
         lane = {
             "case_id": case_id,
             "policy": "direct_short",
@@ -901,7 +901,7 @@ class AttemptBoundaryTests(unittest.TestCase):
                 "output": "fresh",
                 "os_file_cache": "uncontrolled",
             },
-            "argv": ["{ring}", "check", entry],
+            "argv": ["{vorton}", "check", entry],
             "cwd": "{repo}",
             "expected_exit_codes": [0],
             "runner_summary": None,
@@ -920,7 +920,7 @@ class AttemptBoundaryTests(unittest.TestCase):
             "source_sha": "b" * 40,
             "manifest_sha": "c" * 64,
             "tools": {
-                "ring": {"path": compiler, "sha256": "a" * 64}
+                "vorton": {"path": compiler, "sha256": "a" * 64}
             },
             "thinlto_cache_path": str((root / "thinlto-cache").resolve()),
         }
@@ -1127,7 +1127,7 @@ class PhaseTimingTests(unittest.TestCase):
             "resource_plan_verify": 0,
             "command_total": 100,
         }
-        entry = str((harness.REPO_ROOT / "tests" / "cases" / "hello.ring").resolve())
+        entry = str((harness.REPO_ROOT / "tests" / "cases" / "hello.vorton").resolve())
         return [
             {
                 "schema": harness.COMPILER_PHASE_SCHEMA,
@@ -1156,7 +1156,7 @@ class PhaseTimingTests(unittest.TestCase):
             expected_compiler_identity="sha256:" + "a" * 64,
             expected_source_identity="git:" + "b" * 40,
             expected_entry_file=str(
-                (harness.REPO_ROOT / "tests" / "cases" / "hello.ring").resolve()
+                (harness.REPO_ROOT / "tests" / "cases" / "hello.vorton").resolve()
             ),
             expected_success=True,
             expected_executed_phases=[
@@ -1265,10 +1265,10 @@ class PhaseTimingTests(unittest.TestCase):
                 },
                 environment={
                     "source_sha": "b" * 40,
-                    "tools": {"ring": {"sha256": "a" * 64}},
+                    "tools": {"vorton": {"sha256": "a" * 64}},
                 },
                 expected_entry_file=str(
-                    (harness.REPO_ROOT / "tests" / "cases" / "hello.ring").resolve()
+                    (harness.REPO_ROOT / "tests" / "cases" / "hello.vorton").resolve()
                 ),
                 exit_code=0,
                 wall_ns=150,
@@ -1309,7 +1309,7 @@ class PhaseTimingTests(unittest.TestCase):
 
     def test_entry_file_is_bound_to_the_invocation_entry(self) -> None:
         rows = self._compiler_rows()
-        forged = str((harness.REPO_ROOT / "compiler" / "main.ring").resolve())
+        forged = str((harness.REPO_ROOT / "compiler" / "main.vorton").resolve())
         for row in rows:
             row["entry_file"] = forged
         errors = self._validate(rows)
@@ -1347,10 +1347,10 @@ class PhaseTimingTests(unittest.TestCase):
                 },
                 environment={
                     "source_sha": "b" * 40,
-                    "tools": {"ring": {"sha256": "a" * 64}},
+                    "tools": {"vorton": {"sha256": "a" * 64}},
                 },
                 expected_entry_file=str(
-                    (harness.REPO_ROOT / "tests" / "cases" / "hello.ring").resolve()
+                    (harness.REPO_ROOT / "tests" / "cases" / "hello.vorton").resolve()
                 ),
                 exit_code=0,
                 wall_ns=150,
@@ -1387,7 +1387,7 @@ class PhaseTimingTests(unittest.TestCase):
                 },
                 environment={
                     "source_sha": "b" * 40,
-                    "tools": {"ring": {"sha256": "a" * 64}},
+                    "tools": {"vorton": {"sha256": "a" * 64}},
                 },
                 expected_entry_file="",
                 exit_code=0,
@@ -1481,8 +1481,8 @@ class PhaseTimingTests(unittest.TestCase):
             )
 
     def test_timing_is_hidden_opt_in_and_defaults_to_no_state(self) -> None:
-        cli = (harness.REPO_ROOT / "compiler" / "cli.ring").read_text(encoding="utf-8")
-        timing = (harness.REPO_ROOT / "compiler" / "phase_timing.ring").read_text(
+        cli = (harness.REPO_ROOT / "compiler" / "cli.vorton").read_text(encoding="utf-8")
+        timing = (harness.REPO_ROOT / "compiler" / "phase_timing.vorton").read_text(
             encoding="utf-8"
         )
         self.assertIn("let mut phase_timing_file: Str? = none", cli)
@@ -1494,7 +1494,7 @@ class PhaseTimingTests(unittest.TestCase):
         self.assertNotIn("enabled: Bool", timing)
 
     def test_duplicate_finalize_rewrites_existing_trace_incomplete(self) -> None:
-        timing = (harness.REPO_ROOT / "compiler" / "phase_timing.ring").read_text(
+        timing = (harness.REPO_ROOT / "compiler" / "phase_timing.vorton").read_text(
             encoding="utf-8"
         )
         finish = timing[
@@ -1517,14 +1517,14 @@ class PhaseTimingTests(unittest.TestCase):
         generated = (
             harness.REPO_ROOT / "compiler" / "dist-c" / "main.c"
         ).read_text(encoding="utf-8")
-        constructor_name = "ringmod_ring__phase__timing_m_m__PhaseTiming"
+        constructor_name = "vortonmod_vorton__phase__timing_m_m__PhaseTiming"
         constructor_start = generated.index(f"void* {constructor_name}(void* a0) {{")
         constructor_end = generated.index("\n}\n", constructor_start) + 3
         constructor = generated[constructor_start:constructor_end]
-        allocation = re.search(r"ring_alloc\([^;]+\);", constructor)
+        allocation = re.search(r"vorton_alloc\([^;]+\);", constructor)
         assert allocation is not None
 
-        function_name = "ringmod_ring__phase__timing_m_m__new__phase__timing"
+        function_name = "vortonmod_vorton__phase__timing_m_m__new__phase__timing"
         definitions = list(
             re.finditer(
                 rf"^void\* {re.escape(function_name)}\("
@@ -1547,12 +1547,12 @@ class PhaseTimingTests(unittest.TestCase):
         )
         assert branch is not None
         disabled = branch.group("body")
-        self.assertEqual(disabled.count("ring_alloc("), 1)
+        self.assertEqual(disabled.count("vorton_alloc("), 1)
         self.assertIn(allocation.group(0), disabled)
-        self.assertIn("ring_Option_none()", disabled)
+        self.assertIn("vorton_Option_none()", disabled)
         for forbidden in (
-            "ring_str_from_cstr", "ring_list_new", "ring_sb_new",
-            "ring_bench_monotonic_ns", "ring_path_resolve", "ring_write_file",
+            "vorton_str_from_cstr", "vorton_list_new", "vorton_sb_new",
+            "vorton_bench_monotonic_ns", "vorton_path_resolve", "vorton_write_file",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, disabled)
@@ -1616,10 +1616,10 @@ class RunnerPhaseTimingTests(unittest.TestCase):
             # A non-zero child is a legal negative test event.  Only the final
             # runner result determines whether the invocation succeeded.
             self._row(
-                5, suite="e2e", case="negative/example.ring",
-                stage="ring_check", duration_ns=40, executed=True,
+                5, suite="e2e", case="negative/example.vorton",
+                stage="vorton_check", duration_ns=40, executed=True,
                 complete=True, outcome="nonzero", exit_code=1,
-                command_category="ring",
+                command_category="vorton",
             ),
             self._row(
                 6, suite="e2e", case=None, stage="orchestration_residual",
@@ -1811,17 +1811,17 @@ class RunnerPhaseTimingTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                item["stage"] == "ring_check"
-                and item["command_category"] == "ring"
+                item["stage"] == "vorton_check"
+                and item["command_category"] == "vorton"
                 and item["suite"] == "e2e"
                 for item in summary["stage_category_suite"]
             )
         )
 
 
-_PHASE_TEST_COMPILER = os.environ.get("RING_PHASE_TEST_COMPILER", "")
+_PHASE_TEST_COMPILER = os.environ.get("VORTON_PHASE_TEST_COMPILER", "")
 _PHASE_TEST_COMPILER_SHA256 = os.environ.get(
-    "RING_PHASE_TEST_COMPILER_SHA256", ""
+    "VORTON_PHASE_TEST_COMPILER_SHA256", ""
 )
 
 
@@ -1829,7 +1829,7 @@ _PHASE_TEST_COMPILER_SHA256 = os.environ.get(
     _PHASE_TEST_COMPILER
     and _PHASE_TEST_COMPILER_SHA256
     and Path(_PHASE_TEST_COMPILER).is_file(),
-    "set exact RING_PHASE_TEST_COMPILER and SHA256 to run native phase-timing parity",
+    "set exact VORTON_PHASE_TEST_COMPILER and SHA256 to run native phase-timing parity",
 )
 class NativeCliPhaseTimingTests(unittest.TestCase):
     def test_candidate_identity_is_explicit_and_exact(self) -> None:
@@ -1896,12 +1896,12 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                 "    print(value())\n"
                 "}\n"
             )
-            (parse_project / "main.ring").write_text(main_source, encoding="utf-8")
-            (parse_project / "lib.ring").write_text(
+            (parse_project / "main.vorton").write_text(main_source, encoding="utf-8")
+            (parse_project / "lib.vorton").write_text(
                 "pub fn value( {\n", encoding="utf-8"
             )
-            (type_project / "main.ring").write_text(main_source, encoding="utf-8")
-            (type_project / "lib.ring").write_text(
+            (type_project / "main.vorton").write_text(main_source, encoding="utf-8")
+            (type_project / "lib.vorton").write_text(
                 'pub fn value() -> Int { "bad" }\n', encoding="utf-8"
             )
             fake_bin = root / "fake-bin"
@@ -1930,21 +1930,21 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                 ("lsp_failure", ["lsp"], 1, command_only, False),
                 (
                     "single_success",
-                    ["check", str(harness.REPO_ROOT / "tests/cases/hello.ring")],
+                    ["check", str(harness.REPO_ROOT / "tests/cases/hello.vorton")],
                     0,
                     single_checked,
                     False,
                 ),
                 (
                     "single_parse_failure",
-                    ["check", str(harness.REPO_ROOT / "tests/cases/error_multi_parse.ring")],
+                    ["check", str(harness.REPO_ROOT / "tests/cases/error_multi_parse.vorton")],
                     1,
                     single_parse,
                     False,
                 ),
                 (
                     "single_type_failure",
-                    ["check", str(harness.REPO_ROOT / "tests/cases/error_undefined.ring")],
+                    ["check", str(harness.REPO_ROOT / "tests/cases/error_undefined.vorton")],
                     1,
                     single_checked,
                     False,
@@ -1955,7 +1955,7 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                         "check",
                         str(
                             harness.REPO_ROOT
-                            / "tests/cases/modules/diamond_dep/main.ring"
+                            / "tests/cases/modules/diamond_dep/main.vorton"
                         ),
                     ],
                     0,
@@ -1964,14 +1964,14 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                 ),
                 (
                     "project_parse_failure",
-                    ["check", str(parse_project / "main.ring")],
+                    ["check", str(parse_project / "main.vorton")],
                     1,
                     project_parse,
                     False,
                 ),
                 (
                     "project_type_failure",
-                    ["check", str(type_project / "main.ring")],
+                    ["check", str(type_project / "main.vorton")],
                     1,
                     project_checked,
                     False,
@@ -1982,7 +1982,7 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                         "check",
                         str(
                             harness.REPO_ROOT
-                            / "tests/cases/verify_rc/option_temp_leak.ring"
+                            / "tests/cases/verify_rc/option_temp_leak.vorton"
                         ),
                         "--verify-rc",
                     ],
@@ -1996,7 +1996,7 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                         "check",
                         str(
                             harness.REPO_ROOT
-                            / "tests/cases/verify_rc/option_temp_leak.ring"
+                            / "tests/cases/verify_rc/option_temp_leak.vorton"
                         ),
                         "--verify-rc",
                         "--rc-mutate=skip-anf",
@@ -2009,7 +2009,7 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                     "single_build_success",
                     [
                         "build",
-                        str(harness.REPO_ROOT / "tests/cases/hello.ring"),
+                        str(harness.REPO_ROOT / "tests/cases/hello.vorton"),
                         f"--out-dir={output_dirs['single-build-success']}",
                     ],
                     0,
@@ -2020,7 +2020,7 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                     "single_build_clang_failure",
                     [
                         "build",
-                        str(harness.REPO_ROOT / "tests/cases/hello.ring"),
+                        str(harness.REPO_ROOT / "tests/cases/hello.vorton"),
                         f"--out-dir={output_dirs['single-build-failure']}",
                     ],
                     1,
@@ -2031,7 +2031,7 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                     "project_build_success",
                     [
                         "build",
-                        str(harness.REPO_ROOT / "tests/cases/modules/diamond_dep/main.ring"),
+                        str(harness.REPO_ROOT / "tests/cases/modules/diamond_dep/main.vorton"),
                         f"--out-dir={output_dirs['project-build-success']}",
                     ],
                     0,
@@ -2042,7 +2042,7 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                     "project_build_clang_failure",
                     [
                         "build",
-                        str(harness.REPO_ROOT / "tests/cases/modules/diamond_dep/main.ring"),
+                        str(harness.REPO_ROOT / "tests/cases/modules/diamond_dep/main.vorton"),
                         f"--out-dir={output_dirs['project-build-failure']}",
                     ],
                     1,
@@ -2143,7 +2143,7 @@ class NativeCliPhaseTimingTests(unittest.TestCase):
                         ),
                         expected_success=expected_exit == 0,
                         expected_executed_phases=expected_executed,
-                        wall_ns=harness.RING_INT_MAX,
+                        wall_ns=harness.VORTON_INT_MAX,
                     ))
                     self.assertEqual(errors, [])
 
