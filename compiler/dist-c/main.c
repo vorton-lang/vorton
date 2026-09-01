@@ -108,6 +108,31 @@ double vorton_unbox_float(void* a0);
 void* vorton_unit_intern(void* a0);
 void* vorton_write_file(void* a0, void* a1);
 
+static int vorton_cli_has_source_suffix(void* path) {
+    void* suffix = vorton_str_from_cstr(".vorton");
+    int matches = vorton_str_ends_with(path, suffix);
+    vorton_drop(suffix);
+    return matches;
+}
+
+static void* vorton_cli_strip_source_suffix(void* path) {
+    int64_t length = vorton_str_len(path);
+    return vorton_str_slice(path, 0, length - 7);
+}
+
+static void* vorton_cli_output_path(void* path, const char* extension_text) {
+    void* stem = vorton_cli_strip_source_suffix(path);
+    void* extension = vorton_str_from_cstr(extension_text);
+    void* builder = vorton_sb_new();
+    vorton_sb_add(builder, stem);
+    vorton_sb_add(builder, extension);
+    void* result = vorton_sb_to_str(builder);
+    vorton_drop(builder);
+    vorton_drop(extension);
+    vorton_drop(stem);
+    return result;
+}
+
 /* ---- string constants (explicit-length byte arrays) & const cells ---- */
 static void* __vorton_dictg___Option_Eq = 0;
 static const char vorton_cstr_0[6] = "some(";
@@ -561510,6 +561535,38 @@ void* vortonmod_vorton__cli_m_m__cli__main(void* r___vorton_ev_fail, void* r___v
     t146408 = r_file_path;
     t146409 = r_timing;
     t146410 = vortonmod_vorton__phase__timing_m_m__PhaseTiming__set__entry__file(t146409, t146408);
+    if (!vorton_cli_has_source_suffix(r_file_path)) {
+        void* error_builder = vorton_sb_new();
+        void* error_prefix = vorton_str_from_cstr(
+            "Error: input file must end with '.vorton': ");
+        vorton_sb_add(error_builder, error_prefix);
+        vorton_sb_add(error_builder, r_file_path);
+        void* error_message = vorton_sb_to_str(error_builder);
+        vorton_eprintln(error_message);
+        vorton_drop(error_message);
+        vorton_drop(error_builder);
+        vorton_drop(error_prefix);
+        vortonmod_vorton__phase__timing_m_m__PhaseTiming__finish__phase(
+            r_timing,
+            vortonmod_vorton__phase__timing_m_m__PHASE__INPUT__ENTRY__LOAD(),
+            r_input_start);
+        vortonmod_vorton__phase__timing_m_m__PhaseTiming__skip__phase(
+            r_timing,
+            vortonmod_vorton__phase__timing_m_m__PHASE__ENTRY__PARSE());
+        vortonmod_vorton__phase__timing_m_m__PhaseTiming__skip__phase(
+            r_timing,
+            vortonmod_vorton__phase__timing_m_m__PHASE__PROJECT__MODULE__LOAD__PARSE());
+        vortonmod_vorton__phase__timing_m_m__PhaseTiming__skip__phase(
+            r_timing,
+            vortonmod_vorton__phase__timing_m_m__PHASE__TYPE__EFFECT__CHECK__LOWER());
+        vortonmod_vorton__phase__timing_m_m__PhaseTiming__skip__phase(
+            r_timing,
+            vortonmod_vorton__phase__timing_m_m__PHASE__RESOURCE__PLAN__VERIFY());
+        vortonmod_vorton__phase__timing_m_m__PhaseTiming__finish__command(
+            r_timing, VORTON_FALSE);
+        vorton_exit(VORTON_INT(1));
+        return VORTON_UNIT;
+    }
     t146411 = r_file_path;
     t146412 = vorton_file_exists(t146411);
     r___anf_476 = t146412;
@@ -562157,7 +562214,7 @@ void* vortonmod_vorton__cli_m_m__cli__main(void* r___vorton_ev_fail, void* r___v
                 t146704 = r___anf_542;
                 t146705 = r___anf_543;
                 t146706 = r___anf_541;
-                t146707 = vorton_str_replace(t146706, t146704, t146705);
+                t146707 = vorton_cli_strip_source_suffix(t146706);
                 r_base = t146707;
                 t146708 = vorton_sb_new();
                 t146709 = r_base;
@@ -562876,7 +562933,7 @@ void* vortonmod_vorton__cli_m_m__cli__main(void* r___vorton_ev_fail, void* r___v
             t147001 = r___anf_604;
             t147002 = r___anf_605;
             t147003 = r___anf_603;
-            t147004 = vorton_str_replace(t147003, t147001, t147002);
+            t147004 = vorton_cli_strip_source_suffix(t147003);
             r_base_2 = t147004;
             t147005 = r_parsed;
             t147006 = ((void**)t147005)[5];
@@ -562910,7 +562967,7 @@ void* vortonmod_vorton__cli_m_m__cli__main(void* r___vorton_ev_fail, void* r___v
                 t147021 = r___anf_608;
                 t147022 = r___anf_609;
                 t147023 = r_file_path;
-                t147024 = vorton_str_replace(t147023, t147021, t147022);
+                t147024 = vorton_cli_output_path(t147023, ".c");
                 r___rc_scope_265 = t147024;
                 vorton_drop(r___anf_609);
                 vorton_drop(r___anf_608);
@@ -562950,7 +563007,7 @@ void* vortonmod_vorton__cli_m_m__cli__main(void* r___vorton_ev_fail, void* r___v
                 t147042 = r___anf_612;
                 t147043 = r___anf_613;
                 t147044 = r_file_path;
-                t147045 = vorton_str_replace(t147044, t147042, t147043);
+                t147045 = vorton_cli_output_path(t147044, ".o");
                 r___rc_scope_267 = t147045;
                 vorton_drop(r___anf_613);
                 vorton_drop(r___anf_612);

@@ -329,14 +329,14 @@ class ManifestAndPolicyTests(unittest.TestCase):
         self.assertEqual(full["full_gate_cold"], full["full_gate_warm"])
         self.assertEqual(full["full_gate_cold"]["expected_total"], 1556)
         expected_digests = {
-            "filtered_e2e_bool_ops_cold": "3df33c0e37cd2bec720e432441dd1d09a0750beb28b0061b19de05b47c2e8503",
-            "suite_e2e_cold": "7d8e8a19103851cc33b23c3a76e36bf80ca85448dbba6c488194b8aa3be6b65a",
-            "suite_golden_cold": "c1a306e53f5d4fa15d577105ed3e9faafcd83606e7d9154be9f4df689b308cb4",
-            "suite_rc_cold": "2f0a06a5e1bbfb3ce3533323581abfdd645d765f2468bda60a4bbadc79a13260",
+            "filtered_e2e_bool_ops_cold": "c24956c9f289e20271d588326f63849a20cd3567f341980909353d5cf94db693",
+            "suite_e2e_cold": "94dd2398e67dcd493be0bc72834fed04e0abeb0e6f7cee7e47055170ad8eac49",
+            "suite_golden_cold": "898cb7eb066ec50aedb0f7c4c338d954c80cb39b7e9e2d69557ae790d2304935",
+            "suite_rc_cold": "24025bea17882a363e0bef31403fbc593ceb7a2cbf67db15ea6dbf29b9059c55",
             "suite_structural_cold": "3ff7ba79cfc784ed524a8535c93673856771ab6613484634c7b9c5947a20870f",
             "suite_parity_cold": "ae4ee4b1e28d27e79ea6143a199ead811e680bb3d097a19068904744af43c744",
             "suite_self_compile_cold": "9f0035d2c3dec96c0c5f702722da3302dce7a4c4afbc62ded164fcab9257151e",
-            "full_gate_cold": "2a5806e6b037289e9456efa616c61dee966d6e4e51ed451dc4ab5f3ef8bc4dad",
+            "full_gate_cold": "60d5f969d5ea1dbe245779498aaa53854e99621cfc9a9e207390404609b97c63",
         }
         self.assertEqual(
             {
@@ -369,7 +369,7 @@ class ManifestAndPolicyTests(unittest.TestCase):
             lane["runner_summary"]["expected_status_counts"],
             {"pass": 1, "fail": 0, "skip": 0},
         )
-        expected_digest = "3df33c0e37cd2bec720e432441dd1d09a0750beb28b0061b19de05b47c2e8503"
+        expected_digest = "c24956c9f289e20271d588326f63849a20cd3567f341980909353d5cf94db693"
         self.assertEqual(
             harness.runner_cases_contract("[PASS] e2e: bool_ops.vorton\n")["sha256"],
             expected_digest,

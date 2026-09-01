@@ -29,7 +29,7 @@ REPO_ROOT = BENCH_DIR.parents[1]
 DEFAULT_SCHEMA = BENCH_DIR / "disabled_path_gate.schema.json"
 EVIDENCE_SCHEMA = "vorton.check-benchmark.disabled-path-gate.v2"
 SCHEMA_ID = "vorton.check-benchmark.disabled-path-gate.schema.v2"
-SCHEMA_CANONICAL_SHA256 = "e869d99a4d5b61a991c650664c58efdf38ccb4df1932063e2f176b62c6d4ce54"
+SCHEMA_CANONICAL_SHA256 = "fc3118966a8d5c44824cc8ca3a0695aec5bcbb8d164c05e274e0df899a64ea1c"
 
 SUBJECTS = ("base", "candidate")
 WARMUP_PAIRS = 5

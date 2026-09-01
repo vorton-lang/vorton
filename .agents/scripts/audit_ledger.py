@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-NOTE_REF = "refs/notes/vorton-steward-audit-ledger"
+NOTE_REF = "refs/notes/vorton-audit-ledger"
 LEDGER_VERSION = 1
 INVALID_INPUT_EXIT = 2
 ALREADY_RECORDED_EXIT = 3

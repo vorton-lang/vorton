@@ -4134,8 +4134,8 @@ def c_rc_counts(c_body: str) -> Tuple[int, int]:
     """Return exact (vorton_dup, vorton_drop) call counts in a local C body."""
     masked = mask_c_strings_and_comments(c_body)
     return (
-        len(re.findall(r"\bring_dup\s*\(", masked)),
-        len(re.findall(r"\bring_drop\s*\(", masked)),
+        len(re.findall(r"\bvorton_dup\s*\(", masked)),
+        len(re.findall(r"\bvorton_drop\s*\(", masked)),
     )
 
 
@@ -4892,7 +4892,7 @@ def run_extern_rc_oracle(vorton_exe: str, temp_root: Path,
     if holder_body is not None:
         masked_holder = mask_c_strings_and_comments(holder_body)
         holder_slots = re.findall(
-            r"\bring_drop\s*\(\s*\(\(void\s*\*\s*\*\)p\)"
+            r"\bvorton_drop\s*\(\s*\(\(void\s*\*\s*\*\)p\)"
             r"\s*\[\s*([0-9]+)\s*\]\s*\)",
             masked_holder,
         )
@@ -4927,7 +4927,7 @@ def run_extern_rc_oracle(vorton_exe: str, temp_root: Path,
                     errors.append(count_error)
             masked_owned = mask_c_strings_and_comments(cases["1"])
             owned_slots = re.findall(
-                r"\bring_drop\s*\(\s*\(\(void\s*\*\s*\*\)p\)"
+                r"\bvorton_drop\s*\(\s*\(\(void\s*\*\s*\*\)p\)"
                 r"\s*\[\s*([0-9]+)\s*\]\s*\)",
                 masked_owned,
             )

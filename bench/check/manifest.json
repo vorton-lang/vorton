@@ -199,7 +199,7 @@
         "expected_suite_counts": {
           "e2e": {"pass": 1, "fail": 0, "skip": 0}
         },
-        "expected_cases_sha256": "3df33c0e37cd2bec720e432441dd1d09a0750beb28b0061b19de05b47c2e8503",
+        "expected_cases_sha256": "c24956c9f289e20271d588326f63849a20cd3567f341980909353d5cf94db693",
         "skip_policy": "exact",
         "fail_policy": "zero",
         "reported_exit_policy": "required_match_raw"
@@ -228,7 +228,7 @@
         "expected_suite_counts": {
           "e2e": {"pass": 630, "fail": 0, "skip": 0}
         },
-        "expected_cases_sha256": "7d8e8a19103851cc33b23c3a76e36bf80ca85448dbba6c488194b8aa3be6b65a",
+        "expected_cases_sha256": "94dd2398e67dcd493be0bc72834fed04e0abeb0e6f7cee7e47055170ad8eac49",
         "skip_policy": "exact",
         "fail_policy": "zero",
         "reported_exit_policy": "required_match_raw"
@@ -257,7 +257,7 @@
         "expected_suite_counts": {
           "golden": {"pass": 239, "fail": 0, "skip": 0}
         },
-        "expected_cases_sha256": "c1a306e53f5d4fa15d577105ed3e9faafcd83606e7d9154be9f4df689b308cb4",
+        "expected_cases_sha256": "898cb7eb066ec50aedb0f7c4c338d954c80cb39b7e9e2d69557ae790d2304935",
         "skip_policy": "exact",
         "fail_policy": "zero",
         "reported_exit_policy": "required_match_raw"
@@ -286,7 +286,7 @@
         "expected_suite_counts": {
           "rc": {"pass": 589, "fail": 0, "skip": 1}
         },
-        "expected_cases_sha256": "2f0a06a5e1bbfb3ce3533323581abfdd645d765f2468bda60a4bbadc79a13260",
+        "expected_cases_sha256": "24025bea17882a363e0bef31403fbc593ceb7a2cbf67db15ea6dbf29b9059c55",
         "skip_policy": "exact",
         "fail_policy": "zero",
         "reported_exit_policy": "required_match_raw"
@@ -403,7 +403,7 @@
           "structural": {"pass": 3, "fail": 0, "skip": 0},
           "parity": {"pass": 92, "fail": 0, "skip": 0}
         },
-        "expected_cases_sha256": "2a5806e6b037289e9456efa616c61dee966d6e4e51ed451dc4ab5f3ef8bc4dad",
+        "expected_cases_sha256": "60d5f969d5ea1dbe245779498aaa53854e99621cfc9a9e207390404609b97c63",
         "skip_policy": "exact",
         "fail_policy": "zero",
         "reported_exit_policy": "required_match_raw"

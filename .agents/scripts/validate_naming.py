@@ -44,6 +44,10 @@ LEGACY_CONTENT = (
         "C ABI prefix",
         re.compile(rf"(?<![A-Za-z0-9]){re.escape(LEGACY_STEM + '_')}"),
     ),
+    (
+        "escaped-regex C ABI prefix",
+        re.compile(re.escape(r"\b" + LEGACY_STEM + "_")),
+    ),
     ("PascalCase brand", re.compile(re.escape(LEGACY_STEM.title()))),
     (
         "lower-camel brand",
@@ -57,6 +61,23 @@ LEGACY_CONTENT = (
         ),
     ),
 )
+
+
+def legacy_content_findings(text: str) -> list[str]:
+    return [label for label, pattern in LEGACY_CONTENT if pattern.search(text)]
+
+
+def validate_detector_contract(errors: list[str]) -> None:
+    escaped_regex_mutation = (
+        're.findall(r"\\b' + LEGACY_STEM + '_drop\\s*\\(", source)'
+    )
+    findings = legacy_content_findings(escaped_regex_mutation)
+    if "escaped-regex C ABI prefix" not in findings:
+        errors.append("naming detector misses an escaped-regex C ABI mutation")
+
+    decoys = "string_builder ordering_key lowering_step martin" + LEGACY_STEM
+    if legacy_content_findings(decoys):
+        errors.append("naming detector rejects protected substring decoys")
 
 
 def tracked_paths(errors: list[str]) -> list[str]:
@@ -151,6 +172,7 @@ def validate_contents(paths: list[str], errors: list[str]) -> None:
 
 def validate() -> tuple[list[str], int, int]:
     errors: list[str] = []
+    validate_detector_contract(errors)
     paths = tracked_paths(errors)
     if not paths:
         return errors, 0, 0

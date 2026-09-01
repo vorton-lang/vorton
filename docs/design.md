@@ -14,6 +14,8 @@
 
 额外目标：让 LLM 也喜欢写这门语言——模块签名信息密度最大化，LLM 在零训练数据的情况下只需签名即可正确使用 API。
 
+**当前实现状态**：编译器正在 Rust 宿主上重建，先闭合 `source → token → AST → diagnostic` 最小纵切，再按 GitHub Issue 推进 checker、IR、ownership、C11 后端与 CLI。迁移前的 `compiler/*.vorton`、`compiler/dist-c/main.c`、`vorton_runtime.cpp` 与旧测试只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 compiler build、CI、bootstrap 或发布 authority。以下涉及旧 C/self-host 实现的段落记录历史设计与可复用约束，不表示当前 Rust compiler 已实现或通过相应门。
+
 ## 设计公理
 
 **全文唯一真值源 = `docs/philosophy.md`（本节只留速记，消除双真值源）**：**层 0 目标** ④ 不信任程序员 · 编译器是最终权威（渐近表达 = 无人回路 × 全场景；推论：失真必须响 / 优化不可观测 / 人类审查面可枚举）。**层 1 硬约束** ⑤ 编译器必须终止（可判定片段 + fuel）⑥ 确定性资源语义（Drop = scope-end 语义 + as-if 条款；RC 无 GC；环用 Weak）⑦ 场景不可堵死（native / 零强制 runtime / C ABI）。**层 2 策略** ① 类型即模型，不是谜题 ② 效果即可见性 ③ 推断为王，标注为仆 ⑧ 一种事一种写法 ⑨ 语法借用。仲裁：策略让位约束；约束修订由用户决定。
@@ -441,7 +443,7 @@ GADT 的 scoped type equality 是编译期 unification，effect evidence 是运�
 
 ### 1.7 语义规范（后端无关，2026-05-24 确定）
 
-Vorton 语言的语义规范与后端无关。JS 后端已归档（B-100 Phase 2，commit `5df6c99`）；自 2026-08-03 起 main 只保留 C11 codegen，覆盖单文件、project/module 与 self-host，`compiler/dist-c/main.c` 是唯一 tracked bootstrap anchor。最后 LLVM lane 只由 `llvm-c-backend-final` tag 保存，不属于现行实现或验证门。
+Vorton 语言的语义规范与后端无关。历史实现中，JS 后端已归档（B-100 Phase 2，commit `5df6c99`），随后 main 曾只保留 C11 codegen，覆盖单文件、project/module 与 self-host，`compiler/dist-c/main.c` 曾是 tracked bootstrap anchor；最后 LLVM lane 只由 `llvm-c-backend-final` tag 保存。当前路线是在 Rust 宿主上重建编译器，这些旧后端与 anchor 仅作迁移 oracle，不属于现行 compiler、CI、bootstrap 或发布门。
 
 #### 数值类型（2026-05-25 更新）
 
@@ -1258,7 +1260,7 @@ let zs = xs.clone()    // 递归深拷贝，完全独立
 
 求值顺序固定为：`base` 只求值一次但暂不消费；随后所有显式 override RHS 按源码顺序完整求值，此时可继续读取或借用 `base`；只有全部 RHS 成功后，未覆盖字段才以 Own transfer 进入 fresh result，被覆盖字段在 `base` 中的旧值执行 Drop，override temporary 再转入对应结果字段，最后 `base` 整体失活。若任一 RHS 产生 `fail`，不得留下部分 move 的 `base`。override RHS 若试图在提交前 ownership-move `base` 的子字段，则按既有 partial-move 禁令拒绝；要保留该字段就省略 override，要保留整个 base 则显式写 `Type { ..base.clone(), ... }`。
 
-**0.1 internal-checkpoint Known Issue（2026-08-30 用户决定）**：上述是目标语义，不是当前0.1 compiler对所有字段形状的已验证保证。当前self-host只依赖8处全shareable spread；这一路径继续使用physical RC dup并保留base完整。若未覆盖字段为owning或其资源行为依赖type parameter、因而需要exact Take，compiler仍可能接受源码但错误处理source clear/Drop，产生leak、double-drop、UAF或错误析构顺序；0.1不要求为它新增诊断，也不实现partial/open-drop、`Live`/`Moved` occupancy或专用moved-shell operation。外部程序在迁仓后修复前应显式destructure并重建全部字段。现有反例进入GitHub Known Issues；internal checkpoint与公开preview都不得宣称owning spread已正确。
+**迁移前 0.1 internal-checkpoint Known Issue（2026-08-30 用户决定）**：上述是目标语义，迁移前 compiler并未对所有字段形状建立验证保证。当时的self-host只依赖8处全shareable spread；该历史路径使用physical RC dup并保留base完整。若未覆盖字段为owning或其资源行为依赖type parameter、因而需要exact Take，旧 compiler可能接受源码但错误处理source clear/Drop，产生leak、double-drop、UAF或错误析构顺序。该缺陷与反例作为迁移 oracle/已知问题保留；当前 Rust 重建只有在相应 Issue 与真实 gate 闭合后才能宣称 owning spread 已正确，不从旧 internal checkpoint 推导现行保证。
 
 Vorton 0.1 不支持 named enum / variant update spread。`Variant { ..base, field: value }` 稳定产生 source diagnostic；在已经匹配出 exact variant 的 arm 中，显式重建全部字段，例如 `Circle { radius, color: next }`。这不影响 named-field variant construction、generic enum、pattern matching、字段 move 或普通 struct spread。编译器不为该纯缩写引入 runtime tag check、variant-refinement carrier、fallback 或第二条 MoveUpdate 路径。
 
@@ -1707,7 +1709,7 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 
 ### 10.4 后端策略
 
-**当前状态（2026-08-03）**：C11 是 main 唯一 codegen 与 bootstrap lane，支持单文件、project/module 与 self-host；`compiler/dist-c/main.c` 是 tracked stage-0，并以字节固定点验证。LLVM-C/addon、`codegen_llvm*`、旧 `compiler/dist/` 与 `dist-llvm/` 已从 main 删除；`llvm-c-backend-final` tag 是唯一历史恢复点，不是产品依赖。
+**迁移前 C11 后端状态（历史，2026-08-03）**：C11 曾是 main 唯一 codegen 与 bootstrap lane，支持单文件、project/module 与 self-host；`compiler/dist-c/main.c` 曾作为 tracked stage-0 做字节固定点验证。LLVM-C/addon、`codegen_llvm*`、旧 `compiler/dist/` 与 `dist-llvm/` 已从当时的 main 删除；`llvm-c-backend-final` tag 是历史恢复点。当前编译器在 Rust 宿主上重建，以上 C/self-host 资产只作 oracle，不是产品依赖或现行 gate。
 
 **C11 主路径的长期契约**：
 
@@ -1718,7 +1720,7 @@ GPU 操作建模为 effect（`gpu_mem` effect），编译器从 effect/type 信�
 - match/catch 按源码 arm 顺序，穷尽失败 fail loud；Drop、cleanup 与 evidence 生命周期在嵌套函数边界隔离，并由共享 RC/verifier 契约审计。
 - 编译器进程只生成文本并调用外部编译器，不恢复 LLVM-C 式进程内 FFI/IR builder 信道。
 
-**内部检查点与发布边界（2026-08-30 用户决定）**：当前0.1只要求C-only tracked anchor生成可用current compiler、连续self-host到文本fixed point并完成B-183仓库/GitHub治理迁移；不要求critical correctness清零，也不是公开preview。迁仓后B-176/B-180先恢复可接受的check/验证反馈速度，Known Issues与剩余correctness/ABI在GitHub继续，再由B-174/B-177/B-175承担CLI闭环、版本化agent contract与candidate打包产品面；生成程序性能证据由B-181承担。未来第二后端只能消费同一HIR/ABI契约，不能恢复进程内LLVM-C FFI或成为唯一bootstrap。
+**迁移前内部检查点与发布边界（历史，2026-08-30 用户决定）**：当时的0.1检查点只要求C-only tracked anchor生成可用 compiler、连续self-host到文本fixed point并完成仓库/GitHub治理迁移；它不要求critical correctness清零，也不是公开preview。相关反馈速度、Known Issues、CLI/agent contract、candidate打包与生成程序性能事项现只按 GitHub Issue 追踪。当前 Rust 重建不恢复连续self-host门；未来后端仍只能消费同一HIR/ABI契约，不能恢复进程内LLVM-C FFI或成为未经新用户决定的唯一bootstrap。
 
 **未来 LLVM target 重启门**：只有代表性负载证明 C 不可表达的性能瓶颈、Vorton 级调试信息刚需，或目标平台缺少成熟 C 工具链时才重新立项。届时 C 后端永久保留为 reference/stage-0，LLVM 只能是第二信道，并且只发文本 `.ll`，不得恢复进程内 LLVM-C FFI。
 
@@ -1833,7 +1835,7 @@ unsafe原语（`Ptr<T>` + alloc/read/write等）已设计定案（§7.12），�
 
 最近邻必须按不同轴描述：Koka/Flix/Effekt 是 effect 与 handler 机制近邻，Unison 是 abilities + semantic codebase 近邻，MoonBit 是应用语言产品与实验性验证近邻，Zero 是 graph-native agent workflow 近邻，Verus 是权限/SMT/AI proof 近邻；TypeScript 7、Python 与 Rust 则构成强大的「够用就行」替代。Vorton 对外定位因此收窄为：**把可推断的行为契约、确定性资源语义和 agent 验证闭环放在同一条 application-native 默认路径上，并用 B-111 的可复现实验证明收益。**
 
-当前已发货边界也必须诚实陈述：旧宽泛 `io`、`fail/mut`、有限 handler、C11 native/self-host 与 tracked `dist-c` 已有；0.1 的 system/handled clean break 尚待 B-194/B-195/B-196，不能提前宣传为完成。Async 尚未实现，full AE 不计划实现，refinement 仍在 B-001，Drop abort-unwind/Weak 与 RIIR 收尾仍待 B-168/B-002/B-152。
+迁移前已发货边界也必须按历史事实陈述：旧宽泛 `io`、`fail/mut`、有限 handler、C11 native/self-host 与 tracked `dist-c` 曾存在，但现在只作迁移 oracle。当前 Rust 重建不得据此宣传 system/handled clean break、Async、refinement、Drop abort-unwind/Weak 或 RIIR 已实现；这些能力的活动范围与验收只查对应 GitHub Issue。
 
 ---
 
@@ -1849,7 +1851,7 @@ Koka（微软研究院）通过两项技术达到 C 性能的 75-85%：
 
 ### 14.2 编译目标
 
-native 是唯一产品编译目标，codegen/bootstrapping 当前均为 C11-only（JS 已归档，最后 LLVM lane 只在历史 tag）。性能数据必须注明 compiler commit、`dist-c` 指纹、C compiler/version、生成程序与 runtime 优化级别、机器和冷/热缓存状态；旧的单点“native 自编译 290s”不再作为当前基线。开发反馈基线由 B-176 建立并由 B-180 优化，生成程序 baseline/release budget 由 B-181 建立。
+native 仍是目标产品编译方向；迁移前 codegen/bootstrapping 曾为 C11-only（JS 已归档，最后 LLVM lane 只在历史 tag），但当前 Rust compiler 尚未建立发布后端 gate。旧性能证据必须注明 compiler commit、`dist-c` 指纹、C compiler/version、生成程序与 runtime 优化级别、机器和冷/热缓存状态，且不作为当前基线。新的开发反馈、生成程序 baseline 与 release budget 只能由对应 GitHub Issue 在 Rust 路线上重新建立。
 
 ### 14.3 泛型单态化策略（2026-05-24 决策）
 
@@ -1915,7 +1917,7 @@ TypedHIR / CoreHIR / FlowIR 契约
 
 ## 15. 编译器实现
 
-编译器已用 Vorton 自举；当前 main 仍经 legacy HIR → Perceus RC → static verifier → C11 codegen 生成 tracked `dist-c` 固定点，迁移终态由下述分层架构固定。长期后端契约以 §10.4 为准；历史 TypeScript/JS/LLVM 翻译过程与里程碑留在 Git/tag，不在设计真值重复维护。
+迁移前编译器曾用 Vorton 自举，并经 legacy HIR → Perceus RC → static verifier → C11 codegen 生成 tracked `dist-c` 固定点；这些结果现在只作迁移 oracle 与历史证据。当前 main 的 compiler 路线是在 Rust 宿主上重建，下述分层架构描述目标契约而非已通过实现。长期后端契约以 §10.4 为准；历史 TypeScript/JS/LLVM 翻译过程与里程碑留在 Git/tag，不在设计真值重复维护。
 
 ### 15.1 分层 IR 总架构（2026-08-22 用户批准）
 
@@ -1957,11 +1959,11 @@ Source
 
 **渐进迁移而非平行重写**：#268/#269 先建立通用 typed identity、executable inventory、neutral normalization、FlowIR/RcIR 与 validator 骨架；后续 type/effect/evidence、failure/control、RIIR/FFI、optimization 各自在既有 backlog 里迁入其唯一所属层。一个事实切换到新层时必须原子迁移全部消费者并删除旧 fallback/side map；禁止长期双写、shadow authority 或以“兼容”保留旧解释路径。B-190 负责在相应消费者已迁移并有证据后删除遗留重复 authority，不把本架构变成一次无界全仓 rewrite。
 
-**0.1 internal self-host implementation boundary（2026-08-30 supersede）**：#268/#269当前只实现tracked anchor、current compiler连续self-host/fixed point、compiler/hello最小smoke与B-183迁仓的真实consumer。其他外部程序缺陷可保留为Known Issues而不新增source diagnostic；对应IR纵切、完整matrix、full/RC/ASan与一般correctness/safety/ownership证明迁到Vorton GitHub继续，不能被描述成0.1检查点已通过。未来能力仍不得要求当前IR预留空节点、unknown占位、fallback或双authority。
+**迁移前 0.1 internal self-host implementation boundary（历史，2026-08-30 supersede）**：当时的#268/#269只覆盖tracked anchor、连续self-host/fixed point、compiler/hello最小smoke与迁仓 consumer；其他外部程序缺陷继续作为Known Issues。当前 Rust 重建不继承这些完成声明，IR纵切、matrix、full/RC/ASan与一般correctness/ownership证明必须由现行 GitHub Issue 和真实 gate 重新建立。未来能力仍不得要求当前IR预留空节点、unknown占位、fallback或双authority。
 
 **Koka 作为参考实现**：Effect 推断（`InferEffect.hs`）和 evidence passing（`Evidence.hs`）的算法翻译自 Koka 编译器（MIT 许可）。Perceus 引用计数已翻译其 POPL'21 实现落地（§7.11）。
 
-自举证明 Vorton 能承载自身编译器；LLM 开发效率主张必须由 B-111 的对照实验验证。
+迁移前自举是 Vorton 曾承载自身编译器的历史证据，不是当前 Rust compiler gate；LLM 开发效率主张仍必须由现行 Issue 下的可复现实验验证。
 
 ---
 

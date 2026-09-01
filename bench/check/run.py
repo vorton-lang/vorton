@@ -39,10 +39,10 @@ RUNNER_SUMMARY_CONTRACT_SCHEMA = "vorton.check-benchmark.runner-summary-contract
 WARM_CACHE_RECEIPT_SCHEMA = "vorton.check-benchmark.warm-cache-seed.v2"
 # Updated mechanically after result.schema.json changes.  The constant pins the
 # complete nested contract, not merely its public $id.
-RESULT_SCHEMA_CANONICAL_SHA256 = "79fec93925e6cc703b89a55e0162a20ab4a81654b2930e9e659a8dfa7d0b055e"
+RESULT_SCHEMA_CANONICAL_SHA256 = "9670c7d8abed8584f83b9024d82c65f9019d2b4ca8db43d957afc54565e4843c"
 # Formal runs and the baseline combiner accept only these exact checked-in
 # manifest bytes.  The value is updated mechanically with manifest.json.
-CANONICAL_MANIFEST_SHA256 = "c1e179aec7d9d43ee2c9a2bc200a2b2bd1602bb31963d76f493b0cec9b3aebc2"
+CANONICAL_MANIFEST_SHA256 = "f559213127506f5a1b3033d5e8132c4e5f2f23e328fbf074faa821524d587b47"
 COMPILER_PHASE_ORDER = (
     "input_entry_load",
     "entry_parse",

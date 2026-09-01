@@ -1,8 +1,10 @@
 # Vorton 语言规范
 
-状态：当前实现子集
+状态：当前公开语言子集；编译器正在 Rust 宿主上重建
 
 本规范是 Vorton 编程语言的权威参考，独立于任何具体编译器实现。
+
+当前实现路线先闭合 Rust `source → token → AST → diagnostic` 纵切，再按 GitHub Issue 推进其余阶段。迁移前的 Vorton/C11 compiler、tracked C、runtime 与 E2E/golden 测试只作语义 oracle 和已知缺陷复现，不是当前 Rust compiler 的实现、CI、bootstrap 或发布 authority。
 
 ## 文档结构
 
@@ -28,4 +30,4 @@
 
 ## 版本说明
 
-本规范仅涵盖Vorton已实现的公开子集。架构见[`../design.md`](../design.md)；尚未实现的设想不自动成为本规范的一部分。可执行语义以仓库中的E2E/golden测试共同约束。
+本规范仅涵盖已经确认的公开语言子集。架构见[`../design.md`](../design.md)；尚未实现的设想不自动成为本规范的一部分。当前实现覆盖与验收由 GitHub Issue 及进入 Rust compiler 后建立的真实 gate 表达；迁移前 E2E/golden 只提供 oracle，不得冒充当前实现通过。

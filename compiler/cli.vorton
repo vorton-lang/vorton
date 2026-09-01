@@ -27,6 +27,21 @@ use phase_timing::{
     PHASE_PROJECT_MODULE_LOAD_PARSE, PHASE_TYPE_EFFECT_CHECK_LOWER,
     PHASE_RESOURCE_PLAN_VERIFY}
 
+fn has_vorton_source_suffix(path: Str) -> Bool {
+    path.ends_with(".vorton")
+}
+
+fn strip_vorton_source_suffix(path: Str) -> Str {
+    if !has_vorton_source_suffix(path) {
+        panic("internal CLI path invariant: expected exact .vorton suffix")
+    }
+    path.slice(0, path.len() - 7)
+}
+
+fn vorton_output_path(path: Str, extension: Str) -> Str {
+    "${strip_vorton_source_suffix(path)}${extension}"
+}
+
 pub fn cli_main() {
     let args = argv()
     let parsed = parse_cli_args(args)
@@ -86,6 +101,17 @@ pub fn cli_main() {
     let input_start = timing.start_phase()
     let file_path = path_resolve(parsed.file)
     timing.set_entry_file(file_path)
+    if !has_vorton_source_suffix(file_path) {
+        eprintln("Error: input file must end with '.vorton': ${file_path}")
+        timing.finish_phase(PHASE_INPUT_ENTRY_LOAD, input_start)
+        timing.skip_phase(PHASE_ENTRY_PARSE)
+        timing.skip_phase(PHASE_PROJECT_MODULE_LOAD_PARSE)
+        timing.skip_phase(PHASE_TYPE_EFFECT_CHECK_LOWER)
+        timing.skip_phase(PHASE_RESOURCE_PLAN_VERIFY)
+        timing.finish_command(false)
+        exit_process(1)
+        return
+    }
     if file_exists(file_path) == false {
         eprintln("Error: file not found: ${file_path}")
         timing.finish_phase(PHASE_INPUT_ENTRY_LOAD, input_start)
@@ -170,7 +196,7 @@ pub fn cli_main() {
                 let out_dir = path_resolve(parsed.out_dir)
                 // Multi-file (project) C emission: both the .c and the
                 // clang-compiled .o land in out_dir.
-                let base = path_basename(file_path).replace(".vorton", "")
+                let base = strip_vorton_source_suffix(path_basename(file_path))
                 let c_path = path_join(out_dir, "${base}.c")
                 let o_path = path_join(out_dir, "${base}.o")
                 let c_result = compile_project_c(
@@ -284,16 +310,16 @@ pub fn cli_main() {
             // Emit <name>.c, then shell out clang -c → <name>.o.
             // --out-dir redirects both artifacts when explicitly given;
             // the default places them next to the source.
-            let base = path_basename(file_path).replace(".vorton", "")
+            let base = strip_vorton_source_suffix(path_basename(file_path))
             let c_path = if parsed.out_dir_set {
                 path_join(path_resolve(parsed.out_dir), "${base}.c")
             } else {
-                file_path.replace(".vorton", ".c")
+                vorton_output_path(file_path, ".c")
             }
             let o_path = if parsed.out_dir_set {
                 path_join(path_resolve(parsed.out_dir), "${base}.o")
             } else {
-                file_path.replace(".vorton", ".o")
+                vorton_output_path(file_path, ".o")
             }
             let build_ok = generate_c(
                 materialized_verified_hir_program(rc_artifact),
