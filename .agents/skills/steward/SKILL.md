@@ -1,6 +1,6 @@
 ---
 name: steward
-description: Execute an approved Ring-lang/Vorton GitHub Issue locally through implementation, review, validation, and PR completion.
+description: Execute an approved Vorton GitHub Issue locally through implementation, review, validation, and PR completion.
 ---
 
 # Steward

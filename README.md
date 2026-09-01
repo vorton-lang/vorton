@@ -1,12 +1,12 @@
-# Ring
+# Vorton
 
-Ring 是一门“不信任程序员”的 native 编程语言：源码保持接近 Python 的低标注体验，编译器负责推断类型、effect、trait 约束与资源行为，并把无法证明的边界显式暴露出来。
+Vorton 是一门面向 native 应用开发的编程语言，也是其编译器与仓库的统一名称。源码保持接近 Python 的低标注体验，编译器负责推断类型、effect、trait 约束与资源行为，并把无法证明的边界显式暴露出来。
 
-编译器已经用 Ring 自举，并只保留 C11 native 后端。单文件、project/module、self-host 与 tracked bootstrap 都使用同一条 C11 管线；测试入口是零第三方 Python runner。
+仓库已经迁移到 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)。当前工程路线是在 Rust 宿主上重建 Vorton 编译器；首个实现纵切由 [Issue #3](https://github.com/vorton-lang/vorton/issues/3) 跟踪。迁仓前的 C11 compiler、tracked C、runtime 与测试随完整 Git 历史保留，只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 build、bootstrap、CI 或发布门。
 
-## 语言一瞥
+## Vorton 语言一瞥
 
-```ring
+```vorton
 enum Shape {
     circle(radius: Float),
     rect(width: Float, height: Float),
@@ -28,13 +28,13 @@ fn main() {
 
 Effect 也参与推断，并可由词法 handler 替换：
 
-```ring
+```vorton
 effect Greeting {
     fn word() -> Str;
 }
 
 fn greet() -> Str with {Greeting} {
-    "${Greeting.word()}, Ring"
+    "${Greeting.word()}, Vorton"
 }
 
 fn main() {
@@ -45,42 +45,29 @@ fn main() {
 }
 ```
 
-## Native 构建与运行
+## 当前构建与 CI
 
-当前开发环境以 Windows、Python、Clang/Clang++ 和 lld 为基线。以下命令均从仓库根目录运行。
+Rust compiler workspace 尚未进入仓库，因此当前没有可声明为 Vorton compiler authority 的本地构建命令。建立 workspace、最小前端纵切与相称测试后，命令和支持平台会随实现一并记录。
 
-```powershell
-# 从 tracked C bootstrap anchor 构建编译器
-.\compiler\scripts\build_native.ps1
-
-# 检查、编译、链接并运行一个程序
-.\ring.exe check examples/hello.ring
-.\ring.exe build examples/hello.ring --target=c
-clang++ -c ring_runtime.cpp -o ring_runtime.o -std=c++17 -O2 -D_CRT_SECURE_NO_WARNINGS
-clang examples/hello.o ring_runtime.o -o examples/hello.exe -lmsvcrt "-Wl,/STACK:536870912" "-Wl,/MANIFEST:EMBED" "-Wl,/MANIFESTUAC:level='asInvoker'"
-.\examples\hello.exe
-```
-
-`build` 默认目标就是 C；显式写出 `--target=c` 可以让脚本意图更清楚。该命令生成 `examples/hello.c` 和 `examples/hello.o`。
-
-## 测试
-
-Python runner 会从 tracked C anchor 临时构建隔离的 `ring.exe`，并按需构建 runtime：
+当前 CI 只运行零第三方依赖的仓库治理 validator：
 
 ```powershell
-python tests/run_tests.py                 # 全部默认门禁
-python tests/run_tests.py --suite e2e     # 语言语义 E2E
-python tests/run_tests.py --suite golden  # C-native golden
-python tests/run_tests.py --suite rc      # post-RC verifier
-python tests/run_tests.py --suite self-compile # tracked C 固定点
-python tests/run_tests.py --suite structural  # generated-C 结构门禁
-python tests/run_tests.py --suite parity      # 静态证据矩阵
+python .agents/scripts/validate_workflow.py
 ```
+
+它验证当前工作流、Issue 模板、历史看板保持删除与 CI 自身的约束；它不宣称旧 compiler 或未来 Rust compiler 已通过。
+
+## 参与工作
+
+- [GitHub Issues](https://github.com/vorton-lang/vorton/issues) 是活动范围、状态与验收的唯一真值。
+- 每个 Issue 只对应一个 active PR；PR 正文使用 `Closes #N`，merge 后由 GitHub 关闭对应 Issue。
+- [Ideas Discussion #1](https://github.com/vorton-lang/vorton/discussions/1) 只接收尚不可执行的 post-0.1 想法与升级条件。
+- 完整执行规则见 [Vorton 工作流](docs/workflow.md)。迁仓前 Markdown 看板已从当前树删除，历史只查 Git。
 
 ## 文档
 
-- [语言规范](docs/lang-spec/README.md)：当前已实现的公开语法与语义
-- [设计哲学](docs/philosophy.md)：九条公理与仲裁层级
-- [编译器与 runtime 设计](docs/design.md)：实现架构和不变量
+- [语言规范](docs/lang-spec/README.md)：Vorton 当前公开语法与语义
+- [设计哲学](docs/philosophy.md)：语言公理与仲裁层级
+- [编译器与 runtime 设计](docs/design.md)：目标架构和不变量
 - [竞品与行业定位](docs/competitive-analysis.md)：有事实截止日期的比较基线
-- [开发约定](AGENTS.md)：工具链与仓库入口；当前工作流见[`docs/workflow.md`](docs/workflow.md)
+- [Agent 入口](AGENTS.md)：当前技术路线与仓库约定

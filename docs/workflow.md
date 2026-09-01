@@ -1,124 +1,99 @@
 # Vorton 单人项目工作流
 
-本文件只保存当前有效规则。完成历史、失败实验和旧流程留在Git，不在这里累积。
+本文件只保存当前仍有效的执行规则。仓库已经迁移到 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)；活动范围、状态与验收只由 GitHub Issue/PR 表达，完成历史只查 Git。
 
-任何想在长期文档中记录日期化进展、实验过程、失败流水、阶段总结或“以后回来更新”的内容，都是危险信号：不要写。过程只进Git、Issue或PR；文档直接保持当前真值，不叠加supersede日记。
+日期化进展、实验过程、失败流水、命令记录和阶段总结不得写入长期文档。过程进入 Session、Issue、PR 或 Git；真值变化时直接修改当前规则，不叠加 supersede 日记。
 
-## 当前阶段
+## 当前工程路线
 
-- 当前只做迁仓与外部宿主编译器规划，不执行merge、push、transfer、Issue创建或Rust实现。
-- 计划先以normal merge commit把`codex/ownership-sprime-first`合回`main`，再把唯一main迁移到`vorton-lang/vorton`。
-- 迁仓后以Rust实现compiler；先做`source → token → AST → diagnostic`最小纵切。只有真实Rust阻塞才重新讨论宿主语言。
-- dc91、5d57、tracked C和历史candidate只作oracle；不再恢复Ring self-host、bridge、SCU、publicization或generated-C路线。
-- #268/#269保持未完成，迁仓后继续。
+- 当前实现路线是在 Rust 宿主上重建 Vorton 编译器，先闭合 `source → token → AST → diagnostic` 最小纵切，再按 Issue 推进 checker、IR、ownership、C11 后端、CLI 与发布。
+- Rust workspace、compiler build 与测试门只有在对应实现进入仓库后才成立；当前 CI 不宣称 compiler green。
+- 迁仓前的 compiler snapshot、tracked C、C11 self-host/fixed point、runtime 与旧测试只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 bootstrap、CI 或发布 authority。
+- Self-host 已后置；只有语言与外部宿主编译器稳定后，用户作出新决定才可恢复。
 
-## 当前Agent模式
+## 活动真值与唯一工作链
 
-- 独立Steward session暂时禁用，不创建、不唤醒、不传包；所有用户沟通和执行控制都留在当前root session。
-- Root统一负责规划、Issue/PR编排、review、验证、merge和状态汇报。
-- 非常小且路径唯一的修改可由root直接完成；其它具体工作必须拆成明确scope交给当前thread的subagent，subagent结果回root统一对账。
-- 只有root向用户沟通、修改GitHub状态或形成最终claim；subagent不建立平行真值。
-
-## 唯一工作链
-
-迁仓后：
+唯一状态链是：
 
 ```text
-Issue #N → 一个active PR → PR head branch → merge → Issue自动关闭
+Issue #N → 一个 active PR → PR head branch → merge → Issue 自动关闭
 ```
 
-- GitHub Issue取代`docs/backlog.md`和`docs/audit-report.md`作为活动任务真值。
-- 新工作只使用GitHub分配的Issue编号。导入时废弃B/A/D编号；旧编号不进入Issue标题，也不作为新编号保存。
-- Issue和PR标题禁止手工编号、序号前缀或类似编号；只使用描述性标题和GitHub自动编号。
-- 创建任何Issue前，必须向用户展示准确标题、正文和数量并取得明确确认；批量导入按完整manifest一次确认。
-- 每个Issue只有一个active实现PR。大任务先拆Issue，不并行多个实现PR。
-- PR正文写`Closes #N`；merge后由GitHub自动关闭Issue。
-- Branch优先从Issue的Development入口创建，使GitHub自动关联；PR面向默认branch并写`Closes #N`。迁仓时启用Automatically delete head branches。
-- Worktree只是本机可选checkout方式，不是任务、状态、authority或handoff真值。
+- GitHub Issue 是 scope、status、acceptance、依赖与用户决定摘要的唯一活动真值。
+- 每个 Issue 同时只能有一个 active 实现 PR。任务需要并行实现时，先拆成多个 Issue。
+- PR 面向默认 branch，正文写 `Closes #N`；merge 后由 GitHub 关闭且只关闭对应 Issue。
+- Branch 优先从 Issue 的 Development 入口创建以建立关联；仓库启用 Automatically delete head branches，merge 后由 GitHub 删除 head branch。
+- Worktree 只是本机可选 checkout 方式，不是任务、状态、authority 或 handoff 真值。
+- GitHub Project 若启用，只作 GitHub 对象的自动视图，不保存第二套状态。
+- 迁仓前 Markdown backlog/audit 已从当前树删除，历史只查 Git。新工作不分配 B/A/D 编号，也不要求同步 Markdown 看板或本地元数据。
 
-迁仓前，`docs/backlog.md`和`docs/audit-report.md`仅作Issue导入源；导入核对完成后冻结，不再手工维护。
+## GitHub 状态解释
 
-## Session与Issue
-
-- Session用于讨论、澄清和即时协作；Issue保存scope、status和acceptance。
-- 用户在Session拍板后，Discussion在开始实现或merge前向对应Issue同步一条摘要；用户无需重复。
-- Agent恢复工作时先读取Issue最新正文与评论。
-- 两渠道出现不清楚的冲突就直接问用户，不建设cursor、命令语法、webhook或自动双向同步。
-- 普通状态不写Issue评论；linked PR和merge结果已经表达进度。Issue评论只保留用户决定和confirmed blocker，不写命令流水、subagent状态、轮询或长日志。
-
-## 本机执行
-
-- 本机是主要agent执行面；GitHub只承载Issue、PR、CI和Git历史。
-- 直接使用用户现有`git`/`gh`身份完成已批准操作；不建设GitHub App、broker、webhook、machine user或常驻服务。
-- 一个Issue只有一个写owner。Reviewer只读固定PR head SHA。
-- Fixed candidate的machine execution与review同时启动。Machine FAIL优先形成开发反馈；PASS在review CLEAR前保持quarantine；Review BLOCK使PASS失效。
-- 未知时长任务不得使用预测式kill wall。资源门、输出门和用户明确deadline仍有效。
-- 结果绑定同一EvidenceKey：source SHA、artifact/patch SHA、producer command/receipt、observed stage。不同SHA结果不得拼接。
-
-## 状态由GitHub推导
-
-- Open Issue且没有linked PR：待做。
+- Open Issue 且没有 linked PR：待做。
 - Linked draft PR：进行中。
 - Linked ready-for-review PR：review。
-- PR merge到默认branch：`Closes #N`自动关闭Issue，表示完成。
-- PR未merge而关闭：Issue保持open。
-- 只有`blocked`需要额外label；它只冻结该Issue。
-- 如果使用GitHub Project，只启用auto-add与closed/merged→Done内建自动化，Project不成为第二状态真值。
+- PR merge 到默认 branch：`Closes #N` 自动关闭 Issue，表示完成。
+- PR 未 merge 而关闭：Issue 保持 open。
+- 只有异常冻结使用 `blocked` label；普通状态由 Issue/PR 对象推导，不创建 status、wip、owner、phase、has-pr 或 passed/failed label。
 
-## 最小标签
+## Session、Ideas 与 Issue
 
-- Issue恰好一个type：`type:bug|feature|design|maintenance|audit`。
-- Issue恰好一个priority：`priority:p0|p1|p2|p3`。
-- Issue可有多个area：`area:frontend|types-effects|ir-ownership|backend-runtime|tooling|docs`。
-- 只有异常状态使用`blocked`。
-- 不创建status、wip、owner、phase、has-pr、passed/failed或手工编号标签。
-- PR不复制Issue标签；area标签若需要，只按changed paths机械生成。
+- Session 用于讨论、澄清、即时协作与用户拍板，不保存可执行状态。
+- 用户在 Session 拍板后，root 在开始实现或 merge 前向对应 Issue 汇总一条决定摘要；用户无需重复。普通命令流水、轮询、subagent 状态与长日志不写 Issue 评论。
+- [Ideas Discussion #1](https://github.com/vorton-lang/vorton/discussions/1) 只保存尚不可执行的 post-0.1 想法、可能价值与升级条件，不写实现状态或验收清单。
+- 想法出现真实 consumer 后，先向用户展示正式 Issue 的准确标题与正文并取得确认；创建成功后在原 Discussion 回复 Issue 链接。
+- Issue 只保存已经可执行的目标、问题、范围、验收、依赖及必要用户决定。Session、Discussion 与 Issue 出现不清楚的冲突时直接问用户，不建设自动双向同步。
+
+## Issue 创建规则
+
+中文单一 Markdown 模板固定为以下五段，顺序不可变，不增加状态、编号或其它并列字段：
+
+1. `目标`
+2. `当前问题`
+3. `范围`
+4. `验收`
+5. `依赖`
+
+- 标题只写描述性名称，不加手工编号、序号前缀或 B/A/D 编号。
+- 创建任何 Issue 前，必须向用户展示准确标题、正文与数量并取得明确确认；批量导入按完整固定 manifest 一次确认。
+- Issue 恰好使用一个 `type:bug`、`type:feature`、`type:design`、`type:maintenance` 或 `type:audit`。
+- Issue 恰好使用一个 `priority:p0`、`priority:p1`、`priority:p2` 或 `priority:p3`。
+- Issue 可使用零到多个 `area:frontend`、`area:types-effects`、`area:ir-ownership`、`area:backend-runtime`、`area:tooling`、`area:docs`，以及例外 `blocked`。
+- PR 不复制 Issue 的 type、priority 或 blocked label；如需 PR area label，只按 changed paths 机械生成。
+
+## 批量导入
+
+- 导入只消费用户确认过的固定 manifest，不在运行时扩写、重排或推断新 Issue。
+- 每次创建都立即保存 GitHub 返回的 Issue URL，并核对 manifest 输入数、成功 URL 数与最终唯一 Issue 数。
+- 中断恢复时先按已保存 URL 与远端 Issue 对账，只创建尚无返回 URL 的条目；禁止盲目重跑制造重复。
+- 导入完成后，活动状态只查 GitHub Issue/PR；旧 Markdown 编号只留在冻结历史或已导入正文中供检索。
+
+## 本机执行与验证
+
+- 本机是主要 agent 执行面；GitHub 承载 Issue、PR、CI 与 Git 历史。使用用户现有 `git`/`gh` 身份完成已批准操作，不建设额外身份或常驻同步服务。
+- 当前 root Session 统一负责用户沟通、Issue/PR 编排、review、验证、merge 与最终 claim；subagent 只处理 root 指定的明确 scope，不建立平行真值。
+- 一个 Issue 只有一个 writer。Reviewer 只读固定 PR head SHA。
+- Fixed candidate 的 machine execution 与 review 同时启动。Machine FAIL 立即作为开发反馈；Machine PASS 在 review CLEAR 前保持 quarantine，Review BLOCK 使该 PASS 失效。
+- 结果绑定同一 EvidenceKey：source SHA、artifact/patch SHA、producer command/receipt、observed stage。不同 SHA 的结果不得拼接。
+- 未知时长任务不得使用预测式 kill wall；资源门、输出门和用户明确 deadline 仍然有效。
+- 当前 CI 只运行 `python .agents/scripts/validate_workflow.py`，验证仓库治理真值。Rust workspace 落地后，再由对应 Issue 添加真实 Cargo/compiler gate。
 
 ## 用户保留决定
 
 以下事项由用户拍板：
 
-- 语言公开语义、语法、ownership/effect保证；
-- breaking API/ABI和平台支持；
-- 新P0、重大路线和显著投入；
-- repository transfer/rename、外部写入、release、历史重写和不可恢复删除；
-- 创建Issue。
+- 语言公开语义、语法、ownership/effect 保证；
+- breaking API/ABI 与平台支持；
+- 新 P0、重大路线与显著投入；
+- repository transfer/rename、外部写入、release、历史重写与不可恢复删除；
+- 创建 Issue。
 
-普通实现、bugfix、测试、review和内部重构在已确认Issue范围内自主推进。
+已确认 Issue 内的普通实现、bugfix、测试、review 与内部重构可自主推进。任何范围、依赖、优先级或验收变化都先回到对应 Issue 和用户决定，不在实现中静默扩张。
 
-Discussion当前可直接提交纯`docs/**`规划修改；其它main mutation只有用户明确要求时执行。迁仓后所有修改统一走Issue→PR。
+## Security 禁入
 
-## Security禁入
-
-本仓库是单人项目。不得主动规划或建设GitHub App、权限矩阵、CODEOWNERS、安全ruleset、签名、供应链扫描、sandbox、secret基础设施、untrusted-fork模型或其它security/hardening工作。
-
-任何security提议必须先回答：
-
-1. 是否存在当前可复现问题或用户明确需求？
-2. 不做是否会阻塞当前真实consumer？
-
-任一无证据即拒绝，不立项、不预留hook。Compiler crash、wrong-code、UB、数据损坏和ownership/RC错误按普通correctness处理，不得改名为security问题。
-
-## 迁仓计划
-
-当前最小计划只有四步：
-
-1. 隔离rehearsal后用normal merge commit把authority合回main；不squash、rebase或rewrite。
-2. 生成全部refs/notes/tags的bundle和迁移manifest。
-3. 用户另行批准后执行GitHub transfer+rename，更新remote和最小CI。
-4. 展示活动Issue导入manifest并取得用户确认；脚本逐项保存GitHub返回的Issue URL并核对输入/输出数量，中断后先对账再继续。创建完成后冻结Markdown看板；之后另行批准才开始Rust纵切。
-
-## 迁仓验收
-
-- authority已正常merge进唯一main；
-- bundle和manifest可解析全部durable refs/notes/tags；
-- `vorton-lang/vorton`保留完整ancestry，main与远端SHA一致；
-- 活动Issue数量和依赖与确认manifest一致；
-- Markdown看板冻结且不存在第二手工真值；
-- clean clone可运行基础CI；
-- 未创建未经用户确认的Issue；
-- 仓库已启用Automatically delete head branches，merged PR branch由GitHub删除。
+本仓库是单人项目。没有当前可复现问题或用户明确需求时，不主动规划 GitHub App、权限矩阵、CODEOWNERS、安全 ruleset、签名、供应链扫描、sandbox、secret 基础设施、untrusted-fork 模型或其它 security/hardening 工作。Compiler crash、wrong-code、UB、数据损坏和 ownership/RC 错误按普通 correctness 处理。
 
 ## 用户状态摘要
 
-用户询问整体状态时只报告：当前门、已有durable结果、下一门、主要风险、需要用户拍板。默认不报告命令等待、subagent状态、普通重试或原始日志。
+用户询问整体状态时只报告当前门、已有 durable 结果、下一门、主要风险和需要用户拍板的事项。默认不报告命令等待、subagent 状态、普通重试或原始日志。

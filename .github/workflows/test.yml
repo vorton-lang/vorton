@@ -1,4 +1,5 @@
-name: CI
+name: Governance
+
 on:
   push:
     branches: [main]
@@ -6,56 +7,16 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: governance-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  check:
-    # The Python runner builds ring.exe from compiler/dist-c/main.c.
-    runs-on: windows-latest
+  governance:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Verify C toolchain
-        run: |
-          clang --version
-          clang++ --version
-          lld-link --version
-      - name: Run ownership vertical suite
-        run: python tests/run_tests.py --suite ownership-vertical
-
-  test:
-    # C-native executable, golden, generated-C structural, and parity gates.
-    needs: check
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Verify C toolchain
-        run: |
-          clang --version
-          clang++ --version
-          lld-link --version
-      - name: Run C-native executable and evidence suites
-        run: python tests/run_tests.py --suite e2e --suite golden --suite structural --suite parity
-
-  bootstrap:
-    # Regenerate C from the tracked C-native compiler and require byte identity.
-    needs: test
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Verify C toolchain
-        run: |
-          clang --version
-          clang++ --version
-          lld-link --version
-      - name: Verify tracked dist-c fixed point
-        run: python tests/run_tests.py --suite self-compile
+      - name: Validate repository workflow truth
+        run: python .agents/scripts/validate_workflow.py

@@ -1,11 +1,11 @@
 ---
 name: repository-execution-decisions
-description: Apply user-established execution-process decisions inside the Ring-lang repository when coordinating candidate machine runs, review, and Discussion documentation changes. Do not apply outside this repository.
+description: Apply user-established execution-process decisions inside the Vorton repository when coordinating candidate machine runs, review, and repository changes. Do not apply outside this repository.
 ---
 
-# Ring-lang Repository Execution Decisions
+# Vorton Repository Execution Decisions
 
-本skill只记录并应用用户对**当前Ring-lang仓库**执行流程的直接决定；不是全局个人偏好，也不得外推到其他仓库。一般治理仍以`docs/workflow.md`为准；两者冲突时，以这里记录的较新用户bedrock为准并同步修正文档。
+本skill只记录并应用用户对**当前Vorton仓库**执行流程的直接决定；不是全局个人偏好，也不得外推到其他仓库。一般治理仍以`docs/workflow.md`为准；两者冲突时，以这里记录的较新用户bedrock为准并同步修正文档。
 
 ## Candidate机器执行与review同启
 
@@ -23,13 +23,13 @@ description: Apply user-established execution-process decisions inside the Ring-
 - Memory、输出、明确的安全资源门保持独立有效；不得因取消预测式wall而放宽这些门。
 - 已确认live的任务不得仅为调整wall而中断。若既有错误wall已造成纯超时，必须保存terminal receipt，并以相同fixed输入、全新输出和非预测式deadline重新执行；不得拼接半产物。
 
-## Discussion纯文档修改默认无需lease
+## Repository mutation统一走Issue→PR
 
-- Discussion的变更若严格限于`docs/**`，默认可直接在main修改并正常commit，无需事前query Steward或申请main mutation lease。
-- Discussion本地核对HEAD、working tree和exact diff；出现真实重叠dirty path、merge conflict或scope扩到`docs/**`之外时，才进入reconcile/lease流程。
-- 完成验证与commit后通知Steward exact SHA和scope，由Steward正常吸收；通知是事后交接，不是事前批准。
-- 同一连续处理窗口内连续到来的多个docs修改请求应合并处理，只在最终batch完成后向Steward发送一次合并通知，不逐请求query或通知。
-- 本例外不授权push、GitHub/外部状态、history rewrite或其他非文档mutation。
+- 迁仓后，所有repository mutation都必须基于用户已确认的GitHub Issue，并通过该Issue唯一的active PR与PR head branch完成；`docs/**`与治理skill没有直写`main`例外。
+- Session只承载讨论与用户拍板。开始实现或merge前向对应Issue汇总一条决定摘要，不把Session决定当作绕过Issue→PR的写入授权。
+- 同一连续处理窗口内到来的多个docs请求，若都在同一个confirmed Issue的scope与acceptance内，可在该Issue的同一个active PR中合并为一个batch；不得因此直写`main`。
+- 修改前核对HEAD、working tree、exact scope与active PR head branch；发现真实重叠dirty path、merge conflict或scope变化时先reconcile，必要时回到Issue或用户决定。
+- 本规则不新增push、外部状态、history rewrite或不可恢复操作的授权。
 
 ## 单人项目：security默认禁入
 
@@ -40,7 +40,7 @@ description: Apply user-established execution-process decisions inside the Ring-
 
 ## 迁仓后的唯一工作链
 
-- GitHub Issue取代`docs/backlog.md`/`docs/audit-report.md`作为活动任务真值；迁仓后新任务只使用Issue编号，不再分配B/A/D编号。旧编号仅保存在导入Issue正文中供历史检索。
+- GitHub Issue是活动任务真值；迁仓前Markdown看板已从当前树删除，历史只查Git。新任务只使用Issue编号，不再分配B/A/D编号；旧编号仅保存在导入Issue正文中供历史检索。
 - 唯一状态链为`Issue #N → 一个active PR → PR head branch`。PR正文写`Closes #N`，merge后由GitHub自动关闭Issue；大任务先拆成多个Issue，不给一个Issue并行多个实现PR。
 - Worktree只是本机可选checkout方式，不是任务、状态、authority或handoff真值，不进入用户治理模型。
 - Session用于讨论；Issue保存scope/status/acceptance。用户在Session拍板后只同步一条Issue摘要，用户无需重复。
