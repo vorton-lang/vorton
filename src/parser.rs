@@ -129,12 +129,21 @@ impl<'a> Parser<'a> {
                     self.peek().span,
                     "}",
                 ));
+                self.abandon_grouped_use();
+                return None;
             }
             while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
                 let item_start = self.peek().span.start as usize;
-                let name = self.expect_name()?;
+                let Some(name) = self.expect_name() else {
+                    self.abandon_grouped_use();
+                    return None;
+                };
                 let alias = if self.consume(TokenKind::As).is_some() {
-                    Some(self.expect_name()?)
+                    let Some(alias) = self.expect_name() else {
+                        self.abandon_grouped_use();
+                        return None;
+                    };
+                    Some(alias)
                 } else {
                     None
                 };
@@ -148,7 +157,10 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            self.expect(TokenKind::RightBrace)?;
+            if self.expect(TokenKind::RightBrace).is_none() {
+                self.abandon_grouped_use();
+                return None;
+            }
             UseKind::NamedItems(items)
         } else if self.consume(TokenKind::As).is_some() {
             UseKind::PathAlias(self.expect_name()?)
@@ -162,6 +174,12 @@ impl<'a> Parser<'a> {
             kind,
             span: self.source.span(start, self.previous_end()),
         })
+    }
+
+    fn abandon_grouped_use(&mut self) {
+        self.recover_until(&[TokenKind::RightBrace]);
+        self.consume(TokenKind::RightBrace);
+        self.consume(TokenKind::Semicolon);
     }
 
     fn parse_decl(&mut self) -> Option<Decl> {
@@ -575,18 +593,60 @@ impl<'a> Parser<'a> {
                 None,
             ),
         );
-        if self.at(TokenKind::Fn) {
-            self.advance();
-            if self.at(TokenKind::Identifier) {
-                self.advance();
+        let consumed = (|| -> Option<()> {
+            self.expect(TokenKind::Fn)?;
+            self.expect_name()?;
+            self.parse_type_params()?;
+            self.expect(TokenKind::LeftParen)?;
+            self.parse_params()?;
+            self.expect(TokenKind::RightParen)?;
+            if self.consume(TokenKind::Arrow).is_some() {
+                self.parse_type_expr()?;
             }
-            self.recover_until(&[
-                TokenKind::Fn,
-                TokenKind::Pub,
-                TokenKind::RightBrace,
-                TokenKind::Semicolon,
-            ]);
+            self.parse_optional_effect_annotation()?;
             self.consume(TokenKind::Semicolon);
+            Some(())
+        })();
+        if consumed.is_none() {
+            self.recover_impl_member_boundary();
+        }
+    }
+
+    fn recover_impl_member_boundary(&mut self) {
+        let mut parens = 0_u32;
+        let mut brackets = 0_u32;
+        let mut braces = 0_u32;
+        while !self.at(TokenKind::Eof) {
+            if parens == 0 && brackets == 0 && braces == 0 {
+                if self.at_any(&[
+                    TokenKind::Fn,
+                    TokenKind::Pub,
+                    TokenKind::Extern,
+                    TokenKind::RightBrace,
+                ]) || self.at_contextual("type")
+                    || self.at_contextual("delegate")
+                {
+                    return;
+                }
+                if self.consume(TokenKind::Semicolon).is_some() {
+                    return;
+                }
+            }
+            match self.peek().kind {
+                TokenKind::LeftParen => parens += 1,
+                TokenKind::RightParen => parens = parens.saturating_sub(1),
+                TokenKind::LeftBracket => brackets += 1,
+                TokenKind::RightBracket => brackets = brackets.saturating_sub(1),
+                TokenKind::LeftBrace => braces += 1,
+                TokenKind::RightBrace => {
+                    if braces == 0 {
+                        return;
+                    }
+                    braces -= 1;
+                }
+                _ => {}
+            }
+            self.advance();
         }
     }
 
@@ -1414,7 +1474,6 @@ impl<'a> Parser<'a> {
                     body: Box::new(body),
                 })
             }
-            TokenKind::Return => self.parse_return_expression(),
             TokenKind::Try => {
                 self.reject_try();
                 None
@@ -1726,13 +1785,21 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect(TokenKind::FatArrow)?;
-        let body = self.parse_expr()?;
+        let body = self.parse_arm_body()?;
         Some(MatchArm {
             pattern,
             guard,
             span: self.source.span(start, body.span().end as usize),
             body,
         })
+    }
+
+    fn parse_arm_body(&mut self) -> Option<Expr> {
+        if self.at(TokenKind::Return) {
+            self.parse_return_expression()
+        } else {
+            self.parse_expr()
+        }
     }
 
     fn parse_catch_expression(&mut self, expression: Expr) -> Option<Expr> {
@@ -2256,6 +2323,16 @@ impl<'a> Parser<'a> {
         let mut type_args = Vec::new();
         let mut associated = Vec::new();
         if self.consume(TokenKind::Less).is_some() {
+            if self.at(TokenKind::Greater) {
+                let token = self.advance();
+                self.report(Diagnostic::parse(
+                    "E0101",
+                    "Type bound arguments cannot be empty",
+                    token.span,
+                    token.value,
+                ));
+                return None;
+            }
             while !self.at(TokenKind::Greater) && !self.at(TokenKind::Eof) {
                 if self.at(TokenKind::Identifier) && self.peek_n(1).kind == TokenKind::Equal {
                     let item_start = self.peek().span.start as usize;

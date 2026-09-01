@@ -3,7 +3,10 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vorton::ast::{BinaryOp, Decl, Expr, Pattern, Stmt, TypeExpr, UseKind, VariantFields};
+use vorton::ast::{
+    BinaryOp, Decl, EffectName, Expr, ForBinding, ImplMember, Pattern, PatternLiteral, Stmt,
+    TypeExpr, UseKind, VariantFields,
+};
 use vorton::diagnostic::{Diagnostic, DiagnosticNote, format_human, format_llm};
 use vorton::lexer::{TokenKind, lex};
 use vorton::source::{SourceFile, SourceId};
@@ -274,6 +277,29 @@ fn named_type_spans_include_every_closing_angle_bracket() {
 }
 
 #[test]
+fn type_bounds_reject_empty_angles_and_keep_associated_constraints() {
+    let invalid = parse("fn bad<T: Trait<>>(value: T) {}\nfn after() {}\n");
+    assert!(invalid.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0101" && diagnostic.message == "Type bound arguments cannot be empty"
+    }));
+    assert!(has_function(&invalid, "after"));
+
+    let valid = parse("fn good<T: Trait<Item = Int>>(value: T) {}\n");
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+    let Decl::Function(function) = &valid.program.declarations[0] else {
+        panic!("function")
+    };
+    let bound = &function.type_params[0].bounds[0];
+    assert!(bound.type_args.is_empty());
+    assert_eq!(bound.associated.len(), 1);
+    assert_eq!(bound.associated[0].name.text, "Item");
+    let TypeExpr::Named { path, .. } = &bound.associated[0].ty else {
+        panic!("associated type")
+    };
+    assert_eq!(path.segments[0].text, "Int");
+}
+
+#[test]
 fn lexer_recovers_after_invalid_input_and_reports_unterminated_forms() {
     let invalid = lex(&source("& # fn valid() {}"));
     assert_eq!(invalid.diagnostics.len(), 2);
@@ -496,6 +522,26 @@ fn grouped_use_requires_the_colon_colon_separator() {
 }
 
 #[test]
+fn malformed_grouped_use_stays_inside_its_inline_module() {
+    let output = parse("mod m { use foo::{Bar as } fn inside() {} } fn top() {}\n");
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0103")
+    );
+
+    let Decl::Module(module) = &output.program.declarations[0] else {
+        panic!("module")
+    };
+    assert!(module.uses.is_empty());
+    assert!(module.declarations.iter().any(|decl| {
+        matches!(decl, Decl::Function(function) if function.name.text == "inside")
+    }));
+    assert!(has_function(&output, "top"));
+}
+
+#[test]
 fn prohibited_surfaces_fail_loud_without_ast_carriers() {
     let output = parse(
         r#"
@@ -541,6 +587,40 @@ fn raw_string_patterns_fail_without_becoming_string_patterns() {
             && diagnostic.message == "Raw string literals are not supported in patterns"
     }));
     assert!(has_function(&output, "after"));
+}
+
+#[test]
+fn return_expression_is_restricted_to_match_and_catch_arms() {
+    let invalid = parse("fn bad() { let value = return 1 }\nfn after() {}\n");
+    assert!(invalid.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0101" && diagnostic.message == "Expected expression, found 'return'"
+    }));
+    let bad = invalid
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Function(function) if function.name.text == "bad" => Some(function),
+            _ => None,
+        })
+        .expect("bad function");
+    let Expr::Block { statements, .. } = &bad.body else {
+        panic!("block")
+    };
+    assert!(statements.is_empty());
+    assert!(has_function(&invalid, "after"));
+
+    let match_return = tail_expression("match 1 { _ => return 1 }");
+    let Expr::Match { arms, .. } = match_return else {
+        panic!("match")
+    };
+    assert!(matches!(arms[0].body, Expr::Return { .. }));
+
+    let catch_return = tail_expression("risky() catch { _ => return 2 }");
+    let Expr::Catch { arms, .. } = catch_return else {
+        panic!("catch")
+    };
+    assert!(matches!(arms[0].body, Expr::Return { .. }));
 }
 
 #[test]
@@ -668,6 +748,37 @@ fn removed_syntax_contracts_fail_stably_and_recover() {
             "recovery failed for {label}"
         );
     }
+}
+
+#[test]
+fn impl_extern_recovery_preserves_contextual_type_and_method_members() {
+    let output = parse(
+        "struct Box {}\nimpl Box { extern fn raw(value: Int) -> Int\n type Item = Int\n fn okay() {} }\nfn after() {}\n",
+    );
+    assert!(output.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0101"
+            && diagnostic.message == "Impl-member extern functions are not part of Vorton 0.1"
+    }));
+    let impl_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Impl(value) => Some(value),
+            _ => None,
+        })
+        .expect("impl");
+    assert_eq!(impl_decl.members.len(), 2);
+    let ImplMember::AssociatedType(associated) = &impl_decl.members[0] else {
+        panic!("associated type")
+    };
+    assert_eq!(associated.name.text, "Item");
+    assert!(matches!(associated.value, Some(TypeExpr::Named { .. })));
+    let ImplMember::Method(method) = &impl_decl.members[1] else {
+        panic!("method")
+    };
+    assert_eq!(method.name.text, "okay");
+    assert!(has_function(&output, "after"));
 }
 
 #[test]
@@ -868,6 +979,66 @@ fn selected_ast_nodes_keep_surface_shapes() {
         panic!("match")
     };
     assert!(matches!(arms[0].pattern, Pattern::NamedConstructor { .. }));
+}
+
+#[test]
+fn remaining_surface_shapes_have_direct_structural_coverage() {
+    assert!(matches!(tail_expression("3.5"), Expr::Float { .. }));
+    assert!(matches!(tail_expression("()"), Expr::Unit { .. }));
+
+    let for_loop = parse("fn main() { for item in items {} }\n");
+    assert!(for_loop.diagnostics.is_empty());
+    let Decl::Function(function) = &for_loop.program.declarations[0] else {
+        panic!("function")
+    };
+    let Expr::Block { statements, .. } = &function.body else {
+        panic!("block")
+    };
+    let Stmt::For { binding, .. } = &statements[0] else {
+        panic!("for")
+    };
+    let ForBinding::Name(name) = binding else {
+        panic!("name binding")
+    };
+    assert_eq!(name.text, "item");
+
+    let effects = parse("fn effects() with {mut<Int>, unsafe} {}\n");
+    assert!(effects.diagnostics.is_empty(), "{:#?}", effects.diagnostics);
+    let Decl::Function(function) = &effects.program.declarations[0] else {
+        panic!("function")
+    };
+    let effect_set = function.effects.as_ref().expect("effect set");
+    assert!(matches!(
+        effect_set.effects[0].name,
+        EffectName::Mutation(_)
+    ));
+    assert!(matches!(effect_set.effects[1].name, EffectName::Unsafe(_)));
+
+    let patterns = tail_expression("match value { 1.5 => 0, \"x\" => 1, true => 2, _ => 3 }");
+    let Expr::Match { arms, .. } = patterns else {
+        panic!("match")
+    };
+    assert!(matches!(
+        arms[0].pattern,
+        Pattern::Literal {
+            literal: PatternLiteral::Float(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        arms[1].pattern,
+        Pattern::Literal {
+            literal: PatternLiteral::String(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        arms[2].pattern,
+        Pattern::Literal {
+            literal: PatternLiteral::Boolean(true),
+            ..
+        }
+    ));
 }
 
 #[test]
