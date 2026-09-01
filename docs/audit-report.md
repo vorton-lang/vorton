@@ -1,6 +1,9 @@
 # Audit Report
 
-> 活的 bug 看板。修复后删除条目，只在 git commit message 留记录。
+> [!IMPORTANT]
+> **已冻结（迁仓后）**：本文件只供历史检索，不再表达活动范围、状态或优先级。当前可执行工作的唯一真值是 [`vorton-lang/vorton` GitHub Issues](https://github.com/vorton-lang/vorton/issues)；禁止继续维护正文或分配新的 B/A/D 编号。
+
+> 迁仓前历史 bug 看板；以下格式仅供历史阅读。
 > 条目格式：`### #xxx <标题> [严重度] [dispatch] [状态]`
 > dispatch 标记：`mechanical`（路径唯一，可直接执行）/ `judgment`（需要跨模块推理、Argument 或独立 review）
 > 状态流转：`open` → `doing` → 删除
