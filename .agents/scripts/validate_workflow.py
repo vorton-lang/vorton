@@ -16,11 +16,19 @@ REQUIRED_FILES = (
     "AGENTS.md",
     "README.md",
     "docs/workflow.md",
-    "docs/backlog.md",
-    "docs/audit-report.md",
     ".github/workflows/test.yml",
     ".github/ISSUE_TEMPLATE/work-item.md",
     ".github/ISSUE_TEMPLATE/config.yml",
+)
+
+RETIRED_MARKDOWN_BOARDS = (
+    "docs/backlog.md",
+    "docs/audit-report.md",
+)
+
+RETIRED_BRAND = re.compile(
+    r"(?<![A-Za-z0-9_.])ring(?![A-Za-z0-9_])",
+    re.IGNORECASE,
 )
 
 ALLOWED_LABELS = {
@@ -85,7 +93,7 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
         (
             "# Vorton",
             REPOSITORY_URL,
-            "当前工程路线是在 Rust 宿主上重建编译器",
+            "当前工程路线是在 Rust 宿主上重建 Vorton 编译器",
             "只作迁移蓝本、语义 oracle 和已知缺陷复现",
             "python .agents/scripts/validate_workflow.py",
             ISSUES_URL,
@@ -97,7 +105,6 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
         "README.md",
         readme,
         (
-            "编译器已经用 Ring 自举",
             "从 tracked C bootstrap anchor 构建编译器",
             "tests/run_tests.py",
             "全部默认门禁",
@@ -112,11 +119,11 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
         (
             "# Vorton Agent Entry",
             REPOSITORY_URL,
-            "Vorton 当前以 Rust 实现 Ring 编译器",
+            "Vorton 当前以 Rust 实现编译器",
             "它们不是当前 bootstrap、CI 或发布 authority",
             "Issue #N → 一个 active PR → PR head branch → merge",
             "Ideas Discussion #1",
-            "已冻结，只供迁仓前历史检索",
+            "迁仓前 Markdown 看板已从当前树删除，历史只查 Git",
         ),
         errors,
     )
@@ -124,7 +131,6 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
         "AGENTS.md",
         agents,
         (
-            "# Ring-lang Agent Entry",
             "当前只规划Vorton迁仓",
             "从tracked C anchor构建本地compiler",
         ),
@@ -138,6 +144,7 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
         (
             "仓库已经迁移到",
             REPOSITORY_URL,
+            "Rust 宿主上重建 Vorton 编译器",
             "Issue #N → 一个 active PR → PR head branch → merge → Issue 自动关闭",
             "PR 未 merge 而关闭：Issue 保持 open",
             "Linked draft PR：进行中",
@@ -153,6 +160,7 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
             "中断恢复时先按已保存 URL 与远端 Issue 对账",
             "当前 CI 只运行 `python .agents/scripts/validate_workflow.py`",
             "Automatically delete head branches",
+            "迁仓前 Markdown backlog/audit 已从当前树删除",
         ),
         errors,
     )
@@ -184,6 +192,15 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
         errors.append(
             "docs/workflow.md contains unsupported labels: " + ", ".join(extra_labels)
         )
+
+
+def validate_active_branding(files: dict[str, str], errors: list[str]) -> None:
+    for relative in ("AGENTS.md", "README.md", "docs/workflow.md"):
+        for line_number, line in enumerate(files[relative].splitlines(), 1):
+            if RETIRED_BRAND.search(line):
+                errors.append(
+                    f"{relative}:{line_number} contains the retired standalone brand"
+                )
 
 
 def validate_ci(ci: str, errors: list[str]) -> None:
@@ -291,31 +308,24 @@ def validate_template_config(config: str, errors: list[str]) -> None:
         errors.append("config.yml Ideas link must explain its purpose")
 
 
-def validate_frozen_headers(files: dict[str, str], errors: list[str]) -> None:
-    for relative, title in (
-        ("docs/backlog.md", "# Backlog"),
-        ("docs/audit-report.md", "# Audit Report"),
-    ):
-        text = files[relative]
-        first_lines = "\n".join(text.splitlines()[:8])
-        if not text.startswith(f"{title}\n"):
-            errors.append(f"{relative} must retain its historical title")
-        for fragment in ("[!IMPORTANT]", "已冻结（迁仓后）", ISSUES_URL, "B/A/D 编号"):
-            if fragment not in first_lines:
-                errors.append(f"{relative} frozen header missing: {fragment}")
+def validate_retired_boards_absent(errors: list[str]) -> None:
+    for relative in RETIRED_MARKDOWN_BOARDS:
+        if (ROOT / relative).exists():
+            errors.append(f"retired Markdown board must remain deleted: {relative}")
 
 
 def validate() -> list[str]:
     errors: list[str] = []
+    validate_retired_boards_absent(errors)
     files = {relative: read(relative, errors) for relative in REQUIRED_FILES}
     if errors:
         return errors
 
     validate_current_truth(files, errors)
+    validate_active_branding(files, errors)
     validate_ci(files[".github/workflows/test.yml"], errors)
     validate_issue_template(files[".github/ISSUE_TEMPLATE/work-item.md"], errors)
     validate_template_config(files[".github/ISSUE_TEMPLATE/config.yml"], errors)
-    validate_frozen_headers(files, errors)
     return errors
 
 

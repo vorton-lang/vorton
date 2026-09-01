@@ -6,9 +6,9 @@
 
 ## 当前工程路线
 
-- 当前实现路线是在 Rust 宿主上重建 Ring 编译器，先闭合 `source → token → AST → diagnostic` 最小纵切，再按 Issue 推进 checker、IR、ownership、C11 后端、CLI 与发布。
+- 当前实现路线是在 Rust 宿主上重建 Vorton 编译器，先闭合 `source → token → AST → diagnostic` 最小纵切，再按 Issue 推进 checker、IR、ownership、C11 后端、CLI 与发布。
 - Rust workspace、compiler build 与测试门只有在对应实现进入仓库后才成立；当前 CI 不宣称 compiler green。
-- 旧 Ring compiler、tracked C、C11 self-host/fixed point、runtime 与旧测试只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 bootstrap、CI 或发布 authority。
+- 迁仓前的 compiler snapshot、tracked C、C11 self-host/fixed point、runtime 与旧测试只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 bootstrap、CI 或发布 authority。
 - Self-host 已后置；只有语言与外部宿主编译器稳定后，用户作出新决定才可恢复。
 
 ## 活动真值与唯一工作链
@@ -25,7 +25,7 @@ Issue #N → 一个 active PR → PR head branch → merge → Issue 自动关�
 - Branch 优先从 Issue 的 Development 入口创建以建立关联；仓库启用 Automatically delete head branches，merge 后由 GitHub 删除 head branch。
 - Worktree 只是本机可选 checkout 方式，不是任务、状态、authority 或 handoff 真值。
 - GitHub Project 若启用，只作 GitHub 对象的自动视图，不保存第二套状态。
-- `docs/backlog.md` 与 `docs/audit-report.md` 已冻结。迁仓后的新工作不分配 B/A/D 编号，也不要求同步 Markdown 看板或本地元数据。
+- 迁仓前 Markdown backlog/audit 已从当前树删除，历史只查 Git。新工作不分配 B/A/D 编号，也不要求同步 Markdown 看板或本地元数据。
 
 ## GitHub 状态解释
 
