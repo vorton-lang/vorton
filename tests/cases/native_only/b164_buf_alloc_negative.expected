@@ -1,2 +1,2 @@
 // EXPECT_PANIC
-ring panic: ring_buf_alloc negative allocation request (request=-1)
+vorton panic: vorton_buf_alloc negative allocation request (request=-1)

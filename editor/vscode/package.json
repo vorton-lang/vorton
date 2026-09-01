@@ -1,9 +1,9 @@
 {
-  "name": "ring-lang",
-  "displayName": "Ring Language",
-  "description": "Ring-lang syntax highlighting and language configuration",
+  "name": "vorton-lang",
+  "displayName": "Vorton Language",
+  "description": "vorton-lang syntax highlighting and language configuration",
   "version": "0.1.0",
-  "publisher": "ring-lang",
+  "publisher": "vorton-lang",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -13,22 +13,22 @@
   "contributes": {
     "languages": [
       {
-        "id": "ring",
+        "id": "vorton",
         "aliases": [
-          "Ring",
-          "ring"
+          "Vorton",
+          "vorton"
         ],
         "extensions": [
-          ".ring"
+          ".vorton"
         ],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "ring",
-        "scopeName": "source.ring",
-        "path": "./syntaxes/ring.tmLanguage.json"
+        "language": "vorton",
+        "scopeName": "source.vorton",
+        "path": "./syntaxes/vorton.tmLanguage.json"
       }
     ]
   }

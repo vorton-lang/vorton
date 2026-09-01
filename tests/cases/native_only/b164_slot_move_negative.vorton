@@ -1,0 +1,4 @@
+fn main() {
+    let slots: Ptr<Int> = vorton_slot_alloc(0)
+    vorton_slot_move(slots, 0, slots, 0, -1)
+}

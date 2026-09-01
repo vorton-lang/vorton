@@ -1,0 +1,85 @@
+// B-104 D1 rule ④ regression: REMOVE / CLEAR drop owned slot contents.
+//
+// THE CHANGE THIS PINS: pure-Vorton Map.remove/clear and List.clear release each
+// occupied key/value or element via vorton_slot_drop (owned vorton_slot_take plus
+// vorton_drop). Map<Int, V> uses the same generic Map path. New slots acquire
+// ownership at vorton_slot_write, while overwrite uses borrowed
+// vorton_slot_replace; drop_map/drop_list settle slots still live at end-of-life.
+// The low-level Set clear bridges remain RC-neutral because their elements are
+// value-inlined std::string/int64 copies.
+//
+// THE UAF RISK THIS PINS (rc>1 sharing): `m[k]` gets an owned +1 from
+// vorton_slot_read; `xs[i]` gets its +1 when the low-level borrow escapes into the
+// binding. The remove/clear slot drop must DECREMENT, not free; expected output
+// pins saved content and ASan pins liveness.
+// Containers must stay alive and reusable after clear (insert/push again).
+
+fn map_remove_shared() -> Str {
+    let mut m = map_from([("a", "va"), ("b", "vb")])
+    let saved = m["a"]          // owned vorton_slot_read result (rc 2)
+    m.remove("a")               // vorton_slot_drop decrements rc 2→1
+    m.remove("ghost")           // miss: no-op, nothing to drop
+    "${saved} len=${m.len()} hasA=${m.contains_key("a")} b=${m["b"]}"
+}
+
+fn map_remove_unshared() -> Str {
+    let mut m = map_from([("x", "vx"), ("y", "vy")])
+    m.remove("x")               // unshared value (rc=1) → freed: the reclaimed leak
+    "len=${m.len()} y=${m["y"]}"
+}
+
+fn map_int_remove_shared() -> Str {
+    let mut m = map_from([(1, "one"), (2, "two")])
+    let saved = m[1]
+    m.remove(1)                 // same generic pure-Vorton Map.remove path
+    "${saved} len=${m.len()} two=${m[2]}"
+}
+
+fn list_clear_shared() -> Str {
+    let mut xs = ["p", "q", "r"]
+    let saved = xs[2]           // escape-Clone dup (rc 2)
+    xs.clear()                  // drops all three elements; saved survives (rc 2→1)
+    xs.push("s")                // list reusable after clear
+    "${saved} len=${xs.len()} s=${xs[0]}"
+}
+
+fn map_clear_shared() -> Str {
+    let mut m = map_from([("x", "vx"), ("y", "vy")])
+    let saved = m["y"]
+    m.clear()                   // drops both values; saved survives
+    m.insert("z", "vz")         // map reusable after clear
+    "${saved} len=${m.len()} z=${m["z"]}"
+}
+
+fn map_int_clear_shared() -> Str {
+    let mut m = map_from([(7, "seven"), (8, "eight")])
+    let saved = m[7]
+    m.clear()
+    "${saved} len=${m.len()}"
+}
+
+fn clear_in_loop() -> Str {
+    // Unbounded reclaim: fill + clear repeatedly — pre-fix every element leaked;
+    // ASan must stay clean across all the drops.
+    let mut xs: List<Str> = []
+    let mut m = map_new()
+    for i in 0..50 {
+        xs.push("e${i}")
+        xs.push("f${i}")
+        xs.clear()
+        m.insert("k", "v${i}")
+        m.remove("k")
+    }
+    "xs=${xs.len()} m=${m.len()}"
+}
+
+fn main() {
+    print("map_rm: ${map_remove_shared()}")        // map_rm: va len=1 hasA=false b=vb
+    print("map_rm2: ${map_remove_unshared()}")     // map_rm2: len=1 y=vy
+    print("mi_rm: ${map_int_remove_shared()}")     // mi_rm: one len=1 two=two
+    print("list_clear: ${list_clear_shared()}")    // list_clear: r len=1 s=s
+    print("map_clear: ${map_clear_shared()}")      // map_clear: vy len=1 z=vz
+    print("mi_clear: ${map_int_clear_shared()}")   // mi_clear: seven len=0
+    print("loop: ${clear_in_loop()}")              // loop: xs=0 m=0
+    print("done")
+}

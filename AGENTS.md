@@ -13,7 +13,7 @@
 
 - Vorton 当前以 Rust 实现编译器；首个纵切是 `source → token → AST → diagnostic`，随后按 Issue 逐步闭合 checker、IR、ownership、C11 后端与 CLI。
 - Rust workspace 与真实 compiler build/test gate 由对应实现 Issue 建立。在它们进入仓库前，不得声称当前 compiler、Cargo 或发布门已通过。
-- `compiler/*.ring`、`compiler/dist-c/main.c`、`ring_runtime.cpp`、`std/` 与 `tests/run_tests.py` 随完整历史保留，只作迁移蓝本、语义 oracle 与已知缺陷复现；它们不是当前 bootstrap、CI 或发布 authority。
+- `compiler/*.vorton`、`compiler/dist-c/main.c`、`vorton_runtime.cpp`、`std/` 与 `tests/run_tests.py` 随完整历史保留，只作迁移蓝本、语义 oracle 与已知缺陷复现；它们不是当前 bootstrap、CI 或发布 authority。
 - 目标管线为 Lexer → Parser → AST → Checker（HM + effects）→ HIR → Core/Flow ResourcePlanner → RcIR → C11 → native。
 - AST 忠实保留 source + Span；HIR、Core、Flow 与 RcIR 是独立阶段。跨阶段 identity、effect、trait、slot 与 ABI 契约必须来自共享 exact authority，禁止 backend/runtime 猜名字。
 - 新增或删除 AST/HIR/Core/Flow/RcIR 变体时，必须闭合所有 producer、copy/rebuild、validator 与 consumer；遗漏必须 fail closed。
@@ -39,7 +39,7 @@
 
 - Self-host 已后置到语言与外部宿主编译器稳定后的新用户决定；当前不得恢复连续 bootstrap 门。
 - C bridge 只提供安全 Vorton 无法表达的 raw-memory/OS 边界；普通 Vorton callable 与 extern 走统一既定 ABI，不新增 name table 或 backend 手工特判。
-- Slot 所有权：`ring_slot_read` = peek + dup；`ring_slot_take` = move 并清空；`ring_slot_write` = 空 slot 接管；`ring_slot_replace` = 替换并 drop 旧值；`ring_slot_drop` = take + drop。
+- Slot 所有权：`vorton_slot_read` = peek + dup；`vorton_slot_take` = move 并清空；`vorton_slot_write` = 空 slot 接管；`vorton_slot_replace` = 替换并 drop 旧值；`vorton_slot_drop` = take + drop。
 - List/Map/Option 固定 runtime type/drop 必须与生成 struct drop 分工唯一；Set/StringBuilder 按普通 Vorton struct 处理。无字段 enum ctor 产生 fresh box，必须按 exact ctor identity 判断。
 
 ## ASan oracle 配方

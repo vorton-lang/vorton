@@ -1,0 +1,24 @@
+use forward::{choose as extern_choose, choose_unit}
+use provider::{choose as vorton_choose}
+use constants::{choose as const_choose}
+
+fn apply(f: fn(Int) -> Int, value: Int) -> Int {
+    f(value)
+}
+
+fn call_unit(f: fn(Int) -> Unit, value: Int) -> Unit {
+    f(value)
+}
+
+fn main() {
+    // Every source leaf is `choose`, but exact DefId provenance distinguishes
+    // the project extern, Vorton definition, and callable const getter.
+    print(apply(extern_choose, 40))
+    print(apply(vorton_choose, 40))
+    print(apply(const_choose, 40))
+
+    // The unrenamed import covers the non-alias project extern-forward path;
+    // its first-class thunk must normalise Unit to the closure ABI's null.
+    call_unit(choose_unit, 0)
+    print("unit-ok")
+}

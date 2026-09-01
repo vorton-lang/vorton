@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "matrix": "Ring 0.1 ownership/Core/effect/extern vertical",
+  "matrix": "Vorton 0.1 ownership/Core/effect/extern vertical",
   "scope": {
     "real_consumers_only": true,
     "post_0_1_cases": 0,
@@ -10,7 +10,7 @@
   "fixtures": [
     {
       "id": "A1",
-      "path": "single/a_deep_clone_collections.ring",
+      "path": "single/a_deep_clone_collections.vorton",
       "covers": [
         "List<List<Int>> deep clone",
         "Option<List<Int>> deep clone",
@@ -26,7 +26,7 @@
     },
     {
       "id": "A2",
-      "path": "single/a_deep_clone_generic_bound.ring",
+      "path": "single/a_deep_clone_generic_bound.vorton",
       "covers": [
         "generic T: Clone bound",
         "derived generic deep clone",
@@ -40,7 +40,7 @@
     },
     {
       "id": "A3",
-      "path": "single/a_missing_clone_bound.ring",
+      "path": "single/a_missing_clone_bound.vorton",
       "covers": ["missing generic Clone bound fails loud"],
       "expected": {
         "phase": "check",
@@ -51,7 +51,7 @@
     },
     {
       "id": "A4",
-      "path": "single/a_resource_clone_conflict.ring",
+      "path": "single/a_resource_clone_conflict.vorton",
       "covers": ["Drop and Clone are mutually exclusive for Resource"],
       "expected": {
         "phase": "check",
@@ -62,7 +62,7 @@
     },
     {
       "id": "B1",
-      "path": "single/b_type_resource_matrix.ring",
+      "path": "single/b_type_resource_matrix.vorton",
       "covers": [
         "direct Resource reuse after generic consume is rejected",
         "Wrapper<Resource> reuse after generic consume is rejected",
@@ -96,7 +96,7 @@
     },
     {
       "id": "B2",
-      "path": "single/b_ptr_resource_negative_control.ring",
+      "path": "single/b_ptr_resource_negative_control.vorton",
       "covers": ["Ptr<Resource> does not inherit pointee TypeResource ownership"],
       "expected": {
         "phase": "native",
@@ -106,7 +106,7 @@
     },
     {
       "id": "B3",
-      "path": "single/b_reuse_after_transitive_consume.ring",
+      "path": "single/b_reuse_after_transitive_consume.vorton",
       "covers": ["Wrapper<Resource> becomes unavailable after an owning sink"],
       "expected": {
         "phase": "check",
@@ -119,7 +119,7 @@
     },
     {
       "id": "B4",
-      "path": "single/b_ptr_container_cleanup.ring",
+      "path": "single/b_ptr_container_cleanup.vorton",
       "covers": [
         "Ptr is an exact foreign-containment seed without extern declarations",
         "List/Option/Map/Box/struct propagate Ptr containment",
@@ -133,7 +133,7 @@
     },
     {
       "id": "B5",
-      "path": "single/b_field_projection_own_reject.ring",
+      "path": "single/b_field_projection_own_reject.vorton",
       "covers": [
         "ordinary Own projection of a logical Resource field fails loud",
         "diagnostic is keyed by the exact projected place",
@@ -148,7 +148,7 @@
     },
     {
       "id": "B6",
-      "path": "single/b_field_projection_share_clone.ring",
+      "path": "single/b_field_projection_share_clone.vorton",
       "covers": [
         "borrowed Str parameter remains caller-owned after return",
         "ordinary Own projection of a shareable field clones the result slot",
@@ -163,7 +163,7 @@
     },
     {
       "id": "B7",
-      "path": "single/b_pattern_projection_ownership.ring",
+      "path": "single/b_pattern_projection_ownership.vorton",
       "covers": [
         "matched Option payload binding is materialized by exact projection",
         "nested Option tuple bindings preserve their projection path",
@@ -177,7 +177,7 @@
     },
     {
       "id": "B8",
-      "path": "single/b_try_caught_result.ring",
+      "path": "single/b_try_caught_result.vorton",
       "covers": [
         "Try protected success keeps its fresh result on the success successor",
         "Try caught edge creates one fresh error result",
@@ -192,7 +192,7 @@
     },
     {
       "id": "B9",
-      "path": "single/b_pattern_projection_own_reuse.ring",
+      "path": "single/b_pattern_projection_own_reuse.vorton",
       "covers": [
         "Own pattern extraction propagates result demand to its aggregate parameter",
         "the caller transfers Option<Resource> ownership into extract",
@@ -207,7 +207,7 @@
     },
     {
       "id": "C1",
-      "path": "single/c_exact_callable_carriers.ring",
+      "path": "single/c_exact_callable_carriers.vorton",
       "covers": [
         "named function value",
         "lambda",
@@ -226,7 +226,7 @@
     },
     {
       "id": "C2",
-      "path": "single/c_dead_callable_candidate.ring",
+      "path": "single/c_dead_callable_candidate.vorton",
       "covers": [
         "entry-unreachable Return cannot widen a callable result",
         "dead owning callable does not pollute a reachable borrowing call",
@@ -240,7 +240,7 @@
     },
     {
       "id": "D1",
-      "path": "single/d_handled_effect_hof.ring",
+      "path": "single/d_handled_effect_hof.vorton",
       "covers": [
         "polymorphic HOF effect formal",
         "effect substitution",
@@ -256,14 +256,14 @@
     },
     {
       "id": "D2",
-      "path": "single/d_system_effect_hof.ring",
+      "path": "single/d_system_effect_hof.vorton",
       "covers": [
         "closed pure HOF",
         "closed console HOF",
         "pure and console same-signature callable identity",
-        "pure and system-only Ring callables execute through the uniform empty context",
+        "pure and system-only Vorton callables execute through the uniform empty context",
         "SystemEffectRef contributes zero handled context entries",
-        "system extern function value uses a Ring wrapper without changing the HostImport leaf ABI"
+        "system extern function value uses a Vorton wrapper without changing the HostImport leaf ABI"
       ],
       "expected": {
         "phase": "native",
@@ -273,7 +273,7 @@
     },
     {
       "id": "D3",
-      "path": "single/d_generalized_effect_tail.ring",
+      "path": "single/d_generalized_effect_tail.vorton",
       "covers": [
         "one open HOF formal independently instantiates pure, one-effect, and two-effect callbacks",
         "the two handled effects share an operation signature but retain exact entries",
@@ -288,7 +288,7 @@
     },
     {
       "id": "D4",
-      "path": "single/d_custom_effect_extern.ring",
+      "path": "single/d_custom_effect_extern.vorton",
       "covers": ["raw extern ABI cannot carry custom handled evidence"],
       "expected": {
         "phase": "check",
@@ -299,18 +299,18 @@
     },
     {
       "id": "D5",
-      "path": "single/d_effect_default_operation.ring",
-      "covers": ["Ring 0.1 effect operations are signature-only"],
+      "path": "single/d_effect_default_operation.vorton",
+      "covers": ["Vorton 0.1 effect operations are signature-only"],
       "expected": {
         "phase": "check",
         "status": "fail",
         "diagnostic_code": "E0103",
-        "diagnostic_contains": "Effect operation bodies are not supported in Ring 0.1"
+        "diagnostic_contains": "Effect operation bodies are not supported in Vorton 0.1"
       }
     },
     {
       "id": "D7",
-      "path": "single/d_effect_header_composites.ring",
+      "path": "single/d_effect_header_composites.vorton",
       "covers": [
         "Box<fn> actual and fallback branches preserve distinct exact effects and results",
         "positional and named enum fields preserve distinct exact callable effects and results",
@@ -328,11 +328,11 @@
     },
     {
       "id": "D8",
-      "path": "modules/d_effect_order_left/main.ring",
+      "path": "modules/d_effect_order_left/main.vorton",
       "support_paths": [
-        "modules/d_effect_order_left/base.ring",
-        "modules/d_effect_order_left/alpha.ring",
-        "modules/d_effect_order_left/beta.ring"
+        "modules/d_effect_order_left/base.vorton",
+        "modules/d_effect_order_left/alpha.vorton",
+        "modules/d_effect_order_left/beta.vorton"
       ],
       "parity_group": "D-effect-dependency-order",
       "covers": [
@@ -349,11 +349,11 @@
     },
     {
       "id": "D9",
-      "path": "modules/d_effect_order_right/main.ring",
+      "path": "modules/d_effect_order_right/main.vorton",
       "support_paths": [
-        "modules/d_effect_order_right/base.ring",
-        "modules/d_effect_order_right/alpha.ring",
-        "modules/d_effect_order_right/beta.ring"
+        "modules/d_effect_order_right/base.vorton",
+        "modules/d_effect_order_right/alpha.vorton",
+        "modules/d_effect_order_right/beta.vorton"
       ],
       "parity_group": "D-effect-dependency-order",
       "covers": [
@@ -371,7 +371,7 @@
     },
     {
       "id": "D10",
-      "path": "single/d_recursive_generic_self.ring",
+      "path": "single/d_recursive_generic_self.vorton",
       "covers": [
         "ordinary generic self recursion keeps one monomorphic in-group type",
         "the closed function scheme instantiates independently for Int and Str",
@@ -380,12 +380,12 @@
       "expected": {
         "phase": "native",
         "status": "pass",
-        "stdout": "D_RECURSIVE_GENERIC_SELF_OK:5/ring/12\n"
+        "stdout": "D_RECURSIVE_GENERIC_SELF_OK:5/vorton/12\n"
       }
     },
     {
       "id": "D11",
-      "path": "single/d_recursive_top_level_mutual.ring",
+      "path": "single/d_recursive_top_level_mutual.vorton",
       "covers": [
         "top-level mutual recursion closes as one SCC",
         "peer calls share callback type and effect constraints",
@@ -399,7 +399,7 @@
     },
     {
       "id": "D12",
-      "path": "single/d_recursive_inline_module.ring",
+      "path": "single/d_recursive_inline_module.vorton",
       "covers": [
         "inline-module mutual recursion closes as one SCC",
         "private peer recursion preserves the public entry callback effect formal",
@@ -413,7 +413,7 @@
     },
     {
       "id": "D13",
-      "path": "single/d_recursive_impl_methods.ring",
+      "path": "single/d_recursive_impl_methods.vorton",
       "covers": [
         "inherent impl singleton self recursion",
         "inherent impl mutual-method recursion",
@@ -428,10 +428,10 @@
     },
     {
       "id": "D14",
-      "path": "single/d_polymorphic_recursion_rejected.ring",
+      "path": "single/d_polymorphic_recursion_rejected.vorton",
       "covers": [
         "one recursive provisional type cannot instantiate from T to List<T>",
-        "Ring 0.1 polymorphic recursion fails through the existing occurs-check diagnostic"
+        "Vorton 0.1 polymorphic recursion fails through the existing occurs-check diagnostic"
       ],
       "expected": {
         "phase": "check",
@@ -442,7 +442,7 @@
     },
     {
       "id": "D15",
-      "path": "single/d_pending_anonymous_effect_owner.ring",
+      "path": "single/d_pending_anonymous_effect_owner.vorton",
       "covers": [
         "outside-created effectful closure borrows evidence at its later call",
         "inside-created escaped closure uses a different current handler without stale evidence",
@@ -461,7 +461,7 @@
     },
     {
       "id": "D16",
-      "path": "single/d_generic_effect_instantiation_order.ring",
+      "path": "single/d_generic_effect_instantiation_order.vorton",
       "covers": [
         "one generic callable carries fixed mut<T> plus an open callback tail",
         "Int/mut<Str> and Str/mut<Int> instances reverse same-kind atom order",
@@ -471,12 +471,12 @@
       "expected": {
         "phase": "native",
         "status": "pass",
-        "stdout": "D_GENERIC_EFFECT_ORDER_OK:5/ring\n"
+        "stdout": "D_GENERIC_EFFECT_ORDER_OK:5/vorton\n"
       }
     },
     {
       "id": "D17",
-      "path": "single/d_dynamic_evidence_missing_handler.ring",
+      "path": "single/d_dynamic_evidence_missing_handler.vorton",
       "covers": [
         "closure creation under a handler does not capture handled evidence",
         "calling the escaped closure without a current handler fails loud"
@@ -490,7 +490,7 @@
     },
     {
       "id": "D18",
-      "path": "single/d_open_handled_type_formal.ring",
+      "path": "single/d_open_handled_type_formal.vorton",
       "covers": [
         "direct NestedPort<T> runtime token rejects its callable type formal"
       ],
@@ -503,7 +503,7 @@
     },
     {
       "id": "D19",
-      "path": "single/d_open_handled_nested_list.ring",
+      "path": "single/d_open_handled_nested_list.vorton",
       "covers": [
         "NestedPort<List<T>> recursively rejects a nested type formal"
       ],
@@ -516,7 +516,7 @@
     },
     {
       "id": "D20",
-      "path": "single/d_open_handled_factory_lambda.ring",
+      "path": "single/d_open_handled_factory_lambda.vorton",
       "covers": [
         "generic factory cannot hide Probe<T> in an escaped lambda",
         "a later closed call cannot legalize the factory owner's open token"
@@ -530,7 +530,7 @@
     },
     {
       "id": "D21",
-      "path": "single/d_open_handled_nested_fn_row.ring",
+      "path": "single/d_open_handled_nested_fn_row.vorton",
       "covers": [
         "handled token type argument rejects a nested function open effect formal"
       ],
@@ -543,7 +543,7 @@
     },
     {
       "id": "D22",
-      "path": "single/d_late_constrained_mono_closure.ring",
+      "path": "single/d_late_constrained_mono_closure.vorton",
       "covers": [
         "provisional anonymous drain does not finalize a same-owner monomorphic token",
         "a later handle/result annotation closes the callback instance before A1 finalization",
@@ -557,7 +557,7 @@
     },
     {
       "id": "E1",
-      "path": "single/e_user_extern_same_spelling.ring",
+      "path": "single/e_user_extern_same_spelling.vorton",
       "covers": [
         "user externs may reuse all ten compiler bridge leaf spellings",
         "typed source identity prevents manifest capture"
@@ -570,7 +570,7 @@
     },
     {
       "id": "E2",
-      "path": "single/e_extern_manifest_inventory_runtime.ring",
+      "path": "single/e_extern_manifest_inventory_runtime.vorton",
       "covers": [
         "slot alloc",
         "slot dealloc",
@@ -592,7 +592,7 @@
     },
     {
       "id": "F1",
-      "path": "single/f_single_project_parity.ring",
+      "path": "single/f_single_project_parity.vorton",
       "parity_group": "F-single-project",
       "covers": ["single-file ownership entry"],
       "expected": {
@@ -603,8 +603,8 @@
     },
     {
       "id": "F2",
-      "path": "modules/f_single_project_parity/main.ring",
-      "support_paths": ["modules/f_single_project_parity/model.ring"],
+      "path": "modules/f_single_project_parity/main.vorton",
+      "support_paths": ["modules/f_single_project_parity/model.vorton"],
       "parity_group": "F-single-project",
       "covers": ["project ownership entry", "literal output parity with F1"],
       "expected": {
@@ -620,10 +620,10 @@
       "id": "D6",
       "requirement": "raw/unowned effect tail fails closed at the Core boundary",
       "source_fixture": null,
-      "reason": "A legal Ring source tail is generalized under an ExecutableRef; ordinary source cannot construct the invalid raw Core state without becoming a source-string oracle.",
+      "reason": "A legal Vorton source tail is generalized under an ExecutableRef; ordinary source cannot construct the invalid raw Core state without becoming a source-string oracle.",
       "input_fixture_id": "D3",
       "mutation": "core-unowned-effect-tail",
-      "expected_panic_exact": "ring panic: Core assembly: unowned raw effect tail crossed Core\n"
+      "expected_panic_exact": "vorton panic: Core assembly: unowned raw effect tail crossed Core\n"
     }
   ]
 }

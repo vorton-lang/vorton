@@ -23,28 +23,12 @@ REQUIRED_FILES = (
     ".agents/skills/repository-execution-decisions/SKILL.md",
     ".agents/skills/discussion/SKILL.md",
     ".agents/skills/steward/SKILL.md",
+    ".agents/scripts/validate_naming.py",
 )
 
 RETIRED_MARKDOWN_BOARDS = (
     "docs/backlog.md",
     "docs/audit-report.md",
-)
-
-RETIRED_BRAND = re.compile(
-    r"(?<![A-Za-z0-9_.])ring(?![A-Za-z0-9_])",
-    re.IGNORECASE,
-)
-
-ACTIVE_BRAND_FILES = (
-    "AGENTS.md",
-    "README.md",
-    "docs/workflow.md",
-    ".github/workflows/test.yml",
-    ".github/ISSUE_TEMPLATE/work-item.md",
-    ".github/ISSUE_TEMPLATE/config.yml",
-    ".agents/skills/repository-execution-decisions/SKILL.md",
-    ".agents/skills/discussion/SKILL.md",
-    ".agents/skills/steward/SKILL.md",
 )
 
 ALLOWED_LABELS = {
@@ -111,6 +95,7 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
             REPOSITORY_URL,
             "当前工程路线是在 Rust 宿主上重建 Vorton 编译器",
             "只作迁移蓝本、语义 oracle 和已知缺陷复现",
+            "python .agents/scripts/validate_naming.py",
             "python .agents/scripts/validate_workflow.py",
             "历史看板保持删除",
             ISSUES_URL,
@@ -175,7 +160,7 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
             "依赖`",
             "manifest 输入数、成功 URL 数与最终唯一 Issue 数",
             "中断恢复时先按已保存 URL 与远端 Issue 对账",
-            "当前 CI 只运行 `python .agents/scripts/validate_workflow.py`",
+            "当前 CI 运行 `python .agents/scripts/validate_naming.py` 与 `python .agents/scripts/validate_workflow.py`",
             "Automatically delete head branches",
             "迁仓前 Markdown backlog/audit 已从当前树删除",
         ),
@@ -209,15 +194,6 @@ def validate_current_truth(files: dict[str, str], errors: list[str]) -> None:
         errors.append(
             "docs/workflow.md contains unsupported labels: " + ", ".join(extra_labels)
         )
-
-
-def validate_active_branding(files: dict[str, str], errors: list[str]) -> None:
-    for relative in ACTIVE_BRAND_FILES:
-        for line_number, line in enumerate(files[relative].splitlines(), 1):
-            if RETIRED_BRAND.search(line):
-                errors.append(
-                    f"{relative}:{line_number} contains the retired standalone brand"
-                )
 
 
 def validate_execution_skills(files: dict[str, str], errors: list[str]) -> None:
@@ -286,6 +262,7 @@ def validate_ci(ci: str, errors: list[str]) -> None:
         (
             "name: Governance",
             "jobs:\n  governance:",
+            "run: python .agents/scripts/validate_naming.py",
             "run: python .agents/scripts/validate_workflow.py",
         ),
         errors,
@@ -301,9 +278,12 @@ def validate_ci(ci: str, errors: list[str]) -> None:
             )
 
     run_commands = re.findall(r"(?m)^\s+run:\s*(\S.*)$", ci)
-    if run_commands != ["python .agents/scripts/validate_workflow.py"]:
+    if run_commands != [
+        "python .agents/scripts/validate_naming.py",
+        "python .agents/scripts/validate_workflow.py",
+    ]:
         errors.append(
-            ".github/workflows/test.yml must run only the repository validator"
+            ".github/workflows/test.yml must run only the naming and workflow validators"
         )
     forbid_fragments(
         ".github/workflows/test.yml",
@@ -398,7 +378,6 @@ def validate() -> list[str]:
         return errors
 
     validate_current_truth(files, errors)
-    validate_active_branding(files, errors)
     validate_execution_skills(files, errors)
     validate_design_authority(files["docs/design.md"], errors)
     validate_ci(files[".github/workflows/test.yml"], errors)

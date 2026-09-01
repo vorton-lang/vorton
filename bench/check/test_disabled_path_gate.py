@@ -326,7 +326,7 @@ class DisabledPathGateTests(unittest.TestCase):
         base, candidate = "a" * 40, "b" * 40
         gate._require_clean_candidate(base, candidate, candidate, base, candidate, b"")
         cases = {
-            "dirty": (candidate, base, candidate, b" M compiler/cli.ring\n"),
+            "dirty": (candidate, base, candidate, b" M compiler/cli.vorton\n"),
             "head_mismatch": (base, base, candidate, b""),
             "candidate_resolution": (candidate, base, "c" * 40, b""),
         }
@@ -506,7 +506,7 @@ class DisabledPathGateTests(unittest.TestCase):
                 returncode=0,
                 stdout=b"",
                 stderr=(
-                    f"{json.dumps(selected_without_suffix)} \"-out:ring.exe\"\n"
+                    f"{json.dumps(selected_without_suffix)} \"-out:vorton.exe\"\n"
                 ).encode("utf-8"),
             )
             with mock.patch.object(gate.subprocess, "run", return_value=completed):
@@ -537,7 +537,7 @@ class DisabledPathGateTests(unittest.TestCase):
             forged = copy.deepcopy(binding)
             forged_stderr = root / "raw" / "forged-linker-probe.stderr"
             forged_stderr.write_bytes(
-                f'{json.dumps(str(root / "other-lld-link"))} "-out:ring.exe"\n'.encode(
+                f'{json.dumps(str(root / "other-lld-link"))} "-out:vorton.exe"\n'.encode(
                     "utf-8"
                 )
             )

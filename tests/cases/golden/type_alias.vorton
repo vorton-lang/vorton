@@ -1,0 +1,65 @@
+// B-100 P1.1: type alias parity — simple type alias, generic type alias,
+// and aliases used in function parameters and return types.
+
+type Pair = (Int, Str)
+
+type IntList = List<Int>
+
+type MaybeInt = Option<Int>
+
+type MaybeVal<T> = Option<T>
+
+fn format_pair(p: Pair) -> Str {
+    let (n, s) = p
+    "${n}:${s}"
+}
+
+fn sum_list(xs: IntList) -> Int {
+    let mut total = 0
+    for x in xs {
+        total = total + x
+    }
+    total
+}
+
+fn unwrap_int(m: MaybeInt) -> Int {
+    m.unwrap_or(0)
+}
+
+fn unwrap_val<T>(m: MaybeVal<T>, default: T) -> T {
+    m.unwrap_or(default)
+}
+
+fn make_pair(n: Int, s: Str) -> Pair {
+    (n, s)
+}
+
+fn main() {
+    // simple type alias (tuple)
+    let p = make_pair(42, "hello")
+    print(format_pair(p))
+
+    // alias used directly
+    let p2: Pair = (99, "world")
+    print(format_pair(p2))
+
+    // List alias
+    let xs: IntList = [1, 2, 3, 4, 5]
+    print(sum_list(xs))
+
+    // Option alias
+    let m1: MaybeInt = some(42)
+    let m2: MaybeInt = none
+    print(unwrap_int(m1))
+    print(unwrap_int(m2))
+
+    // generic alias
+    let v1: MaybeVal<Str> = some("vorton")
+    let v2: MaybeVal<Str> = none
+    print(unwrap_val(v1, "default"))
+    print(unwrap_val(v2, "default"))
+
+    // alias in expression context
+    let nums: IntList = [10, 20, 30]
+    print(sum_list(nums))
+}

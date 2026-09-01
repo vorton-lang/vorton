@@ -1,0 +1,3 @@
+use provider::{choose as vorton_choose}
+
+pub const choose: fn(Int) -> Int = vorton_choose

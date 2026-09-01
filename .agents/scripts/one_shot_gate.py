@@ -31,14 +31,14 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 CONTRACT_VERSION = 1
-ATTEMPT_SCHEMA = "ring.one-shot.attempt.v1"
-VERDICT_SCHEMA = "ring.one-shot.verdict.v1"
+ATTEMPT_SCHEMA = "vorton.one-shot.attempt.v1"
+VERDICT_SCHEMA = "vorton.one-shot.verdict.v1"
 CHAINED_CONTRACT_VERSION = 2
-CHAINED_ATTEMPT_SCHEMA = "ring.one-shot.attempt.v2"
-CHAINED_VERDICT_SCHEMA = "ring.one-shot.verdict.v2"
-CHAIN_SCHEMA = "ring.one-shot.chain.v1"
-AUDIT_SCHEMA = "ring.one-shot.audit.v1"
-ARCHIVE_SCHEMA = "ring.one-shot.archive.v1"
+CHAINED_ATTEMPT_SCHEMA = "vorton.one-shot.attempt.v2"
+CHAINED_VERDICT_SCHEMA = "vorton.one-shot.verdict.v2"
+CHAIN_SCHEMA = "vorton.one-shot.chain.v1"
+AUDIT_SCHEMA = "vorton.one-shot.audit.v1"
+ARCHIVE_SCHEMA = "vorton.one-shot.archive.v1"
 
 ATTEMPT_NAME = "attempt.json"
 VERDICT_NAME = "verdict.json"
@@ -865,7 +865,7 @@ def _load_windows_adapter() -> Callable[..., dict[str, Any]]:
             raise ContractError("Windows adapter changed after chained plan validation")
     if _WINDOWS_ADAPTER is not None:
         return _WINDOWS_ADAPTER
-    spec = importlib.util.spec_from_file_location("ring_windows_job", path)
+    spec = importlib.util.spec_from_file_location("vorton_windows_job", path)
     if spec is None or spec.loader is None:
         raise ContractError(f"cannot import Windows adapter {path}")
     module = importlib.util.module_from_spec(spec)
@@ -1885,7 +1885,7 @@ def run_one_shot(
     )
 
 
-ENTRY_PLAN_SCHEMA = "ring.one-shot.entry-plan.v1"
+ENTRY_PLAN_SCHEMA = "vorton.one-shot.entry-plan.v1"
 ENTRY_PLAN_KEYS = {"schema", "contract_version", "gate_id", "launcher", "inner"}
 ENTRY_LAUNCHER_KEYS = {"path", "size", "sha256", "windows_adapter"}
 ENTRY_INNER_KEYS = {
@@ -1896,9 +1896,9 @@ ENTRY_INNER_KEYS = {
     "limits",
     "success_exit_codes",
 }
-OUTER_ATTEMPT_SCHEMA = "ring.one-shot.outer-attempt.v1"
-OUTER_VERDICT_SCHEMA = "ring.one-shot.outer-verdict.v1"
-OUTER_AUDIT_SCHEMA = "ring.one-shot.outer-audit.v1"
+OUTER_ATTEMPT_SCHEMA = "vorton.one-shot.outer-attempt.v1"
+OUTER_VERDICT_SCHEMA = "vorton.one-shot.outer-verdict.v1"
+OUTER_AUDIT_SCHEMA = "vorton.one-shot.outer-audit.v1"
 OUTER_ATTEMPT_NAME = "outer-attempt.json"
 OUTER_VERDICT_NAME = "outer-verdict.json"
 OUTER_STDOUT_NAME = "outer-stdout.raw"
@@ -2034,7 +2034,7 @@ def run_chained_plan(
     except (KeyError, TypeError) as exc:
         raise ContractError("outer attempt lacks chain authority fields") from exc
     if (
-        outer_value.get("schema") != "ring.one-shot.outer-attempt.v1"
+        outer_value.get("schema") != "vorton.one-shot.outer-attempt.v1"
         or delivered_plan_hash != plan_sha256
         or delivered_root != os.fspath(outer_root)
         or delivered_attempt_id != outer_attempt_id

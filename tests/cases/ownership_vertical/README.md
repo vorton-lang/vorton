@@ -1,6 +1,6 @@
 # 0.1 ownership vertical fixtures
 
-本目录是 `#268/#269` 统一 fast 真实矩阵的 source corpus。每个正例由 Ring
+本目录是 `#268/#269` 统一 fast 真实矩阵的 source corpus。每个正例由 Vorton
 运行时断言和可观察 stdout 裁决；每个负例由真实 compiler diagnostic 裁决。
 这里没有 Python source-string scan，也没有 post-0.1 占位 surface。
 
@@ -22,12 +22,12 @@ support module 不应被 runner 当成独立 native case。
   以及 user same-spelling isolation。
 - F：同一所有权语义的 single/project literal native parity。
 
-合法 Ring source 中的多态 effect tail 必须归属并 generalize 在 callable owner；
+合法 Vorton source 中的多态 effect tail 必须归属并 generalize 在 callable owner；
 普通 source 无法制造 raw/unowned Core state。因此 D3 是 source-level positive，
-raw/unowned negative 由 manifest 中的 D6 internal Ring mutation canary 覆盖：
+raw/unowned negative 由 manifest 中的 D6 internal Vorton mutation canary 覆盖：
 runner 以 D3 为合法输入、追加 `--rc-mutate=core-unowned-effect-tail`，并要求
 nonzero 与逐字节 panic
-`ring panic: Core assembly: unowned raw effect tail crossed Core`。
+`vorton panic: Core assembly: unowned raw effect tail crossed Core`。
 禁止为了凑 source 负例改用 Python 字符串 oracle。
 
 ## 当前固定边界
@@ -62,7 +62,7 @@ support module。
 2. 对同一 `parity_group` 比较 literal stdout；F1/F2 必须走同一个 semantic
    compiler entry，只允许输入包装不同。
 3. D6 callback 是 acceptance run 的必选项且没有跳过开关：
-   必须只接受 manifest 固定的 exact Ring panic，缺 callback、exit 0 或任一
+   必须只接受 manifest 固定的 exact Vorton panic，缺 callback、exit 0 或任一
    stdout/stderr 漂移都 FAIL。
 4. 用唯一固定 aggregate compiler + matching std/runtime 执行完整矩阵；不得用
    45d 内嵌旧 std 的结果、历史 PASS 或跳过状态豁免终态期望。

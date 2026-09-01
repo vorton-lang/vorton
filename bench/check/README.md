@@ -36,7 +36,7 @@ Direct successful and diagnostic `check` lanes explicitly request the hidden
 compiler option `--phase-timing=<sample path>`. Default compiler invocations do
 not call the clock and do not create a timing file. Compiler timing always goes
 to that independent JSONL file, never to the human or LLM diagnostic stream.
-Every row uses `ring.compiler-phase-timing.v1`, nanoseconds from a monotonic
+Every row uses `vorton.compiler-phase-timing.v1`, nanoseconds from a monotonic
 clock, exact lane/compiler/source identities, `executed`, `complete`, and
 `command_success` flags. The stable phase vocabulary is:
 
@@ -60,7 +60,7 @@ Manifest v4 selects trace semantics explicitly. `compiler_phase_timing`,
 `runner_phase_timing`, and `bootstrap_phase_timing` are required, mutually
 exclusive booleans. A declared trace requires exactly one true mode; an empty
 trace list requires all three false. Bootstrap traces continue to use
-`ring.check-benchmark.bootstrap-phase.v1` and are accepted only for the exact
+`vorton.check-benchmark.bootstrap-phase.v1` and are accepted only for the exact
 tracked-bootstrap argv, requirements, artifacts, output path, timeout, and
 exit recipe. The harness never infers bootstrap semantics from two disabled
 modes, and unknown trace schemas fail closed.
@@ -68,7 +68,7 @@ modes, and unknown trace schemas fail closed.
 The filtered runner lane, all six individual suite lanes, and the full gate
 append the runner's exact
 `--phase-timing={sample_dir}/runner-phase-timing.jsonl` option. These traces use
-`ring.test-runner-phase.v1` with the exact 12-field contract emitted by
+`vorton.test-runner-phase.v1` with the exact 12-field contract emitted by
 `tests/run_tests.py`: schema/version, contiguous sequence, suite/case, fixed
 stage, duration, executed/complete/outcome, exit code, and command category.
 Unknown fields (including a hypothetical thirteenth field), schemas, stage or
@@ -138,7 +138,7 @@ against `git show <commit>:<path>`, so a missing commit or object fails closed.
 The archive command pins `core.autocrlf=false`, making archived text bytes equal
 to the referenced Git blobs even when the Windows checkout enables AutoCRLF.
 Before either binary is sampled, the gate also proves that the exact 11
-`std/*.ring` files consumed by `checker.ring` are byte-identical across both
+`std/*.vorton` files consumed by `checker.vorton` are byte-identical across both
 archives and Git objects. It writes those verified candidate bytes to the
 neutral `stage/std` directory; both binaries run from the same sibling
 `stage/cwd`, so prelude discovery cannot depend on either subject source tree.
@@ -172,7 +172,7 @@ Cold and warm are separate lane IDs. Every invocation is labelled only with:
 ```
 
 Cold lanes point `TEMP`/`TMP` at a fresh per-sample directory, so the runner's
-hard-coded `ring-lang-thinlto-cache` is empty for every invocation. That
+hard-coded `vorton-lang-thinlto-cache` is empty for every invocation. That
 generated cache is removed after counters and artifacts are collected. The
 harness itself owns the bounded warm seed recipe: from a clean worktree it
 builds the tracked anchor/runtime/link once with `bootstrap.py` into an empty
@@ -180,8 +180,8 @@ cache and writes a strict receipt beside it. The receipt binds source files,
 tool executables (including the exact `lld-link`), flags, exact seed
 argv/outcome, the built compiler and intermediate outputs, and a per-file
 canonical cache inventory. The bootstrap output remains beside the cache as
-`ring-lang-b176-warm-seed-output`; formal lanes use only its receipt-proven
-`ring.exe`. Formal cold and warm batches verify the same receipt, build output,
+`vorton-lang-b176-warm-seed-output`; formal lanes use only its receipt-proven
+`vorton.exe`. Formal cold and warm batches verify the same receipt, build output,
 and current seed bytes. Warm batches copy the seed cache into their run
 directory and mutate only that isolated working copy, so one batch cannot warm
 a later batch. Keep the seed cache, receipt, and bootstrap output together until
@@ -190,7 +190,7 @@ seed lifecycle. The retained receipt is part of the combine fingerprint. OS
 file cache is deliberately not flushed or claimed as controlled.
 
 The Python runner also has a separate ignored root artifact,
-`ring_runtime.o`. Lanes that can consume it (`filtered_e2e_bool_ops`, e2e,
+`vorton_runtime.o`. Lanes that can consume it (`filtered_e2e_bool_ops`, e2e,
 golden, and the full gate) isolate it for every invocation and restore any
 pre-existing object afterward. Cold samples start with no root object and therefore measure
 its O2 build each time. Warm samples receive an unmeasured, freshly prepared
@@ -211,10 +211,10 @@ List the expanded cold/warm lanes and run static preflight:
 ```powershell
 python bench/check/run.py --list
 python bench/check/run.py --prepare-warm-cache `
-  --thinlto-cache "$env:TEMP\ring-lang-thinlto-cache"
+  --thinlto-cache "$env:TEMP\vorton-lang-thinlto-cache"
 python bench/check/run.py --preflight `
   --case suite_parity_cold `
-  --thinlto-cache "$env:TEMP\ring-lang-thinlto-cache" `
+  --thinlto-cache "$env:TEMP\vorton-lang-thinlto-cache" `
   --confirm-cache-state cold
 ```
 
@@ -224,7 +224,7 @@ from the validated bootstrap receipt/output prepared above:
 ```powershell
 python bench/check/run.py `
   --case tiny_hello_check_warm `
-  --thinlto-cache "$env:TEMP\ring-lang-thinlto-cache" `
+  --thinlto-cache "$env:TEMP\vorton-lang-thinlto-cache" `
   --confirm-cache-state warm `
   --output C:\path\to\fresh-results
 ```
@@ -233,7 +233,7 @@ Formal runs require a clean tracked worktree. A one-invocation harness probe is
 available while developing the harness and is explicitly not baseline evidence:
 
 ```powershell
-python bench/check/run.py --probe --output "$env:TEMP\ring-check-probe"
+python bench/check/run.py --probe --output "$env:TEMP\vorton-check-probe"
 ```
 
 Run the short self-tests:
@@ -290,7 +290,7 @@ Every fresh result directory contains:
   completeness result.
 
 `manifest.json` includes tiny/large/module/diagnostic/RC direct checks,
-`compiler/main.ring`, hello build, the uniquely filtered `filtered_e2e_bool_ops`
+`compiler/main.vorton`, hello build, the uniquely filtered `filtered_e2e_bool_ops`
 case, each current suite, the full
 gate, and a fresh tracked-bootstrap build. `bootstrap.py` mirrors the production
 O3+ThinLTO build into the sample directory and emits compile/runtime/link phase

@@ -23,8 +23,8 @@ from pathlib import Path
 
 
 OUTER_CONTRACT_VERSION = 1
-OUTER_ATTEMPT_SCHEMA = "ring.one-shot.outer-attempt.v1"
-OUTER_VERDICT_SCHEMA = "ring.one-shot.outer-verdict.v1"
+OUTER_ATTEMPT_SCHEMA = "vorton.one-shot.outer-attempt.v1"
+OUTER_VERDICT_SCHEMA = "vorton.one-shot.outer-verdict.v1"
 OUTER_ATTEMPT_NAME = "outer-attempt.json"
 OUTER_VERDICT_NAME = "outer-verdict.json"
 OUTER_STDOUT_NAME = "outer-stdout.raw"
@@ -504,7 +504,7 @@ def _run(delivery: dict[str, str | int]) -> int:
         plan, launcher_source, launcher_identity = _launcher_from_plan(plan_bytes)
         stage = "launcher-compile-exec"
         launcher_path = launcher_identity["path"]
-        module_name = "ring_one_shot_dynamic_launcher"
+        module_name = "vorton_one_shot_dynamic_launcher"
         module = types.ModuleType(module_name)
         module.__file__ = launcher_path
         module.__package__ = None

@@ -1,0 +1,23 @@
+// B-084 x B-091 interaction (mixed mut-cell + owned-heap capture, env drop):
+// a closure captures BOTH a write-through `let mut` (auto-boxed into a shared
+// VORTON_TYPEID_CELL, B-091) AND a plain owned heap value (a Str).  The closure env
+// holds two owned slots: the shared cell pointer (dup'd at capture, RC-shared with
+// the outer scope) and the Str.  When the env dies, drop_closure_env (B-084) must
+// vorton_drop BOTH slots — the cell via RC (decrement, the outer scope still holds a
+// share, so it must NOT free yet) and the Str via RC.  A naive raw-free of the cell
+// would double-free against the outer scope's drop; the fix relies on vorton_drop's
+// RC so the two paths balance.
+
+fn main() {
+    let mut count = 0
+    let label = "hits"
+    // Closure WRITES THROUGH count (→ boxed cell) and READS label (→ owned Str), so
+    // its env captures TWO owned slots: the shared cell pointer and the Str copy.
+    let bump = fn() -> Str { count = count + 1; "${label}:${count}" }
+    print(bump())   // hits:1
+    print(bump())   // hits:2
+    print(bump())   // hits:3
+    // `bump` is last-used here; its env drops, releasing the shared cell (RC-- only,
+    // outer scope keeps it) and the captured Str label-copy.
+    print("${count} ${label}")   // 3 hits — outer cell share survived the env drop
+}

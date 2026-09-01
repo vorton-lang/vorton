@@ -1,0 +1,52 @@
+// B-104 D1 Stage 2 regression: LetDestructure INIT is a borrow-projected
+// source — fresh inits materialise + scope-end-drop; named inits are no
+// longer Clone-pinned.
+//
+// What this pins:
+//   * `let (a, b) = make_pair()` — the fresh tuple gets an owned __anf binding
+//     (dropped at scope end); a/b are vorton_list_get borrow projections.  A
+//     wrong EARLY drop would free the slots a/b still read → native crash /
+//     divergence (expected output pins values).
+//   * `let (a, b) = pair` (named init) — processed as a BORROW: no anonymous
+//     Clone pin; pair stays valid and is reused AFTER the destructure (a wrong
+//     ownership transfer would free pair under the later read).
+//   * binding ESCAPES (push into an outer list / returned) are Clone-wrapped —
+//     they must survive the init temp's scope-end drop.
+
+fn make_pair() -> (Str, Int) {
+    ("ada", 90)
+}
+
+fn shift(p: (Int, Int)) -> (Int, Int) {
+    let (x, y) = p
+    (x + 1, y + 1)
+}
+
+fn main() {
+    // Fresh Call init.
+    let (name, score) = make_pair()
+    print("${name}=${score}")
+
+    // Fresh TupleLit init.
+    let (lo, hi) = (1, 99)
+    print("${lo}..${hi}")
+
+    // Named init, reused after the destructure (no pin, no premature free).
+    let pair = (7, 8)
+    let (l, r) = pair
+    print("${l}${r}:${pair.0}${pair.1}")
+
+    // Param (borrowed) init through a helper + returned escape.
+    let (sx, sy) = shift((10, 20))
+    print("${sx},${sy}")
+
+    // Binding escapes into an outer container; init temp drops at scope end.
+    let mut names: List<Str> = []
+    let mut i = 0
+    while i < 3 {
+        let (n, v) = make_pair()
+        names.push("${n}${v}${i}")
+        i = i + 1
+    }
+    print(names.join(","))
+}

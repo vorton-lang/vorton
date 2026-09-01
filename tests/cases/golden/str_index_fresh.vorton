@@ -1,0 +1,75 @@
+// B-104 D1 rule ③ regression: `s[i]` on a Str is a FRESH 1-char string
+// (vorton_str_get allocates), NOT a borrow of the receiver.  Locks the
+// per-receiver IndexExpr refinement in perceus (is_str_index):
+//   * operand positions materialise + scope-end-drop the fresh char (the lexer
+//     per-char leak class) — a wrong "borrow" classification would leak; a
+//     wrong drop of a genuine borrow (List/Map indexing, also exercised here)
+//     would UAF and crash the native binary (llvm_diff catches via exit code).
+//   * escape positions MOVE the fresh char (no Clone): binding, list push,
+//     struct field, return — each sink becomes the sole owner, released
+//     exactly once.  Double-free here would crash; the expected output pins this.
+// Outputs must match the golden .expected snapshot byte-for-byte.
+
+struct Wrap {
+    ch: Str,
+}
+
+fn pick(s: Str, i: Int) -> Str {
+    // return position: fresh char moves to the caller.
+    s[i]
+}
+
+fn main() {
+    let s = "vorton-lang"
+
+    // 1. let-binding: fresh char moved into the binding, scope-end-dropped.
+    let c0 = s[0]
+    print(c0)
+
+    // 2. operand positions: comparison / interp piece / call arg — each fresh
+    //    char is consumed by the op and reclaimed (materialise + drop).
+    if s[1] == "i" {
+        print("eq-i")
+    }
+    print("ch=${s[2]}")
+    print(pick(s, 3))
+
+    // 3. lexer-style index loop: per-char reads in a hot loop.
+    let mut i = 0
+    let mut vowels = 0
+    while i < s.len() {
+        let ch = s[i]
+        if ch == "a" || ch == "i" {
+            vowels = vowels + 1
+        }
+        i = i + 1
+    }
+    print("vowels=${vowels}")
+
+    // 4. escape sinks: container push + struct field + re-read after store.
+    let mut chars: List<Str> = []
+    let mut j = 0
+    while j < 4 {
+        chars.push(s[j])
+        j = j + 1
+    }
+    print(chars.join(""))
+    let w = Wrap { ch: s[5] }
+    print(w.ch)
+
+    // 5. shared binding: the BINDING (Ident) escape still Clones — binding and
+    //    container both own a reference; no double-free at scope end.
+    let shared = s[4]
+    let mut bag: List<Str> = []
+    bag.push(shared)
+    bag.push(shared)
+    print("${shared}${bag.join("")}")
+
+    // 6. contrast: List/Map indexing stays a borrow (no drop of the element).
+    let words = ["alpha", "beta"]
+    let first = words[0]
+    print(first)
+    let mut m: Map<Str, Str> = map_new()
+    m.insert("k", "vee")
+    print(m["k"])
+}

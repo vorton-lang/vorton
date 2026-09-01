@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-NOTE_REF = "refs/notes/ring-steward-audit-ledger"
+NOTE_REF = "refs/notes/vorton-steward-audit-ledger"
 LEDGER_VERSION = 1
 INVALID_INPUT_EXIT = 2
 ALREADY_RECORDED_EXIT = 3
@@ -758,11 +758,11 @@ def _run_helper_cli(
 
 def _git_end_to_end_self_test() -> None:
     with tempfile.TemporaryDirectory(
-        prefix="ring-audit-ledger-"
+        prefix="vorton-audit-ledger-"
     ) as temporary:
         repository = Path(temporary)
         _run_git(repository, ("init", "--quiet"))
-        _run_git(repository, ("config", "user.name", "Ring Audit Ledger Test"))
+        _run_git(repository, ("config", "user.name", "Vorton Audit Ledger Test"))
         _run_git(
             repository,
             ("config", "user.email", "audit-ledger@example.invalid"),

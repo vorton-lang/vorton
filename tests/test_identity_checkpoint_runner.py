@@ -66,7 +66,7 @@ class IdentityCheckpointRunnerTests(unittest.TestCase):
 
     def test_set_candidate_invokes_exact_hashed_executable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            candidate = Path(tmpdir) / "candidate ring.exe"
+            candidate = Path(tmpdir) / "candidate vorton.exe"
             candidate_bytes = b"exact I-prime candidate"
             candidate.write_bytes(candidate_bytes)
             resolved = str(candidate.resolve(strict=True))

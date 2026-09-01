@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Sequence
 
 
-LINKER_BINDING_SCHEMA = "ring.check-benchmark.linker-binding.v1"
+LINKER_BINDING_SCHEMA = "vorton.check-benchmark.linker-binding.v1"
 LINKER_PROBE_STDOUT = "linker-probe.stdout.txt"
 LINKER_PROBE_STDERR = "linker-probe.stderr.txt"
 
@@ -41,7 +41,7 @@ def _run_stage(
     _write_trace(
         trace_stream,
         {
-            "schema": "ring.check-benchmark.bootstrap-phase.v1",
+            "schema": "vorton.check-benchmark.bootstrap-phase.v1",
             "phase": name,
             "argv": list(argv),
             "wall_ns": wall_ns,
@@ -154,14 +154,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
     anchor = repo / "compiler" / "dist-c" / "main.c"
-    runtime = repo / "ring_runtime.cpp"
+    runtime = repo / "vorton_runtime.cpp"
     if not anchor.is_file() or not runtime.is_file():
         print("ERROR: tracked C anchor or runtime is missing", file=sys.stderr)
         return 2
 
-    compiler_object = output / "ring_compiler_lto.o"
-    runtime_object = output / "ring_runtime_lto.o"
-    executable = output / "ring.exe"
+    compiler_object = output / "vorton_compiler_lto.o"
+    runtime_object = output / "vorton_runtime_lto.o"
+    executable = output / "vorton.exe"
     trace = output / "phase-trace.jsonl"
     commands = [
         (

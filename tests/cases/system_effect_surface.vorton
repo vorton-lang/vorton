@@ -1,0 +1,54 @@
+effect alias HostCapabilities = {console, fs, process}
+
+fn emit(message: Str) -> Unit with {console} {
+    print(message)
+    eprintln(message)
+    assert(message.len() >= 0, "message length")
+}
+
+fn inspect_file(path: Str) -> Bool with {fs} {
+    let resolved = path_resolve(path)
+    if file_exists(resolved) {
+        let content = read_file(resolved)
+        write_file(resolved, content)
+        true
+    } else {
+        false
+    }
+}
+
+fn delete_existing(path: Str) -> Unit with {fs} {
+    if file_exists(path) {
+        delete_file(path)
+    }
+}
+
+fn inspect_process() -> Int with {process} {
+    let args = argv()
+    let here = cwd()
+    if args.len() > 0 && here.len() > 0 { 1 } else { 0 }
+}
+
+fn run_command(command: Str, args: List<Str>) -> Int with {process} {
+    exec_sync(command, args)
+}
+
+fn terminate(code: Int) -> Never with {process} {
+    exit_process(code)
+    panic("exit_process returned")
+}
+
+fn pure_path(path: Str) -> Str with {} {
+    path_basename(path_join(path_dirname(path), path_extname(path)))
+}
+
+fn inspect_host(path: Str) -> Int with {HostCapabilities} {
+    emit(path)
+    let present = inspect_file(path)
+    let process_state = inspect_process()
+    if present { process_state + 1 } else { process_state }
+}
+
+fn main() {
+    emit(pure_path("folder/file.vorton"))
+}

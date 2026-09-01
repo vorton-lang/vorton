@@ -1,0 +1,71 @@
+// B-150 regression: vorton_str_eq / vorton_str_lt were not registered in
+// rt_method_returns_bool, so the return value was boxed as Int instead of Bool.
+// This test exercises str == and str < in boolean contexts (if, &&, ||, let Bool).
+
+fn main() {
+    let a = "hello"
+    let b = "hello"
+    let c = "world"
+
+    // --- str_eq (==) in if condition ---
+    if a == b {
+        print("eq_true: pass")
+    } else {
+        print("eq_true: FAIL")
+    }
+
+    if a == c {
+        print("eq_false: FAIL")
+    } else {
+        print("eq_false: pass")
+    }
+
+    // --- str_lt (<) in if condition ---
+    if a < c {
+        print("lt_true: pass")
+    } else {
+        print("lt_true: FAIL")
+    }
+
+    if c < a {
+        print("lt_false: FAIL")
+    } else {
+        print("lt_false: pass")
+    }
+
+    // --- result stored in Bool variable, then used in && / || ---
+    let eq_result = a == b
+    let lt_result = a < c
+
+    if eq_result && lt_result {
+        print("and_tt: pass")
+    } else {
+        print("and_tt: FAIL")
+    }
+
+    let neq_result = a == c
+    if neq_result || lt_result {
+        print("or_ft: pass")
+    } else {
+        print("or_ft: FAIL")
+    }
+
+    if neq_result && lt_result {
+        print("and_ft: FAIL")
+    } else {
+        print("and_ft: pass")
+    }
+
+    // --- != (desugars to !(str_eq)) ---
+    if a != c {
+        print("neq_true: pass")
+    } else {
+        print("neq_true: FAIL")
+    }
+
+    if a != b {
+        print("neq_false: FAIL")
+    } else {
+        print("neq_false: pass")
+    }
+}

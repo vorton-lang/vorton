@@ -82,7 +82,7 @@ check_exhaustive(arms, τ_scrutinee) → null | "missing pattern description"
 
 **Enum 类型：** 每个变体都必须被至少一个模式覆盖。如果变体有字段，递归检查字段模式的穷尽性。
 
-```ring
+```vorton
 // 缺少 none 分支 → E0601
 match opt {
     some(x) => x,
@@ -151,7 +151,7 @@ named_pattern_to_positional(variant, named_fields):
 
 当前实现按列独立检查。多字段交叉组合不验证。例如：
 
-```ring
+```vorton
 // 被接受为穷尽（尽管 (true, true) 和 (false, false) 未被单独匹配）
 match (a, b) {
     (true, _) => ...,
@@ -166,7 +166,7 @@ match (a, b) {
 
 Or-Pattern 允许在单个 match/catch arm 中匹配多个模式，语法为 `p₁ | p₂ | ...`，`|` 分隔备选模式。任一子模式匹配即执行该分支。`|` 只在 arm 的最外层解析；它不是表达式运算符，也不能直接嵌套在 tuple 或构造器字段模式中。
 
-```ring
+```vorton
 match color {
     Red | Green => "warm",
     Blue => "cool",
@@ -177,7 +177,7 @@ match color {
 
 **变量绑定约束：** Or-Pattern 中的所有子模式必须绑定相同的变量集，且对应变量的类型必须兼容。例如：
 
-```ring
+```vorton
 match val {
     Some(x) | Other(x) => x,   // 合法：两个子模式都绑定 x
     None => 0,
@@ -204,7 +204,7 @@ specialize_row(row, ctor):
 
 ### Guard
 
-```ring
+```vorton
 match x {
     n if n > 0 => "positive",
     _ => "non-positive",

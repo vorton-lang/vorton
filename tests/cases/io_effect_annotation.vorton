@@ -1,0 +1,17 @@
+// Test: console system effect is correctly tracked from print/assert.
+
+// Function with console effect (inferred from print)
+fn greet(name: Str) {
+    print("hello ${name}")
+}
+
+// Function that calls greet — should also infer console
+fn greet_all() {
+    greet("world")
+    greet("vorton")
+}
+
+fn main() {
+    greet_all()
+    print("io_effect_annotation: all tests passed")
+}

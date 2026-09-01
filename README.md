@@ -49,13 +49,14 @@ fn main() {
 
 Rust compiler workspace 尚未进入仓库，因此当前没有可声明为 Vorton compiler authority 的本地构建命令。建立 workspace、最小前端纵切与相称测试后，命令和支持平台会随实现一并记录。
 
-当前 CI 只运行零第三方依赖的仓库治理 validator：
+当前 CI 只运行两个零第三方依赖的仓库 validator：
 
 ```powershell
+python .agents/scripts/validate_naming.py
 python .agents/scripts/validate_workflow.py
 ```
 
-它验证当前工作流、Issue 模板、历史看板保持删除与 CI 自身的约束；它不宣称旧 compiler 或未来 Rust compiler 已通过。
+它们验证 tracked tree 的技术命名 clean break，以及当前工作流、Issue 模板、历史看板保持删除与 CI 自身的约束；它们不宣称迁移 oracle 或未来 Rust compiler 已通过。
 
 ## 参与工作
 

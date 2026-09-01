@@ -1,0 +1,99 @@
+// B-103 regression: FRESH-CONTAINER CONSTRUCTORS that copy element pointers out
+// of a source container must DUP them (owned-container-constructor rule, design
+// §7.11) — vorton_list_filter / concat / slice / flat_map / vorton_map_from
+// previously copied source-owned pointers WITHOUT a dup, so the fresh result
+// CO-OWNED the source's elements with only one refcount.
+// Under is_droppable_init(Call)=true (B-103) both the result and the source get
+// deep-dropped → double-free / UAF (latent while the pre-B-103 leak régime never
+// dropped the sources).
+// B-123: reverse / sort / sort_default changed to in-place (no fresh copy).
+//
+// Each helper builds a derived container, lets it drop at scope end, and the
+// caller keeps reading the source afterwards; main's own scope end then drops the
+// sources too (the double-free arm).
+
+fn drop_filtered(xs: List<Str>) -> Int {
+    let ys = xs.filter(fn(x) { x != "b" })
+    ys.len()
+}   // ys deep-dropped — must not free xs's elements
+
+fn drop_concat(a: List<Str>, b: List<Str>) -> Int {
+    let c = a.concat(b)
+    c.len()
+}
+
+fn drop_slice(xs: List<Str>) -> Str {
+    let s = xs.slice(1, 3)
+    s[0]
+}
+
+// B-123: reverse/sort are Unit-typed, both backends now in-place.
+fn drop_reverse(mut xs: List<Str>) -> Int {
+    xs.reverse()
+    // Order assertion: ["a","b","c","d"] reversed = ["d","c","b","a"]
+    print("rev: ${xs[0]} ${xs[1]} ${xs[2]} ${xs[3]}")
+    xs.len()
+}
+
+fn drop_sort(mut xs: List<Int>) -> Int {
+    xs.sort()
+    // Order assertion: [3,1,4,1,5] sorted = [1,1,3,4,5]
+    print("sorted: ${xs[0]} ${xs[1]} ${xs[2]} ${xs[3]} ${xs[4]}")
+    xs.len()
+}
+
+fn alias_visibility() {
+    // Alias test: sort mutates receiver in-place, alias sees the change.
+    let mut xs = [3, 1, 2]
+    let ys = xs
+    xs.sort()
+    print("alias: ${ys[0]} ${ys[1]} ${ys[2]}")
+}
+
+fn drop_flat(nested: List<List<Str>>) -> Int {
+    // Closure returns its parameter — the tail escape Clones the BORROWED inner
+    // list, so flat_map receives a SHARED sub-list (rc ≥ 2): the stolen-ownership
+    // bug freed elements still owned by `nested`.
+    let flat = nested.flat_map(fn(l) { l })
+    flat.len()
+}
+
+fn drop_map_from() -> Str {
+    let m = map_from([("a", "x"), ("b", "y")])
+    m["a"]
+}   // m deep-dropped — values were co-owned with the entries pairs
+
+fn main() {
+    let xs = ["a", "b", "c", "d"]
+    print("filter: ${drop_filtered(xs)}")     // filter: 3
+    print("alive: ${xs.len()} ${xs[1]}")       // alive: 4 b
+
+    let ys = ["e", "f"]
+    print("concat: ${drop_concat(xs, ys)}")   // concat: 6
+    print("alive2: ${xs[0]} ${ys[1]}")          // alive2: a f
+
+    print("slice: ${drop_slice(xs)}")          // slice: b
+    print("alive3: ${xs[3]}")                    // alive3: d
+
+    print("reverse: ${drop_reverse(xs)}")      // reverse: 4
+                                                // (also prints: rev: d c b a)
+
+    let nums = [3, 1, 4, 1, 5]
+    print("sort: ${drop_sort(nums)}")          // sort: 5
+                                                // (also prints: sorted: 1 1 3 4 5)
+
+    alias_visibility()                          // alias: 1 2 3
+
+    let nested = [["1", "2"], ["3"]]
+    print("flat: ${drop_flat(nested)}")        // flat: 3
+    print("alive4: ${nested.len()} ${nested[0][1]}")  // alive4: 2 2
+
+    print("mfrom: ${drop_map_from()}")          // mfrom: x
+
+    // both-drop arm: derived containers bound in MAIN scope too, so source and
+    // result drop in the same scope (ordering-independent balance).
+    let zs = xs.filter(fn(x) { x == "a" })
+    let cc = xs.concat(ys)
+    print("local: ${zs.len()} ${cc.len()}")    // local: 1 6
+    print("done")
+}

@@ -3,7 +3,7 @@
   "features": [
     {
       "feature_id": "HExpr.IntLit",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -11,7 +11,7 @@
     },
     {
       "feature_id": "HExpr.FloatLit",
-      "evidence": ["tests/cases/golden/str_lte_gte_float_mod.ring"],
+      "evidence": ["tests/cases/golden/str_lte_gte_float_mod.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -19,7 +19,7 @@
     },
     {
       "feature_id": "HExpr.StrLit",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -27,7 +27,7 @@
     },
     {
       "feature_id": "HExpr.BoolLit",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -35,7 +35,7 @@
     },
     {
       "feature_id": "HExpr.Ident",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -43,7 +43,7 @@
     },
     {
       "feature_id": "HExpr.BinOp",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -51,7 +51,7 @@
     },
     {
       "feature_id": "HExpr.UnaryOp",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -59,7 +59,7 @@
     },
     {
       "feature_id": "HExpr.Call",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -67,7 +67,7 @@
     },
     {
       "feature_id": "HExpr.FieldAccess",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -75,7 +75,7 @@
     },
     {
       "feature_id": "HExpr.StructLit",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -83,7 +83,7 @@
     },
     {
       "feature_id": "HExpr.NamedVariantConstruct",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -91,7 +91,7 @@
     },
     {
       "feature_id": "HExpr.MatchExpr",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -99,7 +99,7 @@
     },
     {
       "feature_id": "HExpr.Block",
-      "evidence": ["tests/cases/golden/block_expr.ring"],
+      "evidence": ["tests/cases/golden/block_expr.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -107,7 +107,7 @@
     },
     {
       "feature_id": "HExpr.IfExpr",
-      "evidence": ["tests/cases/golden/if_elseif_return.ring"],
+      "evidence": ["tests/cases/golden/if_elseif_return.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -115,7 +115,7 @@
     },
     {
       "feature_id": "HExpr.StringInterp",
-      "evidence": ["tests/cases/golden/string_interp.ring"],
+      "evidence": ["tests/cases/golden/string_interp.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -123,7 +123,7 @@
     },
     {
       "feature_id": "HExpr.TryCatch",
-      "evidence": ["tests/cases/golden/c_backend_step6.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step6.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -132,8 +132,8 @@
     {
       "feature_id": "HExpr.HandleExpr",
       "evidence": [
-        "tests/cases/golden/abort_handler_arm.ring",
-        "tests/cases/golden/c_backend_step6.ring"
+        "tests/cases/golden/abort_handler_arm.vorton",
+        "tests/cases/golden/c_backend_step6.vorton"
       ],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
@@ -142,7 +142,7 @@
     },
     {
       "feature_id": "HExpr.Lambda",
-      "evidence": ["tests/cases/golden/closure_capture_nonloop.ring"],
+      "evidence": ["tests/cases/golden/closure_capture_nonloop.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -150,7 +150,7 @@
     },
     {
       "feature_id": "HExpr.EffectOp",
-      "evidence": ["tests/cases/golden/c_backend_step6.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step6.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -158,7 +158,7 @@
     },
     {
       "feature_id": "HExpr.RangeExpr",
-      "evidence": ["tests/cases/golden/for_range_variants.ring"],
+      "evidence": ["tests/cases/golden/for_range_variants.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -166,7 +166,7 @@
     },
     {
       "feature_id": "HExpr.ListLit",
-      "evidence": ["tests/cases/golden/list_contains.ring"],
+      "evidence": ["tests/cases/golden/list_contains.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -174,7 +174,7 @@
     },
     {
       "feature_id": "HExpr.TupleLit",
-      "evidence": ["tests/cases/golden/tuple_literal_pattern.ring"],
+      "evidence": ["tests/cases/golden/tuple_literal_pattern.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -182,7 +182,7 @@
     },
     {
       "feature_id": "HExpr.IndexExpr",
-      "evidence": ["tests/cases/golden/index_expr.ring"],
+      "evidence": ["tests/cases/golden/index_expr.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -190,7 +190,7 @@
     },
     {
       "feature_id": "HExpr.DictConstruct",
-      "evidence": ["tests/cases/golden/dynamic_wrapped_dict.ring"],
+      "evidence": ["tests/cases/golden/dynamic_wrapped_dict.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -198,7 +198,7 @@
     },
     {
       "feature_id": "HExpr.Clone",
-      "evidence": ["tests/cases/golden/rc_alias_read_projection.ring"],
+      "evidence": ["tests/cases/golden/rc_alias_read_projection.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -206,7 +206,7 @@
     },
     {
       "feature_id": "HExpr.ReturnExpr",
-      "evidence": ["tests/cases/golden/match_return_expr.ring"],
+      "evidence": ["tests/cases/golden/match_return_expr.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -214,7 +214,7 @@
     },
     {
       "feature_id": "HExpr.UnsafeBlock",
-      "evidence": ["tests/cases/unsafe_block.ring"],
+      "evidence": ["tests/cases/unsafe_block.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
@@ -223,7 +223,7 @@
 
     {
       "feature_id": "HStmt.Let",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -231,7 +231,7 @@
     },
     {
       "feature_id": "HStmt.Var",
-      "evidence": ["tests/cases/golden/let_mut_reassign.ring"],
+      "evidence": ["tests/cases/golden/let_mut_reassign.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -239,7 +239,7 @@
     },
     {
       "feature_id": "HStmt.Assign",
-      "evidence": ["tests/cases/golden/let_mut_reassign.ring"],
+      "evidence": ["tests/cases/golden/let_mut_reassign.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -247,7 +247,7 @@
     },
     {
       "feature_id": "HStmt.ExprStmt",
-      "evidence": ["tests/cases/golden/exprstmt_discard_drop.ring"],
+      "evidence": ["tests/cases/golden/exprstmt_discard_drop.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -255,7 +255,7 @@
     },
     {
       "feature_id": "HStmt.Return",
-      "evidence": ["tests/cases/golden/if_elseif_return.ring"],
+      "evidence": ["tests/cases/golden/if_elseif_return.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -263,7 +263,7 @@
     },
     {
       "feature_id": "HStmt.While",
-      "evidence": ["tests/cases/golden/while_break_continue.ring"],
+      "evidence": ["tests/cases/golden/while_break_continue.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -271,7 +271,7 @@
     },
     {
       "feature_id": "HStmt.ForIn",
-      "evidence": ["tests/cases/golden/for_range_variants.ring"],
+      "evidence": ["tests/cases/golden/for_range_variants.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -279,7 +279,7 @@
     },
     {
       "feature_id": "HStmt.Break",
-      "evidence": ["tests/cases/golden/while_break_continue.ring"],
+      "evidence": ["tests/cases/golden/while_break_continue.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -287,7 +287,7 @@
     },
     {
       "feature_id": "HStmt.Continue",
-      "evidence": ["tests/cases/golden/while_break_continue.ring"],
+      "evidence": ["tests/cases/golden/while_break_continue.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -295,7 +295,7 @@
     },
     {
       "feature_id": "HStmt.LetDestructure",
-      "evidence": ["tests/cases/golden/letdestructure_init_drop.ring"],
+      "evidence": ["tests/cases/golden/letdestructure_init_drop.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -303,7 +303,7 @@
     },
     {
       "feature_id": "HStmt.IfLet",
-      "evidence": ["tests/cases/golden/if_let_basic.ring"],
+      "evidence": ["tests/cases/golden/if_let_basic.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -311,7 +311,7 @@
     },
     {
       "feature_id": "HStmt.Drop",
-      "evidence": ["tests/cases/golden/rc_alias_read_projection.ring"],
+      "evidence": ["tests/cases/golden/rc_alias_read_projection.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -319,7 +319,7 @@
     },
     {
       "feature_id": "HDecl.Fn",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -327,7 +327,7 @@
     },
     {
       "feature_id": "HDecl.Struct",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -335,7 +335,7 @@
     },
     {
       "feature_id": "HDecl.Enum",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -343,7 +343,7 @@
     },
     {
       "feature_id": "HDecl.Impl",
-      "evidence": ["tests/cases/golden/c_backend_step5.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step5.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -351,7 +351,7 @@
     },
     {
       "feature_id": "HDecl.Effect",
-      "evidence": ["tests/cases/golden/c_backend_step6.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step6.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -359,7 +359,7 @@
     },
     {
       "feature_id": "HDecl.Test",
-      "evidence": ["tests/cases/golden/test_decl.ring"],
+      "evidence": ["tests/cases/golden/test_decl.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -367,7 +367,7 @@
     },
     {
       "feature_id": "HDecl.Trait",
-      "evidence": ["tests/cases/golden/c_backend_step5.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step5.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -375,7 +375,7 @@
     },
     {
       "feature_id": "HDecl.ExternFn",
-      "evidence": ["tests/cases/effect_annotation_extern.ring"],
+      "evidence": ["tests/cases/effect_annotation_extern.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
@@ -383,7 +383,7 @@
     },
     {
       "feature_id": "HDecl.ExternType",
-      "evidence": ["tests/cases/golden/extern_handle_rc_exclusion.ring"],
+      "evidence": ["tests/cases/golden/extern_handle_rc_exclusion.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -391,7 +391,7 @@
     },
     {
       "feature_id": "HDecl.TypeAlias",
-      "evidence": ["tests/cases/golden/type_alias.ring"],
+      "evidence": ["tests/cases/golden/type_alias.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -399,7 +399,7 @@
     },
     {
       "feature_id": "HDecl.Const",
-      "evidence": ["tests/cases/golden/basic_ops.ring"],
+      "evidence": ["tests/cases/golden/basic_ops.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -407,7 +407,7 @@
     },
     {
       "feature_id": "HDecl.ModBlock",
-      "evidence": ["tests/cases/golden/mod_inline.ring"],
+      "evidence": ["tests/cases/golden/mod_inline.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -415,7 +415,7 @@
     },
     {
       "feature_id": "Pattern.Wildcard",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -423,7 +423,7 @@
     },
     {
       "feature_id": "Pattern.Binding",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -431,7 +431,7 @@
     },
     {
       "feature_id": "Pattern.Constructor",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -439,7 +439,7 @@
     },
     {
       "feature_id": "Pattern.NamedConstructor",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -447,7 +447,7 @@
     },
     {
       "feature_id": "Pattern.Literal",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -455,7 +455,7 @@
     },
     {
       "feature_id": "Pattern.TuplePattern",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -463,7 +463,7 @@
     },
     {
       "feature_id": "Pattern.OrPattern",
-      "evidence": ["tests/cases/golden/c_backend_step4.ring"],
+      "evidence": ["tests/cases/golden/c_backend_step4.vorton"],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
       "status": "covered",
@@ -472,7 +472,7 @@
 
     {
       "feature_id": "backend.c_text_determinism",
-      "evidence": ["compiler/main.ring"],
+      "evidence": ["compiler/main.vorton"],
       "oracle": "byte-identical-generated-c",
       "lane": ["self-compile-c"],
       "status": "covered",
@@ -481,9 +481,9 @@
     {
       "feature_id": "backend.c_line_directives",
       "evidence": [
-        "tests/cases/structural/c_line_single.ring",
-        "tests/cases/structural/c_line_project/main.ring",
-        "tests/cases/structural/c_line_project/probe.ring"
+        "tests/cases/structural/c_line_single.vorton",
+        "tests/cases/structural/c_line_project/main.vorton",
+        "tests/cases/structural/c_line_project/probe.vorton"
       ],
       "oracle": "generated-c-line-map-structural",
       "lane": ["c-structural"],
@@ -492,15 +492,15 @@
     },
     {
       "feature_id": "backend.c_symbol_link_contract",
-      "evidence": ["tests/cases/modules/c_symbol_ring_prefix_collision/main.ring"],
+      "evidence": ["tests/cases/modules/c_symbol_vorton_prefix_collision/main.vorton"],
       "oracle": "module-golden+c-native",
       "lane": ["module-c"],
       "status": "covered",
-      "reason": "Project linking exercises Ring/runtime symbol-prefix collision handling."
+      "reason": "Project linking exercises Vorton/runtime symbol-prefix collision handling."
     },
     {
       "feature_id": "backend.extern_handle_rc_structural",
-      "evidence": ["tests/cases/structural/extern_handle_rc.ring"],
+      "evidence": ["tests/cases/structural/extern_handle_rc.vorton"],
       "oracle": "generated-c-local-rc-structural",
       "lane": ["c-structural"],
       "status": "covered",
@@ -508,7 +508,7 @@
     },
     {
       "feature_id": "backend.frontend_check_only",
-      "evidence": ["tests/cases/error_occurs_check.ring"],
+      "evidence": ["tests/cases/error_occurs_check.vorton"],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
       "status": "covered",
@@ -516,7 +516,7 @@
     },
     {
       "feature_id": "backend.module_project",
-      "evidence": ["tests/cases/modules/basic_import/main.ring"],
+      "evidence": ["tests/cases/modules/basic_import/main.vorton"],
       "oracle": "module-golden+c-native",
       "lane": ["module-c"],
       "status": "covered",
@@ -524,7 +524,7 @@
     },
     {
       "feature_id": "backend.ffi",
-      "evidence": ["tests/cases/modules/extern_fn/main.ring"],
+      "evidence": ["tests/cases/modules/extern_fn/main.vorton"],
       "oracle": "module-golden+c-native",
       "lane": ["module-c"],
       "status": "covered",
@@ -533,10 +533,10 @@
     {
       "feature_id": "backend.native_handwritten_semantics",
       "evidence": [
-        "tests/cases/native_only/i64_boundary.ring",
-        "tests/cases/native_only/i64_overflow.ring",
-        "tests/cases/native_only/int_divzero.ring",
-        "tests/cases/native_only/int_modzero.ring"
+        "tests/cases/native_only/i64_boundary.vorton",
+        "tests/cases/native_only/i64_overflow.vorton",
+        "tests/cases/native_only/int_divzero.vorton",
+        "tests/cases/native_only/int_modzero.vorton"
       ],
       "oracle": "handwritten-golden-or-expected-panic",
       "lane": ["native-c"],
@@ -546,7 +546,7 @@
 
     {
       "feature_id": "collections.api_clone",
-      "evidence": ["tests/cases/api_clone.ring"],
+      "evidence": ["tests/cases/api_clone.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
@@ -555,14 +555,14 @@
     {
       "feature_id": "shared.iterator_protocol",
       "evidence": [
-        "tests/cases/iterator.ring",
-        "tests/cases/iterator_lowering_control.ring",
-        "tests/cases/iterator_lowering_conditional_bound.ring",
-        "tests/cases/iterator_lowering_effect.ring",
-        "tests/cases/iterator_lowering_effect_source_order.ring",
-        "tests/cases/iterator_lowering_generic_instances.ring",
-        "tests/cases/iterator_lowering_owned.ring",
-        "tests/cases/iterator_lowering_drop_shadow.ring"
+        "tests/cases/iterator.vorton",
+        "tests/cases/iterator_lowering_control.vorton",
+        "tests/cases/iterator_lowering_conditional_bound.vorton",
+        "tests/cases/iterator_lowering_effect.vorton",
+        "tests/cases/iterator_lowering_effect_source_order.vorton",
+        "tests/cases/iterator_lowering_generic_instances.vorton",
+        "tests/cases/iterator_lowering_owned.vorton",
+        "tests/cases/iterator_lowering_drop_shadow.vorton"
       ],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
@@ -572,12 +572,12 @@
     {
       "feature_id": "checker.pending_trait_obligation_owner",
       "evidence": [
-        "tests/cases/golden/set_ops.ring",
-        "tests/cases/golden/pending_trait_obligations.ring",
-        "tests/cases/golden/pending_trait_test_owner.ring",
-        "tests/cases/golden/pending_trait_effect_annotation.ring",
-        "tests/cases/golden/pending_trait_callable_assoc_fixed_point.ring",
-        "tests/cases/golden/pending_trait_multi_bound_fixed_point.ring"
+        "tests/cases/golden/set_ops.vorton",
+        "tests/cases/golden/pending_trait_obligations.vorton",
+        "tests/cases/golden/pending_trait_test_owner.vorton",
+        "tests/cases/golden/pending_trait_effect_annotation.vorton",
+        "tests/cases/golden/pending_trait_callable_assoc_fixed_point.vorton",
+        "tests/cases/golden/pending_trait_multi_bound_fixed_point.vorton"
       ],
       "oracle": "c-native-golden",
       "lane": ["golden-c"],
@@ -587,13 +587,13 @@
     {
       "feature_id": "backend.frontend_pending_trait_obligation_fail_closed",
       "evidence": [
-        "tests/cases/errors/pending_trait_no_source.ring",
-        "tests/cases/errors/pending_trait_concrete_missing.ring",
-        "tests/cases/errors/pending_trait_monomorphic_barrier.ring",
-        "tests/cases/errors/pending_trait_multi_bound_atomic.ring",
-        "tests/cases/errors/pending_trait_extern_validation.ring",
-        "tests/cases/errors/pending_trait_extern_late_success.ring",
-        "tests/cases/errors/pending_trait_callable_value_no_source.ring"
+        "tests/cases/errors/pending_trait_no_source.vorton",
+        "tests/cases/errors/pending_trait_concrete_missing.vorton",
+        "tests/cases/errors/pending_trait_monomorphic_barrier.vorton",
+        "tests/cases/errors/pending_trait_multi_bound_atomic.vorton",
+        "tests/cases/errors/pending_trait_extern_validation.vorton",
+        "tests/cases/errors/pending_trait_extern_late_success.vorton",
+        "tests/cases/errors/pending_trait_callable_value_no_source.vorton"
       ],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
@@ -602,15 +602,15 @@
     },
     {
       "feature_id": "collections.set_struct_eq",
-      "evidence": ["tests/cases/set_struct_eq.ring"],
+      "evidence": ["tests/cases/set_struct_eq.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
-      "reason": "Auto-derived Eq and Hash evidence supports structural keys in the pure-Ring Map-backed Set on the C-native backend."
+      "reason": "Auto-derived Eq and Hash evidence supports structural keys in the pure-Vorton Map-backed Set on the C-native backend."
     },
     {
       "feature_id": "collections.set_ops_deep_eq",
-      "evidence": ["tests/cases/set_ops_deep_eq.ring"],
+      "evidence": ["tests/cases/set_ops_deep_eq.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
@@ -618,7 +618,7 @@
     },
     {
       "feature_id": "derive.hash.auto_eq_fixpoint",
-      "evidence": ["tests/cases/derive_hash_set.ring"],
+      "evidence": ["tests/cases/derive_hash_set.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
@@ -626,15 +626,15 @@
     },
     {
       "feature_id": "collections.set_hash_collision_rehash",
-      "evidence": ["tests/cases/set_hash_collision_rehash.ring"],
+      "evidence": ["tests/cases/set_hash_collision_rehash.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
-      "reason": "The pure-Ring Map-backed Set preserves Hash+Eq semantics across collisions, duplicate inserts, tombstones, rehash, and set algebra."
+      "reason": "The pure-Vorton Map-backed Set preserves Hash+Eq semantics across collisions, duplicate inserts, tombstones, rehash, and set algebra."
     },
     {
       "feature_id": "backend.frontend_hash_reject_manual_eq_without_hash",
-      "evidence": ["tests/cases/errors/set_manual_eq_missing_hash.ring"],
+      "evidence": ["tests/cases/errors/set_manual_eq_missing_hash.vorton"],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
       "status": "covered",
@@ -643,10 +643,10 @@
     {
       "feature_id": "backend.frontend_hash_reject_float_field",
       "evidence": [
-        "tests/cases/errors/derive_hash_float_missing.ring",
-        "tests/cases/errors/derive_nested_hash_float_missing.ring",
-        "tests/cases/errors/derive_nested_hash_float_set_missing.ring",
-        "tests/cases/errors/derive_nested_hash_float_map_missing.ring"
+        "tests/cases/errors/derive_hash_float_missing.vorton",
+        "tests/cases/errors/derive_nested_hash_float_missing.vorton",
+        "tests/cases/errors/derive_nested_hash_float_set_missing.vorton",
+        "tests/cases/errors/derive_nested_hash_float_map_missing.vorton"
       ],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
@@ -655,7 +655,7 @@
     },
     {
       "feature_id": "backend.effect_custom_and_fail",
-      "evidence": ["tests/cases/effect_custom_and_fail.ring"],
+      "evidence": ["tests/cases/effect_custom_and_fail.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
@@ -664,17 +664,17 @@
     {
       "feature_id": "frontend.effect_operation_signature_only",
       "evidence": [
-        "tests/cases/custom_effect.ring",
-        "tests/cases/error_removed_effect_default_body.ring"
+        "tests/cases/custom_effect.vorton",
+        "tests/cases/error_removed_effect_default_body.vorton"
       ],
       "oracle": "handwritten-golden+c-native+diagnostic-substring",
       "lane": ["e2e-c", "check"],
       "status": "covered",
-      "reason": "Ring 0.1 custom effects retain explicit handlers while effect-operation bodies are rejected and locally recovered without automatic default evidence."
+      "reason": "Vorton 0.1 custom effects retain explicit handlers while effect-operation bodies are rejected and locally recovered without automatic default evidence."
     },
     {
       "feature_id": "backend.system_effect_capabilities",
-      "evidence": ["tests/cases/system_effect_surface.ring"],
+      "evidence": ["tests/cases/system_effect_surface.vorton"],
       "oracle": "c-native-check+golden",
       "lane": ["e2e-c"],
       "status": "covered",
@@ -683,9 +683,9 @@
     {
       "feature_id": "backend.system_effect_custom_adapter",
       "evidence": [
-        "tests/cases/system_effect_custom_adapter.ring",
-        "tests/cases/error_handle_system_effect.ring",
-        "tests/cases/error_removed_io_effect_annotation.ring"
+        "tests/cases/system_effect_custom_adapter.vorton",
+        "tests/cases/error_handle_system_effect.vorton",
+        "tests/cases/error_removed_io_effect_annotation.vorton"
       ],
       "oracle": "c-native-golden+diagnostic-substring",
       "lane": ["e2e-c", "check"],
@@ -695,8 +695,8 @@
     {
       "feature_id": "backend.core_ownership_cutover",
       "evidence": [
-        "tests/cases/ownership_core_cutover.ring",
-        "tests/cases/modules/ownership_core_cutover_project/main.ring"
+        "tests/cases/ownership_core_cutover.vorton",
+        "tests/cases/modules/ownership_core_cutover_project/main.vorton"
       ],
       "oracle": "handwritten-golden+c-native+project-c",
       "lane": ["e2e-c", "module-c"],
@@ -705,7 +705,7 @@
     },
     {
       "feature_id": "backend.effect_abort_handler_arm",
-      "evidence": ["tests/cases/golden/abort_handler_arm.ring"],
+      "evidence": ["tests/cases/golden/abort_handler_arm.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["golden-c"],
       "status": "covered",
@@ -714,8 +714,8 @@
     {
       "feature_id": "backend.effect_abort_handler_open_row",
       "evidence": [
-        "tests/cases/abort_handler_open_row.ring",
-        "tests/cases/abort_handler_assoc_open_row.ring"
+        "tests/cases/abort_handler_open_row.vorton",
+        "tests/cases/abort_handler_assoc_open_row.vorton"
       ],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
@@ -725,7 +725,7 @@
     {
       "feature_id": "backend.module_abort_handler_assoc_constraint",
       "evidence": [
-        "tests/cases/modules/abort_handler_assoc_constraint/main.ring"
+        "tests/cases/modules/abort_handler_assoc_constraint/main.vorton"
       ],
       "oracle": "module-golden+c-native",
       "lane": ["module-c"],
@@ -735,21 +735,21 @@
     {
       "feature_id": "backend.frontend_abort_handler_contract",
       "evidence": [
-        "tests/cases/error_abort_handler_arm_io_effect.ring",
-        "tests/cases/error_abort_handler_arm_reraise_effect.ring",
-        "tests/cases/error_abort_handler_mixed_open_row_payload_type.ring",
-        "tests/cases/error_abort_handler_open_row_payload_type.ring",
-        "tests/cases/error_abort_handler_payload_type.ring",
-        "tests/cases/error_abort_handler_result_type.ring",
-        "tests/cases/errors/abort_handler_unannotated_callback_payload.ring",
-        "tests/cases/errors/abort_handler_unannotated_payload_monomorphic.ring",
-        "tests/cases/errors/abort_handler_nested_open_row_payload.ring",
-        "tests/cases/errors/abort_handler_assoc_payload_owner.ring",
-        "tests/cases/errors/abort_handler_assoc_payload_multi_owner.ring",
-        "tests/cases/errors/abort_handler_assoc_payload_unified_owners.ring",
-        "tests/cases/errors/abort_handler_assoc_payload_open_record_owner.ring",
-        "tests/cases/errors/abort_handler_assoc_payload_structured.ring",
-        "tests/cases/errors/abort_handler_assoc_payload_typevar_equality.ring"
+        "tests/cases/error_abort_handler_arm_io_effect.vorton",
+        "tests/cases/error_abort_handler_arm_reraise_effect.vorton",
+        "tests/cases/error_abort_handler_mixed_open_row_payload_type.vorton",
+        "tests/cases/error_abort_handler_open_row_payload_type.vorton",
+        "tests/cases/error_abort_handler_payload_type.vorton",
+        "tests/cases/error_abort_handler_result_type.vorton",
+        "tests/cases/errors/abort_handler_unannotated_callback_payload.vorton",
+        "tests/cases/errors/abort_handler_unannotated_payload_monomorphic.vorton",
+        "tests/cases/errors/abort_handler_nested_open_row_payload.vorton",
+        "tests/cases/errors/abort_handler_assoc_payload_owner.vorton",
+        "tests/cases/errors/abort_handler_assoc_payload_multi_owner.vorton",
+        "tests/cases/errors/abort_handler_assoc_payload_unified_owners.vorton",
+        "tests/cases/errors/abort_handler_assoc_payload_open_record_owner.vorton",
+        "tests/cases/errors/abort_handler_assoc_payload_structured.vorton",
+        "tests/cases/errors/abort_handler_assoc_payload_typevar_equality.vorton"
       ],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
@@ -759,9 +759,9 @@
     {
       "feature_id": "backend.frontend_rebind_monomorphic_param",
       "evidence": [
-        "tests/cases/errors/rebind_monomorphic_param_expansion.ring",
-        "tests/cases/errors/abort_handler_unannotated_callback_payload.ring",
-        "tests/cases/errors/abort_handler_unannotated_payload_monomorphic.ring"
+        "tests/cases/errors/rebind_monomorphic_param_expansion.vorton",
+        "tests/cases/errors/abort_handler_unannotated_callback_payload.vorton",
+        "tests/cases/errors/abort_handler_unannotated_payload_monomorphic.vorton"
       ],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
@@ -771,8 +771,8 @@
     {
       "feature_id": "backend.effect_handler_mut_capture",
       "evidence": [
-        "tests/cases/effect_custom_multi_effect.ring",
-        "tests/cases/effect_handler_mut_capture.ring"
+        "tests/cases/effect_custom_multi_effect.vorton",
+        "tests/cases/effect_handler_mut_capture.vorton"
       ],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
@@ -782,8 +782,8 @@
     {
       "feature_id": "backend.struct_named_pattern_fields",
       "evidence": [
-        "tests/cases/struct_match_pattern.ring",
-        "tests/cases/struct_named_pattern_fields.ring"
+        "tests/cases/struct_match_pattern.vorton",
+        "tests/cases/struct_named_pattern_fields.vorton"
       ],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
@@ -793,9 +793,9 @@
     {
       "feature_id": "backend.tuple_eq_dispatch",
       "evidence": [
-        "tests/cases/tuple_eq.ring",
-        "tests/cases/tuple_eq_dispatch.ring",
-        "tests/cases/tuple_eq_wrapped_dict_rc.ring"
+        "tests/cases/tuple_eq.vorton",
+        "tests/cases/tuple_eq_dispatch.vorton",
+        "tests/cases/tuple_eq_wrapped_dict_rc.vorton"
       ],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
@@ -804,7 +804,7 @@
     },
     {
       "feature_id": "backend.tuple_eq_struct",
-      "evidence": ["tests/cases/tuple_eq_struct.ring"],
+      "evidence": ["tests/cases/tuple_eq_struct.vorton"],
       "oracle": "handwritten-golden+c-native",
       "lane": ["e2e-c"],
       "status": "covered",
@@ -812,7 +812,7 @@
     },
     {
       "feature_id": "backend.frontend_tuple_oob",
-      "evidence": ["tests/cases/error_tuple_oob.ring"],
+      "evidence": ["tests/cases/error_tuple_oob.vorton"],
       "oracle": "diagnostic-substring",
       "lane": ["check"],
       "status": "covered",

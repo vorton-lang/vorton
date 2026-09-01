@@ -27,8 +27,8 @@ from windows_job import preflight_job_support, run_in_job
 BENCH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BENCH_DIR.parents[1]
 DEFAULT_SCHEMA = BENCH_DIR / "disabled_path_gate.schema.json"
-EVIDENCE_SCHEMA = "ring.check-benchmark.disabled-path-gate.v2"
-SCHEMA_ID = "ring.check-benchmark.disabled-path-gate.schema.v2"
+EVIDENCE_SCHEMA = "vorton.check-benchmark.disabled-path-gate.v2"
+SCHEMA_ID = "vorton.check-benchmark.disabled-path-gate.schema.v2"
 SCHEMA_CANONICAL_SHA256 = "e869d99a4d5b61a991c650664c58efdf38ccb4df1932063e2f176b62c6d4ce54"
 
 SUBJECTS = ("base", "candidate")
@@ -38,26 +38,26 @@ MEDIAN_RATIO_MAX = 1.02
 MEDIAN_DELTA_NS_MAX = 2_000_000
 EXPECTED_STDOUT = b"OK\r\n"
 EXPECTED_STDERR = b""
-PHASE_ENV_PREFIX = "RING_PHASE_"
+PHASE_ENV_PREFIX = "VORTON_PHASE_"
 ANCHOR_PATH = "compiler/dist-c/main.c"
-RUNTIME_PATH = "ring_runtime.cpp"
-FIXTURE_PATH = "tests/cases/hello.ring"
+RUNTIME_PATH = "vorton_runtime.cpp"
+FIXTURE_PATH = "tests/cases/hello.vorton"
 GATE_PATH = "bench/check/disabled_path_gate.py"
 SCHEMA_PATH = "bench/check/disabled_path_gate.schema.json"
 HARNESS_PATH = "bench/check/run.py"
 WINDOWS_JOB_PATH = "bench/check/windows_job.py"
 STD_PATHS = (
-    "std/io.ring",
-    "std/iterator.ring",
-    "std/list.ring",
-    "std/map.ring",
-    "std/set.ring",
-    "std/str.ring",
-    "std/num.ring",
-    "std/result.ring",
-    "std/fs.ring",
-    "std/path.ring",
-    "std/process.ring",
+    "std/io.vorton",
+    "std/iterator.vorton",
+    "std/list.vorton",
+    "std/map.vorton",
+    "std/set.vorton",
+    "std/str.vorton",
+    "std/num.vorton",
+    "std/result.vorton",
+    "std/fs.vorton",
+    "std/path.vorton",
+    "std/process.vorton",
 )
 BUILD_TIMEOUT_SECONDS = 1200
 INVOCATION_TIMEOUT_SECONDS = 60
@@ -207,10 +207,10 @@ def _stage_layout(evidence_root: Path) -> dict[str, str]:
         "source": str(stage / "source"),
         "build": str(stage / "build"),
         "thinlto_cache": str(stage / "thinlto-cache"),
-        "subject_base": str(stage / "subjects" / "base" / "ring.exe"),
-        "subject_candidate": str(stage / "subjects" / "candidate" / "ring.exe"),
-        "invocation_binary": str(stage / "invoke" / "ring.exe"),
-        "fixture": str(stage / "fixture" / "hello.ring"),
+        "subject_base": str(stage / "subjects" / "base" / "vorton.exe"),
+        "subject_candidate": str(stage / "subjects" / "candidate" / "vorton.exe"),
+        "invocation_binary": str(stage / "invoke" / "vorton.exe"),
+        "fixture": str(stage / "fixture" / "hello.vorton"),
         "std": str(stage / "std"),
         "cwd": str(stage / "cwd"),
     }
@@ -417,8 +417,8 @@ def _expected_build_commands(
 ) -> list[tuple[str, list[str]]]:
     source, build = Path(stage["source"]), Path(stage["build"])
     compiler_object, runtime_object = (
-        build / "ring_compiler_lto.o",
-        build / "ring_runtime_lto.o",
+        build / "vorton_compiler_lto.o",
+        build / "vorton_runtime_lto.o",
     )
     return [
         (
@@ -439,7 +439,7 @@ def _expected_build_commands(
             "link",
             [
                 tools["clang"]["path"], str(compiler_object), str(runtime_object),
-                "-o", str(build / "ring.exe"), *LINK_FLAGS[:-1],
+                "-o", str(build / "vorton.exe"), *LINK_FLAGS[:-1],
                 f"-B{Path(tools['lld_link']['path']).resolve().parent}",
                 LINK_FLAGS[-1],
                 f"-Wl,/lldltocache:{stage['thinlto_cache']}", LTO_CACHE_POLICY,
@@ -864,7 +864,7 @@ def _build_subject(
         )
         _require_command(record, f"{subject} {phase}")
         commands.append(record)
-    built = build / "ring.exe"
+    built = build / "vorton.exe"
     binary = _coff_identity(built)
     slot = Path(stage[f"subject_{subject}"])
     slot.parent.mkdir(parents=True)

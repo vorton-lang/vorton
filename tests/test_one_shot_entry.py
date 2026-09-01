@@ -343,7 +343,7 @@ class OneShotEntryTests(unittest.TestCase):
     def test_second_stage_failures_are_durable_after_outer_attempt(self) -> None:
         launchers = {
             "syntax": ("def broken(:\n", "SyntaxError"),
-            "import": ("import ring_missing_outer_module\n", "ModuleNotFoundError"),
+            "import": ("import vorton_missing_outer_module\n", "ModuleNotFoundError"),
             "dataclass": (
                 "from dataclasses import dataclass\n"
                 "@dataclass\nclass Good:\n    value: int\n"

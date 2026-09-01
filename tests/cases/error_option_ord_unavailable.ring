@@ -1,8 +1,0 @@
-// Option has no Ord implementation in Ring 0.1.  A backend-generated cmp
-// symbol must never make this source type-check.
-
-fn main() {
-    let left: Option<Int> = some(1)
-    let right: Option<Int> = some(2)
-    let _ = left.cmp(right)
-}
