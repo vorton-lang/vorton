@@ -60,6 +60,6 @@ Verification 必须是 fresh、read-only task，在 PR head SHA 对应的 clean 
 ## Merge 与归档
 
 - Readiness、Execution、Verification 的 task ID 都记录在 PR 的 `验证` 区；普通命令流水不写 Issue 评论。
-- Verifier 可先对 fixed candidate 给出 verdict，其 `PASS` 不依赖该 Verifier task 自己尚未发生的归档。
-- Planning 收到终态后查询并归档本 Issue 所有已完成或已失效后台 task；归档完成是 merge 的机械前置条件。只有用户能决定重置 Planning 会话，agent 只能凭具体证据建议。
-- 只有未变化 SHA 的 canonical gates、Debt Gate `PASS`、Verifier `PASS`、task 归档完成以及已有 merge 预授权同时成立时，Planning 才可 merge。
+- 归档可能清理 task worktree；Planning 只有确认 task 不可能再被合法恢复时才可归档。Executor 与 Verifier 的 exact 可恢复边界分别见对应角色模板。
+- 归档不是 merge 前置条件。只有未变化 SHA 的 canonical gates、Debt Gate `PASS`、Verifier `PASS` 和已有 merge 预授权同时成立时，Planning 才可 merge。
+- Merge 后，Planning 归档该 Issue 剩余的 Executor 与后台 task。只有用户能决定重置 Planning 会话，agent 只能凭具体证据建议。

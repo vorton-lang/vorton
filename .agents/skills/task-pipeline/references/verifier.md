@@ -9,37 +9,29 @@
 - SHA：`<PR head 的 exact 40-hex commit>`
 - Canonical gates：`<Issue 与该 SHA repository authority 指定的命令>`
 
-在 SHA 对应的 clean worktree 中读取 `AGENTS.md`、本 skill、Issue、PR diff 与相关 repository authority；开始和结束都核对 PR head 仍为该 SHA。
+在 SHA 对应的 clean worktree 中读取 `AGENTS.md`、本 skill、Issue、PR diff 与相关 repository authority。
 
 ## 允许
 
 - 只读检查 candidate，按原命令运行 canonical gates，并在仓库外临时目录创建最小行为探针。
 - 为每个 finding 报告 contract/invariant、触发条件、期望、实际结果和 exact evidence。
+- 确认遗留 lifecycle authority、错误 SHA、空洞模板或越权外部写入任一情况都不能得到 `PASS`。
 
 ## 禁止
 
 - 修改 candidate、正式测试库、Issue/PR contract，修复 finding，扩大范围，执行外部写入或 merge。
-- 读取 Execution 会话、采用其自我评价、拼接不同 SHA 证据，或在失败后静默重跑。
-- 在 SHA 不符、证据不完整、canonical gate 缺失或 task 越权时给出 `PASS`。
+- 读取 Execution 会话或采用其自我评价。
 
 ## Verdict
 
-- `PASS`：同一 SHA 满足全部 acceptance、canonical gates 与 Debt Gate，且没有 blocking finding。
-- `PRODUCT_FAIL`：candidate 违反 contract/invariant、canonical gate 因产品行为失败，或存在 blocking debt；进入 fresh Execution。
-- `EVIDENCE_GAP`：SHA/身份错误、验收或 gate 不足以裁决、contract 不可验证；回到 Planning。
-- `INFRA_BLOCKED`：只有已确认且与 candidate 产品行为无关的基础设施阻塞；只处理该基础设施。
+- `PASS`：acceptance 与主 skill 的全部 gate 均满足，没有 blocking finding。
+- `PRODUCT_FAIL`：candidate 违反 contract/invariant，或存在 blocking debt。
+- `EVIDENCE_GAP`：身份、contract 或证据不足以裁决。
+- `INFRA_BLOCKED`：与 candidate 产品行为无关的基础设施阻止必要验证。
 
-## Debt Gate
+## 共享规则
 
-逐项尝试删除或合并净新增代码、测试、文档、依赖、配置与抽象，并核对当前 consumer 和不可替代作用。必须确认遗留 lifecycle authority、错误 SHA、空洞模板或越权外部写入任一情况都不能得到 `PASS`。结构性、长期或影响验证的债务记为 `BLOCK`；局部可逆品味问题可记录但不阻塞。
-
-## 重试与资源
-
-默认不设 task-local 限制，不用预测耗时设置 kill wall。失败命令保留 exact output，不静默重跑；只有证据证明基础设施问题并在其修复后，才由 Planning 按 `INFRA_BLOCKED` 路由。任何 candidate 改动都产生新 SHA，并要求 fresh Verification，旧结果全部失效。
-
-## 归档
-
-Verifier 不归档自己或其他 task，也不以待归档为由拒绝对 fixed candidate 裁决。Planning 收到终态后记录 task ID、归档本 Issue 已完成/失效 task，并把归档完成作为 merge 前置条件。
+Candidate/证据、Debt Gate、重试与资源、task 归档只按主 skill 的对应章节执行，不在本模板复述。Verifier 把相应裁决写入固定终态事件；fixed SHA verdict 已终结且本 task 不会复用后可归档。
 
 ## 终态事件
 

@@ -13,19 +13,26 @@
 
 ## 允许
 
-- 在 Issue 范围内修改仓库，运行开发所需的现有 gate，并保留 exact failure 作为开发反馈。
+- 在 Issue 范围内修改仓库并运行开发所需的现有 gate。
 - 使用现有 `git`/`gh` 身份建立或更新该 Issue 的唯一 branch 与 draft PR。
-- 对不改变 Issue 的精确事实请求澄清；澄清后可在同一 task 续接。
+- 对不改变 Issue 的精确事实请求澄清。
 
 ## 禁止
 
 - 读取或消费 Planning、Readiness、旧 Execution、调用者 working tree/index，或把它们的结论当证据。
-- 修改 Issue contract、扩大范围、自行决定重大未决、创建第二 PR/authority，或执行越出授权的外部写入。
+- 修改 Issue contract、扩大范围、自行决定重大未决，或执行越出授权的外部写入。
 - merge、自我 Verification、给出 `PASS`，或把开发检查称为 canonical acceptance。
 
-## Debt Gate、重试、资源与归档
+## 共享规则
 
-实现须按主 skill 的 Debt Gate 主动删除重复规则与无 consumer 内容，并在 PR `验证` 区留下可供 Verifier 复核的净新增说明；Executor 不裁定 Debt Gate。默认不设资源限制，不使用预测式 timeout，也不静默重跑失败命令。需要 contract 变化时输出 `NEEDS_DECISION` 并停止；仅缺精确事实时输出 `NEEDS_CLARIFICATION` 并暂停；其他无法形成 candidate 的终态为 `FAILED`。Executor 不归档自己或其他 task，归档由 Planning 在收到终态后完成。
+Candidate/证据、Debt Gate、重试与资源、task 归档只按主 skill 的对应章节执行，不在本模板复述。Executor 在 PR `验证` 区提供净新增说明但不裁定 Debt Gate；输出 `READY_FOR_VERIFICATION` 后仍须保持 task/worktree 可恢复，直到 PR merge。
+
+## Status
+
+- `READY_FOR_VERIFICATION`：candidate 已 commit、push 并进入唯一 draft PR。
+- `NEEDS_CLARIFICATION`：只缺不改变 contract 的精确事实；暂停后可续接本 task。
+- `NEEDS_DECISION`：需要 contract 或重大决定变化；停止并交回 Planning。
+- `FAILED`：因上述两类以外的终态原因无法形成 candidate。
 
 ## 终态事件
 
