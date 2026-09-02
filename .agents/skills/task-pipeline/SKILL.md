@@ -13,6 +13,8 @@ description: Plan and advance Vorton repository changes through GitHub Issue Pla
 - Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由 fresh task，以及在已有预授权下执行 merge；不得修改仓库。
 - Issue 是 Execution 与 Verification 的 immutable contract。范围、验收、依赖、优先级或重大设计需要改变时，必须回到 Planning，由用户决定并更新 Issue。
 - Worktree 只是隔离 checkout；不得把调用会话的 working tree、index、未提交改动、摘要或结论当作输入。
+- 读取事实时，GitHub 只提供 Issue/PR 的活动状态与 exact head；仓库文件、diff 和 authority 应从本阶段 clean worktree 或已有本地 Git object 批量读取。只有缺少所需 object 或 contract 明确指向外部 authority 时才联网，禁止逐文件远程抓取。
+- 创建 fresh task 时，只有 `threadId` 可用于后续编排；`clientThreadId` 只表示 worktree setup pending，不得传给 thread tools，也不得用 `list_threads` 忙轮询。工具尚未提供 `threadId` 时等待 setup 完成或报告可见性阻塞。
 
 ## 三阶段
 
