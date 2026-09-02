@@ -14,6 +14,8 @@
 ## 允许
 
 - 只读检查 candidate，按原命令运行 canonical gates，并在仓库外临时目录创建最小行为探针。
+- 多个行为或删除探针复用同一个仓库外隔离副本；每个探针结束后恢复并核对 exact SHA 与 clean 状态，只有无法可靠恢复时才新建副本。
+- 预期失败的负向探针以 `EXPECTED_REJECT` 记录命令、预期拒绝点与实际拒绝点；只有偏离预期的失败才作为 finding 或基础设施错误。
 - 为每个 finding 报告 contract/invariant、触发条件、期望、实际结果和 exact evidence。
 - 确认遗留 lifecycle authority、错误 SHA、空洞模板或越权外部写入任一情况都不能得到 `PASS`。
 
