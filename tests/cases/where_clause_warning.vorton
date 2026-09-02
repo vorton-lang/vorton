@@ -4,8 +4,8 @@
 // failure mode for unattended LLM loops). Compilation behavior is unchanged:
 // the program still type-checks, builds, and runs (exit code 0).
 //
-// NOTE: when refinement types land (B-001), this warning, this test case,
-// and the W0002 contracts in tests/run_tests.py must be removed together.
+// NOTE: when refinement types land (B-001), this warning and fixture must be
+// revised together so the expected behavior never straddles two authorities.
 
 struct Account {
     balance: Int where balance >= 0
