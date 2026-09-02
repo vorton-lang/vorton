@@ -1,6 +1,1 @@
 compiler/dist-c/main.c text eol=lf linguist-generated=true
-bench/check/manifest.json text eol=lf
-bench/check/run.py text eol=lf
-bench/check/windows_job.py text eol=lf
-bench/check/disabled_path_gate.py text eol=lf
-bench/check/disabled_path_gate.schema.json text eol=lf
