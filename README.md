@@ -8,8 +8,8 @@ Vorton 是一门面向 native 应用开发的编程语言，也是其编译器�
 
 ```vorton
 enum Shape {
-    circle(radius: Float),
-    rect(width: Float, height: Float),
+    circle(Float),
+    rect(Float, Float),
 }
 
 fn area(shape: Shape) -> Float {

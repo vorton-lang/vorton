@@ -42,9 +42,9 @@ Vorton 在同一 evaluation region 内按源码 **从左到右** 求值同级子
 struct Point { x: Float, y: Float }
 
 enum Shape {
-    circle(radius: Float),
-    rect(width: Float, height: Float),
-    polygon(vertices: List<Point>),
+    circle(Float),
+    rect(Float, Float),
+    polygon(List<Point>),
 }
 
 fn area(s: Shape) -> Float {
