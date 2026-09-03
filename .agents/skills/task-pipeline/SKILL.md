@@ -1,26 +1,42 @@
 ---
 name: task-pipeline
-description: Plan and advance Vorton repository changes through GitHub Issue Planning, fresh Execution, and fresh Verification. Use when a request may become executable repository work, or for PR verification and merge routing; do not use for project status or unrelated read-only discussion.
+description: Plan and advance Vorton repository goals through GitHub Milestones, Issue Planning, fresh Execution, and fresh Verification. Use when a request may become executable repository work, or for PR verification and merge routing; do not use for project status or unrelated read-only discussion.
 ---
 
 # Vorton Task Pipeline
 
-这是 Vorton 仓库唯一的任务 lifecycle authority。先读取根目录 `AGENTS.md`、最新 GitHub Issue 和任务涉及的仓库 authority；活动范围、状态与验收只认 Issue/PR，完成历史只查 PR 与 Git。角色 prompt 是本 skill 的一部分，不是独立 authority：Execution 使用 [Executor 模板](references/executor.md)，Verification 使用 [Verifier 模板](references/verifier.md)。
+这是 Vorton 仓库唯一的任务 lifecycle authority。先读取根目录 `AGENTS.md`、全部 open GitHub Milestone 描述、当前 GitHub Issue 和任务涉及的仓库 authority；持久目标与目标顺序只认 Milestone，当前范围、设计、验收与依赖只认 Issue，完成历史只查 PR 与 Git。角色 prompt 是本 skill 的一部分，不是独立 authority：Execution 使用 [Executor 模板](references/executor.md)，Verification 使用 [Verifier 模板](references/verifier.md)。
 
 ## 工作单元与授权
 
-- 一个用户确认的 Issue 是一个工作单元，同时只允许一个 active PR、一个 PR head branch 和一个 writer；PR 面向默认分支并使用 `Closes #N`。
-- Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由 fresh task，以及在已有预授权下执行 merge；不得修改仓库。
+- 一个用户确认的 Issue 是一个工作单元，同时只允许一个 active PR、一个 PR head branch 和一个 writer；PR 面向默认分支并使用 `Closes #N`。Issue 必须归入其验收首先依赖的最早目标。
+- Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由 fresh task，以及在已有预授权下执行 merge；关闭或重新打开 Milestone 必须另有用户明确授权；不得修改仓库。
 - Issue 是 Execution 与 Verification 的 immutable contract。范围、验收、依赖、优先级或重大设计需要改变时，必须回到 Planning，由用户决定并更新 Issue。
 - Worktree 只是隔离 checkout；不得把调用会话的 working tree、index、未提交改动、摘要或结论当作输入。
-- 读取事实时，GitHub 只提供 Issue/PR 的活动状态与 exact head；仓库文件、diff 和 authority 应从本阶段 clean worktree 或已有本地 Git object 批量读取。只有缺少所需 object 或 contract 明确指向外部 authority 时才联网，禁止逐文件远程抓取。
+- Milestone/Issue/PR 的描述与活动状态以及 PR/default-branch 的 exact remote head 必须直接从 GitHub 读取；仓库文件、diff 和 authority 应从本阶段 clean worktree 或已有本地 Git object 批量读取。只有缺少所需 object 或 contract 明确指向其它外部 authority 时，才联网取得 repository 内容，禁止逐文件远程抓取。
+- 默认不读取 state reason 为 `not_planned` 的 closed Issue；只有用户明确要求历史调查时才可读取。
 - 创建 fresh task 时，只有 `threadId` 可用于后续编排；`clientThreadId` 只表示 worktree setup pending，不得传给 thread tools，也不得用 `list_threads` 忙轮询。工具尚未提供 `threadId` 时等待 setup 完成或报告可见性阻塞。
+
+## Milestone 与 Issue 路由
+
+- 正常推进只允许 `Milestone → 当前 Issue → fresh Readiness → fresh Execution → fresh Verification` 的单向路由；失败或 contract 变化只按本 skill 的固定终态返回 Planning，不得把后阶段摘要变成前阶段输入。
+- Planning 在选择工作前必须读取全部 open Milestone 描述，并按已确认的 `1/5 → 5/5` 顺序选择最早未关闭目标。多个未来 Milestone 可以同时 open，但前一 Milestone 未关闭时，不得为后一 Milestone 启动 Issue。
+- Issue 归入其验收首先依赖的最早目标，文件修改位置不决定归属。后序工作发现前序 contract 缺陷时，立即暂停后序；由 Planning 取得用户确认后重新打开前序目标，不得在后序 Issue 中静默修补或让两个目标并行。
+- 同一 Milestone 默认只推进一个 active Issue。只有各 Issue 的 fresh Readiness 均已 `CLEAR`、修改面相互独立且用户明确批准时才允许并行。
+- Milestone 的自动 Issue 百分比不构成目标完成证明。最后一个已知 Issue 合并后，Planning 必须对目标结果做一次整体只读核对；只有用户确认目标完成并授权写入后，Planning 才可关闭 Milestone。
+- Milestone 正文只保存目标与边界，不保存执行步骤、进度清单、旧 Issue 链接或未来实现方案；不得用本地 roadmap 或其它载体建立第二状态系统。
 
 ## 三阶段
 
 ### Planning 与 Readiness
 
-Planning 把原始目标收敛为 Issue。Readiness 必须是 fresh、只读 task，只接收原始目标、最新 Issue 和默认分支事实，不接收 Planning 结论或旧 task 内容；它输出 `CLEAR` 或 `REWRITE`。`CLEAR` 只授权从所报 start SHA 开始 Execution，不是 Verification 或 merge 证据；`REWRITE` 回到 Planning，更新 contract 后必须重开 fresh Readiness。
+Planning 把当前 Milestone 的现实缺口收敛为 Issue。Planning 只向 fresh Readiness 提供 repository full name、当前 Milestone 编号或 URL、当前 Issue 编号或 URL、默认分支名称这些稳定标识符；不得提供或转述 Milestone/Issue body、评论、PR 状态、default-branch SHA、repository 内容、diff、摘要、旧任务结论或其它事实 snapshot。
+
+Readiness 必须是以 Full access（`danger-full-access` 或宿主等价模式）启动的 fresh、只读 task。Full access 只提供独立访问 GitHub、网络与本机 Git objects 的能力，不扩大角色授权；任何 repository、GitHub 或外部状态写入都会使该 Readiness 无效。
+
+Readiness 必须自行从 GitHub 读取当前 Milestone、Issue、关联 PR 与 remote default-branch head，并从 clean local checkout 或对应 Git object 批量读取 repository authority。它可以直接使用经核对 clean 且位于 remote default-branch head 的 main checkout；fresh 性来自独立任务与独立取证，不要求为只读阶段额外建立 worktree。Execution 与 Verification 仍必须使用各自的 clean worktree 和 exact SHA 隔离。
+
+Full access 或独立 GitHub 读取不可用时，Readiness 必须 fail closed 并报告可见性或基础设施阻塞；不得接受 Planning snapshot、调用者 working tree 内容或离线转述作为 fallback。Readiness 输出 `CLEAR`、`REWRITE` 或 `BLOCKED`：`CLEAR` 只授权从其独立确定并报告的 start SHA 开始 Execution，不是 Verification 或 merge 证据；`REWRITE` 回到 Planning，更新 contract 后必须重开 fresh Readiness；`BLOCKED` 只表示上述访问能力不足。
 
 任务进入 Readiness 前，Planning 使用实际可发现的 `grilling` skill 压测目标与 contract；已安装的 `grill-me` 只可作为调用入口，不能成为替代 authority。找不到 `grilling` 时 fail closed，不自行模拟。
 
@@ -29,10 +45,10 @@ Readiness 只输出：
 ```text
 Issue: #N
 Stage: READINESS
-Status: CLEAR | REWRITE
-Start SHA: <40-hex default-branch commit>
+Status: CLEAR | REWRITE | BLOCKED
+Start SHA: <40-hex default-branch commit or NONE when BLOCKED>
 Confirmed facts:
-- <fact or rewrite reason>
+- <fact, rewrite reason, or blocking reason>
 ```
 
 ### Execution

@@ -14,7 +14,7 @@
 
 额外目标：让 LLM 也喜欢写这门语言——模块签名信息密度最大化，LLM 在零训练数据的情况下只需签名即可正确使用 API。
 
-**当前实现状态**：编译器正在 Rust 宿主上重建，先闭合 `source → token → AST → diagnostic` 最小纵切，再按 GitHub Issue 推进 checker、IR、ownership、C11 后端与 CLI。迁移前的 `compiler/*.vorton`、`compiler/dist-c/main.c`、`vorton_runtime.cpp` 与旧测试只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 compiler build、CI、bootstrap 或发布 authority。以下涉及旧 C/self-host 实现的段落记录历史设计与可复用约束，不表示当前 Rust compiler 已实现或通过相应门。
+**当前实现状态**：编译器正在 Rust 宿主上重建，先闭合 `source → token → AST → diagnostic` 最小纵切，再按 GitHub Milestone 的目标顺序通过当前 Issue 推进 checker、IR、ownership、C11 后端与 CLI。迁移前的 `compiler/*.vorton`、`compiler/dist-c/main.c`、`vorton_runtime.cpp` 与旧测试只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 compiler build、CI、bootstrap 或发布 authority。以下涉及旧 C/self-host 实现的段落记录历史设计与可复用约束，不表示当前 Rust compiler 已实现或通过相应门。
 
 ## 设计公理
 
@@ -2003,7 +2003,7 @@ Source
 
 ## 状态真值
 
-本文件只保存稳定设计。当前技术入口以 `AGENTS.md` 为准；活动依赖、范围与验收只查 GitHub Issues，完成历史、被否决方案和逐轮调查只查 Git。解析但无语义效果的“幽灵功能”必须进入经用户确认的 GitHub Issue，不能在设计附录另建第二张看板。
+本文件只保存稳定设计。当前技术入口以 `AGENTS.md` 为准；持久目标与目标顺序只查 GitHub Milestones，当前依赖、范围与验收只查 GitHub Issues，完成历史、被否决方案和逐轮调查只查 PR 与 Git。解析但无语义效果的“幽灵功能”必须进入经用户确认的 GitHub Issue，不能在设计附录另建第二张看板。
 
 ## 一句话
 

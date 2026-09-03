@@ -3,13 +3,39 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_URL = "https://github.com/vorton-lang/vorton"
+MILESTONES_URL = f"{REPOSITORY_URL}/milestones"
+ISSUES_URL = f"{REPOSITORY_URL}/issues"
 DISCUSSION_URL = f"{REPOSITORY_URL}/discussions/1"
+
+AGENT_MILESTONE_TRUTH = (
+    f"GitHub Milestones]({MILESTONES_URL}) 是持久目标与目标顺序的唯一真值"
+)
+PIPELINE_MILESTONE_TRUTH = "持久目标与目标顺序只认 Milestone"
+PIPELINE_ORDER_RULE = "前一 Milestone 未关闭时，不得为后一 Milestone 启动 Issue"
+PIPELINE_ORDER_CONTRADICTION = "前一 Milestone 未关闭时，可以为后一 Milestone 启动 Issue"
+PIPELINE_NOT_PLANNED_RULE = (
+    "默认不读取 state reason 为 `not_planned` 的 closed Issue"
+)
+PIPELINE_NOT_PLANNED_CONTRADICTION = (
+    "默认读取 state reason 为 `not_planned` 的 closed Issue"
+)
+PIPELINE_SNAPSHOT_RULE = (
+    "不得接受 Planning snapshot、调用者 working tree 内容或离线转述作为 fallback"
+)
+PIPELINE_SNAPSHOT_CONTRADICTION = "可以接受 Planning snapshot 作为 fallback"
+RETIRED_LOCAL_AUTHORITIES = {
+    "docs/backlog.md",
+    "docs/audit-report.md",
+    "docs/roadmap.md",
+    "ROADMAP.md",
+}
 
 REQUIRED_FILES = (
     "AGENTS.md",
@@ -103,6 +129,17 @@ def nonempty_comments(relative: str, text: str, minimum: int, errors: list[str])
         )
 
 
+def is_retired_local_authority(relative: str) -> bool:
+    normalized = relative.replace("\\", "/")
+    return normalized in RETIRED_LOCAL_AUTHORITIES
+
+
+def validate_local_authority_paths(paths: list[str], errors: list[str]) -> None:
+    for relative in sorted(set(paths)):
+        if is_retired_local_authority(relative):
+            errors.append(f"retired local authority must remain absent: {relative}")
+
+
 def validate_repository_layout(errors: list[str]) -> None:
     script_names = {
         path.name for path in (ROOT / ".agents" / "scripts").glob("*.py")
@@ -130,9 +167,10 @@ def validate_repository_layout(errors: list[str]) -> None:
             + ", ".join(path.name for path in role_files)
         )
 
-    for relative in ("docs/backlog.md", "docs/audit-report.md"):
-        if (ROOT / relative).exists():
-            errors.append(f"retired Markdown authority must remain absent: {relative}")
+    repository_files = [
+        relative for relative in RETIRED_LOCAL_AUTHORITIES if (ROOT / relative).is_file()
+    ]
+    validate_local_authority_paths(repository_files, errors)
 
 
 def validate_entry_docs(files: dict[str, str], errors: list[str]) -> None:
@@ -142,6 +180,9 @@ def validate_entry_docs(files: dict[str, str], errors: list[str]) -> None:
         (
             "# Vorton Agent Entry",
             REPOSITORY_URL,
+            MILESTONES_URL,
+            AGENT_MILESTONE_TRUTH,
+            "immutable execution contract",
             ".agents/skills/task-pipeline/SKILL.md",
             "唯一任务 lifecycle authority",
             "Vorton 当前以 Rust 重建编译器",
@@ -156,6 +197,8 @@ def validate_entry_docs(files: dict[str, str], errors: list[str]) -> None:
         (
             "# Vorton",
             REPOSITORY_URL,
+            MILESTONES_URL,
+            ISSUES_URL,
             "当前工程路线是在 Rust 宿主上重建 Vorton 编译器",
             "python .agents/scripts/validate_naming.py",
             "python .agents/scripts/validate_workflow.py",
@@ -164,6 +207,15 @@ def validate_entry_docs(files: dict[str, str], errors: list[str]) -> None:
         ),
         errors,
     )
+    numbered_issue = re.compile(
+        rf"(?i)(?:\bIssue\s*#\s*\d+\b|{re.escape(ISSUES_URL)}/\d+\b)"
+    )
+    current_route = re.compile(r"(?i)(?:当前(?:工程)?路线|当前可执行工作|current route)")
+    if any(
+        numbered_issue.search(line) and current_route.search(line)
+        for line in files["README.md"].splitlines()
+    ):
+        errors.append("README.md must not name a numbered Issue as the current route")
 
     workflow = files["docs/workflow.md"]
     require_fragments(
@@ -173,6 +225,12 @@ def validate_entry_docs(files: dict[str, str], errors: list[str]) -> None:
             "../.agents/skills/task-pipeline/SKILL.md",
             "../.github/ISSUE_TEMPLATE/work-item.md",
             "../.github/pull_request_template.md",
+            MILESTONES_URL,
+            ISSUES_URL,
+            "保存持久目标与目标顺序",
+            "immutable execution contract",
+            "Milestone 的自动 Issue 百分比不是目标完成证明",
+            "本地 roadmap 保持删除",
             DISCUSSION_URL,
             "python .agents/scripts/validate_naming.py",
             "python .agents/scripts/validate_workflow.py",
@@ -208,6 +266,51 @@ def validate_task_pipeline(files: dict[str, str], errors: list[str]) -> None:
     if reference_links != {"references/executor.md", "references/verifier.md"}:
         errors.append("task-pipeline must route to exactly its Executor and Verifier references")
 
+    require_fragments(
+        skill_path,
+        body,
+        (
+            "全部 open GitHub Milestone 描述",
+            PIPELINE_MILESTONE_TRUTH,
+            "Milestone/Issue/PR 的描述与活动状态",
+            "PR/default-branch 的 exact remote head 必须直接从 GitHub 读取",
+            PIPELINE_NOT_PLANNED_RULE,
+            "`Milestone → 当前 Issue → fresh Readiness → fresh Execution → fresh Verification` 的单向路由",
+            "Planning 在选择工作前必须读取全部 open Milestone 描述",
+            "`1/5 → 5/5` 顺序选择最早未关闭目标",
+            PIPELINE_ORDER_RULE,
+            "Issue 归入其验收首先依赖的最早目标",
+            "后序工作发现前序 contract 缺陷时，立即暂停后序",
+            "同一 Milestone 默认只推进一个 active Issue",
+            "fresh Readiness 均已 `CLEAR`、修改面相互独立且用户明确批准",
+            "Milestone 的自动 Issue 百分比不构成目标完成证明",
+            "Planning 必须对目标结果做一次整体只读核对",
+            "用户确认目标完成并授权写入后",
+            "不得用本地 roadmap 或其它载体建立第二状态系统",
+            "Planning 只向 fresh Readiness 提供 repository full name",
+            "当前 Milestone 编号或 URL",
+            "当前 Issue 编号或 URL",
+            "默认分支名称这些稳定标识符",
+            "不得提供或转述 Milestone/Issue body、评论、PR 状态、default-branch SHA",
+            "Full access（`danger-full-access` 或宿主等价模式）",
+            "任何 repository、GitHub 或外部状态写入都会使该 Readiness 无效",
+            "自行从 GitHub 读取当前 Milestone、Issue、关联 PR 与 remote default-branch head",
+            "clean 且位于 remote default-branch head 的 main checkout",
+            "Execution 与 Verification 仍必须使用各自的 clean worktree 和 exact SHA 隔离",
+            "Readiness 必须 fail closed",
+            PIPELINE_SNAPSHOT_RULE,
+            "Status: CLEAR | REWRITE | BLOCKED",
+        ),
+        errors,
+    )
+    for contradiction in (
+        PIPELINE_ORDER_CONTRADICTION,
+        PIPELINE_NOT_PLANNED_CONTRADICTION,
+        PIPELINE_SNAPSHOT_CONTRADICTION,
+    ):
+        if contradiction in body:
+            errors.append(f"{skill_path} contains contradictory policy: {contradiction}")
+
     executor_path = ".agents/skills/task-pipeline/references/executor.md"
     executor = files[executor_path]
     if executor.startswith("---") or "[`task-pipeline`](../SKILL.md)" not in executor:
@@ -226,6 +329,12 @@ def validate_templates(files: dict[str, str], errors: list[str]) -> None:
         errors.append("work-item.md front matter has unsupported fields")
     if metadata.get("name") != "可执行工作":
         errors.append("work-item.md must remain the single executable-work template")
+    require_fragments(
+        issue_path,
+        body,
+        ("归入当前 Milestone", "其验收首先依赖的最早未关闭目标"),
+        errors,
+    )
     expected_issue_lines = [
         "> **问题**：",
         "> **结果**：",
@@ -315,8 +424,9 @@ def validate_other_authorities(files: dict[str, str], errors: list[str]) -> None
         files["docs/design.md"],
         (
             "当前技术入口以 `AGENTS.md` 为准",
-            "活动依赖、范围与验收只查 GitHub Issues",
-            "完成历史、被否决方案和逐轮调查只查 Git",
+            "持久目标与目标顺序只查 GitHub Milestones",
+            "当前依赖、范围与验收只查 GitHub Issues",
+            "完成历史、被否决方案和逐轮调查只查 PR 与 Git",
         ),
         errors,
     )
@@ -336,6 +446,82 @@ def validate_other_authorities(files: dict[str, str], errors: list[str]) -> None
                 errors.append(f".gitattributes targets missing path: {pattern}")
 
 
+def expect_mutation_rejected(
+    name: str,
+    files: dict[str, str],
+    relative: str,
+    mutate: Callable[[str], str],
+    validator: Callable[[dict[str, str], list[str]], None],
+    errors: list[str],
+) -> None:
+    mutated = dict(files)
+    mutated[relative] = mutate(files[relative])
+    if mutated[relative] == files[relative]:
+        errors.append(f"workflow detector mutation did not change input: {name}")
+        return
+    findings: list[str] = []
+    validator(mutated, findings)
+    if not findings:
+        errors.append(f"workflow detector misses representative mutation: {name}")
+
+
+def validate_detector_contract(files: dict[str, str], errors: list[str]) -> None:
+    expect_mutation_rejected(
+        "delete Milestone authority",
+        files,
+        "AGENTS.md",
+        lambda text: text.replace(AGENT_MILESTONE_TRUTH, ""),
+        validate_entry_docs,
+        errors,
+    )
+    expect_mutation_rejected(
+        "restore numbered Issue route",
+        files,
+        "README.md",
+        lambda text: text + "\n当前路线由 Issue #999 跟踪。\n",
+        validate_entry_docs,
+        errors,
+    )
+    expect_mutation_rejected(
+        "allow cross-Milestone start",
+        files,
+        ".agents/skills/task-pipeline/SKILL.md",
+        lambda text: text.replace(
+            PIPELINE_ORDER_RULE,
+            PIPELINE_ORDER_CONTRADICTION,
+        ),
+        validate_task_pipeline,
+        errors,
+    )
+    expect_mutation_rejected(
+        "consume not_planned Issue",
+        files,
+        ".agents/skills/task-pipeline/SKILL.md",
+        lambda text: text.replace(
+            PIPELINE_NOT_PLANNED_RULE,
+            PIPELINE_NOT_PLANNED_CONTRADICTION,
+        ),
+        validate_task_pipeline,
+        errors,
+    )
+    expect_mutation_rejected(
+        "allow Planning snapshot fallback",
+        files,
+        ".agents/skills/task-pipeline/SKILL.md",
+        lambda text: text.replace(
+            PIPELINE_SNAPSHOT_RULE,
+            PIPELINE_SNAPSHOT_CONTRADICTION,
+        ),
+        validate_task_pipeline,
+        errors,
+    )
+
+    findings: list[str] = []
+    validate_local_authority_paths(["docs/roadmap.md"], findings)
+    if not findings:
+        errors.append("workflow detector misses representative mutation: local roadmap")
+
+
 def validate() -> list[str]:
     errors: list[str] = []
     validate_repository_layout(errors)
@@ -348,6 +534,7 @@ def validate() -> list[str]:
     validate_github_config(files, errors)
     validate_ci(files[".github/workflows/test.yml"], errors)
     validate_other_authorities(files, errors)
+    validate_detector_contract(files, errors)
     return errors
 
 
