@@ -11,7 +11,7 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 
 - 一个用户确认的 Issue 是一个工作单元，同时只允许一个 active PR、一个 PR head branch 和一个 writer；PR 面向默认分支并使用 `Closes #N`。Issue 必须归入其验收首先依赖的最早目标。
 - Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由 fresh task，以及在已有预授权下执行 merge；关闭或重新打开 Milestone 必须另有用户明确授权；不得修改仓库。
-- Issue 是 Execution 与 Verification 的 immutable contract。范围、验收、依赖、优先级或重大设计需要改变时，必须回到 Planning，由用户决定并更新 Issue。
+- 经用户确认的 Issue body 是 Execution 与 Verification 的 immutable contract；Issue 评论、PR、handoff 或 task 输出都不能追加或覆盖合同。范围、验收、依赖、优先级或重大设计需要改变时，当前 Readiness、Execution 与 candidate 立即失效，必须回到 Planning，由用户决定并更新 Issue body 后重开 fresh Readiness。
 - Worktree 只是隔离 checkout；不得把调用会话的 working tree、index、未提交改动、摘要或结论当作输入。
 - Milestone/Issue/PR 的描述与活动状态以及 PR/default-branch 的 exact remote head 必须直接从 GitHub 读取；仓库文件、diff 和 authority 应从本阶段 clean worktree 或已有本地 Git object 批量读取。只有缺少所需 object 或 contract 明确指向其它外部 authority 时，才联网取得 repository 内容，禁止逐文件远程抓取。
 - 默认不读取 state reason 为 `not_planned` 的 closed Issue；只有用户明确要求历史调查时才可读取。
@@ -25,6 +25,15 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 - 同一 Milestone 默认只推进一个 active Issue。只有各 Issue 的 fresh Readiness 均已 `CLEAR`、修改面相互独立且用户明确批准时才允许并行。
 - Milestone 的自动 Issue 百分比不构成目标完成证明。最后一个已知 Issue 合并后，Planning 必须对目标结果做一次整体只读核对；只有用户确认目标完成并授权写入后，Planning 才可关闭 Milestone。
 - Milestone 正文只保存目标与边界，不保存执行步骤、进度清单、旧 Issue 链接或未来实现方案；不得用本地 roadmap 或其它载体建立第二状态系统。
+
+## 范围防火墙
+
+Issue 只冻结可观察结果、必要边界与最小充分 gate，不预先加入没有当前失败证据的证明工程、通用验证设施或未来 hook。Readiness `CLEAR` 后，执行中发现的新事实只按以下路由处理，不得让合同随实现增长：
+
+- 原合同内的局部实现缺陷保持验收不变，由当前 Execution 修复并只增加能独立杀死该缺陷的最小回归；若来自 Verification，则按既有 `PRODUCT_FAIL` 路由 fresh Execution。
+- 实现路线失败但合同不变时，删除或废弃失败实现并对同一合同启动 fresh Execution；不得建立 compatibility bridge、双实现或临时第二 authority。
+- 发现规范、公开语义、保证、依赖、抽象边界或验收需要改变时，第一次即停止并返回 Planning；不得边实现边编辑 Issue 或用评论追加条款。
+- CLI、renderer、fuzz、LSP、benchmark 等相邻能力没有当前 consumer 时只报告并从当前工作丢弃；不得顺便实现、预留 hook 或自动建立未来 Issue。
 
 ## 三阶段
 
