@@ -2,7 +2,7 @@
 
 Vorton 是一门面向 native 应用开发的编程语言，也是其编译器与仓库的统一名称。源码保持接近 Python 的低标注体验，编译器负责推断类型、effect、trait 约束与资源行为，并把无法证明的边界显式暴露出来。
 
-仓库已经迁移到 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)。当前工程路线是在 Rust 宿主上重建 Vorton 编译器；首个实现纵切由 [Issue #3](https://github.com/vorton-lang/vorton/issues/3) 跟踪。迁仓前的 C11 compiler、tracked C、runtime 与语义输入随完整 Git 历史保留，只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 build、bootstrap、CI 或发布门。
+仓库已经迁移到 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)。当前工程路线是在 Rust 宿主上重建 Vorton 编译器；持久目标与顺序见 [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones)，当前可执行工作见 [GitHub Issues](https://github.com/vorton-lang/vorton/issues)。迁仓前的 C11 compiler、tracked C、runtime 与语义输入随完整 Git 历史保留，只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 build、bootstrap、CI 或发布门。
 
 ## Vorton 语言一瞥
 
@@ -58,7 +58,8 @@ python .agents/scripts/validate_workflow.py
 
 ## 参与工作
 
-- [GitHub Issues](https://github.com/vorton-lang/vorton/issues) 是活动范围、状态与验收的唯一真值。
+- [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones) 保存持久目标与目标顺序。
+- [GitHub Issues](https://github.com/vorton-lang/vorton/issues) 保存当前 immutable execution contract。
 - 所有仓库任务使用 [三阶段 task pipeline](.agents/skills/task-pipeline/SKILL.md)。
 - 模板、标签与 [Ideas Discussion #1](https://github.com/vorton-lang/vorton/discussions/1) 的入口见 [GitHub 工作入口](docs/workflow.md)。
 - 完成历史只查 PR 与 Git；迁仓前 Markdown 看板保持删除。

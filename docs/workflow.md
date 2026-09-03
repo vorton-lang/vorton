@@ -4,9 +4,11 @@
 
 ## 活动真值
 
-- [GitHub Issues](https://github.com/vorton-lang/vorton/issues) 保存活动范围、状态、验收、依赖与用户决定；PR 和 Git 保存实现与完成历史。
+- [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones) 保存持久目标与目标顺序；Milestone 正文只保存目标与边界，不保存执行步骤、进度清单、旧 Issue 链接或未来方案。
+- [GitHub Issues](https://github.com/vorton-lang/vorton/issues) 保存当前范围、设计、验收与依赖，是 immutable execution contract。
+- PR 和 Git 保存实现与完成历史；Milestone 的自动 Issue 百分比不是目标完成证明。
 - Worktree、Codex task、GitHub Project 与本地文件都不是平行状态 authority。Project 若启用，只作 GitHub 对象视图。
-- 迁仓前 Markdown backlog/audit 保持删除；新工作不分配 B/A/D 编号。
+- 迁仓前 Markdown backlog/audit 与本地 roadmap 保持删除；新工作不分配 B/A/D 编号。
 
 ## 模板
 
