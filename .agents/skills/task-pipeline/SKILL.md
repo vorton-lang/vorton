@@ -5,21 +5,21 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 
 # Vorton Task Pipeline
 
-这是 Vorton 仓库唯一的任务 lifecycle authority。先读取根目录 `AGENTS.md`、全部 open GitHub Milestone 描述、当前 GitHub Issue 和任务涉及的仓库 authority；持久目标与目标顺序只认 Milestone，当前范围、设计、验收与依赖只认 Issue，完成历史只查 PR 与 Git。角色 prompt 是本 skill 的一部分，不是独立 authority：Execution 使用 [Executor 模板](references/executor.md)，Verification 使用 [Verifier 模板](references/verifier.md)。
+这是 Vorton 仓库唯一的任务 lifecycle authority。先读取根目录 `AGENTS.md`、全部 open GitHub Milestone 描述、当前 GitHub Issue 和任务涉及的仓库 authority；持久目标与目标顺序只认 Milestone，当前范围、设计、验收与依赖只认 Issue。允许直接读取的完成历史只查 reset 后的 PR 与 Git；reset 前历史只按下文污染隔离规则处理。角色 prompt 是本 skill 的一部分，不是独立 authority：Execution 使用 [Executor 模板](references/executor.md)，Verification 使用 [Verifier 模板](references/verifier.md)。
 
 ## 工作单元与授权
 
-- 一个用户确认的 Issue 是一个工作单元，同时只允许一个 active PR、一个 PR head branch 和一个 writer；PR 面向默认分支并使用 `Closes #N`。Issue 必须归入其验收首先依赖的最早目标。
+- 一个用户确认的 Issue 是一个工作单元，同时只允许一个 active PR、一个 PR head branch 和一个 writer；PR 面向默认分支并使用 `Closes #N`。
 - Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由 fresh task，以及在已有预授权下执行 merge；关闭或重新打开 Milestone 必须另有用户明确授权；不得修改仓库。
-- 经用户确认的 Issue body 是 Execution 与 Verification 的 immutable contract；Issue 评论、PR、handoff 或 task 输出都不能追加或覆盖合同。范围、验收、依赖、优先级或重大设计需要改变时，当前 Readiness、Execution 与 candidate 立即失效，必须回到 Planning，由用户决定并更新 Issue body 后重开 fresh Readiness。
+- 经用户确认的 Issue body 是 Execution 与 Verification 的 immutable contract；Issue 评论、PR、handoff 或 task 输出都不能追加或覆盖合同。合同变化只按下文统一失败路由处理。
 - Worktree 只是隔离 checkout；不得把调用会话的 working tree、index、未提交改动、摘要或结论当作输入。
 - Milestone/Issue/PR 的描述与活动状态以及 PR/default-branch 的 exact remote head 必须直接从 GitHub 读取；仓库文件、diff 和 authority 应从本阶段 clean worktree 或已有本地 Git object 批量读取。只有缺少所需 object 或 contract 明确指向其它外部 authority 时，才联网取得 repository 内容，禁止逐文件远程抓取。
-- 默认不读取 state reason 为 `not_planned` 的 closed Issue；只有用户明确要求历史调查时才可读取。
+- 默认不读取 state reason 为 `not_planned` 的 closed Issue。对 reset 后对象，只有用户明确要求历史调查时才可读取；reset 前 closed Issue 即使由用户要求调查，也只能进入下文的隔离检查。
 - 创建 fresh task 时，只有 `threadId` 可用于后续编排；`clientThreadId` 只表示 worktree setup pending，不得传给 thread tools，也不得用 `list_threads` 忙轮询。工具尚未提供 `threadId` 时等待 setup 完成或报告可见性阻塞。
 
 ## Milestone 与 Issue 路由
 
-- 正常推进只允许 `Milestone → 当前 Issue → fresh Readiness → fresh Execution → fresh Verification` 的单向路由；失败或 contract 变化只按本 skill 的固定终态返回 Planning，不得把后阶段摘要变成前阶段输入。
+- 正常推进只允许 `Milestone → 当前 Issue → fresh Readiness → fresh Execution → fresh Verification` 的单向路由；任何非成功终态只按下文统一失败路由推进，不得把后阶段摘要变成前阶段输入。
 - Planning 在选择工作前必须读取全部 open Milestone 描述，并按已确认的 `1/5 → 5/5` 顺序选择最早未关闭目标。多个未来 Milestone 可以同时 open，但前一 Milestone 未关闭时，不得为后一 Milestone 启动 Issue。
 - Issue 归入其验收首先依赖的最早目标，文件修改位置不决定归属。后序工作发现前序 contract 缺陷时，立即暂停后序；由 Planning 取得用户确认后重新打开前序目标，不得在后序 Issue 中静默修补或让两个目标并行。
 - 同一 Milestone 默认只推进一个 active Issue。只有各 Issue 的 fresh Readiness 均已 `CLEAR`、修改面相互独立且用户明确批准时才允许并行。
@@ -38,11 +38,9 @@ Reset 前的 Issue、PR、commit revision、task、chat、评论、摘要与过�
 
 ## 范围防火墙
 
-Issue 只冻结可观察结果、必要边界与最小充分 gate，不预先加入没有当前失败证据的证明工程、通用验证设施或未来 hook。Readiness `CLEAR` 后，执行中发现的新事实只按以下路由处理，不得让合同随实现增长：
+Issue 只冻结可观察结果、必要边界与最小充分 gate，不预先加入没有当前失败证据的证明工程、通用验证设施或未来 hook。Readiness `CLEAR` 后，不得让合同随实现增长：
 
-- 原合同内的局部实现缺陷保持验收不变，由当前 Execution 修复并只增加能独立杀死该缺陷的最小回归；若来自 Verification，则按既有 `PRODUCT_FAIL` 路由 fresh Execution。
-- 实现路线失败但合同不变时，删除或废弃失败实现并对同一合同启动 fresh Execution；不得建立 compatibility bridge、双实现或临时第二 authority。
-- 发现规范、公开语义、保证、依赖、抽象边界或验收需要改变时，第一次即停止并返回 Planning；不得边实现边编辑 Issue 或用评论追加条款。
+- 原合同内的局部实现缺陷不改变验收，只增加能独立杀死该缺陷的最小回归，不得借修复扩大合同。
 - CLI、renderer、fuzz、LSP、benchmark 等相邻能力没有当前 consumer 时只报告并从当前工作丢弃；不得顺便实现、预留 hook 或自动建立未来 Issue。
 
 ## 三阶段
@@ -55,9 +53,7 @@ Readiness 必须是以 Full access（`danger-full-access` 或宿主等价模式�
 
 Readiness 必须自行从 GitHub 读取当前 Milestone、Issue、关联 PR 与 remote default-branch head，并从 clean local checkout 或对应 Git object 批量读取 repository authority。它可以直接使用经核对 clean 且位于 remote default-branch head 的 main checkout；fresh 性来自独立任务与独立取证，不要求为只读阶段额外建立 worktree。Execution 与 Verification 仍必须使用各自的 clean worktree 和 exact SHA 隔离。
 
-Full access 或独立 GitHub 读取不可用时，Readiness 必须 fail closed 并报告可见性或基础设施阻塞；不得接受 Planning snapshot、调用者 working tree 内容或离线转述作为 fallback。Readiness 输出 `CLEAR`、`REWRITE` 或 `BLOCKED`：`CLEAR` 只授权从其独立确定并报告的 start SHA 开始 Execution，不是 Verification 或 merge 证据；`REWRITE` 回到 Planning，更新 contract 后必须重开 fresh Readiness；`BLOCKED` 只表示上述访问能力不足。
-
-Readiness 输出 `CLEAR` 后，Planning 必须按其报告的 start SHA 自动启动 fresh Execution；这里没有新的用户确认点。`REWRITE` 或 `BLOCKED` 才停止自动推进并返回 Planning。
+Full access 或独立 GitHub 读取不可用时，Readiness 必须 fail closed 并报告可见性或基础设施阻塞；不得接受 Planning snapshot、调用者 working tree 内容或离线转述作为 fallback。Readiness 输出 `CLEAR`、`REWRITE` 或 `BLOCKED`：`CLEAR` 只授权并要求 Planning 从其独立确定的 start SHA 自动启动 fresh Execution，这里没有新的用户确认点，也不构成 Verification 或 merge 证据；`REWRITE` 回到 Planning，更新 contract 后必须重开 fresh Readiness；`BLOCKED` 只表示上述访问能力不足。
 
 任务进入 Readiness 前，Planning 使用实际可发现的 `grilling` skill 压测目标与 contract；已安装的 `grill-me` 只可作为调用入口，不能成为替代 authority。找不到 `grilling` 时 fail closed，不自行模拟。
 
@@ -90,11 +86,13 @@ Verification 必须是 fresh、read-only task，在 PR head SHA 对应的 clean 
 
 对净新增代码、测试、文档、依赖、配置和抽象逐项说明当前 consumer、不可替代作用及更小替代为何不足。Verifier 必须实际尝试删除或合并净新增内容：结构性、长期或影响验证的债务为 `BLOCK`；局部、可逆且不削弱 contract 的品味问题只记录，不阻塞。Finding 必须给出 contract/invariant、触发条件、期望与实际结果。
 
-## 重试与资源
+## 失败路由、重试与资源
 
+- 不静默重跑失败命令，先保留 exact failure。`NEEDS_CLARIFICATION` 只在 Issue 不变时由同一 Execution task 续接。
+- 原合同内的局部实现缺陷由当前 Execution 修复；`PRODUCT_FAIL` 或合同不变但实现路线失败时，删除失败路径并启动 fresh Execution，不得建立 compatibility bridge、双实现或临时第二 authority。任一修复产生新 SHA 后重开 fresh Verification。
+- `NEEDS_DECISION`，或发现规范、公开语义、保证、依赖、抽象边界、验收需要改变时，第一次即停止并返回 Planning；由用户决定并更新 Issue body 后重开 fresh Readiness，不得边实现边追加 Issue 评论。
+- `EVIDENCE_GAP` 回到 Planning；`INFRA_BLOCKED` 只处理已确认且与 candidate 行为无关的基础设施阻塞。Execution `FAILED` 按已确认原因进入上述对应路由，不得自动重跑。
 - 默认不设置 task-local 资源限制。只有实测失败、实测超时或相同且已记录的 case 才能按证据设置限制；未知时长不能用预测式 wall timeout。
-- 不静默重跑失败命令。先保留 exact failure，再按终态路由：Execution 的事实澄清可在 Issue 不变时用同一 task 续接；重大决策必须更新 Issue 并重开 fresh Execution。
-- `PRODUCT_FAIL` 进入 fresh Execution；`EVIDENCE_GAP` 回到 Planning；`INFRA_BLOCKED` 只处理已确认的基础设施阻塞。任一修复产生新 SHA 后重开 fresh Verification。
 
 ## Merge 与归档
 
