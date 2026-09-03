@@ -1,6 +1,6 @@
 # Vorton
 
-Vorton 是一门面向 native 应用开发的编程语言，也是其编译器与仓库的统一名称。源码保持接近 Python 的低标注体验，编译器负责推断类型、effect、trait 约束与资源行为，并把无法证明的边界显式暴露出来。
+Vorton 是一门面向 native 应用开发的编程语言，也是其编译器与仓库的统一名称。源码保持接近 Python 的低标注体验，编译器负责推断类型、effect、trait 约束与资源行为，并把无法证明的边界显式暴露出来。这里的“接近 Python”只指低标注体验；换行和缩进不参与语法。
 
 仓库已经迁移到 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)。当前工程路线是在 Rust 宿主上重建 Vorton 编译器；持久目标与顺序见 [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones)，当前可执行工作见 [GitHub Issues](https://github.com/vorton-lang/vorton/issues)。迁仓前的 C11 compiler、tracked C、runtime 与语义输入随完整 Git 历史保留，只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 build、bootstrap、CI 或发布门。
 
@@ -20,9 +20,9 @@ fn area(shape: Shape) -> Float {
 }
 
 fn main() {
-    let shapes = [circle(2.0), rect(3.0, 4.0)]
-    let total = shapes.fold(0.0, fn(sum, shape) { sum + area(shape) })
-    print("total = ${total}")
+    let shapes = [circle(2.0), rect(3.0, 4.0)];
+    let total = shapes.fold(0.0, fn(sum, shape) { sum + area(shape) });
+    print("total = ${total}");
 }
 ```
 
@@ -40,8 +40,8 @@ fn greet() -> Str with {Greeting} {
 fn main() {
     let message = handle { greet() } with {
         Greeting.word() => "hello",
-    }
-    print(message)
+    };
+    print(message);
 }
 ```
 

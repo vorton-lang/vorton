@@ -1,5 +1,7 @@
 # 模式匹配
 
+模式的唯一 EBNF 见[语法](syntax.md#模式)。本页只定义名称解析后的绑定与穷尽性语义。
+
 ## 模式形式
 
 | 模式 | 语法 | 匹配条件 |
@@ -14,7 +16,7 @@
 
 ### 绑定 vs Unit 变体消歧
 
-如果绑定模式的名称恰好是当前作用域中某个零字段 enum 变体的名称（如 `none`），则该模式被重分类为构造器模式。这确保 `none` 匹配 `Option.none` 变体而非创建新绑定。
+Pattern path 使用统一 `Ident`/`Path` token；首字母大小写不参与分类。如果 bare single-segment path 的 exact 名称解析到当前作用域中的零字段 enum variant（如 `none`），它被归为构造器模式，否则才是 binding。限定 path 和带 payload 的 pattern 同样只按解析到的声明身份判断。
 
 ### 命名构造器模式的特殊语法
 

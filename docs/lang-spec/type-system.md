@@ -2,6 +2,8 @@
 
 Vorton 使用 Hindley-Milner 类型推断（let-polymorphism），扩展了 effect row、record row polymorphism 和 trait bound。
 
+类型表达式、参数和调用的唯一 source EBNF 见[语法](syntax.md)；本页的公式是名称解析后的类型规则，不是第二份 parser grammar。
+
 ## 类型
 
 ### 原始类型
@@ -72,7 +74,7 @@ Record 类型仅出现在函数参数位置。没有匿名 record 字面量语�
 Option<T> = some(T) | none
 ```
 
-内置 enum。语法 `T?` 是 `Option<T>` 的语法糖。
+内置 enum，且 `Option<T>` 是唯一类型拼写。类型位置不接受 `T?`；表达式位置的 postfix `expr?` 是独立的传播语法。
 
 ### 集合类型
 
@@ -492,17 +494,16 @@ Vorton 0.1 的 builtin public `Eq` trait 只包含 `eq`；不存在 `ne` member�
   Range<Int> 保留特殊快速路径（直接编译为计数循环）。
 ```
 
-字段赋值要求其root binding可变，并保持同一字段类型。0.1中`IndexExpr`只产生读取值，不是lvalue；index assignment在进入类型/ownership lowering前稳定拒绝。容器更新通过声明为`mut self`的具名方法参与普通调用与mutation推断。
+字段赋值要求其root binding可变，并保持同一字段类型。0.1中`IndexExpr`只产生读取值，不是lvalue；index assignment在进入类型/ownership lowering前稳定拒绝。容器更新通过物化签名为`self: mut Self`的具名方法参与普通调用与mutation推断。
 
 ## 方法解析
 
-方法调用 `receiver.method(args)` 按以下顺序解析：
+语法先把 `receiver.method(args)` 唯一分类为 MethodCall；它不能解释为函数值字段调用。函数值字段必须显式写 `(receiver.method)(args)`，后者是 FieldAccess 外加普通 Call。MethodCall 按以下顺序解析：
 
-1. **Struct 字段**：如果 receiver 是 struct 类型，检查是否有名为 `method` 的字段。如果找到且可调用，视为字段访问 + 调用。
-2. **固有方法**：检查 receiver 具体类型的 `impl_methods[type_name]`。
-3. **原始类型方法**：对于 `Str`、`Int`、`Float`，检查原始类型方法表。
-4. **Trait 方法**：搜索 `trait_impls` 中为 receiver 类型实现的 trait。
-5. **受约束类型变量**：如果 receiver 是带 trait bound 的类型变量，通过 trait dictionary dispatch。
+1. **固有方法**：检查 receiver 具体类型的 `impl_methods[type_name]`。
+2. **原始类型方法**：对于 `Str`、`Int`、`Float`，检查原始类型方法表。
+3. **Trait 方法**：搜索 `trait_impls` 中为 receiver 类型实现的 trait。
+4. **受约束类型变量**：如果 receiver 是带 trait bound 的类型变量，通过 trait dictionary dispatch。
 
 未找到方法时：错误 E0305（未定义的方法）。
 

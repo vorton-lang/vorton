@@ -12,14 +12,7 @@ trait Show {
 
 声明一组类型必须实现的方法。`Self` 类型变量引用实现该 trait 的具体类型。
 
-### EBNF
-
-```
-TraitDecl = "trait" IDENT TypeParams? (":" TypeBound ("+" TypeBound)*)? "{" TraitMember* "}"
-TraitMember = TraitMethodSig | AssocTypeDecl
-TraitMethodSig = "fn" IDENT TypeParams? "(" Params ")" ("->" TypeExpr)? EffectAnnotation?
-AssocTypeDecl = "type" IDENT (":" TypeBound ("+" TypeBound)*)? ("=" TypeExpr)?
-```
+完整且唯一的 trait、impl、method signature 与 associated type 产生式见[语法](syntax.md#program-与声明)。本页不建立第二份文法。
 
 ### Visibility
 
@@ -49,11 +42,11 @@ Vorton 0.1 的 source trait member 只有方法签名，不允许函数体。Tra
 
 ```vorton
 trait Describable {
-    fn describe(self) -> Str
+    fn describe(self: Self) -> Str;
 }
 
 trait Printable: Describable {
-    fn label(self) -> Str
+    fn label(self: Self) -> Str;
 }
 ```
 
@@ -71,8 +64,8 @@ trait Printable: Describable {
 
 ```vorton
 trait Container {
-    type Item
-    fn get(self) -> Item
+    type Item;
+    fn get(self: Self) -> Item;
 }
 ```
 
@@ -82,7 +75,7 @@ trait Container {
 
 ```vorton
 impl Container for IntBox {
-    type Item = Int
+    type Item = Int;
     fn get(self) -> Int { self.value }
 }
 ```
@@ -107,8 +100,8 @@ fn sum_source<T: Source<Item = Int>>(s: T) -> Int {
 
 ```vorton
 trait Container {
-    type Item: Eq   // Item 必须实现 Eq
-    fn get(self) -> Item
+    type Item: Eq;   // Item 必须实现 Eq
+    fn get(self: Self) -> Item;
 }
 ```
 
@@ -116,8 +109,8 @@ trait Container {
 
 ```vorton
 trait Processor {
-    type Output = Int           // 默认为 Int
-    fn process(self) -> Output
+    type Output = Int;           // 默认为 Int
+    fn process(self: Self) -> Output;
 }
 
 impl Processor for Doubler {    // 使用默认 Output = Int
@@ -125,7 +118,7 @@ impl Processor for Doubler {    // 使用默认 Output = Int
 }
 
 impl Processor for Greeter {    // 覆盖为 Str
-    type Output = Str
+    type Output = Str;
     fn process(self) -> Str { "Hello, ${self.name}!" }
 }
 ```
@@ -164,7 +157,7 @@ impl Show for Point {
 }
 ```
 
-为具体类型实现 trait。必须提供所有无默认实现的抽象方法。缺少必需方法报错。
+为具体类型实现 trait。Source trait method 没有默认 body，因此 impl 必须提供全部方法；缺少方法时报错。
 
 ### 泛型 Impl
 
@@ -207,13 +200,12 @@ bounds = { (α₁, "Show"), (α₂, "Eq"), ... }
 
 ## 方法解析与 Dictionary Evidence
 
-调用 `x.method()` 时按以下语义顺序解析：
+`x.method(args)` 在语法阶段始终是 MethodCall，不会先按函数值字段解释。函数值字段必须显式写 `(x.method)(args)`。MethodCall 随后按以下语义顺序解析：
 
-1. receiver 上可调用的字段；
-2. receiver 具体类型的固有方法；
-3. 原始类型提供的方法；
-4. 具体类型唯一可用的 trait impl；
-5. receiver 是受约束类型变量时，从其 trait bound 取得隐式 dictionary evidence。
+1. receiver 具体类型的固有方法；
+2. 原始类型提供的方法；
+3. 具体类型唯一可用的 trait impl；
+4. receiver 是受约束类型变量时，从其 trait bound 取得隐式 dictionary evidence。
 
 找不到方法时报 E0305。
 
@@ -233,7 +225,7 @@ fn show_twice<T: Show>(value: T) -> Str {
 
 Vorton 0.1 不提供 `delegate` declaration。Impl 中以 `delegate field: Trait` 形式出现的旧表面必须稳定报错，并建议写普通 `impl Trait for Type`，由每个方法显式调用相应字段。普通 trait、associated type、supertrait、dictionary evidence 与手写 forwarding impl 均保持；编译器不得生成 delegate owner、wrapper body或专属 Core/ABI carrier。
 
-## 自动派生 (Auto-derive)
+## Compiler-defined 结构实现
 
 编译器自动为所有 struct/enum 类型派生可派生的 trait。当前支持的 auto-derive trait：
 
@@ -245,7 +237,21 @@ Vorton 0.1 不提供 `delegate` declaration。Impl 中以 `delegate field: Trait
 
 派生按依赖 fixpoint 扩展到嵌套与递归用户类型。`Hash` 的内建基础 evidence 当前包括 `Int`、`Str`、`Bool`，不包括 `Float` 或 `Unit`；缺少所需 evidence 时保持 fail closed，并在实际 trait bound 被要求时报告 E0503。
 
-`Json` 不属于无提示的全局 auto-derive 集合。用户必须在 struct/enum 声明前显式写 `@derive(Json)`；编译器只在全部字段都能取得 `Json` evidence 时生成实现，并为泛型字段保留相应 trait bound。缺失字段 evidence 会报告 E0503。当前 `@derive(...)` 的显式表面只接受 `Json`，不提供空 `impl`、alias 或第二套兼容入口。
+这些实现是 compiler-defined 的封闭语义，不对应 source attribute，也不能作为开放 derive 系统的入口。`Json` 不在该集合中；它是普通公开 trait，用户 struct/enum 只能写普通显式 impl，JSON 形状完全由该 impl 决定：
+
+```vorton
+struct Label {
+    text: Str,
+}
+
+impl Json for Label {
+    fn to_json(self: Self) -> Str {
+        json_stringify(self.text)
+    }
+}
+```
+
+canonical 0.1 没有 `@` token、attribute grammar 或 source-level derive directive。缺少 `Json` evidence 的 `json_stringify` 调用报告 E0503；编译器不按用户类型字段自动生成 JSON 对象、variant tag 或 impl body。
 
 ## 限制
 

@@ -2,13 +2,15 @@
 
 Vorton 使用基于文件的模块系统。每个 `.vorton` 文件是一个模块。模块通过 `use` 声明导入其他模块的公开符号。
 
+`requires`、`use`、inline `mod` 与 path 的唯一产生式见[语法](syntax.md)；本页只定义解析后的模块身份、可见性与依赖语义。
+
 ## 模块标识
 
 模块名由文件路径派生，`::` 分隔符映射到文件系统目录分隔符：
 
 ```
-use parser::lexer    →  parser/lexer.vorton
-use utils            →  utils.vorton
+use parser::lexer;   →  parser/lexer.vorton
+use utils;           →  utils.vorton
 ```
 
 项目根目录是入口文件所在目录。
@@ -18,7 +20,7 @@ use utils            →  utils.vorton
 ### 单符号导入
 
 ```vorton
-use parser::Token
+use parser::Token;
 ```
 
 从 `parser.vorton` 导入 `Token`。
@@ -26,7 +28,7 @@ use parser::Token
 ### 多符号导入
 
 ```vorton
-use parser::{Token, parse, Lexer}
+use parser::{Token, parse, Lexer};
 ```
 
 从同一模块导入多个符号。
@@ -34,7 +36,7 @@ use parser::{Token, parse, Lexer}
 ### 整模块导入
 
 ```vorton
-use parser
+use parser;
 ```
 
 当前实现把 `parser` 的所有 `pub` 符号直接导入当前作用域。该形式不会创建可通过 `parser::Token` 访问的模块值。
@@ -42,7 +44,7 @@ use parser
 ### 重命名导入
 
 ```vorton
-use parser::{Token as T}
+use parser::{Token as T};
 ```
 
 命名导入可以用 `as` 创建局部别名。整模块 `use parser as p` 当前不受支持。
@@ -50,7 +52,7 @@ use parser::{Token as T}
 ### 嵌套路径
 
 ```vorton
-use checker::env::TypeEnv
+use checker::env::TypeEnv;
 ```
 
 映射到 `checker/env.vorton` 中的 `TypeEnv`。
@@ -66,7 +68,7 @@ mod outer {
     pub fn value() -> Int { 42 }
 
     mod inner {
-        use super::value       // 导入父模块 outer 的 value
+        use super::value;      // 导入父模块 outer 的 value
         pub fn get() -> Int { value() }
     }
 }
@@ -87,8 +89,8 @@ mod outer {
 支持多级 `super` 链式引用和多符号导入：
 
 ```vorton
-use super::super::some_fn         // 向上两层
-use super::{value, helper}        // 从父模块导入多个符号
+use super::super::some_fn;        // 向上两层
+use super::{value, helper};       // 从父模块导入多个符号
 ```
 
 在文件顶层使用 `super::` 会报 E0705 错误（超出模块嵌套深度）。
@@ -123,7 +125,7 @@ pub struct Point { pub x: Int, pub y: Int }
 ### `pub use` 再导出
 
 ```vorton
-pub use inner::greet
+pub use inner::greet;
 ```
 
 将依赖模块的导出提升为当前模块的公开接口。支持模块门面模式。
@@ -132,13 +134,13 @@ pub use inner::greet
 
 ```vorton
 // 合法：owner enum 与constructor同时公开
-pub use leaf::{Token, Wrap}
+pub use leaf::{Token, Wrap};
 
 // 合法：两者都可重命名
-pub use leaf::{Token as PublicToken, Wrap as Make}
+pub use leaf::{Token as PublicToken, Wrap as Make};
 
 // 非法：facade只公开constructor，缺少owner enum
-pub use leaf::Wrap
+pub use leaf::Wrap;
 ```
 
 最后一种写法在re-export处稳定报错并建议同时公开owner enum。直接`pub use`一个enum仍自动携带其constructors；private/local `use`不受该public closure规则影响。实现按exact `VariantRef.owner`核对，不能从constructor leaf、alias spelling或唯一名字猜owner，也不能为接受constructor-only facade而隐式扩大type/impl可见性。
@@ -168,7 +170,7 @@ mod math {
 }
 
 fn main() {
-    let sum = math::add(1, 2)
+    let sum = math::add(1, 2);
 }
 ```
 
@@ -188,7 +190,7 @@ mod outer {
 }
 
 fn main() {
-    let msg = outer::inner::greet("world")    // 多级限定路径
+    let msg = outer::inner::greet("world");   // 多级限定路径
 }
 ```
 
@@ -231,7 +233,7 @@ mod outer {
     pub fn value() -> Int { 42 }
 
     mod inner {
-        use super::value
+        use super::value;
         pub fn get_outer() -> Int { value() }
     }
 }
@@ -245,7 +247,7 @@ mod outer {
 mod shapes {
     pub struct Circle { pub radius: Float }
 
-    pub impl Circle {
+    impl Circle {
         pub fn area(self) -> Float { 3.14159 * self.radius * self.radius }
     }
 }
@@ -258,10 +260,10 @@ mod shapes {
 #### 文件模块 header
 
 ```vorton
-requires {unsafe}
+requires {unsafe};
 
-use std::ptr
-extern fn vorton_raw_alloc(count: Int) -> Ptr<Int>
+use std::ptr;
+extern fn vorton_raw_alloc(count: Int) -> Ptr<Int>;
 ```
 
 文件 header 必须是第一项非注释语法、每文件至多一次，并位于全部 `use` 与声明之前。有 header 时，它是文件模块的 effect ceiling；省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 许可从不隐式获得。使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效文件/inline-module `requires` 集合显式包含 `unsafe`。
@@ -285,7 +287,7 @@ mod pure_logic requires {} {
 ```vorton
 mod console_layer requires {console} {
     pub fn greet(name: Str) -> Unit with {console} {
-        print("Hello, ${name}!")
+        print("Hello, ${name}!");
     }
     // 此模块内只允许 console effect，使用 fs、process 或 fail 会报错
 }

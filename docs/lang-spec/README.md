@@ -2,7 +2,7 @@
 
 状态：当前公开语言子集；编译器正在 Rust 宿主上重建
 
-本规范是 Vorton 编程语言的权威参考，独立于任何具体编译器实现。
+本规范是 Vorton 编程语言的权威参考，独立于任何具体编译器实现。字符到 token 只以[词法结构](lexical.md)为准，token 到完整语法结构只以[语法](syntax.md)中的 canonical EBNF 为准；其余页面只解释语义，不复制产生式。
 
 当前实现路线先闭合 Rust `source → token → AST → diagnostic` 纵切，再按 GitHub Issue 推进其余阶段。迁移前的 Vorton/C11 compiler、tracked C、runtime 与 E2E/golden 测试只作语义 oracle 和已知缺陷复现，不是当前 Rust compiler 的实现、CI、bootstrap 或发布 authority。
 
