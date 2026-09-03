@@ -26,6 +26,16 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 - Milestone 的自动 Issue 百分比不构成目标完成证明。最后一个已知 Issue 合并后，Planning 必须对目标结果做一次整体只读核对；只有用户确认目标完成并授权写入后，Planning 才可关闭 Milestone。
 - Milestone 正文只保存目标与边界，不保存执行步骤、进度清单、旧 Issue 链接或未来实现方案；不得用本地 roadmap 或其它载体建立第二状态系统。
 
+## Canonical reset 与历史污染红线
+
+`a09ec8db5ffb673007d5ebc8a4509393fbeec18e` 是本仓库新规范的 canonical reset baseline。该 snapshot 中由 `AGENTS.md` 指定的 current authority、其 default-branch 后继版本，以及 reset 后新产生的当前 Milestone、Issue、PR 与 Git 事实可以在正常上下文直接读取。
+
+Reset 前的 Issue、PR、commit revision、task、chat、评论、摘要与过程结论，以及 current authority 明确标为 legacy、迁移 oracle、superseded 或历史证据的载荷，即使仍被 tracked，也一律属于污染区。Planning、Readiness、Execution 与 Verification 不得把污染区内容直接读入、搜索进、摘录到或转述给其工作上下文。
+
+确有必要检查污染区时，必须在不传入当前会话上下文的隔离 fresh fork/task 中进行；只可提供 repository full name、对象 stable identifier 与精确检查问题。隔离上下文的事实、引用、代码、路径、diff、方案、摘要和 agent 结论均不得回传。唯一允许穿过隔离边界的是用户在该隔离会话中明确确认的规范性决议，并且必须同时写明适用范围、排除项与是否授权执行；接收会话仍须从 current authority 独立取得一切当前事实。隔离检查不能充当 Readiness、Verification 或 merge 证据。
+
+污染区内容一旦进入某个 lifecycle task 的工作上下文，该 task 立即失去继续承担 Planning、Readiness、Execution 或 Verification 的资格；不得靠忽略、总结或再次转述恢复，必须从 current authority 启动 clean replacement。
+
 ## 范围防火墙
 
 Issue 只冻结可观察结果、必要边界与最小充分 gate，不预先加入没有当前失败证据的证明工程、通用验证设施或未来 hook。Readiness `CLEAR` 后，执行中发现的新事实只按以下路由处理，不得让合同随实现增长：
