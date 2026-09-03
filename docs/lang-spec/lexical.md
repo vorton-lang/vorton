@@ -1,144 +1,119 @@
 # 词法结构
 
-## 注释
+本页是 canonical 0.1 从字符到 token 的唯一 authority。语法结构、优先级和 AST 分类由[语法](syntax.md)定义；Lexer 不读取缩进、换行位置或标识符大小写来猜测语法角色。
 
+## 扫描规则
+
+Lexer 从左到右扫描，并在当前位置选择可成立的最长 token。多字符运算符优先于其前缀；关键字只在完整标识符拼写相等时成立，例如 `move_value` 是一个 `Ident`，不是 `'move'` 后跟另一个 token。空白与注释被丢弃，其他字符必须形成下列 token，否则产生词法错误。
+
+除字符串、原始字符串和行注释内容外，canonical 0.1 源码只接受下文定义的 ASCII 标识符字符、数字、运算符和定界符。`@` 没有 token；`@derive(Json)`、`@repr(C)` 等形式因此在词法阶段非法，不能产生 attribute/derive AST 占位。
+
+## 空白与注释
+
+```ebnf
+LineBreak   ::= '\r\n' | '\n' | '\r'
+Whitespace  ::= ' ' | '\t' | LineBreak
+LineComment ::= '//' NonLineBreakChar* (LineBreak | EOF)
+NonLineBreakChar ::= ⟨除 '\r'、'\n' 外的任意字符⟩
+EOF         ::= ⟨输入结束位置⟩
 ```
-LineComment  ::= '//' ⟨除换行外的任意字符⟩* ⟨换行 | EOF⟩
-```
 
-Vorton 仅使用 `//` 行注释，无块注释。
+`NonLineBreakChar` 表示除 `\r`、`\n` 外的任意字符。Vorton 只有 `//` 行注释，没有块注释。换行只会终止行注释，或作为原始字符串的内容；在其他位置它和空格、制表符完全等价，缩进没有语法意义。
 
-## 空白
-
-空白字符（空格、制表符、换行、回车）用于分隔 token，其他情况下无语义意义。一个例外：
-
-**函数调用同行规则：** `(` token 仅在与前一个表达式同行时，才被解析为调用表达式的后缀。这消除了以下歧义：
+因此调用不受换行影响：
 
 ```vorton
-foo
-(x, y)    // 两个独立表达式：`foo` 和 tuple `(x, y)`
-
-foo(x, y) // 一个表达式：函数调用
+callable
+(first, second);
 ```
 
-## 关键字
+这与 `callable(first, second);` 是同一次调用。若要表达两个语句，必须显式终止第一个：
 
-以下 35 个标识符是保留关键字：
-
-```
-fn     let    mut    const   struct  enum    match   impl
-effect handle with   if      else    catch   test    return
-for    in     pub    where   true    false   trait   try
-while  break  continue loop  use     as      extern  mod
-super  requires unsafe
+```vorton
+callable;
+(first, second);
 ```
 
-注意：`type`、`delegate`、`self`、`sig` 不是关键字。`type`与`self`在特定上下文中由 Parser 特殊解析；0.1没有`delegate`或`sig`声明，因此二者都是普通标识符。Post-0.1若重新设计相应语法，必须选择不破坏0.1标识符的contextual/versioned syntax。`try`是保留关键字，使用时产生编译错误。
+## 标识符与关键字
 
-## 运算符和定界符
-
-### 运算符（按类别）
-
-| 类别 | Token |
-|------|-------|
-| 算术 | `+`  `-`  `*`  `/`  `%` |
-| 比较 | `==`  `!=`  `<`  `>`  `<=`  `>=` |
-| 逻辑 | `&&`  `\|\|`  `!` |
-| 赋值 | `=`  `+=`  `-=`  `*=`  `/=`  `%=` |
-| Or-Pattern 分隔 | `\|` |
-| 范围 | `..`  `..=` |
-| 访问 | `.`  `::` |
-| 可选 | `?` |
-| 箭头 | `->`  `=>` |
-
-### 定界符
-
-```
-(  )  {  }  [  ]  ,  :  ;
+```ebnf
+AsciiLetter   ::= 'A'..'Z' | 'a'..'z'
+Digit         ::= '0'..'9'
+IdentStart    ::= AsciiLetter | '_'
+IdentContinue ::= IdentStart | Digit
+Ident         ::= IdentStart IdentContinue*
 ```
 
-分号是可选的语句终止符。解析器接受但不要求分号。
+Lexer 只产生一种 `Ident`。首字母大小写不产生 type、value、variant 或 constructor 类别；这些身份由后续名称解析根据声明和使用位置决定。
 
-## 运算符优先级
+以下拼写是保留关键字 token：
 
-从低到高：
-
-| 级别 | 名称 | 运算符 | 结合性 |
-|------|------|--------|--------|
-| 1 | Catch | `catch` | 左结合 |
-| 2 | LogicOr | `\|\|` | 左结合 |
-| 3 | LogicAnd | `&&` | 左结合 |
-| 4 | Equality | `==`  `!=` | 不可结合 |
-| 5 | Compare | `<`  `>`  `<=`  `>=` | 不可结合 |
-| 6 | Range | `..`  `..=` | 左结合 |
-| 7 | AddSub | `+`  `-` | 左结合 |
-| 8 | MulDiv | `*`  `/`  `%` | 左结合 |
-| 9 | Unary | `-`  `!`（前缀） | 右结合 |
-| 10 | Postfix | `.`  `()`  `[]`  `?` | 左结合 |
-
-不可结合运算符不能链式使用：`a < b < c` 是解析错误。
-
-## 标识符
-
-```
-Ident        ::= ⟨字母 | '_'⟩ ⟨字母 | 数字 | '_'⟩*
+```text
+fn       let      mut      move     const    struct   enum     match
+impl     effect   handle   with     if       else     catch    test
+return   for      in       pub      where    true     false    trait
+try      while    break    continue loop     use      as       extern
+mod      super    requires unsafe
 ```
 
-其中"字母"为 ASCII 字母（`a`-`z`、`A`-`Z`）。
+`type`、`self` 和 `alias` 是 contextual spelling：Lexer 仍把它们生成为 `Ident`，Parser 只在相应产生式中按精确拼写解释。`delegate` 和 `sig` 也是普通 `Ident`，canonical 0.1 没有对应声明产生式。`where` 与 `try` 保留但没有 canonical 0.1 语法产生式，因而不能作为标识符或静默占位。
 
-以大写字母（`A`-`Z`）开头的标识符具有特殊意义：在特定上下文中被识别为类型名或 enum 变体构造器（struct 字面量解析、模式匹配）。
+## 运算符与定界符
 
-## 字面量
+下列每项各产生一个 token；同一行内按最长匹配扫描，例如 `..=` 不拆成 `..` 与 `=`，`&&` 不拆成两个非法的 `&`。
 
-### 整数字面量
+| 类别 | Token spelling |
+|------|----------------|
+| 算术 | `+` `-` `*` `/` `%` |
+| 比较 | `==` `!=` `<` `>` `<=` `>=` |
+| 逻辑与模式 | `&&` `\|\|` `!` `\|` |
+| 赋值 | `=` `+=` `-=` `*=` `/=` `%=` |
+| 范围 | `..` `..=` |
+| 访问与传播 | `.` `::` `?` |
+| 箭头 | `->` `=>` |
+| 定界符 | `(` `)` `{` `}` `[` `]` `,` `:` `;` |
 
-```
-IntLit       ::= ⟨数字⟩+
-```
+`?` 只有一个 token。它可由语法用作 postfix expression；类型语法不消费它，因此 `T?` 不是类型拼写。
 
-仅十进制整数。不支持十六进制、八进制或二进制前缀。
+## 数值字面量
 
-### 浮点字面量
-
-```
-FloatLit     ::= ⟨数字⟩+ '.' ⟨数字⟩+
-```
-
-小数点两侧必须有数字。`.5` 和 `5.` 不合法。
-
-### 布尔字面量
-
-```
-BoolLit      ::= 'true' | 'false'
+```ebnf
+IntLit   ::= Digit+
+FloatLit ::= Digit+ '.' Digit+
 ```
 
-### 字符串字面量
+canonical 0.1 只接受十进制数字，不接受 radix 前缀或数值后缀。浮点小数点两侧都必须有数字；`.5` 与 `5.` 非法。`1..2` 扫描为 `IntLit('1')`、`'..'`、`IntLit('2')`，不是浮点字面量。
 
-```
-StringLit    ::= '"' ⟨string-char⟩* '"'
-```
+## 字符串字面量
 
-支持标准转义序列：`\\`、`\"`、`\n`、`\t`、`\r`、`\0`。
-
-### 原始字符串字面量
-
-```
-RawStringLit ::= 'r"'  ⟨除 '"' 外的任意字符⟩* '"'
-               | 'r#"' ⟨除 '"#' 外的任意字符⟩* '"#'
+```ebnf
+Escape          ::= '\\' ('\\' | '"' | 'n' | 't' | 'r' | '0')
+StringPlainChar ::= ⟨除 '"'、'\\'、LineBreak 与 '${' 起点外的任意字符⟩
+StringPart      ::= Escape | StringPlainChar
+StringLit       ::= '"' StringPart* '"'
 ```
 
-两种形式都不处理转义或插值，并允许跨行。`r"..."` 不能包含双引号；需要双引号时使用单层 hash delimiter `r#"..."#`。当前语法不接受更多层 hash。
+`StringPlainChar` 可以是 Unicode 字符；它排除未转义的 `"`、`\\`、换行以及二字符序列 `${` 的起点。单独的 `$` 或不紧接 `{` 的 `$` 是普通内容。普通字符串不能跨行。支持的转义只有 `\\`、`\"`、`\n`、`\t`、`\r`、`\0`。
 
-### 字符串插值
+### 原始字符串
 
-```
-InterpString ::= '"' (⟨string-char⟩ | '${' Expr '}')* '"'
-```
-
-插值表达式是任意 Vorton 表达式。Lexer 将插值字符串分词为以下序列：
-
-```
-StringInterpStart  →  Expr  →  StringInterpMiddle  →  Expr  →  StringInterpEnd
+```ebnf
+RawStringLit ::= 'r"' Raw0Char* '"'
+               | 'r#"' Raw1Content '"#'
+Raw0Char     ::= ⟨除 '"' 外的任意字符⟩
+Raw1Content  ::= ⟨不包含终止序列 '"#' 的任意字符序列⟩
 ```
 
-支持嵌套插值：`"outer ${inner + "${deep}"}"`。
+`Raw0Char` 是除 `"` 外的任意字符；`Raw1Content` 是不包含终止序列 `"#` 的任意字符序列。原始字符串不处理转义或插值并允许换行。只有零层和一层 hash delimiter；更多层 hash 非法。
+
+### 插值字符串 token
+
+遇到普通字符串中的第一个 `${` 时，Lexer 不产生 `StringLit`，而进入插值模式并产生以下 token 序列：
+
+```ebnf
+StringInterpStart  ::= '"' StringPart* '${'
+StringInterpMiddle ::= '}' StringPart* '${'
+StringInterpEnd    ::= '}' StringPart* '"'
+```
+
+`StringInterpStart` 与每个 `StringInterpMiddle` 后，Lexer 以普通源码模式产生 token，直到与该 `${` 配对的 `}`；随后恢复字符串模式。普通源码中的嵌套 `{...}`、嵌套插值字符串及其定界符各自计数，不会提前结束外层插值。最后一个配对 `}` 到闭引号形成 `StringInterpEnd`。表达式如何组合这些 token 只由[语法](syntax.md)规定。

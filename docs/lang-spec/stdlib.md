@@ -2,19 +2,24 @@
 
 本页说明预加载 builtin 与标准库模块的语义边界，不复制完整 API 表。`std/` 模块的公开声明、trait bound 与 effect 标注以 [`std/*.vorton`](../../std/) 中的源码为准；由编译器预加载的类型和原语会在下文明确标出，其精确签名以 builtin 注册表为准。
 
+类型、声明和表达式的 source grammar 只以[语法](syntax.md)为准；本页中的代码只展示 API 使用与语义。
+
 ## Core 与预加载类型
 
-`Option<T>` 是内建 enum，`T?` 是它的类型语法糖：
+`Option<T>` 是内建 enum，也是唯一 Option 类型拼写；其数据形状等价于：
 
 ```vorton
-Option<T> = some(T) | none
+enum Option<T> {
+    some(T),
+    none,
+}
 ```
 
-`some` / `none`、安全解包与 HOF 方法由 core 环境提供。`?`、`catch` 和 `fail<E>` 的关系分别见[语法](syntax.md)与 [Effect 系统](effects.md)。
+`some` / `none`、安全解包与 HOF 方法由 core 环境提供。类型位置不接受 `T?`；postfix expression `expr?`、`catch` 和 `fail<E>` 的关系分别见[语法](syntax.md)与 [Effect 系统](effects.md)。
 
 `print`、`assert`、`panic` 与 JSON 字符串化等基础入口声明在 [`std/io.vorton`](../../std/io.vorton)。0.1 capability cutover 后，console 输出携带 `console`；进程退出归 `process`。`panic` 是不可恢复的终止；可恢复错误使用 `fail<E>`。B-195 完成前源码仍存在宽泛 `io` 与漏标 host extern 的过渡实现，不能把该现状当作终态规范。
 
-`json_stringify<T: Json>(value: T) -> Str` 只接受可取得 `Json` evidence 的类型。标准库为 `Int`、`Float`、`Bool`、`Str` 和 `List<T: Json>` 提供实现；用户 struct/enum 使用 `@derive(Json)` 显式请求结构化实现。Struct 输出按字段声明顺序组成对象；enum 输出以 `"_tag"` 保存 variant 名，随后按声明顺序输出 named 字段或 `_0`、`_1` 等 positional 字段。没有 `Json` evidence 的调用在编译期拒绝。
+`json_stringify<T: Json>(value: T) -> Str` 只接受可取得 `Json` evidence 的类型。标准库为 `Int`、`Float`、`Bool`、`Str` 和 `List<T: Json>` 提供普通实现；用户 struct/enum 必须显式写普通 `impl Json for Type`。用户类型没有自动结构化 JSON 保证：对象字段、顺序、enum tag 与其他形状都由该 impl 自己决定。没有 `Json` evidence 的调用在编译期拒绝；示例见 [Trait 系统](traits.md#compiler-defined-结构实现)。
 
 ### `Cell<T>`
 
@@ -55,9 +60,9 @@ Option<T> = some(T) | none
 [`std/list.vorton`](../../std/list.vorton) 定义可变、有序集合 `List<T>`。列表字面量 `[]` 产生该类型；读取、切片和 HOF 操作返回新值或 `Option`，原地操作要求可变 receiver。`List<T>` 实现 `Iterable`；依赖值相等或排序的操作分别要求 `T: Eq` 或 `T: Ord`。
 
 ```vorton
-let mut values = [3, 1, 2]
-values.push(4)
-let doubled = values.map(fn(x) { x * 2 })
+let mut values = [3, 1, 2];
+values.push(4);
+let doubled = values.map(fn(x) { x * 2 });
 ```
 
 ### `Map<K, V>`
@@ -71,9 +76,9 @@ let doubled = values.map(fn(x) { x * 2 })
 [`std/set.vorton`](../../std/set.vorton) 定义 `Set<T>`，其语言层实现是 `Map<T, Unit>` 的 Vorton wrapper。成员查询、插入、删除、集合代数和需要重新建表的过滤操作要求 `T: Hash + Eq`。迭代顺序不构成语义保证。
 
 ```vorton
-let mut seen: Set<Str> = set_new()
-seen.insert("vorton")
-assert(seen.contains("vorton"), "membership")
+let mut seen: Set<Str> = set_new();
+seen.insert("vorton");
+assert(seen.contains("vorton"), "membership");
 ```
 
 ### `Hash + Eq` 契约
@@ -104,14 +109,14 @@ pub enum Result<T, E> {
 
 ```vorton
 pub trait Iterator {
-    type Item
-    fn next(mut self) -> Item?
+    type Item;
+    fn next(self: mut Self) -> Option<Item>;
 }
 
 pub trait Iterable {
-    type Item
-    type Iter: Iterator
-    fn iter(self) -> Iter
+    type Item;
+    type Iter: Iterator;
+    fn iter(self: Self) -> Iter;
 }
 ```
 
@@ -133,4 +138,4 @@ pub trait Iterable {
 
 ## Mutation 与 effect
 
-集合和 iterator 的原地方法使用 `mut self`。对局部 `let mut` 的修改不会把 mutation effect 泄漏到函数签名；修改可变参数或捕获的外部状态时，编译器注入对应的多实例 `mut<T>` marker effect。完整规则见 [Effect 系统](effects.md)。
+集合和 iterator 的原地方法在物化签名中使用 `self: mut Self`。对局部 `let mut` 的修改不会把 mutation effect 泄漏到函数签名；修改可变参数或捕获的外部状态时，编译器注入对应的多实例 `mut<T>` marker effect。完整规则见 [Effect 系统](effects.md)。

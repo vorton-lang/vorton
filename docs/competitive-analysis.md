@@ -499,7 +499,7 @@ Pel、Quasar、Dana、Darklang 的 agent 化方向主要是 workflow/orchestrati
 - `AST → ResolvedAST → TypedHIR → CoreHIR → FlowIR → RcIR → AbiIR → C11` 是已批准迁移终态；fixed main 尚无这些独立 compiler stages，仍由 legacy HIR/Perceus/codegen 承担语义；
 - 0.1 已批准 `SystemEffectRef(console/fs/process)` / `HandledEffectRef(custom)` 分域、删除 user effect default body，并把用户 Drop 限制为 effect-free；但 current main 仍保留 legacy `io` 与旧 default/evidence/Drop 路径；
 - 0.1 已批准A1递归组single-inference、R1调用点dynamic handled evidence与P2统一`EffectCtx` ABI；isolated authority已有typed producer/HIR/C/runtime纵切代码，但尚未通过fresh candidate、统一single/project矩阵或最终长门，不能写成current main已发货能力；
-- 0.1 已决定删除 partial/reopened inline module、function default parameters、inert `sig`、refinement `where` placeholder；`T?` 也由 B-191 在 preview 前 clean break。除已明确形成的局部证据外，这些决定不能统称为 fixed main 已发货能力；
+- canonical 0.1 语法已排除 partial/reopened inline module、function default parameters、inert `sig`、refinement `where` placeholder 与历史 `T?` 类型缩写；迁移 oracle 是否仍接受旧形式不构成当前 parser surface 或 Rust compiler 已发货能力；
 - refinement types 未实现：参数位 `where` 仍不能表达，struct-field `where` 在 current main 仍是 parse-and-discard + warning，等待 B-193 删除；
 - RIIR 标准库迁移尚未完成；
 - Drop 的 C-native abort unwind、Weak 与若干已知 critical RC/runtime 缺陷尚未收口；
@@ -534,7 +534,7 @@ Pel、Quasar、Dana、Darklang 的 agent 化方向主要是 workflow/orchestrati
 - **B-174/B-177/B-175**：按 CLI 闭环 → 版本化 agent contract → Windows/Linux candidate artifacts 交付可安装、可运行、可诊断的 preview；BAML 的 wrapper/toolchain pin/run/bridge 说明版本匹配与渐进采用已成为竞争基线，但首个 Vorton preview 不以多宿主 bridge 为前置。
 - **B-176/B-180/B-187/B-190/B-183**：ownership 后建立可复现 baseline与 2× 开发反馈目标，并完成 bounded 文档复核，再做 overengineering audit，随后才执行 Vorton/GitHub workflow cutover；竞品变化不改变该顺序。
 - **B-181**：单独建立生成程序 runtime、内存/分配与产物尺寸的 release baseline/budget。
-- **B-193/B-194/B-195/B-196/B-191**：在 preview 前完成 0.1 surface/effect clean break；不得把已批准目标写成 current main 能力。
+- **Canonical 0.1 surface**：当前 parser-visible 规则直接以 `docs/lang-spec/lexical.md` 与 `syntax.md` 为准；迁移 oracle 或旧 B-193/B-194/B-195/B-196/B-191 记录仍可描述实现差距，但不能恢复旧语法或成为第二 authority。
 - **B-177**：导出版本化只读 semantic inspection contract、provider-neutral skill 与 bundled primer，不改变源码/Git 真值模型；对照 BAML `agent install`、`describe`/`grep` 与 Zero query/inspect 的可发现性，但只消费 compiler 权威事实，并作为 B-175 candidate 门。
 - **B-168**：在 B-176/B-180 工具链吞吐专项后确定 C-native failure/control ABI 及其 Drop、TCB 与可移植性边界。
 - **B-111**：用固定模型、预算和公开 artifact 复现 Vorton vs TypeScript 7 的 agent 开发对照；借鉴 BAML 的 run/finding/skill-variant/build-pin 回流形态，在 Vorton 行为契约子集另做工具面消融，不把其未独立核验的结果当先验，也不在首轮擅自增加第三语言。

@@ -1,6 +1,6 @@
 # vorton-lang 设计哲学
 
-不信任程序员的 native 编程语言。编译器是最终权威——不信任你，但也不要求你自证清白；它自己做功课（全推断），查到问题了来找你。写起来像 Python（lv0 零标注），编译器看到 Rust 级别的类型与副作用信息。语义内核 = Rust − borrow checker − 标注负担 + 代数效果 + 可判定推断。主战场：CLI / 服务端 / 系统编程——编译器自身是首个目标生产负载。当前编译器在 Rust 宿主上重建；迁移前的 C11 compiler、tracked C、runtime 与 self-host 结果只作迁移蓝本、语义 oracle 和历史证据，不是当前 bootstrap、CI 或发布 authority。实现路线变化不改变这些语言公理。
+不信任程序员的 native 编程语言。编译器是最终权威——不信任你，但也不要求你自证清白；它自己做功课（全推断），查到问题了来找你。写起来像 Python 只指 lv0 低标注，不表示 layout-sensitive 或 newline-sensitive 语法；编译器看到 Rust 级别的类型与副作用信息。语义内核 = Rust − borrow checker − 标注负担 + 代数效果 + 可判定推断。主战场：CLI / 服务端 / 系统编程——编译器自身是首个目标生产负载。当前编译器在 Rust 宿主上重建；迁移前的 C11 compiler、tracked C、runtime 与 self-host 结果只作迁移蓝本、语义 oracle 和历史证据，不是当前 bootstrap、CI 或发布 authority。实现路线变化不改变这些语言公理。
 
 ## 出发点（2026-06-12 成文，2026-06-24 重构——原始动机从"agent 验证瓶颈"回溯到"程序员不可信"）
 
@@ -99,9 +99,9 @@ Bidirectional + constraint solving + effect inference。写代码的体验接近
 
 ### 8. 一种事只有一种写法（层 2 · 策略）
 
-每当一种操作出现第二种写法，必须删掉一种；两种都有道理时，删语法更重的那个。动机：多写法语言（TS 的 interface/type/class/literal 四种数据定义）中程序员每次选不同的——人类因偏好不一致，LLM 因无记忆——大型代码库风格混乱、上下文压缩失效。实战否决记录为全体公理最强：`|>`、`?`、`try`、`or`、`|x|` lambda、`++`（实例库见下文「语法原则」与 design.md 已落地决策表）。2026-06-12 D-6 自「语法原则」升格成文。
+每当一种操作出现第二种写法，必须删掉一种；两种都有道理时，删语法更重的那个。动机：多写法语言（TS 的 interface/type/class/literal 四种数据定义）中程序员每次选不同的——人类因偏好不一致，LLM 因无记忆——大型代码库风格混乱、上下文压缩失效。实战否决记录为全体公理最强：`|>`、`T?` 类型缩写、`try`、`or`、`|x|` lambda、`++`（实例库见下文「语法原则」与 design.md 已落地决策表）。2026-06-12 D-6 自「语法原则」升格成文。
 
-**纯缩写语法糖准入门（2026-08-22 用户拍板）**：语法糖必须提供独立的建模、认知、验证或组合价值；仅减少字符数或 token 数不构成价值，尤其不值得让 LLM 学习第二种等价拼写。若显式形式已经简洁、完整且可组合，保留该唯一形式。现存 `T?` 只缩写 `Option<T>`、没有独立语义且引入 nullable / error-propagation 的跨语言歧义，已决定由 B-191 在 B-180 性能专项后、preview 产品面前 clean break 删除；执行前不扩大新用法。
+**纯缩写语法糖准入门（2026-08-22 用户拍板）**：语法糖必须提供独立的建模、认知、验证或组合价值；仅减少字符数或 token 数不构成价值，尤其不值得让 LLM 学习第二种等价拼写。若显式形式已经简洁、完整且可组合，保留该唯一形式。历史 `T?` 只缩写 `Option<T>`、没有独立语义且引入 nullable / error-propagation 的跨语言歧义；canonical 0.1 已将其删除，只保留 `Option<T>`。Postfix expression `expr?` 是传播操作，不是第二种类型拼写。
 
 ### 9. 语法借用，最大化知识迁移（层 2 · 策略）
 
@@ -124,8 +124,8 @@ TS 里定义数据结构有 interface/type/class/literal 四种写法，LLM 每�
 - 数据定义只有 `struct`
 - 错误只有 `fail.raise`
 - 方法调用只有 `.method()` 链式风格（无管道运算符）
-- Option 类型只有 `Option<T>`；迁移前编译器接受的 `T?` 是历史语法，不用于新代码，当前 Rust 重建不得把它作为默认表面恢复
-- Option 操作只有方法链（`.map()`, `.and_then()`, `.unwrap_or()`）——无关键字
+- Option 类型只有 `Option<T>`；迁移前编译器接受的 `T?` 是历史语法，当前 Rust 重建不得恢复。Postfix `expr?` 仍是独立的传播表面
+- Option 常规值 API 使用方法链（`.map()`, `.and_then()`, `.unwrap_or()`）；postfix `expr?` 只承担传播
 - 函数/闭包统一用 `fn` 关键字（无第二种 lambda 语法）
 
 每当一种操作出现第二种写法，必须删掉一种。如果两种都有道理，删语法更重的那个；如果第二种只少写几个字符，直接保留显式 canonical form。
@@ -165,7 +165,7 @@ Option 世界（数据类型）          Fail 世界（effect）
 └── Result<T, E> [std]          └── to_result(fn) [std] 桥接（fail→Result）
 ```
 
-- **Option** 是纯方法 API。无关键字，无运算符，无特殊语法
+- **Option 类型**只有 `Option<T>` 一种拼写；常规值操作使用方法。Postfix `expr?` 单独表示传播，不是 nullable/type suffix
 - **Fail** 有 `catch`（模式匹配错误）和 `handle...with`（完整 effect 处理器）
 - **Option→fail 桥接**：`.to_fail(error)` 方法，调用者指定错误值——不丢失信息
 - **fail→Option 桥接**：`some(expr) catch { _ => none }` 组合
@@ -188,7 +188,7 @@ Option 世界（数据类型）          Fail 世界（effect）
 |--------|------|
 | `try { }` | 与 `.and_then()` 重叠——两种 Option 链式方式违反"一种事一种写法" |
 | `or` 关键字 | 关键字成本高于方法；Option 默认值统一用 `.unwrap_or()` / `.unwrap_or_else()` |
-| `?` 运算符 | 本质是 unwrap；raise(undefined) 丢失错误信息；方法 `.to_fail(error)` 更好 |
+| `T?` 类型后缀 | 只缩写 `Option<T>`，没有独立建模价值；必须写显式 `Option<T>`。这不删除 postfix `expr?` |
 | 管道运算符 `\|>` | 与 `.method()` 重叠——链式调用只有一种写法 |
 | `\|x\| x + 1` 闭包 | 与 `fn(x) { x + 1 }` 重叠——函数定义只有 `fn` 一种形式 |
 

@@ -6,7 +6,7 @@
 
 **三支柱**：
 
-1. **推断一切** — 类型 + effect + 可变性 + 所有权，全推断。写代码的体验接近 Python，编译器内部看到完整类型+效果+所有权信息。标注由 formatter 按配置等级自动生成，人只控制详细度。Rust 的安全性不应以标注负担为代价。
+1. **推断一切** — 类型 + effect + 可变性 + 所有权，全推断。写代码的低标注体验接近 Python，但语法不依赖换行或缩进；编译器内部看到完整类型+效果+所有权信息。标注由 formatter 按配置等级自动生成，人只控制详细度。Rust 的安全性不应以标注负担为代价。
 2. **追踪一切** — 签名即完整行为契约。函数的副作用（IO、失败、可变、异步）全部由 effect system 在类型层追踪。LLM 和人都能从签名读出全部副作用，无需查看实现。
 3. **语义驱动性能** — 在 HIR 消费 effect purity / linearity 信息，再通过 native 后端实现 bounds check 消除、RC 省略、纯函数重排/并行化。前两个支柱产生的类型信息是优化燃料，而不是绑定某个 codegen 的 metadata。
 
@@ -42,9 +42,9 @@ Vorton 在同一 evaluation region 内按源码 **从左到右** 求值同级子
 struct Point { x: Float, y: Float }
 
 enum Shape {
-    circle(radius: Float),
-    rect(width: Float, height: Float),
-    polygon(vertices: List<Point>),
+    circle(Float),
+    rect(Float, Float),
+    polygon(List<Point>),
 }
 
 fn area(s: Shape) -> Float {
@@ -56,12 +56,12 @@ fn area(s: Shape) -> Float {
 }
 
 trait Drawable {
-    type Surface
-    fn draw(self, target: Surface) -> Unit
+    type Surface;
+    fn draw(self: Self, target: Surface) -> Unit;
 }
 
 impl Drawable for Shape {
-    type Surface = Canvas
+    type Surface = Canvas;
     fn draw(self, target: Canvas) -> Unit {
         match self { ... }
     }
@@ -78,9 +78,9 @@ fn serialize_sorted<T: Ord + Serialize>(list: List<T>) -> Bytes {
 }
 
 trait Collection {
-    type Item
-    type Iter: Iterator<item = Item>
-    fn iter(self) -> Iter
+    type Item;
+    type Iter: Iterator<Item = Item>;
+    fn iter(self: Self) -> Iter;
 }
 ```
 
@@ -94,15 +94,15 @@ trait Collection {
 
 ### 1.1a JSON 编码支持域（2026-08-06 D-001）
 
-`json_stringify` 的公开支持域由公开 `Json` trait 裁决，签名为 `json_stringify<T: Json>(value: T) -> Str`，不再承诺无约束的任意 `T`。Int、Float、Bool、Str 与 `List<T: Json>` 提供标准实现；用户 struct/enum 只有在显式请求 `Json` derive 时才获得结构化实现，不做无提示的全局 auto-derive。
+`json_stringify` 的公开支持域由公开 `Json` trait 裁决，签名为 `json_stringify<T: Json>(value: T) -> Str`，不再承诺无约束的任意 `T`。Int、Float、Bool、Str 与 `List<T: Json>` 提供标准实现；用户 struct/enum 只能通过普通显式 `impl Json for Type` 获得实现，不存在 source-level derive 请求。
 
-结构化编码保持历史字段、enum `_tag` 形状与 Float 编码规则；这些输出属于可回归的公开行为。调用点缺少 `Json` evidence 时必须在编译期拒绝。实现复用普通 trait dictionary 作为类型证据，native runtime 不按值表示猜测类型，也不为 unknown 类型提供 fallback。显式 derive 的具体表面语法与实现分层在 #260 planning/review 中对齐现有 trait/derive 机制，但不得改变上述支持域和 fail-closed 边界。
+标准类型实现维持各自已声明的编码行为；用户类型没有自动字段顺序、enum `_tag` 或其他结构化 JSON 形状保证，其输出完全由显式 impl 决定。调用点缺少 `Json` evidence 时必须在编译期拒绝。实现复用普通 trait dictionary 作为类型证据，native runtime 不按值表示猜测类型，也不为 unknown 类型提供 fallback。canonical 0.1 不产生 Attribute/Derive AST、生成 body 或 future placeholder。
 
 ### 1.1b Union Type（匿名 enum 语法糖，2026-05-25 决策）
 
 `A | B | C` 是匿名 enum 的语法糖。纯编译期展开，不引入子类型，HM 推断不受影响。
 
-> **排期边界（2026-08-23 用户复核）**：本节既有语义与 2026-06-15 的 match 消歧裁决继续有效。匿名 sum 提供结构等价、自动注入与错误类型组合，具有独立建模/组合价值，不属于 `T?` 一类纯缩写；但它不是 0.1 urgent 能力，B-072 明确顺延到首次 0.1 发布后实现。
+> **排期边界（2026-08-23 用户复核）**：本节既有语义与 2026-06-15 的 match 消歧裁决继续有效。匿名 sum 提供结构等价、自动注入与错误类型组合，具有独立建模/组合价值，不属于历史 `T?` 一类纯缩写；但它不是 0.1 urgent 能力，B-072 明确顺延到首次 0.1 发布后实现。
 
 ```
 // 写法
@@ -112,13 +112,13 @@ fn process(x: Str | I64) -> Str {
         I64(n) => n.to_str(),
     }
 }
-process("hello")   // 编译器自动包装为 union 的 Str 分支
-process(42)        // 编译器自动包装为 union 的 I64 分支
+process("hello");  // 编译器自动包装为 union 的 Str 分支
+process(42);       // 编译器自动包装为 union 的 I64 分支
 
 // 错误组合——核心用例
 fn load_config(path: Str) -> Config with {fail<IoError | ParseError>} {
-    let raw = read_file(path)        // fail<IoError>，自动包装进 union
-    let parsed = parse_json(raw)     // fail<ParseError>，自动包装进 union
+    let raw = read_file(path);       // fail<IoError>，自动包装进 union
+    let parsed = parse_json(raw);    // fail<ParseError>，自动包装进 union
     parsed
 }
 ```
@@ -144,10 +144,10 @@ fn load_config(path: Str) -> Config with {fail<IoError | ParseError>} {
 类型附带谓词，编译器尽力静态检查，无法证明时插入运行时检查：
 
 ```
-type Positive    = Int where it > 0
-type NonEmpty<T> = List<T> where it.len() > 0
-type Percentage  = Float where 0.0 <= it <= 100.0
-type Email       = Str where it.matches(r"^[^@]+@[^@]+\.[^@]+$")
+type Positive    = Int where it > 0;
+type NonEmpty<T> = List<T> where it.len() > 0;
+type Percentage  = Float where 0.0 <= it <= 100.0;
+type Email       = Str where it.matches(r"^[^@]+@[^@]+\.[^@]+$");
 
 fn divide(a: Float, b: Float where b != 0.0) -> Float {
     a / b
@@ -158,11 +158,11 @@ struct Portfolio {
     assets:  NonEmpty<Asset>,
 }
 
-let x = 42
-divide(1.0, x)      // 编译器证明 42 != 0 ✓
+let x = 42;
+divide(1.0, x);     // 编译器证明 42 != 0 ✓
 
-let y = read_input()
-divide(1.0, y)      // 编译器插入运行时检查，失败触发 fail effect
+let y = read_input();
+divide(1.0, y);     // 编译器插入运行时检查，失败触发 fail effect
 ```
 
 ### 1.3 Const Generics（值参数化类型）
@@ -173,7 +173,7 @@ divide(1.0, y)      // 编译器插入运行时检查，失败触发 fail effect
 
 ```
 // 固定长度数组（B-070）
-let key: [U8; 32] = [0; 32]
+let key: [U8; 32] = [0; 32];
 
 // 等式约束：两个 N 必须相等（HM unification 自然处理）
 fn zip<T, U, const N>(a: [T; N], b: [U; N]) -> [(T, U); N] { ... }
@@ -200,8 +200,8 @@ fn greet(person: {name: Str, ..rest}) -> Str {
 struct User    { name: Str, age: I64, email: Str }
 struct Company { name: Str, industry: Str }
 
-greet(User { ... })       // ✓ 单态化为 greet__User
-greet(Company { ... })    // ✓ 单态化为 greet__Company
+greet(User { ... });      // ✓ 单态化为 greet__User
+greet(Company { ... });   // ✓ 单态化为 greet__Company
 ```
 
 **编译策略**：
@@ -226,7 +226,7 @@ Vorton 的错误处理基于一个核心洞察：**错误有生命周期——�
 - **`catch` 是就地恢复** —— 捕获 fail effect 并提供替代值，总是消除 fail effect
 - **`Option<T>` 是独立的数据类型** —— 表达"有或没有"，通过 `to_fail()` 进入 effect 世界
 
-> **公开类型拼写（2026-08-22 用户决定）**：最终只保留显式 `Option<T>`。当前编译器接受的 `T?` 是历史纯缩写语法糖，不提供独立语义；在 B-180 性能专项后由 B-191 做未发布期 clean break，并在 preview 产品面前完成。迁移前不新增或扩张 `T?` 用法，当前实现事实仍以 lang-spec 与可执行 parser 为准。
+> **公开类型拼写（2026-08-22 用户决定）**：canonical 0.1 只保留显式 `Option<T>`。迁移前编译器接受的 `T?` 是历史纯缩写语法糖，不提供独立语义，也不是当前 Rust 重建表面。Postfix expression `expr?` 继续表示传播，与类型拼写无关。
 
 ```
 // Option 是显式数据类型；没有 nullable/null 语义
@@ -238,9 +238,9 @@ struct User {
 }
 
 // Option → 值：unwrap 方法
-let nick = user.nickname.unwrap()              // none → panic
-let nick = user.nickname.unwrap_or("匿名")     // none → 默认值
-let nick = user.nickname.unwrap_or_else(fn() { compute_default() })
+let nick = user.nickname.unwrap();             // none → panic
+let nick = user.nickname.unwrap_or("匿名");    // none → 默认值
+let nick = user.nickname.unwrap_or_else(fn() { compute_default() });
 
 // Option → fail effect：to_fail 方法（从数据进入 effect 世界）
 fn get_nickname(user: User) -> Str {
@@ -251,10 +251,10 @@ fn get_nickname(user: User) -> Str {
 let config = load_config(path) catch {
     IoError(e) => default_config(),
     _          => panic("unexpected error"),
-}
+};
 
 // fail effect → 物化为数据：to_result（当需要错误作为持久数据时）
-let result: Result<Config, Str> = to_result(fn() { load_config(path) })
+let result: Result<Config, Str> = to_result(fn() { load_config(path) });
 ```
 
 **什么时候用哪个：**
@@ -275,54 +275,54 @@ Vorton 的可变性由唯一关键字 `mut` 统一管理。设计原则：**局�
 **`let` vs `let mut`：**
 
 ```
-let x = 10                   // 不可变——不可重绑定，不可调用 mut self 方法
-let mut counter = 0          // 可变——可重绑定，可调用 mut self 方法
+let x = 10;                  // 不可变——不可重绑定，不可调用 self: mut Self 方法
+let mut counter = 0;         // 可变——可重绑定，可调用 self: mut Self 方法
 
-let list = [1, 2, 3]
-list.push(4)                 // ERROR — push 是 mut self 方法，需要 let mut
-list.len()                   // ok — len 是只读方法
+let list = [1, 2, 3];
+list.push(4);                // ERROR — push 要求 self: mut Self，需要 let mut
+list.len();                  // ok — len 是只读方法
 
-let mut list = [1, 2, 3]
-list.push(4)                 // ok
-list = [5, 6]                // ok — 重绑定
+let mut list = [1, 2, 3];
+list.push(4);                // ok
+list = [5, 6];               // ok — 重绑定
 ```
 
-**`mut` 参数——传入可变引用：**
+**可变参数——传入可变引用：**
 
 ```
-fn increment(mut counter: Int) {
-    counter = counter + 1    // 直接赋值，修改调用方的变量
+fn increment(counter: mut Int) {
+    counter = counter + 1;   // 直接赋值，修改调用方的变量
 }
 
-let mut n = 0
-increment(n)                 // 编译器从签名推断需要 box
-print(n)                     // 1
+let mut n = 0;
+increment(n);                // 编译器从签名推断需要 box
+print(n);                    // 1
 
 // formatter preset "review"+ 自动插入 mut 标记：
-increment(mut n)             // 等价写法，可选语法，方便人阅读
+increment(mut n);            // 等价 assertion，可选语法，方便人阅读
 ```
 
 编译器为 `mut` 参数自动 box（`{ value }` 对象），用户无感。调用方的 `mut` 前缀是**可选标注**——编译器接受两种写法，语义相同。formatter 按配置决定是否插入：`preset = "none"` 省略，`preset = "review"+` 插入（代码审查时副作用可见）。
 
-**`mut self`——可变方法：**
+**`self: mut Self`——可变方法：**
 
 ```
 impl List<T> {
     fn len(self) -> Int { ... }           // 只读
-    fn push(mut self, value: T) { ... }   // 可变——调用方需要 let mut 绑定
-    fn clear(mut self) { ... }            // 可变
+    fn push(self: mut Self, value: T) { ... } // 可变——调用方需要 let mut 绑定
+    fn clear(self: mut Self) { ... }          // 可变
 }
 ```
 
 **闭包捕获——编译器透明 box：**
 
 ```
-let mut counter = 0
-let inc = fn() { counter = counter + 1 }  // 闭包捕获 mut 绑定
-let get = fn() { counter }
+let mut counter = 0;
+let inc = fn() { counter = counter + 1; }; // 闭包捕获 mut 绑定
+let get = fn() { counter };
 
-inc(); inc(); inc()
-get()  // 3
+inc(); inc(); inc();
+get(); // 3
 ```
 
 编译器检测到 `counter` 被闭包捕获且为 `let mut`，自动 box 为 `{ value: 0 }`。闭包和外层作用域共享同一个 box。用户写的是直觉代码，编译器干脏活。
@@ -365,7 +365,7 @@ Refinement 是值级谓词——描述值本身的性质（`Int where it > 0`）
 
 ```
 trait Drop {
-    fn drop(mut self)             // 0.1 必须 effect-free
+    fn drop(self: move Self);     // 0.1 必须 effect-free
 }
 ```
 
@@ -399,11 +399,11 @@ trait Drop {
 fn safe_write(file: FileHandle, data: Str where data.len() > 0) with {fail<Str>, async} {
     // file: impl Drop → scope 结束自动 close（正常 + abort 均 RAII）
     // data: refined → 保证非空，跨 await 稳定
-    let written = await(file.write(data))
+    let written = await(file.write(data));
     if written == 0 {
-        fail.raise("write failed")   // abort → file.drop() 自动触发
+        fail.raise("write failed");  // abort → file.drop() 自动触发
     }
-    file.close()                      // 也可提前显式消耗
+    file.close();                     // 也可提前显式消耗
 }
 ```
 
@@ -419,7 +419,7 @@ Or-pattern 合并的 GADT 变体必须同时满足两道独立门：各 alternat
 
 **Refinement × mut 参数（赋值点重新验证）**
 
-`fn foo(mut x: Int where x > 0)` 的 refinement 必须在每次赋值后重新成立。编译器通过 SSA 约束传播在每个赋值点验证新值满足谓词。这和 refinement 本身的流分析实现是同一层复杂度，不单独拆分。Refinement 的核心价值是使用点的保证，不只是入口检查。
+未来 refinement 若开放，`fn foo(x: mut Int where x > 0)` 的谓词必须在每次赋值后重新成立。该写法位于明确的 post-0.1 refinement 设计愿景中；canonical 0.1 的 `where` 没有产生式。
 
 **Auto-Boxing × Linear（透明）**
 
@@ -439,7 +439,7 @@ GADT 的 scoped type equality 是编译期 unification，effect evidence 是运�
 
 **mut\<T\> × Ownership（隐式借用 + 无 borrow checker）**
 
-`mut self` 方法调用 Drop 值时，语义为隐式借用（不消耗所有权）。Drop 值在 scope 内可通过 `mut self` 被修改，scope 结束时自动 drop（RAII）或提前 `drop(x)` / `x.close()` 显式消耗。Vorton 不引入 borrow checker——Perceus RC + Ownership + mut\<T\> + Drop 已覆盖安全性需求（内存安全由 Perceus RC 保证，资源安全由 Ownership + Drop 保证，mutation 追踪由 mut\<T\> effect 保证，数据竞争由结构化并发 + move 语义排除）。不设 borrow checker 的残余可变别名窗口（`f(xs, mut xs)` 同值双借）由句法禁止收口；其余别名由 move 语义（§7.5，use-after-move 编译错误）杜绝，COW 因此为不可观测的内部优化（2026-06-11 拍板，B-110）。
+`self: mut Self` 方法调用 Drop 值时，语义为隐式借用（不消耗所有权）。Drop 值在 scope 内可通过该 receiver mode 被修改，scope 结束时自动 drop（RAII）或提前 `drop(x)` / `x.close()` 显式消耗。Vorton 不引入 borrow checker——Perceus RC + Ownership + mut\<T\> + Drop 已覆盖安全性需求（内存安全由 Perceus RC 保证，资源安全由 Ownership + Drop 保证，mutation 追踪由 mut\<T\> effect 保证，数据竞争由结构化并发 + move 语义排除）。不设 borrow checker 的残余可变别名窗口（`f(xs, mut xs)` 同值双借）由句法禁止收口；其余别名由 move 语义（§7.5，use-after-move 编译错误）杜绝，COW 因此为不可观测的内部优化（2026-06-11 拍板，B-110）。
 
 ### 1.7 语义规范（后端无关，2026-05-24 确定）
 
@@ -463,7 +463,7 @@ Vorton 语言的语义规范与后端无关。历史实现中，JS 后端已归�
 
 #### 内存布局（2026-05-24 决策）
 
-默认布局不保证（编译器可重排字段）。`@repr(C)` C 兼容布局（FFI）、`@repr(packed)` 紧凑布局（协议解析）、`@align(N)` 显式对齐。属性标注机制。
+默认布局不保证（编译器可重排字段）。canonical 0.1 没有 `@` token 或 attribute grammar，因此不提供 source-level C layout、packed layout 或显式对齐标注；需要字段级 FFI layout 时必须在出现真实 consumer 后另行决定完整语义与语法，不能预留 attribute 节点。
 
 #### 运算符重载（2026-05-24 决策）
 
@@ -529,7 +529,7 @@ EffectAtom
 
 ```vorton
 effect Logger {
-    fn log(msg: Str) -> Unit
+    fn log(msg: Str) -> Unit;
 }
 ```
 
@@ -542,9 +542,9 @@ effect Logger {
 ```
 // 你写的：
 fn load_portfolio(path: Str) -> Portfolio {
-    let raw = fs::read_file(path)
-    let data = json.parse(raw)
-    let weights = validate(data)
+    let raw = fs::read_file(path);
+    let data = json.parse(raw);
+    let weights = validate(data);
     Portfolio { weights, assets: data.assets }
 }
 
@@ -561,8 +561,8 @@ fn load_portfolio(path: Str) -> Portfolio {
 
 ```
 fn load_portfolio(path: Str) -> Portfolio {
-    let raw = fs::read_file(path) // fs + fail 自动冒泡
-    let data = json.parse(raw)    // fail 自动冒泡
+    let raw = fs::read_file(path); // fs + fail 自动冒泡
+    let data = json.parse(raw);    // fail 自动冒泡
     validate(data)                 // fail 自动冒泡
 }
 ```
@@ -576,7 +576,7 @@ let config = load_config(path) catch {
     IoError(e)    => { log(e); default_config() },
     ParseError(e) => fallback(path),
     _             => panic("unexpected"),
-}
+};
 ```
 
 `catch` 总是消除 `fail` effect——它是一个完整捕获点。内部用模式匹配分派不同错误类型。如果需要选择性处理（只处理部分错误、其余继续传播），在 catch 内部 match + re-raise：
@@ -587,7 +587,7 @@ let config = load_config(path) catch { e =>
         IoError(io_err) => default_config(),
         other           => raise(other),    // 显式重新抛出
     }
-}
+};
 ```
 
 这样"部分处理"是显式的（re-raise），而非隐式的（有没有 catch-all arm）。
@@ -597,15 +597,15 @@ let config = load_config(path) catch { e =>
 当需要错误作为持久数据时（收集多个错误、序列化、测试断言、跨 API 边界传递）：
 
 ```
-let result: Result<Config, Str> = to_result(fn() { load_config(path) })
+let result: Result<Config, Str> = to_result(fn() { load_config(path) });
 match result {
     ok(config) => use_config(config),
     err(e)     => log("failed: ${e}"),
 }
 
 // 典型场景：验证收集
-let results = fields.map(fn(f) { to_result(fn() { validate_field(f) }) })
-let errors = results.filter(fn(r) { r.is_err() })
+let results = fields.map(fn(f) { to_result(fn() { validate_field(f) }) });
+let errors = results.filter(fn(r) { r.is_err() });
 ```
 
 **阶段 3b：effect 替换——`handle...with`（高级）**
@@ -614,7 +614,7 @@ let errors = results.filter(fn(r) { r.is_err() })
 
 ```
 handle {
-    let result = complex_pipeline()
+    let result = complex_pipeline();
     save(result)
 } with {
     Logger.log(msg) => print(msg),          // custom handled effect
@@ -629,15 +629,15 @@ handle {
 
 ```
 effect FileAccess {
-    fn read(path: Str) -> Str
+    fn read(path: Str) -> Str;
 }
 
 test "load_portfolio parses correctly" {
-    let mock_data = r#"{"weights": [25, 25, 25, 25], ...}"#
+    let mock_data = r#"{"weights": [25, 25, 25, 25], ...}"#;
 
     handle {
-        let p = load_portfolio_via_file_access("fake.json")
-        assert(p.weights.len() == 4)
+        let p = load_portfolio_via_file_access("fake.json");
+        assert(p.weights.len() == 4);
     } with {
         FileAccess.read(_path) => mock_data,
     }
@@ -654,7 +654,7 @@ test "load_portfolio parses correctly" {
 ```
 // tail-resumptive：handler 返回值替代 custom operation 的返回值，计算继续
 handle {
-    let data = FileAccess.read("config.toml") // → "mock-data"
+    let data = FileAccess.read("config.toml"); // → "mock-data"
     "got: ${data}"                       // → "got: mock-data"
 } with {
     FileAccess.read(path) => "mock-data",
@@ -683,8 +683,8 @@ Generic custom effect声明只是interface/template，不因bodyless operation h
 
 ```
 // IDE 模式 A：行尾幽灵文字
-let raw = fs::read_file(path)     ░ fs, fail<FsError> ░
-let data = json.parse(raw)        ░ fail<ParseError> ░
+let raw = fs::read_file(path);    ░ fs, fail<FsError> ░
+let data = json.parse(raw);       ░ fail<ParseError> ░
 
 // IDE 模式 B：底色高亮
 // 纯表达式 = 无底色
@@ -697,8 +697,8 @@ Formatter 可选将 effect 标注固化为源码注释：
 
 ```
 //: 前缀注释，formatter 自动维护
-let raw = fs::read_file(path)     //: fs, fail<FsError>
-let data = json.parse(raw)        //: fail<ParseError>
+let raw = fs::read_file(path);    //: fs, fail<FsError>
+let data = json.parse(raw);       //: fail<ParseError>
 ```
 
 ---
@@ -709,11 +709,11 @@ let data = json.parse(raw)        //: fail<ParseError>
 
 ```
 // 局部推断
-let x = 42                        // Int
-let names = ["a", "b", "c"]      // List<Str>
+let x = 42;                       // Int
+let names = ["a", "b", "c"];     // List<Str>
 
 // 双向推断
-let f: fn(Int) -> Bool = fn(x) { x > 0 }
+let f: fn(Int) -> Bool = fn(x) { x > 0 };
 
 // 全局约束求解 + row poly
 fn process(items) {
@@ -750,13 +750,13 @@ TypedHIR/PreCore必须把直接constructor语法按resolver/registry已选定的
 
 Vorton 0.1 明确不支持 **polymorphic recursion**：递归环中的同一 callable 不能以彼此不可统一的类型实例调用自己或 peer。普通泛型递归仍支持，只要递归环内共享同一组类型参数；函数离开递归组后仍是正常泛型 scheme。Post-0.1 只有真实 consumer 证明该限制无法由普通泛型递归、显式数据建模或非递归 wrapper 表达时，才由 B-203 重新评估；0.1 不预留相关 IR、annotation 或 fallback。
 
-**函数默认参数（2026-08-23 用户决定）**：Vorton 0.1 不支持 `fn f(x: T = expr)`。默认参数只省略调用点实参，显式 wrapper 函数可完整表达，却要求保存/复制 typed HIR template、freshen 全部 binder identity 并给每个下游阶段保留 default-specialization authority；compiler/std/examples 当前无 consumer。0.1 clean break 删除该语法与 call-site expansion，不影响 trait method default body。未来若出现独立 API 建模价值，再作为新 feature 评估，不保留兼容路径。
+**函数默认参数（2026-08-23 用户决定）**：Vorton 0.1 不支持 `fn f(x: T = expr)`。默认参数只省略调用点实参，显式 wrapper 函数可完整表达，却要求保存/复制 typed HIR template、freshen 全部 binder identity 并给每个下游阶段保留 default-specialization authority；compiler/std/examples 当前无 consumer。0.1 clean break 删除该语法与 call-site expansion；source trait method 同样只有签名，不存在 default body。未来若出现独立 API 建模价值，再作为新 feature 评估，不保留兼容路径。
 
 ### 3.2 Formatter：标注密度管理器
 
 Vorton 的 formatter 不只是语法格式化工具（缩进/空白/换行），它同时管理**标注密度**——基于编译器的类型推断结果，在源码上增删类型和 effect 标注。源码是规范形式，标注是可增减的文档层。
 
-**核心设计原则：标注是文档，不是语义。** 编译器永远从函数体推断 convention，标注不改变编译行为（编译产物与无标注时相同）。标注缺失 = 最多 warning；标注存在即检查，**与推断不一致 = 编译错误**——统一信号「标注过期了」，修复手段是 `vorton fmt` 刷新（内部标注）或人工确认 pub 契约变更（见 3.2.3/3.2.4），而非改代码迁就标注。lv0 能编译的代码补全**正确**标注后编译行为不变。（2026-06-11 订正：原「不一致 = warning 从不 error」表述与 3.2.3「不匹配 = 编译错误」矛盾，以 3.2.3 为准。）
+**核心设计原则：标注是文档，不是语义。** 编译器永远从函数体推断 convention，标注不改变编译行为（编译产物与无标注时相同）。标注缺失 = 最多 warning；type/effect 等 contract 标注与推断不一致时是编译错误，修复手段是 `vorton fmt` 刷新（内部标注）或人工确认 pub 契约变更（见 3.2.3/3.2.4），而非改代码迁就标注。Parameter/call-site mode 与 closure capture 是更轻的 inferred assertion：不匹配产生 warning，agent profile 将 warning 升为 error；它们同样不能覆盖推断结果。lv0 能编译的代码补全正确标注后编译行为不变。
 
 #### 3.2.1 Git 存储模型：lv0 / lv2（2026-05-24 确定）
 
@@ -775,10 +775,11 @@ Vorton 采用两级标注模型管理源码的标注密度：
 |--------|:---:|------|
 | 函数返回类型 | ✅ | `fn f(...) -> Int` |
 | effect row | ✅ | `with {fs, fail<E>}` |
-| move 参数（声明） | ✅ | `fn f(move x: T)` |
+| move 参数（声明） | ✅ | `fn f(x: move T)` |
 | mut callsite | ✅ | `f(mut list)` |
 | 闭包 effect | ✅ | 闭包的 effect 签名 |
-| move callsite | ❌ | 编译器 use-after-move 够用，标了噪音大 |
+| move callsite | ✅ | `f(move file)`，只断言推断结果 |
+| 闭包 capture | ✅ | `fn [mut counter: Int, name: Str](x) { ... }` |
 | 局部变量类型 | ❌ | 过于繁琐（与 Rust/TS 一致） |
 | borrow 参数 | ❌ | 默认即 borrow，标了是噪音 |
 | 泛型实例化类型参数 | ❌ | `Vec.new()` 不写 `::<Int>` |
@@ -894,6 +895,7 @@ vorton fmt --check          # CI 检查：是否符合配置（不修改文件�
 |------|------|-----------|------|
 | `pub fn` 签名（返回类型 + effect） | **契约** | 不匹配 = 编译错误 | 调用方依赖此签名，是 API 边界 |
 | 内部（let 类型、lambda 参数、局部 fn） | **文档** | 不匹配 = 编译错误 | 引导开发者运行 formatter 刷新 |
+| parameter/call-site mode、closure capture | **推断 assertion** | 不匹配 = warning；agent profile 为 error | 推断结果始终是 authority |
 
 两者都在编译时检查，但 formatter 对它们的处理策略不同：
 
@@ -903,7 +905,7 @@ vorton fmt --check          # CI 检查：是否符合配置（不修改文件�
 | 正确（匹配推断） | 保持 | 保持 |
 | **错误（不匹配推断）** | **直接更新** | **不动，报 warning** |
 
-关键区别：内部标注是 formatter 管辖范围，过期了直接刷新；pub 签名是 API 契约，可能是有意的 breaking change，也可能是无意的 body 改动，formatter 不替人做判断。
+关键区别：内部 type/effect 标注是 formatter 管辖范围，过期了直接刷新；pub 签名是 API 契约，可能是有意的 breaking change，也可能是无意的 body 改动，formatter 不替人做判断。Mode/capture assertion 只报告推断失真，不进入上表的 contract 更新分支。
 
 #### 3.2.4 工作流
 
@@ -925,7 +927,7 @@ vorton fmt --check          # CI 检查：是否符合配置（不修改文件�
 
 三层保证标注与推断的一致性：
 
-**1. 编译器**：标注存在就检查。不匹配 = 编译错误。不区分 pub/内部——统一的信号："标注过期了"。
+**1. 编译器**：标注存在就检查。Type/effect contract 不匹配 = 编译错误；mode/capture assertion 不匹配 = warning（agent profile 下升级为 error）。两者都不改变推断真值。
 
 **2. Formatter 性质**：
 - **幂等性**：`fmt(fmt(code)) == fmt(code)` — 格式化两次 = 格式化一次
@@ -966,26 +968,28 @@ Vorton 没有 UFCS（Uniform Function Call Syntax）。`::` 和 `.method()` 是�
 - **`::`（模块路径）**：解析模块内的函数/常量/类型。`std::fs::read_file(path)` 调用 `std/fs` 模块的自由函数。
 - **`.method()`（方法调用）**：解析 receiver 的方法。解析链：impl 方法 > trait 方法 > builtin 方法。**不**回退到自由函数。
 
+`value.member(args)` 在 AST 中始终是 MethodCall，不能因 `member` 字段恰好具有函数类型而改判为 FieldAccess + Call。函数值字段只有一种调用写法：`(value.member)(args)`。换行是普通空白，不改变这项分类。
+
 ```vorton
 impl List<T> {
     fn map<U>(self, f: fn(T) -> U) -> List<U> { ... }
 }
 
-my_list.map(fn(x) { x + 1 })   // 解析到 List.map（impl 方法）
+my_list.map(fn(x) { x + 1 });  // 解析到 List.map（impl 方法）
 ```
 
 **自由函数不能通过 `.method()` 调用**：
 
 ```vorton
 fn double(x: I64) -> I64 { x * 2 }
-42.double()   // ❌ 编译错误——double 是自由函数，不在方法解析链中
-double(42)    // ✅ 唯一正确写法
+42.double();  // ❌ 编译错误——double 是自由函数，不在方法解析链中
+double(42);   // ✅ 唯一正确写法
 ```
 
 **方法不能通过 `::` 调用**：
 
 ```vorton
-List::map(my_list, f)   // ❌ 不存在——:: 是模块路径，不是类型限定符
+List::map(my_list, f);  // ❌ 不存在——:: 是模块路径，不是类型限定符
 ```
 
 公理⑧在此被编译器结构天然保障——`::` 和 `.` 是两个互不重叠的语法域。LLM 训练数据里对数学函数用自由函数、对容器操作用方法的惯例足以区分，不需要编译器允许两种写法。
@@ -1036,9 +1040,9 @@ Vorton 有意选择简单 trait 系统，换取更强推断能力：
 
 ```
 trait Describable {
-    fn name(self) -> Str
-    fn kind(self) -> Str
-    fn describe(self) -> Str
+    fn name(self: Self) -> Str;
+    fn kind(self: Self) -> Str;
+    fn describe(self: Self) -> Str;
 }
 
 struct User { name: Str, age: Int }
@@ -1056,12 +1060,12 @@ Vorton 0.1不允许trait method body；每个impl显式实现完整contract。�
 
 ```
 trait Loggable {
-    fn log_tag(self) -> Str
-    fn log(self, msg: Str) -> Unit with {console}
+    fn log_tag(self: Self) -> Str;
+    fn log(self: Self, msg: Str) -> Unit with {console};
 }
 
 trait Serializable {
-    fn to_json(self) -> Str
+    fn to_json(self: Self) -> Str;
 }
 
 impl Loggable for User {
@@ -1092,16 +1096,18 @@ impl Describable for Admin {
     fn describe(self) -> Str { self.base.describe() }
 }
 
-admin.describe()    // 显式转发到 base.describe()
+admin.describe();   // 显式转发到 base.describe()
 ```
 
 Vorton 0.1不提供`delegate`surface。需要组合复用时写普通impl与普通method call；编译器不生成wrapper、associated binding或evidence forwarding。
 
-### 5.4 Row Poly + Trait 交叉
+### 5.4 Row Poly + Trait 交叉 ⚠️ post-0.1 语义草图
 
-```
+canonical 0.1 没有单 `&` token 或 record/trait intersection 产生式；下列只记录未来组合意图，不是当前 source 示例或 parser placeholder：
+
+```text
 fn greet_and_log<T: Loggable>(entity: {name: Str, ..} & T) -> Str {
-    entity.log("被打招呼了")
+    entity.log("被打招呼了");
     "你好, ${entity.name}"
 }
 ```
@@ -1111,12 +1117,12 @@ fn greet_and_log<T: Loggable>(entity: {name: Str, ..} & T) -> Str {
 ```
 fn process_all(items: List<dyn Describable>) {
     for item in items {
-        print(item.describe())     // 动态分发
+        print(item.describe());    // 动态分发
     }
 }
 
-let things: List<dyn Describable> = [user, admin, company]
-process_all(things)
+let things: List<dyn Describable> = [user, admin, company];
+process_all(things);
 ```
 
 默认静态分发（泛型单态化），`dyn` 是主动选择运行时多态的标志。
@@ -1149,8 +1155,8 @@ pub struct Config {
 }
 
 pub fn load(path: Str) -> Config {
-    let raw = fs::read_file(path)
-    let table = toml.parse(raw)
+    let raw = fs::read_file(path);
+    let table = toml.parse(raw);
     Config {
         db_url: table.get("db_url"),
         port:   table.get_int("port"),
@@ -1162,12 +1168,12 @@ pub fn load(path: Str) -> Config {
 
 ```
 // main.vorton
-use config                          // 导入 config.vorton
+use config;                         // 导入 config.vorton
 
-let cfg = config::load("app.toml")
+let cfg = config::load("app.toml");
 
 // 可以 pub use 重导出
-pub use config
+pub use config;
 ```
 
 `pub` 可见性在多文件模式下强制执行，单文件模式不强制（向后兼容）。
@@ -1183,10 +1189,10 @@ Import、re-export 与 same-origin diamond 是同一既有 declaration 的重复
 文件本身是隐式模块。0.1 允许一个可选的 `requires {effects}` 文件头；它必须是文件中第一项非注释语法、每文件至多一次，并与 inline `mod name requires {effects}` 使用同一 capability checker：
 
 ```vorton
-requires {unsafe}
+requires {unsafe};
 
-use std::ptr
-extern fn vorton_raw_alloc(count: Int) -> Ptr<Int>
+use std::ptr;
+extern fn vorton_raw_alloc(count: Int) -> Ptr<Int>;
 ```
 
 存在 header 时，它是该文件模块的 effect ceiling；`requires {}` 表示纯文件模块。省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 从不隐式授权：使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效的文件/inline-module `requires` 集合显式包含 `unsafe`。`unsafe {}` 仍是逐块责任签字，header 不能替代它；extern 声明本身是 ABI 签字，调用点保持 safe。拒绝再增加逐声明 `unsafe extern fn` 第二套授权语法。实现与仓内迁移由 B-156 跟踪。
@@ -1237,20 +1243,20 @@ extern fn vorton_raw_alloc(count: Int) -> Ptr<Int>
 
 ```vorton
 // 非 Drop：rc+1 共享
-let xs = [1, 2, 3]
-let ys = xs            // rc+1，两者指向同一 List
-print(ys.len())        // ✅
+let xs = [1, 2, 3];
+let ys = xs;           // rc+1，两者指向同一 List
+print(ys.len());       // ✅
 
 // Drop 类型：auto-move
-let f = File.open("x")
-let g = f              // auto-move，f 失效
-print(f.path())        // ❌ 编译错误：f 已 move
+let f = File.open("x");
+let g = f;             // auto-move，f 失效
+print(f.path());       // ❌ 编译错误：f 已 move
 
 // 显式独立副本
-let zs = xs.clone()    // 递归深拷贝，完全独立
+let zs = xs.clone();   // 递归深拷贝，完全独立
 ```
 
-**lv2 formatter**：对 Drop 类型的赋值显式标注 `move`——`let g = move f`。lv0 不写。
+赋值中的 auto-move 始终由编译器推断；canonical 0.1 不增加 `let g = move f` 第二种表达式表面。可选 `move` assertion 只出现在参数类型、closure capture 与 call argument 的固定位置。
 
 **无 `&T`/`&mut T` 类型**：非 Drop 赋值用 rc+1 代替零成本引用。rc+1 不是深拷贝（仅一个计数器加一），且可被后续优化（reuse / RC 消除 / 逃逸分析）消除至零成本。不引入二等类型、逃逸规则等复杂度。
 
@@ -1284,15 +1290,16 @@ Vorton 0.1 不支持 named enum / variant update spread。`Variant { ..base, fie
 
 ```vorton
 // extern fn 的 mut 标注
-extern fn sort_in_place(arr: mut List<Int>)          // mutates arr
-extern fn read_all(path: Str) -> Str / {fs, fail<FsError>} // path is readonly
+extern fn sort_in_place(arr: mut List<Int>);         // mutates arr
+extern fn read_all(path: Str) -> Str with {fs, fail<FsError>}; // path is readonly
 ```
 
-调用点 lv2 同步显示：`f(mut list)` / `f(move file)`。lv0 一律写 `f(x)`。
+调用点 lv2 可显示：`f(mut list)` / `f(move file)`。lv0 一律写 `f(x)`。这些 mode 标注和 capture list 都只断言编译器推断结果，不能覆盖它；不匹配产生现有 warning，并在 agent profile 下作为 error。
 
 **`mut` 语法位置区分含义**：
 - `mut` 在名称前（`let mut x`）= 关于名称（rebind）
 - `mut` 在类型前（`x: mut T`）= 关于值（mutation）
+- `mut`/`move` 在 call argument 或 closure capture 的 place 前（`f(mut x, move y)`、`fn [mut x, move y]()`）= 对推断 mode/capture 的可选 assertion
 
 函数类型中同样标注约定：`fn(T)` = borrow，`fn(mut T)` = mutable，`fn(move T)` = move。
 
@@ -1311,7 +1318,7 @@ Parse / project Resolver / Type+Effect
 → mechanical C codegen
 ```
 
-**FlowIR 契约**：TypedHIR → CoreHIR 已完成derive、protocol for-in、and/or、dictionary、extern-forward与handled-effect evidence等0.1 semantic elaboration；函数默认参数、source trait default body、`delegate`、effect default body、`sig`与impl-member `extern fn`不属于0.1 surface。FlowIR只接收canonical CoreHIR body/contract；所有非原子值、pattern projection与value-yielding control result已有exact typed slot；Test、Const、Lambda/handler、derived/intrinsic/drop/dict helper等所有真实callable或helper body及显式contract进入一个共享`ExecutableInventory`。Enum constructor则是携带exact `VariantRef`与field refs的typed construction operation，不是callable inventory节点。Builtin inherent method在Core闭合前已是exact `IntrinsicRef` contract，而不是由backend按类型名/方法名补造的FFI body。System effect只随exact call contract进入AbiIR HostImport，不成为executable handler root。每个first-class callable同时携带freeze后的effect contract；dynamic candidate不得只按参数/返回类型匹配而丢失system/handled/fail/mut/unsafe或正式effect参数。Neutral ANF只保持同一evaluation region内严格左到右求值，不跨short-circuit、branch、loop/lambda、guard、catch/handle、unsafe或control-transfer边界，也不产生`Clone/Take/Drop/Cleanup`。FlowIR freeze后任何阶段新增binder都是internal error。
+**FlowIR 契约**：TypedHIR → CoreHIR 已完成compiler-defined structural impl/drop glue、protocol for-in、and/or、dictionary、extern-forward与handled-effect evidence等0.1 semantic elaboration；函数默认参数、source trait default body、`delegate`、effect default body、`sig`、source attribute/derive与impl-member `extern fn`不属于0.1 surface。FlowIR只接收canonical CoreHIR body/contract；所有非原子值、pattern projection与value-yielding control result已有exact typed slot；Test、Const、Lambda/handler、compiler-defined/intrinsic/drop/dict helper等所有真实callable或helper body及显式contract进入一个共享`ExecutableInventory`。Enum constructor则是携带exact `VariantRef`与field refs的typed construction operation，不是callable inventory节点。Builtin inherent method在Core闭合前已是exact `IntrinsicRef` contract，而不是由backend按类型名/方法名补造的FFI body。System effect只随exact call contract进入AbiIR HostImport，不成为executable handler root。每个first-class callable同时携带freeze后的effect contract；dynamic candidate不得只按参数/返回类型匹配而丢失system/handled/fail/mut/unsafe或正式effect参数。Neutral ANF只保持同一evaluation region内严格左到右求值，不跨short-circuit、branch、loop/lambda、guard、catch/handle、unsafe或control-transfer边界，也不产生`Clone/Take/Drop/Cleanup`。FlowIR freeze后任何阶段新增binder都是internal error。
 
 **Core effect closure（2026-08-26 用户批准）**：CoreHIR不存在“稍后再解”的effect。TypedHIR freeze先求解普通effect inference metavariable；合法多态tail必须generalize为带`owner + ordinal`的稳定`EffectParamRef`，无法归属formal scheme的raw UnionFind/type-var tail直接fail loud。`CoreCallableEffectContract`只允许canonical exact atoms（`SystemEffectRef`、`HandledEffectRef`、`fail<CoreTypeRef>`、`mut<CoreTypeRef>`、`unsafe`）及至多一个正式`EffectParamRef`；effect alias已展开。每个调用点在进入Core前固定formal effect参数的exact实例化。Core/Flow只运输、比较和验证这些契约，不重跑effect inference；ResourcePlanner不消费effect格。正式effect参数等价于已量化类型参数，不等于未解析变量。
 
@@ -1340,12 +1347,12 @@ Parse / project Resolver / Type+Effect
 非 Drop 类型的 `let x = y` 创建别名（rc+1，同一对象）。编译器在函数内追踪别名关系，**mutation 后旧别名失效**：
 
 ```vorton
-let xs = [1, 2, 3]
-let ys = xs             // ys 别名 xs
-print(ys.len())         // ✅ mutation 之前，ys 有效
-xs.push(4)              // mutation 点——ys 在此失效
-print(xs)               // ✅ xs 是 mutator
-print(ys)               // ❌ 编译错误：ys 在 xs mutation 后失效
+let xs = [1, 2, 3];
+let ys = xs;            // ys 别名 xs
+print(ys.len());        // ✅ mutation 之前，ys 有效
+xs.push(4);             // mutation 点——ys 在此失效
+print(xs);              // ✅ xs 是 mutator
+print(ys);              // ❌ 编译错误：ys 在 xs mutation 后失效
 ```
 
 **规则**：
@@ -1359,7 +1366,7 @@ print(ys)               // ❌ 编译错误：ys 在 xs mutation 后失效
 
 **mutation 判定（自底向上，完备要求）**：
 - **赋值** = mutation：binding 重赋值与字段赋值（`x.field = val`）。0.1 的 index expression 只读；`x[i] = val` 与 compound index assignment 稳定拒绝，不隐式改写成 setter
-- **容器 mutation**：使用显式 mutator，例如 `xs.set(i, value)` 与 `map.insert(key, value)`；这些方法的 `mut self` / callable resource contract 是唯一 mutation authority，不能由赋值语法或后端名称表重建
+- **容器 mutation**：使用显式 mutator，例如 `xs.set(i, value)` 与 `map.insert(key, value)`；这些方法的 `self: mut Self` / callable resource contract 是唯一 mutation authority，不能由赋值语法或后端名称表重建
 - **用户函数**：编译器分析函数体——若函数体 mutates 参数，该参数推断为 `mut T`，该调用即 mutation
 - **extern fn**：必须在声明时显式标注 `mut`（§7.3）——未标注 = 只读
 - **完备性要求**：别名追踪系统上线时 mutation 判定必须覆盖所有路径（赋值 + 推断 + FFI 标注），不接受渐进白名单。否则会出现漏报导致运行时 UAF——与 Rust 对 `&mut` 的要求同等严格
@@ -1371,32 +1378,32 @@ print(ys)               // ❌ 编译错误：ys 在 xs mutation 后失效
 **修复方式**：
 ```vorton
 // 方式 1：clone 拿独立副本
-let ys = xs.clone()     // 递归深拷贝，完全独立
-xs.push(4)              // ✅
+let ys = xs.clone();    // 递归深拷贝，完全独立
+xs.push(4);             // ✅
 
 // 方式 2：别名用完再 mutate（NLL 可能自动通过）
-let ys = xs
-print(ys)               // ys 最后使用
-xs.push(4)              // ✅ NLL 检测到 ys 此后无使用，别名已结束
+let ys = xs;
+print(ys);              // ys 最后使用
+xs.push(4);             // ✅ NLL 检测到 ys 此后无使用，别名已结束
 
 // 方式 3：显式作用域限制别名
 {
-    let ys = xs
-    print(ys)
+    let ys = xs;
+    print(ys);
 }                       // ys 作用域结束
-xs.push(4)              // ✅
+xs.push(4);             // ✅
 ```
 
 **参数的别名安全**：callee 推断为 `x: mut T` 时，caller 在调用期间不能有其他别名指向同一值。编译器在调用点检查。
 
 ### 7.5 `mut` 关键字
 
-`mut` 在用户代码中**只有一个含义**：rebind（重新绑定）。
+`mut` 的含义由固定语法位置决定：`let mut x` 允许名称 rebind；`x: mut T`、call argument 的 `mut x` 与 capture list 的 `mut x` 是可省略、必须匹配推断结果的 mutation assertion。`mut x` 不构成 parameter/receiver binder。
 
 ```vorton
-let x = 5               // 不可 rebind
-let mut x = 5            // 可 rebind
-x = 10                   // ✅
+let x = 5;              // 不可 rebind
+let mut x = 5;          // 可 rebind
+x = 10;                 // ✅
 ```
 
 参数位的 `mut`（表示可变借用，`x: mut T`）和 `move`（表示所有权转移，`x: move T`）**由编译器推断**，用户不写（lv0）。lv2 formatter 展示推断结果。
@@ -1407,8 +1414,8 @@ x = 10                   // ✅
 
 ```vorton
 impl Drop for FileHandle {
-    fn drop(self) {
-        self.close_internal()
+    fn drop(self: move Self) {
+        self.close_internal();
     }
 }
 ```
@@ -1429,8 +1436,8 @@ impl Drop for FileHandle {
 **`Rc<T>`**：非 Drop 包装器，用于共享 Drop 类型。
 
 ```vorton
-let f = Rc.new(File.open("data.txt"))
-let g = f              // rc+1（Rc 本身是非 Drop 类型），两边都活
+let f = Rc.new(File.open("data.txt"));
+let g = f;             // rc+1（Rc 本身是非 Drop 类型），两边都活
 // 最后一个 Rc 引用消亡时，内部 File 的 Drop 执行
 ```
 
@@ -1439,10 +1446,10 @@ let g = f              // rc+1（Rc 本身是非 Drop 类型），两边都活
 **`.clone()` = 递归深拷贝**（Rust Clone trait 语义）：
 
 ```vorton
-let a = [[1, 2], [3, 4]]
-let b = a.clone()        // 新外层 List，新内层 List，元素 copy
-b[0].push(5)
-print(a)                 // [[1, 2], [3, 4]]——不受影响
+let a = [[1, 2], [3, 4]];
+let b = a.clone();       // 新外层 List，新内层 List，元素 copy
+b[0].push(5);
+print(a);                // [[1, 2], [3, 4]]——不受影响
 ```
 
 - struct/enum：逐字段递归 clone
@@ -1459,12 +1466,12 @@ print(a)                 // [[1, 2], [3, 4]]——不受影响
 
 ```vorton
 // lv0
-let mut counter = 0
-let name = "hello"
-let inc = fn() { counter = counter + 1; print(name) }
+let mut counter = 0;
+let name = "hello";
+let inc = fn() { counter = counter + 1; print(name); };
 
 // lv2（formatter 展示）
-let inc = fn() [mut counter: Int, name: Str] { ... }
+let inc = fn [mut counter: Int, name: Str]() { ... };
 ```
 
 **捕获规则**：
@@ -1586,7 +1593,7 @@ buffer 内的值 = RC 世界之外、所有权由封装作者人工记账。拆�
 
 **跨界移交 = per-type 三件套，不做泛型 `addr_of`**：泛型「对任意安全值取指针」把引擎私有的值表示（box 布局/unboxing/单例化——B-104 D4 dict、D6 none/const 均在动）变成可观测 API，「优化不可观测」被堵死。跨界走容器显式 API：`List<T>::from_raw_parts(p, len, cap)`（移交进 RC 世界）/ `list.into_raw_parts()`（移交出，consume）/ `list.as_ptr()`（borrow 性质，指针有效期 ≤ 宿主存活 = 签字内容）；Str 同构。FFI 调用保活无需新机制（实参 borrow 语义已覆盖）。
 
-**`@repr(C)` 的精确角色**：read/write 按位搬 **T 的值表示**（box 指针或 unboxed 标量），任意 T 永远合法（容器场景无需布局承诺）；需要 `@repr(C)` 门票的是**字段级解释**（把 C 填的内存按字段读、字段指针投影）——默认布局编译器自由重排。投影形态（`offset_of` intrinsic vs 投影语法）归实现项 B-125。
+**字段级 FFI layout 边界**：read/write 按位搬 **T 的值表示**（box 指针或 unboxed 标量），任意 T 永远合法（容器场景无需布局承诺）；解释 C 写入内存的字段或投影字段指针则需要尚未设计的显式 layout contract。canonical 0.1 不为此提供 `@` attribute 或 AST placeholder；未来只有连同完整语义和真实 consumer 才能选择具体表面。
 
 **验收工具 v1** = ASan 两档纪律 + `vorton audit unsafe`；miri 类解释器远期挂账不立项。
 
@@ -1628,9 +1635,9 @@ buffer 内的值 = RC 世界之外、所有权由封装作者人工记账。拆�
 ```
 fn fetch_portfolio_data() -> PortfolioData {
     scope {
-        let stocks_task = spawn { fetch_stocks() }
-        let bonds_task  = spawn { fetch_bonds() }
-        let gold_task   = spawn { fetch_gold() }
+        let stocks_task = spawn { fetch_stocks() };
+        let bonds_task  = spawn { fetch_bonds() };
+        let gold_task   = spawn { fetch_gold() };
 
         PortfolioData {
             stocks: await(stocks_task),
@@ -1647,31 +1654,31 @@ async 和 sync 代码无缝组合。handler 决定执行策略（设计已确定
 
 ```
 effect async {
-    fn spawn<T>(task: fn() -> T with {async}) -> Future<T>
-    fn await<T>(f: Future<T>) -> T
+    fn spawn<T>(task: fn() -> T with {async}) -> Future<T>;
+    fn await<T>(f: Future<T>) -> T;
 }
 
 fn fetch_both() -> (Data, Data) with {async} {
     scope {
-        let a = spawn { fetch_stocks() }
-        let b = spawn { fetch_bonds() }
+        let a = spawn { fetch_stocks() };
+        let b = spawn { fetch_bonds() };
         (await(a), await(b))
     }
 }
 
 // 生产环境：默认 async handler 驱动
 fn main() with {console, async} {
-    let result = fetch_both()
-    print(result.debug())
+    let result = fetch_both();
+    print(result.debug());
 }
 
 // 测试环境：sync handler 直接执行
 fn test_fetch() {
-    let result = handle fetch_both() with {
+    let result = handle { fetch_both() } with {
         async.spawn(task) => task(),
         async.await(f) => f,
-    }
-    assert(result.0 == expected)
+    };
+    assert(result.0 == expected);
 }
 ```
 
@@ -1685,10 +1692,10 @@ fn test_fetch() {
 
 ```
 fn producer_consumer() with {async} {
-    let ch = channel<Int>(buffer: 16)
+    let ch = channel<Int>(buffer: 16);
     scope {
-        spawn { for i in 0..100 { ch.send(i) }; ch.close() }
-        spawn { for msg in ch { log("received: ${msg}") } }
+        spawn { for i in 0..100 { ch.send(i); } ch.close(); };
+        spawn { for msg in ch { log("received: ${msg}"); } };
     }
 }
 ```
@@ -1858,7 +1865,7 @@ native 仍是目标产品编译方向；迁移前 codegen/bootstrapping 曾为 C
 按类型表示自动分流，借鉴 C#/.NET Tiered Compilation。不是全单态化 vs 全 boxing 的二选一。
 
 **分流规则**：
-- 值类型（I8/I32/I64/F64/`@value struct`）：size/layout 不同，必须单态化
+- 值类型（I8/I32/I64/F64）：size/layout 不同，必须单态化。Aggregate 的显式 value-layout 若未来需要，必须另行设计；canonical 0.1 没有 `@value` 或其他 attribute 表面
 - 引用类型（List/Map/Str/struct）：底层都是指针，共享一份泛型实现（trait dictionary dispatch）
 - 热路径：PGO/JIT 决定是否对特定引用类型也单态化
 
@@ -1941,7 +1948,7 @@ Source
 | `AST` | 忠实保存表面语法、注释所需形状与 Span；不承载名字、类型或后端结论。 |
 | `ResolvedAST` | 每个声明、引用、member、constructor、effect op、import/re-export 与 extern bridge 都携带 exact `SymbolRef`；下游不再查询 resolver 或按叶名回退。 |
 | `TypedHIR` | HM inference metavariable 已收敛；可泛化的type/effect tail已转换为带owner/ordinal的显式量化参数，无法归属formal scheme的raw变量拒绝。类型、effect row、callee/impl/associated-type 选择、call-site effect实例化与公开 module interface 已固定；ownership mode 可仍为 symbolic contract，但不得回写普通 type/effect 结果。 |
-| `CoreHIR` | 所有0.1语言级隐式语义已elaborated：derive、protocol for-in、short-circuit、trait dictionary、handled-effect evidence、closure/capture、constructor与intrinsic均成为explicit body、typed edge、typed construction operation或`IntrinsicContract`；source trait default body与`delegate`不在0.1 surface。真实callable的共享`ExecutableInventory`封闭，enum constructor不冒充callable节点。每个callable携带closed atoms或atoms+正式`EffectParamRef`的effect contract；不存在raw effect metavariable。System effect只携带exact host call contract且不进入evidence。函数默认参数、effect default body与`sig`同样不在0.1 surface。此层仍不含资源操作。 |
+| `CoreHIR` | 所有0.1语言级隐式语义已elaborated：compiler-defined structural impl/drop glue、protocol for-in、short-circuit、trait dictionary、handled-effect evidence、closure/capture、constructor与intrinsic均成为explicit body、typed edge、typed construction operation或`IntrinsicContract`；source attribute/derive、trait default body与`delegate`不在0.1 surface。真实callable的共享`ExecutableInventory`封闭，enum constructor不冒充callable节点。每个callable携带closed atoms或atoms+正式`EffectParamRef`的effect contract；不存在raw effect metavariable。System effect只携带exact host call contract且不进入evidence。函数默认参数、effect default body与`sig`同样不在0.1 surface。此层仍不含资源操作。 |
 | `FlowIR` | ownership-neutral ANF、pattern decision/projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 已建立；project-wide identity、binder、call/alias/capture graph 冻结，后续新增 node/binder 是 internal error。 |
 | `RcIR` | 唯一 ResourcePlanner 输出 `Clone/Take/Drop/Cleanup` 与 ranked certificate；binder set 与 FlowIR 相同，资源语义完全显式。 |
 | `AbiIR` | 只把已验证语义降为 typeid/tag/field layout、symbol、prototype、closure/dict/evidence layout、drop glue、exact HostImport、extern 与 failure ABI；不得新增调用、控制边、owner、effect class 或语言 fallback。 |
@@ -1998,7 +2005,7 @@ Source
 | 2026-06-12 | B-111 优先级（D-7）：层 0 判据（公理④「LLM 写 Vorton 优于 TS」）至今零测量、缺测量仪 | B-111 P2→P1，地位等价公理⑥的 B-089 锚点；只改优先级不动排程（B-104 里程碑照旧先行）。条目见 backlog B-111 | 规则 2（层 0 判据） | B-111 验收 |
 | 2026-06-15 | 字符串编码模型：code point API 与既有后端行为失真 | 选 A（UTF-8 字节串）：`len`=字节数 O(1)、`chars()`/`char_count()` 提供 code point API；否决 B（code point）理由=O(n) len + 需 ByteStr 补位违反⑧。§1.7 已修正，实现归 B-133 | ⑥⑦⑧（5/7 判据 A 胜出） | B-133 按 backlog 的 C/native、Unicode 与 FFI gate 验收 |
 | 2026-06-24 | 层 0 重构：④ 原名「无人回路 × 全场景」绑定 LLM 叙事——核心 claim 应比 agent 窗口更根本 | ④ 改名「不信任程序员 · 编译器是最终权威」；「无人回路 × 全场景」降为渐近表达；出发点从「agent 验证瓶颈」回溯到「程序员不可信是永恒事实」（C/Rust/Vorton 三角定位）；LLM-first 降格为推论；核心赌注分两层 | 元决策 | — |
-| 2026-08-22 | 纯缩写语法糖准入与历史 `T?`：少写字符是否足以换取第二种公开类型拼写 | 否。语法糖必须提供独立建模/认知/验证/组合价值；`Option<T>` 为唯一目标拼写，`T?` 由 B-191 在 B-180 后、B-174 前 clean break 删除；当前 correctness/性能主线不被打断 | ⑧（层 2 策略，用户方向） | B-191 的负例、仓内原子迁移与 self-host fixed point |
+| 2026-08-22 | 纯缩写语法糖准入与历史 `T?`：少写字符是否足以换取第二种公开类型拼写 | 否。语法糖必须提供独立建模/认知/验证/组合价值；canonical 0.1 只保留 `Option<T>`，`T?` 仅可作为明确历史/非法反例；postfix `expr?` 不受影响 | ⑧（层 2 策略，用户方向） | canonical grammar 的正负例与仓内 stale-form 检查 |
 | 2026-08-23 | 0.1 effect/capability surface：宽泛 `io`、host root handler、user default operation body与隐式effectful Drop会形成重复authority并隐藏能力 | SystemEffectRef=`console/fs/process`且不进evidence/不可handle/无root；HandledEffectRef才显式handle；host call只经AbiIR HostImport。0.1删除user effect default body与effectful Drop，后两者在post-0.1有真实consumer时分别由B-197/B-198重审。Refinement占位语法同步删除；已批准匿名union语义保留但实现顺延post-0.1 | ②④⑤⑧（可见性、失真必须响、有限authority、一种写法） | B-193~B-198及system/handled crossing mutations |
 
 ## 状态真值

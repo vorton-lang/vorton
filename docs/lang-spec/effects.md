@@ -2,6 +2,8 @@
 
 Vorton 用 effect row 描述计算可能发生的副作用。函数声明通常省略 effect 标注并由编译器推断；显式 `with { ... }` 是约束和文档，不改变函数体的实际语义。
 
+Effect declaration、annotation、`handle` 与 `catch` 的唯一产生式见[语法](syntax.md)；本页只定义类型与运行语义。
+
 ## Effect 分类与消除权
 
 Effect row 中的 atom 共享组合与推断机制，但并不共享同一种运行时解释或消除规则：
@@ -58,7 +60,7 @@ System effect 是静态能力事实，不是语言内动态 provider：
 
 ```vorton
 effect FileAccess {
-    fn read(path: Str) -> Str
+    fn read(path: Str) -> Str;
 }
 
 fn load(path: Str) -> Config with {FileAccess} {
@@ -101,8 +103,8 @@ Default provider 有真实的建模与人体工学价值，post-0.1 由 B-197 �
 `effect alias` 给一组 effect 命名：
 
 ```vorton
-effect alias HostIO = {console, fs, process}
-effect alias Fallible<E> = {fail<E>}
+effect alias HostIO = {console, fs, process};
+effect alias Fallible<E> = {fail<E>};
 ```
 
 Alias 可泛型化、可 `pub` 导出，并在类型检查前递归展开；循环 alias 被拒绝。展开后的 exact atoms 才参与 identity、capability、inspection 与 ABI，alias 本身不制造 evidence或新的运行时 effect。
@@ -193,7 +195,7 @@ Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`Eff
 let value = risky() catch {
     Missing(name) => default_for(name),
     Invalid(msg) => repair(msg),
-}
+};
 ```
 
 Arms 对 `E` 做穷尽性检查，未覆盖时报 E0601；部分处理必须在 arm 中显式重新 `fail.raise`。被捕获计算的 failure 被消除，arm 新产生的 effect 向外传播。`try` 是保留关键字，不是错误处理语法。
@@ -202,11 +204,11 @@ Arms 对 `E` 做穷尽性检查，未覆盖时报 E0601；部分处理必须在 
 
 ```vorton
 let result = handle {
-    Logger.log("hello")
+    Logger.log("hello");
     42
 } with {
     Logger.log(msg) => print(msg),
-}
+};
 ```
 
 Handler 在其body的动态调用范围内提供 handled-effect operations。被显式处理的 exact handled effect 从 body row 中消除；开放尾未知 effect 与 handler arm 新产生的 effect继续传播。System effect、`mut<T>` 与 `unsafe` 不能由 `handle` 删去。只在该范围内创建但未调用的ordinary closure不会捕获handler；它逃逸后的effect仍由未来调用点处理。
