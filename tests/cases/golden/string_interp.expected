@@ -1,9 +1,0 @@
-sum: 7
-nested: inner=12!
-zero
-even:6 (half 3)
-odd:5 (sq 25)
-len=3 first=10
-nums[1,2,3]
-empty[]
-neg=-5 flag=true

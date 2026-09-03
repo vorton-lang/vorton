@@ -1,7 +1,0 @@
-error[E0707]: Ambiguous value name 'Alias::V': conflicting payloads 'defs::E_V' and 'other::V'
-pub use other::{V}
-!E0702
-!E0703
-!E0704
-!E0705
-!Ambiguous value name 'V'

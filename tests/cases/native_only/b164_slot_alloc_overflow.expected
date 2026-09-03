@@ -1,2 +1,0 @@
-// EXPECT_PANIC
-vorton panic: vorton_slot_alloc slot byte-size overflow (request=2305843009213693952)

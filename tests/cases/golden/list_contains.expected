@@ -1,5 +1,0 @@
-builtin idx0 (a): true
-builtin idx2 (c): true
-builtin idx3 (d): true
-builtin miss (z): false
-generic idx3 (d): true

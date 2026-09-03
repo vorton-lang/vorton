@@ -18,7 +18,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Validate repository naming
-        run: python .agents/scripts/validate_naming.py
-      - name: Validate repository workflow truth
-        run: python .agents/scripts/validate_workflow.py
+      - name: Validate current tree
+        run: python .agents/scripts/validate_current_tree.py

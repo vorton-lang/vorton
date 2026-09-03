@@ -421,13 +421,13 @@ TuplePattern     ::= '(' Pattern ',' Pattern (',' Pattern)* ','? ')'
 
 ## 明确排除的 0.1 表面
 
-以下形式没有 canonical 产生式，只能在文档中作为非法或历史反例出现：
+以下形式没有 canonical 产生式，只能在文档中作为非法反例出现：
 
 ```vorton
-let old: Int? = none;                    // 非法：类型只能写 Option<Int>
-fn old(mut value) { value = 1; }         // 非法：binder-prefix mode
-fn old(mut self) {}                      // 非法：receiver-prefix mode
-let old = fn(x) [move resource] { x };   // 非法：capture list 在参数之后
+let invalid: Int? = none;                    // 非法：类型只能写 Option<Int>
+fn invalid(mut value) { value = 1; }         // 非法：binder-prefix mode
+fn invalid(mut self) {}                      // 非法：receiver-prefix mode
+let invalid = fn(x) [move resource] { x };   // 非法：capture list 在参数之后
 @derive(Json)                            // 非法：'@' 不是 token
 pub impl Value {}                        // 非法：impl block 无 visibility
 ```

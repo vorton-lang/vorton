@@ -5,7 +5,7 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 
 # Vorton Task Pipeline
 
-这是 Vorton 仓库唯一的任务 lifecycle authority。先读取根目录 `AGENTS.md`、全部 open GitHub Milestone 描述、当前 GitHub Issue 和任务涉及的仓库 authority；持久目标与目标顺序只认 Milestone，当前范围、设计、验收与依赖只认 Issue。允许直接读取的完成历史只查 reset 后的 PR 与 Git；reset 前历史只按下文污染隔离规则处理。角色 prompt 是本 skill 的一部分，不是独立 authority：Execution 使用 [Executor 模板](references/executor.md)，Verification 使用 [Verifier 模板](references/verifier.md)。
+这是 Vorton 仓库唯一的任务 lifecycle authority。先读取根目录 `AGENTS.md`、全部 open GitHub Milestone 描述、当前 GitHub Issue 和任务涉及的仓库 authority；持久目标与目标顺序只认 Milestone，当前范围、设计、验收与依赖只认 Issue。允许直接读取的完成历史只查 canonical clean-tree boundary 及其后继中的 PR 与 Git；边界前历史只按下文污染隔离规则处理。角色 prompt 是本 skill 的一部分，不是独立 authority：Execution 使用 [Executor 模板](references/executor.md)，Verification 使用 [Verifier 模板](references/verifier.md)。
 
 ## 工作单元与授权
 
@@ -14,7 +14,7 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 - 经用户确认的 Issue body 是 Execution 与 Verification 的 immutable contract；Issue 评论、PR、handoff 或 task 输出都不能追加或覆盖合同。合同变化只按下文统一失败路由处理。
 - Worktree 只是隔离 checkout；不得把调用会话的 working tree、index、未提交改动、摘要或结论当作输入。
 - Milestone/Issue/PR 的描述与活动状态以及 PR/default-branch 的 exact remote head 必须直接从 GitHub 读取；仓库文件、diff 和 authority 应从本阶段 clean worktree 或已有本地 Git object 批量读取。只有缺少所需 object 或 contract 明确指向其它外部 authority 时，才联网取得 repository 内容，禁止逐文件远程抓取。
-- 默认不读取 state reason 为 `not_planned` 的 closed Issue。对 reset 后对象，只有用户明确要求历史调查时才可读取；reset 前 closed Issue 即使由用户要求调查，也只能进入下文的隔离检查。
+- 默认不读取 state reason 为 `not_planned` 的 closed Issue。对 clean-tree boundary 后的对象，只有用户明确要求历史调查时才可读取；边界前 closed Issue 即使由用户要求调查，也只能进入下文的隔离检查。
 - 创建 fresh task 时，只有 `threadId` 可用于后续编排；`clientThreadId` 只表示 worktree setup pending，不得传给 thread tools，也不得用 `list_threads` 忙轮询。工具尚未提供 `threadId` 时等待 setup 完成或报告可见性阻塞。
 
 ## Milestone 与 Issue 路由
@@ -26,15 +26,15 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 - Milestone 的自动 Issue 百分比不构成目标完成证明。最后一个已知 Issue 合并后，Planning 必须对目标结果做一次整体只读核对；只有用户确认目标完成并授权写入后，Planning 才可关闭 Milestone。
 - Milestone 正文只保存目标与边界，不保存执行步骤、进度清单、旧 Issue 链接或未来实现方案；不得用本地 roadmap 或其它载体建立第二状态系统。
 
-## Canonical reset 与历史污染红线
+## Canonical clean-tree boundary 与历史污染红线
 
-`a09ec8db5ffb673007d5ebc8a4509393fbeec18e` 是本仓库新规范的 canonical reset baseline。该 snapshot 中由 `AGENTS.md` 指定的 current authority、其 default-branch 后继版本，以及 reset 后新产生的当前 Milestone、Issue、PR 与 Git 事实可以在正常上下文直接读取。
+Annotated tag `canonical-clean-tree` 标记第一份完成 current-tree clean break 的 remote default-branch commit。该 tag 所指 tree 中由 `AGENTS.md` 指定的 current authority、其 default-branch 后继版本，以及边界后新产生的 Milestone、Issue、PR 与 Git 事实可以在正常上下文直接读取。Tag 尚未建立时，普通 lifecycle task 必须 fail closed；唯一例外是 immutable Issue contract 明确授权读取混合 current tree 的 clean-break task，且只可读取合同列出的对象与 diff。
 
-Reset 前的 Issue、PR、commit revision、task、chat、评论、摘要与过程结论，以及 current authority 明确标为 legacy、迁移 oracle、superseded 或历史证据的载荷，即使仍被 tracked，也一律属于污染区。Planning、Readiness、Execution 与 Verification 不得把污染区内容直接读入、搜索进、摘录到或转述给其工作上下文。
+只存在于该边界之前的 Issue、PR、commit revision、task、chat、评论、摘要、过程结论、源码、测试与文档，以及 current authority 明确标为 historical 的载荷，一律属于污染区。Planning、Readiness、Execution 与 Verification 不得把污染区内容直接读入、搜索进、摘录到或转述给其工作上下文。
 
 确有必要检查污染区时，必须在不传入当前会话上下文的隔离 fresh fork/task 中进行；只可提供 repository full name、对象 stable identifier 与精确检查问题。隔离上下文的事实、引用、代码、路径、diff、方案、摘要和 agent 结论均不得回传。唯一允许穿过隔离边界的是用户在该隔离会话中明确确认的规范性决议，并且必须同时写明适用范围、排除项与是否授权执行；接收会话仍须从 current authority 独立取得一切当前事实。隔离检查不能充当 Readiness、Verification 或 merge 证据。
 
-污染区内容一旦进入某个 lifecycle task 的工作上下文，该 task 立即失去继续承担 Planning、Readiness、Execution 或 Verification 的资格；不得靠忽略、总结或再次转述恢复，必须从 current authority 启动 clean replacement。
+污染区内容一旦进入未获上述 clean-break 明确授权的 lifecycle task 工作上下文，该 task 立即失去继续承担 Planning、Readiness、Execution 或 Verification 的资格；不得靠忽略、总结或再次转述恢复，必须从 current authority 启动 clean replacement。
 
 ## 范围防火墙
 

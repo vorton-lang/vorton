@@ -6,133 +6,17 @@ Effect declaration、annotation、`handle` 与 `catch` 的唯一产生式见[语
 
 ## Effect 分类与消除权
 
-Effect row 中的 atom 共享组合与推断机制，但并不共享同一种运行时解释或消除规则：
+Effect row 中的 atom 共享组合与推断机制，但拥有不同的执行与消除规则：
 
-| 分类 | 0.1 实例 | 唯一消除/执行规则 |
-|------|----------|-------------------|
-| System effect | `console`、`fs`、`process` | 不可 `handle`，不进入 evidence；以 AbiIR HostImport 交给目标 host provider |
-| Handled effect | 用户 `effect` 声明 | 进入 typed evidence，必须由显式 `handle...with` 消除 |
+| 分类 | Canonical instance | 唯一消除或执行规则 |
+|---|---|---|
+| System effect | `console`、`fs`、`process` | 不可 `handle`，不进入 evidence；由目标 host provider 执行 |
+| Handled effect | 用户 `effect` 声明 | 进入 typed evidence，由显式 `handle...with` 消除 |
 | Failure | `fail<E>` | 由 `catch` 或显式 failure handler 消除 |
-| Mutation marker | `mut<T>` | 只由局部性/状态作用域规则消除 |
+| Mutation marker | `mut<T>` | 只由局部性与状态作用域规则消除 |
 | Unsafe obligation | `unsafe` | 只由词法 `unsafe { ... }` discharge |
 
-该分类在 TypedHIR effect freeze 前固定。System effect 绝不能获得 handler evidence；handled effect 绝不能直接降为 HostImport。`main` 可以保留 system effect，由目标环境直接执行；未消除的用户 handled effect 不得逃出 `main`。
-
-## Effect row closure 与多态
-
-进入CoreHIR前，普通effect推断元变量必须完成求解。一个tail只有在函数scheme中被正式量化时才可保留，并转换为带声明owner与ordinal的稳定effect参数；它表示已确定的多态契约，不是“下游稍后再猜”的未知effect。无法归属正式scheme的raw推断tail是编译错误。
-
-因此callable的冻结契约只有两种形态：closed exact atoms，或exact atoms加一个正式effect参数。Effect alias在此前已递归展开；first-class function value与每个调用点保留同一正式参数及exact实例化关系。CoreHIR、FlowIR、ResourcePlanner、AbiIR与后端均不得重新运行effect inference、按函数名恢复row，或把正式effect参数静默当成空row。System effect实例化仍不产生evidence；handled effect实例化必须与ordered typed evidence一致。
-
-递归 callable 的effect formal按类型系统的递归绑定组规则产生。组内 peer/self 使用共享 provisional row，不在首个引用处实例化或分配正式身份；整组约束求解后，才为最终量化tail生成 canonical `EffectParamRef`、发布 source-formal→actual 关系并原子写回全组header。Top-level、inline module与impl method使用同一协议。禁止premint、first-use/body scan、executable-stack可见性、importer remint或post-SCC HIR patch恢复identity。
-
-递归组body只做一次effect inference；其raw effect row随内部draft等待整组求解，随后恰好一次final-zonk、evidence canonicalization与header publication。每个scheme/callable实例的effect actual必须来自该实例唯一的full mapping receipt，并与type actual、dictionary/evidence共用；禁止按已zonk类型再次结构匹配重建effect或dictionary替换。
-
-Vorton 0.1对同一尚未闭合的A1检查单元采用closed-header限制：具名函数作为first-class value使用时，provider声明的完整header必须在registration时已经递归closed，不能等待provider body inference补全effect tail。Pure provider使用显式`with {}`；effectful provider使用完整封闭`with { ... }`。开放header在函数值使用点稳定报错并建议补全header或改用lambda wrapper；编译器不得为接受它而在SCC中重做名字解析、按源码顺序猜provider或提前发布scheme。
-
-该限制不影响普通direct call、header已冻结的import/re-export函数值、lambda、函数参数转发、factory/dynamic call及HOF callback formal的open row。Post-0.1的B-204将以sole resolver产生的exact callable-occurrence dependency建立proper ResolvedAST纵切，完成后恢复同检查单元省略`with`且由body推断effect的具名函数值；0.1不为此预留carrier或fallback。
-
-Generic custom effect声明仍可参数化，closed concrete实例保持不同的typed identity，例如`Reader<Int>`与`Reader<Str>`。0.1不支持runtime handled token依赖尚未闭合的generic formal：任何实际进入callable header、nested function type、body context layout、operation lookup、handler install或call/value instantiation的custom handled instance，其type arguments必须递归fully closed；不得含当前或外层callable/impl/trait/lambda的type formal、nested callable effect formal/open row、open structural row或其他仍可实例化部分。违反时在TypedHIR atomic publish前报错，不能靠runtime token remap、specialization或type erasure补救。`fail<T>`、`mut<T>`和顶层effect-row formal不受此限制；effect alias展开后再按同一规则检查。
-
-Effect declaration及其bodyless operation contract本身不产生runtime token；只有可执行body中真实lookup/install等物理consumer进入project token table。CoreHIR用已冻结type graph复核closed条件和token producer census，但不重跑类型/effect推断。
-
-## System effects 与 HostImport
-
-0.1 只定义当前真实 API 所需的三类 system effect：
-
-| Effect | 语义范围 |
-|--------|----------|
-| `console` | 标准输出与标准错误输出 |
-| `fs` | 文件系统访问及依赖 cwd/filesystem 的路径解析 |
-| `process` | 参数、工作目录、同步子进程与进程退出 |
-
-纯路径字符串运算不产生 `fs`。没有真实 API 时不预先声明 `net`、`clock`、`random` 等未来能力。
-
-System effect 是静态能力事实，不是语言内动态 provider：
-
-1. host extern/intrinsic 声明必须携带 exact system effect 与正交的 `fail<E>` 契约；
-2. ResolvedAST/TypedHIR 以 exact `SymbolRef` / `CalleeRef` 保存 operation identity；
-3. CoreHIR/FlowIR/RcIR 不生成或传递 system evidence；
-4. AbiIR 把调用固化为带 ABI symbol、参数、返回与 failure contract 的 HostImport；
-5. native C 链接 runtime symbol，未来 WASM 使用 imports，嵌入式可链接 host provider。任何 target 都不得在 `main` 注入 root handler或按叶名猜操作。
-
-需要可替换/可 mock 的依赖时，定义用户 handled effect，并以普通显式 handler adapter 翻译到 system API：
-
-```vorton
-effect FileAccess {
-    fn read(path: Str) -> Str;
-}
-
-fn load(path: Str) -> Config with {FileAccess} {
-    parse(FileAccess.read(path))
-}
-
-fn load_from_os(path: Str) -> Config with {fs, fail<FsError>} {
-    handle {
-        load(path)
-    } with {
-        FileAccess.read(p) => fs::read_file(p),
-    }
-}
-```
-
-测试可给 `FileAccess` 提供纯 handler；直接 `fs` 调用本身不可被 `handle`。这使抽象依赖与真实宿主权限保持分域。
-
-## 用户自定义 Effect
-
-```vorton
-effect Logger {
-    fn log(msg: Str) -> Unit;
-}
-
-fn write_log(msg: Str) -> Unit with {Logger} {
-    Logger.log(msg)
-}
-```
-
-操作签名规定参数、返回类型和调用时产生的 handled effect。操作通过 `EffectName.operation(...)` 调用。
-
-### 0.1 无 default operation body
-
-用户 effect operation 在 0.1 只有签名，不允许 body。Custom effect 必须由显式 `handle...with` 提供解释；不存在自动 default evidence、部分默认、默认 body 依赖图或 codegen fallback。
-
-Default provider 有真实的建模与人体工学价值，post-0.1 由 B-197 结合实际 consumer 重新比较 op body、显式具名 provider 与普通 wrapper。不得直接恢复 0.1 前的 checker hydration、全局 evidence init 或默认依赖拓扑实现。
-
-### Effect alias
-
-`effect alias` 给一组 effect 命名：
-
-```vorton
-effect alias HostIO = {console, fs, process};
-effect alias Fallible<E> = {fail<E>};
-```
-
-Alias 可泛型化、可 `pub` 导出，并在类型检查前递归展开；循环 alias 被拒绝。展开后的 exact atoms 才参与 identity、capability、inspection 与 ABI，alias 本身不制造 evidence或新的运行时 effect。
-
-## `mut<T>` Marker Effect
-
-`mut<T>` 是当前 mutation 可见性机制的一部分，并保留在 effect row 中。
-
-- 修改函数自己的局部 `let mut` 绑定不会让 `mut` 逃逸到函数签名；
-- 通过 `mut` 参数修改调用方状态，或修改闭包捕获的外部可变状态，会注入相应的 `mut<T>`；
-- 调用要求可变 receiver 的方法仍需可变绑定；effect 不替代这项检查；
-- `mod requires { ... }` 会检查逃逸的 `mut<T>`，因此 `requires {}` 的纯模块不能修改外部状态。
-
-`mut<T>` 是多实例 marker。同一 row 可以同时包含 `mut<Int>` 与 `mut<Str>`，它们不得因为都叫 `mut` 而合并。裸标注 `with {mut}` 每次实例化时引入 fresh 状态类型。
-
-## `unsafe` Effect
-
-`unsafe` 标记编译器不能验证其内存安全前提的操作。它进入函数签名并向调用方传播，但不能由普通 `handle` 或 `catch` 消除；唯一 discharge 形式是词法 `unsafe { ... }` block。
-
-```vorton
-mod raw_buffer requires {unsafe} {
-    fn first(ptr: Ptr<Int>) -> Int {
-        unsafe { ptr.read() }
-    }
-}
-```
-
-`unsafe { ... }` 只移除 block 内显式产生的 `unsafe`；其中的 system、failure、mutation 或 handled effect 仍传播。模块必须以 `requires {unsafe}` 授权 discharge，该许可本身不证明 block 内不变量。预加载raw pointer操作见[标准库](stdlib.md#ptrt-与-unsafe-原语)。
+Effect class 在 typed contract 冻结前固定。System effect 绝不能获得 handler evidence；handled effect 绝不能直接变成 host operation。`main` 可以保留 system effect，由目标环境执行；未消除的用户 handled effect 不得逃出 `main`。
 
 ## Effect Row
 
@@ -147,43 +31,131 @@ EffectRow = { e₁, e₂, ..., eₙ, ..α }     // 开放 row
 
 规范中的函数类型可写成 `(T₁, ..., Tₙ) -> R / ε`。源码函数类型用 `fn(T₁, ..., Tₙ) -> R with { ... }` 表示显式 row；省略 `with` 时可保留开放尾以支持 effect 多态。
 
+普通推断 metavariable 必须在 TypedHIR 前求解。只有由函数 scheme 正式量化的开放尾可以保留，并获得稳定的 owner 与 ordinal；无法归属 formal scheme 的 raw tail 是编译错误。Effect alias 在此之前递归展开。
+
+具名 callable 作为 first-class value 时还必须满足[同检查单元的 closed-header 规则](type-system.md#同检查单元的具名函数值)；该规则不改变 ordinary direct call 的 effect inference。
+
 ### Identity 与合并
 
 合并两个 row 时：
 
 1. system effect 按 exact capability identity 去重；`fs`、`console`、`process` 互不相等；
 2. `unsafe` 与 `unsafe` 是同一实例；
-3. `fail<T>` 与 `fail<U>` 匹配时统一 payload 类型；
-4. 同一 exact handled effect 只对应一份 evidence，其类型参数必须统一；
-5. `mut<T>` 按完整状态类型区分，可在同一 row 保留多个实例；
-6. 未匹配 effect 只能进入开放尾；封闭侧不接受额外 effect。
+3. `fail<T>` 与 `fail<U>` 匹配时统一 payload type；
+4. 同一 exact handled effect 只对应一份 evidence，其 type arguments 必须统一；
+5. `mut<T>` 按完整 state type 区分，可在同一 row 保留多个实例；
+6. 未匹配 effect 只能进入开放尾，封闭侧不接受额外 effect。
 
-不同开放尾都带未匹配项时，row unification 创建共享 fresh 尾并分别保留对侧未匹配项。Effect class 不因 row 合并、alias 展开或 module import而改变。
+不同开放尾都带未匹配项时，row unification 创建共享 fresh tail，并分别保留对侧未匹配项。Effect class 不因 row 合并、alias 展开或 module import 而改变。
+
+Generic custom effect 可以参数化，closed concrete instance 保持不同 typed identity，例如 `Reader<Int>` 与 `Reader<Str>`。任何实际用于 operation lookup、handler install 或 callable contract 的 handled-effect instance，其 type arguments 都必须完全闭合；不能依赖 runtime name lookup、type erasure 或 specialization 补救。`fail<T>`、`mut<T>` 与正式 effect-row parameter 不属于这项 runtime identity 限制。
+
+## System effects
+
+Canonical 0.1 定义三类 system effect：
+
+| Effect | 语义范围 |
+|---|---|
+| `console` | 标准输出与标准错误输出 |
+| `fs` | 文件系统访问及依赖工作目录或文件系统的路径解析 |
+| `process` | 参数、工作目录、同步子进程与进程退出 |
+
+纯路径字符串运算不产生 `fs`。System effect 是静态能力事实，不是语言内动态 provider。Host declaration 必须携带 exact system effect 与正交的 `fail<E>` contract；它不能因为是 extern、runtime bridge 或 intrinsic 而省略 capability。
+
+需要可替换或可 mock 的依赖时，程序声明用户 handled effect，再用普通 handler adapter 翻译到 system operation：
+
+```vorton
+effect FileAccess {
+    fn read(path: Str) -> Str;
+}
+
+fn load(path: Str) -> Config with {FileAccess} {
+    parse(FileAccess.read(path))
+}
+
+fn load_from_host(path: Str) -> Config with {fs, fail<FsError>} {
+    handle { load(path) } with {
+        FileAccess.read(p) => read_file(p),
+    }
+}
+```
+
+直接 system operation 本身不可被 `handle`，因此抽象依赖和真实宿主访问保持分域。
+
+## 用户自定义 Effect
+
+```vorton
+effect Logger {
+    fn log(message: Str) -> Unit;
+}
+
+fn write_log(message: Str) -> Unit with {Logger} {
+    Logger.log(message)
+}
+```
+
+Operation signature 规定参数、返回类型和调用时产生的 handled effect。Operation 通过 `EffectName.operation(...)` 调用。
+
+Effect operation 只有 signature，不允许 body。Custom effect 必须由显式 `handle...with` 提供解释；不存在自动 default evidence、部分默认或 default-body fallback。
+
+### Effect alias
+
+`effect alias` 给一组 effect 命名：
+
+```vorton
+effect alias HostIO = {console, fs, process};
+effect alias Fallible<E> = {fail<E>};
+```
+
+Alias 可泛型化、可 `pub` 导出，并在类型检查前递归展开；循环 alias 被拒绝。展开后的 exact atom 才参与 identity、capability 与 ABI，alias 本身不制造 evidence 或新的 runtime effect。
+
+## `mut<T>` Marker Effect
+
+`mut<T>` 记录计算触及的外部可变 state type。
+
+- 修改函数自己的局部 `let mut` binding 不让 `mut` 逃逸到函数签名；
+- 通过 `mut` parameter 修改 caller state，或修改 closure 捕获的外部可变 state，会注入相应的 `mut<T>`；
+- 调用 mutable receiver 仍要求可变 binding；effect 不替代这项检查；
+- Module `requires { ... }` 检查逃逸的 `mut<T>`，因此 `requires {}` 的 pure module 不能修改外部 state。
+
+`mut<T>` 是多实例 marker。同一 row 可以同时包含 `mut<Int>` 与 `mut<Str>`，它们不能因为都叫 `mut` 而合并。裸标注 `with {mut}` 每次实例化时引入 fresh state type。
+
+## `unsafe` Effect
+
+`unsafe` 标记编译器不能验证其 memory-safety premise 的 operation。它进入函数签名并向 caller 传播，不能由普通 `handle` 或 `catch` 消除；唯一 discharge 形式是词法 `unsafe { ... }` block。
+
+```vorton
+mod raw_buffer requires {unsafe} {
+    fn first(ptr: Ptr<Int>) -> Int {
+        unsafe { ptr.read() }
+    }
+}
+```
+
+`unsafe { ... }` 只移除 block 内显式产生的 `unsafe`；其中的 system、failure、mutation 或 handled effect 仍传播。Module 必须以 `requires {unsafe}` 授权 discharge，该许可本身不证明 block 内不变量。
 
 ## Effect 传播
 
-Effect 按求值组合：
+Effect 按实际求值组合：
 
 | 表达式 | 结果 effect |
-|--------|-------------|
+|---|---|
 | 字面量、标识符 | `{}` |
 | 运算、参数列表、block | 已求值子表达式的 row 合并 |
-| 函数调用 | callee row 与参数求值 row 合并 |
-| 方法调用 | receiver、方法和参数 row 合并 |
-| `if` / `match` | 条件或 scrutinee 与所有分支 row 合并 |
-| Lambda | body row 存入函数类型；创建 lambda 本身是纯的 |
+| 函数调用 | callee row 与 argument-evaluation row 合并 |
+| 方法调用 | receiver、method 与 argument row 合并 |
+| `if` / `match` | condition 或 scrutinee 与所有 branch row 合并 |
+| Closure | body row 存入函数类型；创建 closure 本身为 pure |
 
-函数声明没有 `with` 时，以函数体推断出的 row 为准。显式封闭 row 漏掉实际 effect 时编译失败。Host operation 不得因为是 `extern`、runtime bridge 或 builtin 而省略 system effect。
+函数声明没有 `with` 时，以 body 推断出的 row 为准。显式封闭 row 漏掉实际 effect 时编译失败。
 
-### Effectful function value 的 evidence
+### Effectful function value
 
-普通 lambda/closure 不捕获定义点当前安装的 handled-effect evidence。其 body row 冻结在函数类型中；所有Vorton callable统一接收一个显式borrowed `EffectCtx*`，每次调用从调用点当前 dynamic handler environment传入。没有对应typed handler entry时，effect继续传播到调用者，不能因为closure在某个`handle`内创建而被提前消除。
+普通 closure 不捕获定义点当前安装的 handled-effect evidence。Body row 冻结在函数类型中，每次调用从调用点当前 dynamic handler environment 取得 typed evidence。没有对应 handler 时，effect 继续传播，不能因为 closure 在某个 `handle` 内创建而提前消除。
 
-因此，一个pure factory可以返回effectful closure：调用factory不需要该effect，调用返回值时才需要。closure在`handle`内创建后逃逸，也不会延长旧handler的动态范围；在新的handler内调用时使用新handler。Handler arm/re-perform的内部runtime对象可显式持有outer evidence，但不改变ordinary user closure规则。
+因此 pure factory 可以返回 effectful closure：调用 factory 不产生该 body effect，调用返回值时才产生。Closure 在 handler 内创建后逃逸，不会延长已经结束的 handler dynamic scope；在新 handler 内调用时使用新的 evidence。
 
-Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`EffectCtx*`；direct/method调用省略`env`但保持其余相对顺序。Pure与system-only Vorton callable传immortal empty context。普通用户top-level extern与不会回调Vorton callable的普通HostImport leaf不接收context；exact compiler-owned runtime intrinsic只要会调用Vorton callable，就必须显式接收并转发context。0.1当前穷尽集合为`vorton_list_sort_bridge`/`vorton_list_sort`、`Option.map`、`Option.and_then`、`Option.unwrap_or_else`与`Cell.update`：sort和Option三项转发current context，pure `Cell.update` callback接收immortal empty context。调用同步完成，leaf不保存或retain context；集合由exact compiler intrinsic identity裁决，禁止名字猜测、thunk或通用adapter，也不新增用户extern callback能力。Context entry由完整typed handled instance（exact effect identity + exact type arguments）索引，不能按名字或nominal leaf合并；`GenericProbe<Str>`与`GenericProbe<Int>`是两个不同entry。
-
-`handle`创建owned child overlay并引用parent context；ordinary calls只borrow并转发指针，returned closure不捕获。Closed row可用冻结layout的静态位置；open effect-row formal原样转发同一个context pointer，typed view只作静态证明，不产生stack/heap remap。禁止C varargs、stack remap view、closure remap descriptor、TLS/global/root handler、runtime name lookup以及closed/open两套function-pointer ABI。Handler arm/re-perform内部对象可显式持parent context，其生命周期不改变ordinary closure规则。
+Open effect-row formal 原样转发当前 typed context。实现不能使用 global/TLS root handler、runtime name lookup、closure capture 的隐式 handler 或另一套 function-value ABI 改变该语义。
 
 ## Effect 消除
 
@@ -194,11 +166,11 @@ Indirect closure ABI依次传递`env`、普通参数、trait dictionaries、`Eff
 ```vorton
 let value = risky() catch {
     Missing(name) => default_for(name),
-    Invalid(msg) => repair(msg),
+    Invalid(message) => repair(message),
 };
 ```
 
-Arms 对 `E` 做穷尽性检查，未覆盖时报 E0601；部分处理必须在 arm 中显式重新 `fail.raise`。被捕获计算的 failure 被消除，arm 新产生的 effect 向外传播。`try` 是保留关键字，不是错误处理语法。
+Arms 对 `E` 做穷尽性检查；部分处理必须在 arm 中显式重新 raise。被捕获计算的 failure 被消除，arm 新产生的 effect 向外传播。`try` 是保留关键字，不是错误处理语法。
 
 ### `handle ... with`
 
@@ -207,43 +179,37 @@ let result = handle {
     Logger.log("hello");
     42
 } with {
-    Logger.log(msg) => print(msg),
+    Logger.log(message) => record(message),
 };
 ```
 
-Handler 在其body的动态调用范围内提供 handled-effect operations。被显式处理的 exact handled effect 从 body row 中消除；开放尾未知 effect 与 handler arm 新产生的 effect继续传播。System effect、`mut<T>` 与 `unsafe` 不能由 `handle` 删去。只在该范围内创建但未调用的ordinary closure不会捕获handler；它逃逸后的effect仍由未来调用点处理。
+Handler 在 body 的 dynamic call scope 内提供 handled-effect operations。被完整处理的 exact handled effect 从 body row 中消除；open tail 的未知 effect 与 arm 新产生的 effect 继续传播。System effect、`mut<T>` 与 `unsafe` 不能由 `handle` 删除。
 
-Vorton 0.1 对 custom handled effect 采用 **whole-effect complete handler**：同一个 `handle...with` 只要为某个 exact `HandledEffectRef` 写出任一 operation arm，就必须覆盖该 `EffectDef` 声明的全部 operations，各恰好一次。源码 arm 顺序任意；TypedHIR 按 exact `EffectOperationRef` 的声明 ordinal 重排并冻结 dense `0..N-1` evidence，只有完整 census 后才可删除整个 effect atom并发布handler facts。Missing、duplicate、unknown operation或cross-owner arm均稳定报源码诊断；Core再次验证owner、count与ordinal全集。0.1不支持partial residual effect、未覆盖operation向parent自动转发或sparse evidence ABI；需要部分拦截时必须拆分effect或为其余operations写显式转发/re-perform arm。
+Canonical 0.1 使用 whole-effect complete handler：同一个 `handle...with` 只要为某个 exact effect 写出一个 operation arm，就必须覆盖该 effect 声明的全部 operations，各恰好一次。Source arm 顺序任意；missing、duplicate、unknown 或 cross-owner arm 都是编译错误。需要只拦截部分 operation 时，必须拆分 effect 或为其余 operation 写显式 forwarding arm。
 
 ## Handler 语义
 
-非 abort operation 是 tail-resumptive：arm 结果作为 operation 返回值，计算随后继续。Arm 结果必须与 operation return type兼容；返回`Unit`的operation位于语句语义位置，arm值被丢弃，`Never`作为bottom可用于任何返回位置。Vorton 不支持显式 `resume`、post-resume 或 multi-shot continuation。
+非-abort operation 是 tail-resumptive：arm result 作为 operation return value，原计算随后继续。Arm result 必须兼容 operation return type；返回 `Unit` 的 operation 丢弃 arm value，`Never` 作为 bottom 可用于任意返回位置。Vorton 不支持显式 `resume`、post-resume 或 multi-shot continuation。
 
-`fail.raise(error)` 不恢复原计算。捕获它的 arm 恰好执行一次，arm 结果替换整个 `handle` / `catch` 表达式；处理当前 failure 时对应 handler 已失活，再次 raise 逃向外层。
+`fail.raise(error)` 不恢复原计算。捕获它的 arm 恰好执行一次，arm result 替换整个 `handle` 或 `catch` expression；处理当前 failure 时对应 handler 已失活，再次 raise 逃向外层。
 
-## HOF Effect 多态
+## 高阶 Effect 多态
 
-高阶函数 callback row 使用开放尾，例如：
+高阶函数的 callback row 使用开放尾，例如：
 
 ```text
-map : (List<T>, (T) -> U / ?ε) -> List<U> / ?ε
+transform : (T, (T) -> U / ?ε) -> U / ?ε
 ```
 
-Callback 的 system、handled、failure、mutation 或 unsafe effect都通过 `?ε` 传播；HOF 不得假装 callback 纯净，也不得把 system effect转成 handler evidence。精确标准库声明以[`std/*.vorton`](../../std/)为准。
+Callback 的 system、handled、failure、mutation 或 unsafe effect 都通过 `?ε` 传播。高阶函数不能假装 callback 为 pure，也不能把 system effect 转成 handler evidence。
 
-## Drop 的 0.1 边界
+## Drop 边界
 
-0.1 用户 `Drop::drop` 的最终推断 effect row 必须为空；`fail`、system effect、handled effect与逃逸的 `mut<T>` 均禁止。编译器生成的字段递归释放、RC deallocation 与已验证 intrinsic cleanup 不属于用户 effect body。
+用户 `Drop::drop` 的最终推断 effect row 必须为空；`fail`、system effect、handled effect 与逃逸的 `mut<T>` 均禁止。编译器生成的字段递归释放、RC deallocation 与已验证 intrinsic cleanup 不属于用户 effect body。
 
-0.1 不建立 `DropEffectSet`、latent destruction carrier 或空占位字段。Post-0.1 只有真实 File/Socket/Transaction 等 consumer出现后，B-198 才比较 effectful Drop、显式 close + pure safety-net Drop等方案；若选择 latent destruction contract，它必须在 TypedHIR effect freeze 前进入函数 effect，不能由 ResourcePlanner、AbiIR或system call静默补入。
+## Canonical 边界
 
-## 当前实现迁移边界
-
-B-194/B-195/B-196 完成前，编译器仍存在 user default effect body、宽泛 `Effect::IoEffect`、`io.read/write` 与漏标 system effect 的 std host extern，以及允许 effectful Drop 的旧路径。它们是待原子删除的实现事实，不构成 0.1 终态兼容承诺。
-
-## 当前限制
-
-- Handler 仅支持 tail-resumptive operation 与 abortive failure；
-- 不支持 post-resume 或多次 resume；
-- Full algebraic effects 不在当前实现范围内；
-- System effect 不是语言内 sandbox；它提供可推断、可审计的宿主能力摘要，未来 package policy可消费该摘要，但不会把静态声明冒充 OS 权限隔离。
+- Handler 只支持 tail-resumptive operation 与 abortive failure；
+- 不支持显式 post-resume 或 multiple resume；
+- System effect 不是语言内 sandbox，只是可推断、可审计的宿主能力摘要；
+- Allocation 本身没有独立 effect class；raw allocation operation 仍产生 `unsafe`。

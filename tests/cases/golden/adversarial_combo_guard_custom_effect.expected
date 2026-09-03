@@ -1,7 +1,0 @@
-T1: zero,low,exact,high
-T2: zero,low,low,low,exact,high
-T3: alice
-T4: carol?
-T5: anon-star
-T6: none
-adversarial_combo_guard_custom_effect: done

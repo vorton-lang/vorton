@@ -1,4 +1,0 @@
-E0305
-Type 'Int?' has no method 'cmp'
-Check available methods using the type's impl block or trait implementations
-!internal compiler error

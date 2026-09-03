@@ -1,4 +1,0 @@
-E0504
-Ambiguous method 'next' on 'NextSecond'
-provided by an inherent impl and trait 'Iterator'
-!internal compiler error

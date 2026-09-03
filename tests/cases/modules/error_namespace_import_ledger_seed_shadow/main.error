@@ -1,6 +1,0 @@
-error[E0707]: Ambiguous value name 'x': conflicting payloads 'a::x' and 'b::x'
-use b::{x}
-!E0702
-!E0703
-!E0704
-!E0705

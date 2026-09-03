@@ -1,9 +1,0 @@
-shadow=99
-trait-iter
-trait-next
-value=0
-trait-next
-value=1
-trait-next
-after-loop
-drop-source

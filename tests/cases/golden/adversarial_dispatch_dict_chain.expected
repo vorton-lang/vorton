@@ -1,8 +1,0 @@
-int_chain=same
-int_chain2=diff
-str_chain=same
-str_chain2=diff
-pt_chain=same
-pt_chain2=diff
-dual=eq:(1,2)
-dual2=ne:(1,2)/(3,4)

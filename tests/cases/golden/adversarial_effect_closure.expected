@@ -1,8 +1,0 @@
-T1: hello world
-T2: X:test
-T3: val-good
-T4: not-found
-T5: fmt(val-ok)
-T6: mode=prod-mode
-T7: first-x second-y
-adversarial_effect_closure: done

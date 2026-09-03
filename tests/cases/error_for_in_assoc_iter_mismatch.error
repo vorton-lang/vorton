@@ -1,4 +1,0 @@
-E0301
-Iterable::Iter is 'DeclaredIter'
-iter() returns 'ActualIter'
-!E0503

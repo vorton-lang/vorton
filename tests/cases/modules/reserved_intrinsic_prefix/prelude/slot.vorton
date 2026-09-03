@@ -1,5 +1,0 @@
-pub fn vorton_slot_read() -> Int { 702 }
-
-pub fn vorton_slot_take() -> Int { 703 }
-
-pub fn vorton_slot_write() -> Int { 704 }

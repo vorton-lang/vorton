@@ -1,4 +1,0 @@
-E0504
-Ambiguous method 'iter' on 'TraitCollision'
-trait 'LeftIter' and trait 'RightIter'
-!internal compiler error

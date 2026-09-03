@@ -1,5 +1,0 @@
-folded=seed:42
-acc=seed:42
-folded2=seed:42+1+2+3
-acc2=seed:42
-folded3=lit:21

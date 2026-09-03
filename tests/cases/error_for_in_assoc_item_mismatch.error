@@ -1,4 +1,0 @@
-E0301
-Iterable::Item is 'Int'
-Iterator::Item is 'Str'
-!E0503

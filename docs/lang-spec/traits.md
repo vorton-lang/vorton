@@ -24,15 +24,15 @@ Trait 是完整的行为 contract，不为method或associated type提供独立vi
 - `impl Trait for Type`中的`pub fn`/`pub type`非法，implementation item的visibility继承Trait；
 - inherent `impl Type`仍允许每个method/associated item独立写`pub`或保持private。
 
-非法`pub`必须hard-fail并给删除修复，不能接受后忽略。Trait dictionary、provider identity与CoreHIR不保存per-member visibility。需要sealed trait时将来使用显式设计，不以private required method模拟。
+非法 `pub` 必须 hard-fail 并给出删除修复，不能接受后忽略。Trait dictionary、provider identity 与 CoreHIR 不保存 per-member visibility。Private required method 不产生 sealed-trait 语义。
 
-Vorton 0.1的inherent impl与trait impl都不接受`extern fn` member；这与visibility无关，写在impl中的`extern fn`一律hard-fail。用户FFI只由top-level `extern fn`声明；需要method形态时以普通inherent wrapper调用该top-level extern。标准库内建方法由编译器exact intrinsic manifest提供，不是trait/impl语法成员。
+Vorton 0.1 的 inherent impl 与 trait impl 都不接受 `extern fn` member；这与 visibility 无关，写在 impl 中的 `extern fn` 一律 hard-fail。用户 FFI 只由 top-level `extern fn` 声明；需要 method 形态时以普通 inherent wrapper 调用该 top-level extern。
 
 ### Public interface、private impl 与 opaque return
 
 Public item的参数、返回类型、pub field、public enum payload、generic bound及effect/trait contract不得引用更private的declaration；违反时hard-fail。Public struct的private field可以包含private nominal，因为该representation只经compiler metadata运输，不进入source interface。`impl PublicTrait for PrivateType`可在module内部合法存在并参与project coherence，但不会成为外部callable surface。Trait impl只有target与trait均对调用方可见时才随module export，public inherent type也只导出其`pub`methods。
 
-Vorton 0.1不支持return-position`impl Trait`、opaque type或由推断产生的匿名public concrete type。需要隐藏返回值具体类型时，当前使用显式public wrapper/generic contract；post-0.1由B-200在真实consumer下重新设计。`impl`出现在type position必须稳定parse error，不能先建立只transport不约束的占位节点。
+Vorton 0.1 不支持 return-position `impl Trait`、opaque type 或由推断产生的匿名 public concrete type。需要隐藏返回值具体类型时使用显式 public wrapper 或 generic contract。`impl` 出现在 type position 必须产生 parse error。
 
 ### 0.1 方法签名边界
 
@@ -56,9 +56,9 @@ trait Printable: Describable {
 
 **Supertrait evidence**：具体 impl 方法可以调用 supertrait 方法；调用使用同一 exact dictionary evidence 链，不需要 source default body。
 
-**循环检测**：`trait A: B` + `trait B: A` 在声明阶段检测，报 E0501。
+**循环检测**：`trait A: B` 与 `trait B: A` 的循环在声明阶段被拒绝。
 
-**impl 验证**：`impl Printable for Foo` 时若未实现 `Describable for Foo`，报 supertrait 未满足错误。
+**impl 验证**：`impl Printable for Foo` 时若没有 `Describable for Foo`，报 supertrait 未满足错误。
 
 ### 关联类型
 
@@ -123,16 +123,6 @@ impl Processor for Greeter {    // 覆盖为 Str
 }
 ```
 
-**错误码**：
-
-| 错误码 | 含义 |
-|--------|------|
-| E0510 | 缺少必需的关联类型实现 |
-| E0511 | 引用了 trait 中不存在的关联类型 |
-| E0512 | 关联类型歧义 |
-| E0513 | 关联类型 bound 不满足 |
-| E0514 | 出现了意外的关联类型 |
-
 ## Impl 块
 
 ### 固有方法
@@ -145,7 +135,7 @@ impl Point {
 
 为类型定义方法，不依赖任何 trait。通过 `.method()` 调用：`point.distance()`。
 
-固有impl只包含普通函数与关联类型，不承载FFI link identity，也不包含`delegate`声明。编译器内建的Str/Int/Float方法在语言层仍表现为普通固有方法，其宿主映射属于CoreHIR/AbiIR的exact intrinsic contract。
+固有 impl 只包含普通函数与关联类型，不承载 FFI link identity，也不包含 `delegate` 声明。
 
 ### Trait 实现
 
@@ -196,7 +186,7 @@ TypeScheme = ∀α₁..αₙ. τ [bounds]
 bounds = { (α₁, "Show"), (α₂, "Eq"), ... }
 ```
 
-泛化时 trait bound 从 `var_bounds` 收集并存入 type scheme。实例化时 bound 从旧变量转移到 fresh 变量。
+泛化时 trait bound 从 `var_bounds` 收集并存入 type scheme。实例化时 bound 从 quantified variable 转移到 fresh variable。
 
 ## 方法解析与 Dictionary Evidence
 
@@ -207,7 +197,7 @@ bounds = { (α₁, "Show"), (α₂, "Eq"), ... }
 3. 具体类型唯一可用的 trait impl；
 4. receiver 是受约束类型变量时，从其 trait bound 取得隐式 dictionary evidence。
 
-找不到方法时报 E0305。
+找不到方法时产生未定义方法的类型错误。
 
 ```vorton
 fn stringify<T: Show>(value: T) -> Str {
@@ -223,11 +213,11 @@ fn show_twice<T: Show>(value: T) -> Str {
 
 ## 显式转发
 
-Vorton 0.1 不提供 `delegate` declaration。Impl 中以 `delegate field: Trait` 形式出现的旧表面必须稳定报错，并建议写普通 `impl Trait for Type`，由每个方法显式调用相应字段。普通 trait、associated type、supertrait、dictionary evidence 与手写 forwarding impl 均保持；编译器不得生成 delegate owner、wrapper body或专属 Core/ABI carrier。
+Vorton 0.1 不提供 `delegate` declaration。`delegate field: Trait` 必须产生语法错误；组合转发通过普通 `impl Trait for Type` 和显式 method call 表达。编译器不得生成 delegate owner、wrapper body 或专属 Core/ABI carrier。
 
 ## Compiler-defined 结构实现
 
-编译器自动为所有 struct/enum 类型派生可派生的 trait。当前支持的 auto-derive trait：
+编译器自动为所有 struct/enum 类型派生满足字段约束的以下 trait：
 
 - **Eq**: 当所有字段都实现 Eq 时自动派生。`==`/`!=` 运算符解糖为 `Eq.eq()` 调用。
 - **Hash**: 仅当该 struct/enum 同时走编译器的结构化 auto-Eq 路径，且所有字段都可获得 Hash evidence 时自动派生。Struct 按字段声明顺序组合 hash；enum 先组合稳定的 variant discriminator，再组合字段。已有 manual Eq 不会隐式获得结构化 Hash，避免 `Eq` / `Hash` coherence 失配。
@@ -235,23 +225,9 @@ Vorton 0.1 不提供 `delegate` declaration。Impl 中以 `delegate field: Trait
 - **Debug**: 当所有字段都实现 Debug 时自动派生。
 - **Ord**: 当所有字段都实现 Ord 时自动派生。`<`/`>`/`<=`/`>=` 运算符解糖为 `Ord.cmp()` 调用。
 
-派生按依赖 fixpoint 扩展到嵌套与递归用户类型。`Hash` 的内建基础 evidence 当前包括 `Int`、`Str`、`Bool`，不包括 `Float` 或 `Unit`；缺少所需 evidence 时保持 fail closed，并在实际 trait bound 被要求时报告 E0503。
+派生按依赖 fixpoint 扩展到嵌套与递归用户类型。`Hash` 的基础 evidence 包括 `Int`、`Str` 与 `Bool`，不包括 `Float` 或 `Unit`；缺少所需 evidence 时保持 fail closed，并在 trait bound 被要求时产生类型错误。
 
-这些实现是 compiler-defined 的封闭语义，不对应 source attribute，也不能作为开放 derive 系统的入口。`Json` 不在该集合中；它是普通公开 trait，用户 struct/enum 只能写普通显式 impl，JSON 形状完全由该 impl 决定：
-
-```vorton
-struct Label {
-    text: Str,
-}
-
-impl Json for Label {
-    fn to_json(self: Self) -> Str {
-        json_stringify(self.text)
-    }
-}
-```
-
-canonical 0.1 没有 `@` token、attribute grammar 或 source-level derive directive。缺少 `Json` evidence 的 `json_stringify` 调用报告 E0503；编译器不按用户类型字段自动生成 JSON 对象、variant tag 或 impl body。
+这些实现是 compiler-defined 的封闭语义，不对应 source attribute，也不是开放 derive 系统。Canonical 0.1 没有 `@` token、attribute grammar 或 source-level derive directive；其它 trait 需要普通显式 impl。
 
 ## 限制
 

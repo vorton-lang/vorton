@@ -1,4 +1,0 @@
-E0503
-call_float(facade::emit, 1.5)
-type does not satisfy 'Hash'
-!E0301

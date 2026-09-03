@@ -1,6 +1,0 @@
-error[E0707]: Ambiguous value name 'Clash': conflicting payloads 'a::Clash' and 'b::Clash'
-use b
-!E0702
-!E0703
-!E0704
-!E0705

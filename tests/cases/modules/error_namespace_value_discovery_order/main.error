@@ -1,5 +1,0 @@
-error[E0707]: Ambiguous value name 'V': conflicting payloads 'other::V' and 'origin::V'
-pub use slow::{V}
-!pub use fast::{V}
-!E0703
-!E0704

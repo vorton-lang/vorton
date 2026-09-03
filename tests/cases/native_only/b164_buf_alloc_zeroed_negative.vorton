@@ -1,4 +1,0 @@
-fn main() {
-    let buffer = vorton_buf_alloc_zeroed(-1)
-    vorton_buf_dealloc(buffer)
-}

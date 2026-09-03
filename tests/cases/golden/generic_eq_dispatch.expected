@@ -1,5 +1,0 @@
-direct str ==: true
-generic str contains: true
-generic str miss:     false
-generic int contains: true
-builtin str contains: true

@@ -1,8 +1,0 @@
-pub fn marker() -> Int {
-    0
-}
-
-// provider.vorton depends on this module, so these declarations are intentional
-// project-forward bridges rather than foreign-library imports.
-pub extern fn choose(value: Int) -> Int
-pub extern fn choose_unit(value: Int) -> Unit

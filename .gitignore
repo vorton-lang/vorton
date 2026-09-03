@@ -1,35 +1,6 @@
-node_modules/
-dist/
-out/
-*.js.map
 .DS_Store
 Thumbs.db
 __pycache__/
 *.py[cod]
-
-.claude/worktrees/
+/target/
 /.worktrees/
-.claude/settings.local.json
-.deepseek/
-
-tests/scratch/
-tests/cases/**/*.js
-
-# Native compiler build artifacts
-/vorton_runtime.o
-/vorton_compiler.o
-/vorton_output.ll
-compiler/vorton_output.ll
-tests/cases/**/*.o
-tests/cases/**/*.exe
-examples/*.o
-/test_minimal.o
-/test_minimal.vorton
-
-# native self-host build / debug scratch (repo root) — 链接产物 + 调试变体 + tmp 复现目录
-/vorton*.exe
-/vorton*.map
-/vorton*.o
-/hello.exe
-/test_output*.txt
-/tmp*/

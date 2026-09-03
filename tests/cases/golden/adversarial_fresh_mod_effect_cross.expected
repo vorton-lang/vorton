@@ -1,7 +1,0 @@
-[fx] start 42
-metric: count=42
-[fx] done 42
-log2: computing 3+7=10
-alt: start 10
-m: 10
-alt: done 10

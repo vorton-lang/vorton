@@ -1,7 +1,0 @@
-T1: negative
-T2: caught: zero
-T3: ok(5)
-T4: negative
-T5: caught: zero
-T6: ok(5)
-handle_try_return_cleanup: done

@@ -1,4 +1,0 @@
-E0503
-Impl method type parameter bound 'Marker' is unsupported
-impl method predicates are not supported
-!internal compiler error

@@ -1,6 +1,0 @@
-error[E0705]: Cannot use 'super::' — relative path exceeds module nesting depth
-use super::super::super::missing::{Thing}
-!E0702
-!E0703
-!E0704
-!E0707

@@ -1,9 +1,0 @@
-parse_int_ok=42
-parse_int_bad=none
-parse_int_neg=-7
-parse_float_ok=3.14
-parse_float_bad=none
-int_to_str=99
-float_to_str=2.75
-zero_int=0
-zero_float=0

@@ -1,7 +1,0 @@
-q: (10,2)
-r2: 40x50@(0)
-spread: (100,2)
-area: 32
-desc after shift: group(3)
-circle@(12,5)r3
-box[L*]@(102,2)

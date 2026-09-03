@@ -1,7 +1,0 @@
-T1: result=51
-T2: caught
-T3: caught-seq
-T4: -1
-T5: 11
-T6: 50
-adversarial_effect_nested_call_fail: done

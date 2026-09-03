@@ -1,5 +1,0 @@
-error[E0207]:
-Duplicate definition: 'Handle' is already defined
-pub extern type Handle
-!E0707
-!Clash

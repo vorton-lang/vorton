@@ -1,4 +1,0 @@
-r1: ok(66)
-r2: err(overflow)
-r3: err(boom)
-ok_count: 50

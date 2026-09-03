@@ -1,6 +1,0 @@
-error[E0702]: Module 'main::outer::missing' not found
-use super::missing::{Thing}
-!E0703
-!E0704
-!E0705
-!E0707

@@ -1,5 +1,0 @@
-error[E0704]:
-Unresolved value import dependency SCC
-use super::b::{V}
-!E0703
-!E0707

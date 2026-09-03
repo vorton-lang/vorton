@@ -1,4 +1,0 @@
-E0504
-Ambiguous method 'eq' on 'Int'
-provided by trait 'Eq' and trait 'CustomIntEq'
-!internal compiler error
