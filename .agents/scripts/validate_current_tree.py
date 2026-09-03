@@ -75,9 +75,9 @@ def validate() -> tuple[list[str], int, int]:
                 f"case-insensitive tracked-path collision: {previous} / {normalized}"
             )
 
-        if posix.parts and posix.parts[0] in FORBIDDEN_ROOTS:
+        if posix.parts and posix.parts[0].casefold() in FORBIDDEN_ROOTS:
             errors.append(f"removed tree must remain absent: {normalized}")
-        if normalized in FORBIDDEN_PATHS:
+        if normalized.casefold() in FORBIDDEN_PATHS:
             errors.append(f"removed path must remain absent: {normalized}")
 
         if not resolved.is_file():
