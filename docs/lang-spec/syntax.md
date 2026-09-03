@@ -127,7 +127,7 @@ let update = fn [mut counter: Int, name: Str](step: Int) {
 };
 ```
 
-`fn(step) [mut counter] { ... }` 非法。capture list 可在 lv0 完全省略并由编译器推断，lv2 formatter 可物化；它不进入 `FnType`，不改变函数类型相等性或调用签名。所有显式 mode/capture assertion 都必须与推断结果一致；不一致遵守现有 warning 及 agent profile 的 warning-as-error 规则。
+`fn(step) [mut counter] { ... }` 非法。capture list 可完全省略并由编译器推断；它不进入 `FnType`，不改变函数类型相等性或调用签名。所有显式 mode/capture assertion 都必须与推断结果一致；不一致必须产生诊断。
 
 ## Path、类型与 effect
 

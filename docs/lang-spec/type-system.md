@@ -117,7 +117,7 @@ generalize(τ, Γ):
   free_vars  = ftv(τ)                    // τ 中的自由类型变量
   env_vars   = ftv(Γ)                    // 环境中的自由类型变量
   quantified = free_vars \ env_vars      // 量化不在作用域中的变量
-  bounds     = collect_bounds(quantified) // 从 var_bounds 收集 trait bound
+  bounds     = collect_bounds(quantified) // 收集这些变量上的 trait bound
   return ∀quantified. τ [bounds]
 ```
 
@@ -492,9 +492,9 @@ Vorton 0.1 的语言级 `Eq` contract 只包含 `eq`；不存在 `ne` member、o
 
 语法先把 `receiver.method(args)` 唯一分类为 MethodCall；它不能解释为函数值字段调用。函数值字段必须显式写 `(receiver.method)(args)`，后者是 FieldAccess 外加普通 Call。MethodCall 按以下顺序解析：
 
-1. **固有方法**：检查 receiver 具体类型的 `impl_methods[type_name]`。
+1. **固有方法**：检查 receiver 具体类型声明的固有方法。
 2. **原始类型方法**：对于 `Str`、`Int`、`Float`，检查原始类型方法表。
-3. **Trait 方法**：搜索 `trait_impls` 中为 receiver 类型实现的 trait。
+3. **Trait 方法**：检查 receiver 类型可用的 trait impl。
 4. **受约束类型变量**：如果 receiver 是带 trait bound 的类型变量，通过 trait dictionary dispatch。
 
 未找到方法时产生未定义方法的类型错误。
@@ -502,7 +502,6 @@ Vorton 0.1 的语言级 `Eq` contract 只包含 `eq`；不存在 `ne` member、o
 ## 作用域规则
 
 - 作用域是词法的且嵌套的（函数体、块、for-in 体、match 分支、if-let 体）。
-- 每对 `push_scope` / `pop_scope` 创建一个新的作用域层级。
 - `let` / `let mut` 绑定从声明点到封闭作用域末尾可见。
 - 函数参数在函数体内可见。
 - For-in 循环变量在循环体内可见。

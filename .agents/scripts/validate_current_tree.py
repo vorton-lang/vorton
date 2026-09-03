@@ -84,8 +84,6 @@ def validate() -> tuple[list[str], int, int]:
             errors.append(f"tracked file is missing: {normalized}")
             continue
         data = resolved.read_bytes()
-        if b"\0" in data:
-            continue
         try:
             data.decode("utf-8")
         except UnicodeDecodeError as error:

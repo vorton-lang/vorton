@@ -186,7 +186,7 @@ TypeScheme = ∀α₁..αₙ. τ [bounds]
 bounds = { (α₁, "Show"), (α₂, "Eq"), ... }
 ```
 
-泛化时 trait bound 从 `var_bounds` 收集并存入 type scheme。实例化时 bound 从 quantified variable 转移到 fresh variable。
+泛化时把 quantified variable 上的 trait bound 存入 type scheme。实例化时 bound 从 quantified variable 转移到 fresh variable。
 
 ## 方法解析与 Dictionary Evidence
 
