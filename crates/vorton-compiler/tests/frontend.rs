@@ -64,8 +64,8 @@ pub trait Show<T>: Eq + Debug {
     fn show(self: Self, other: T) -> Output with {};
 }
 
-effect Reader<T> {
-    fn read(key: Str) -> T;
+effect alias {
+    fn read(key: Str) -> Str;
 }
 
 pub effect alias Host<T> = {Reader<T>, fail<T>, mut, unsafe};
@@ -580,13 +580,14 @@ match value {
     Named { first, second: _, .. } => 7,
     (left, right) => 8,
     Red | Green if visible => 9,
+    _::Variant => 10,
 }
 "#,
     );
     let ExprKind::Match { arms, .. } = expression.kind else {
         panic!("match expected")
     };
-    assert_eq!(arms.len(), 10);
+    assert_eq!(arms.len(), 11);
     assert!(matches!(
         arms[0].pattern.alternatives[0].kind,
         PatternKind::Wildcard
@@ -631,6 +632,14 @@ match value {
     ));
     assert_eq!(arms[9].pattern.alternatives.len(), 2);
     assert!(arms[9].guard.is_some());
+    let PatternKind::Path { path, fields: None } = &arms[10].pattern.alternatives[0].kind else {
+        panic!("qualified underscore path pattern expected")
+    };
+    assert!(matches!(
+        &path.segments[..],
+        [PathSegment::Identifier(root), PathSegment::Identifier(variant)]
+            if root.text == "_" && variant.text == "Variant"
+    ));
 }
 
 #[test]
@@ -916,6 +925,7 @@ fn rejects_excluded_or_ambiguous_surfaces() {
         "fn invalid() { transfer(move (resource)); }",
         "fn invalid() { Thing { field, ..base } }",
         "fn invalid() { (single,) }",
+        "fn invalid() { match value { Variant() => 0 } }",
         "fn invalid(value: (Single)) {}",
         "fn first() {} use later;",
         "fn invalid() { if packet { ready: true } {} }",

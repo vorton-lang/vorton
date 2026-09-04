@@ -140,7 +140,7 @@ impl Parser {
             }
             Tag::Effect => {
                 self.bump();
-                if self.at_contextual("alias") {
+                if self.at_contextual("alias") && self.nth_tag(1) == Tag::Ident {
                     self.bump();
                     DeclarationKind::EffectAlias(Declared {
                         visibility,
@@ -1808,7 +1808,7 @@ impl Parser {
     fn parse_pattern(&mut self) -> Result<Pattern, FrontendDiagnostic> {
         let token = self.current().clone();
         match token.kind {
-            TokenKind::Ident(ref text) if text == "_" => {
+            TokenKind::Ident(ref text) if text == "_" && self.nth_tag(1) != Tag::ColonColon => {
                 self.bump();
                 Ok(Spanned::new(PatternKind::Wildcard, token.span))
             }
@@ -1841,14 +1841,9 @@ impl Parser {
         let path = self.parse_path(false)?;
         let start = path.span.start;
         let fields = if self.eat(Tag::LParen).is_some() {
-            let mut patterns = Vec::new();
-            if !self.at(Tag::RParen) {
-                loop {
-                    patterns.push(self.parse_pattern()?);
-                    if self.eat(Tag::Comma).is_none() || self.at(Tag::RParen) {
-                        break;
-                    }
-                }
+            let mut patterns = vec![self.parse_pattern()?];
+            while self.eat(Tag::Comma).is_some() && !self.at(Tag::RParen) {
+                patterns.push(self.parse_pattern()?);
             }
             self.expect(Tag::RParen)?;
             Some(PatternFields::Positional(patterns))
