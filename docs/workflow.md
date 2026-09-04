@@ -29,4 +29,4 @@ Issue 恰好选择一个 type、一个 priority，并可选择零到多个 area�
 
 ## 当前 CI
 
-当前 CI 只运行 `python .agents/scripts/validate_current_tree.py`。它验证 current tree 的结构边界，不复制 workflow 或语言规范正文；Cargo 与 compiler gate 只有在对应实现 Issue 建立后才成立。
+Governance CI 在 Ubuntu 上依次运行 current-tree 结构检查、Rust format、Clippy、workspace tests 与 Git whitespace gate。精确命令以 [workflow](../.github/workflows/test.yml) 为准，不在本页复制。
