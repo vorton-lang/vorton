@@ -1,2 +1,0 @@
-// EXPECT_PANIC
-vorton panic: vorton_buf_alloc_zeroed negative allocation request (request=-1)

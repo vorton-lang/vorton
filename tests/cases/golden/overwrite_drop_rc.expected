@@ -1,8 +1,0 @@
-list_basic: aBc len=3
-list_shared: new old keep
-list_self: xy
-map_set: v2 zz ww len=3
-map_shared: v2 v1
-mi_shared: uno one two len=2
-loop: v99
-done

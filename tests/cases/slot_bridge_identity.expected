@@ -1,4 +1,0 @@
-module:read|module/take|module+write+value
-local:read|local/take|local+write+value
-param:read|param/take|param+write+value
-stored/stored

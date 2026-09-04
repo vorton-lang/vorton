@@ -1,2 +1,0 @@
-// EXPECT_PANIC
-vorton panic: vorton_slot_alloc negative allocation request (request=-1)

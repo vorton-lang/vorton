@@ -39,7 +39,7 @@ use parser::{Token, parse, Lexer};
 use parser;
 ```
 
-当前实现把 `parser` 的所有 `pub` 符号直接导入当前作用域。该形式不会创建可通过 `parser::Token` 访问的模块值。
+该形式把 `parser` 的所有 `pub` 符号直接导入当前作用域，不创建可通过 `parser::Token` 访问的 module value。
 
 ### 重命名导入
 
@@ -47,7 +47,7 @@ use parser;
 use parser::{Token as T};
 ```
 
-命名导入可以用 `as` 创建局部别名。整模块 `use parser as p` 当前不受支持。
+命名导入可以用 `as` 创建局部别名。整模块 `use parser as p` 不受支持。
 
 ### 嵌套路径
 
@@ -93,7 +93,7 @@ use super::super::some_fn;        // 向上两层
 use super::{value, helper};       // 从父模块导入多个符号
 ```
 
-在文件顶层使用 `super::` 会报 E0705 错误（超出模块嵌套深度）。
+在文件顶层使用 `super::` 会因超出模块嵌套深度而报错。
 
 #### `self::` 引用当前模块
 
@@ -118,9 +118,7 @@ pub fn greet() -> Str { "hello" }
 pub struct Point { pub x: Int, pub y: Int }
 ```
 
-在多文件模式下，未标记 `pub` 的声明不可被其他模块导入。导入非 pub 符号报 E0701 错误。
-
-单文件模式下 `pub` 被接受但不强制执行（向后兼容）。
+未标记 `pub` 的声明不可被其他模块导入。`pub` 不改变声明在自身 module 内的可见性。
 
 ### `pub use` 再导出
 
@@ -143,19 +141,13 @@ pub use leaf::{Token as PublicToken, Wrap as Make};
 pub use leaf::Wrap;
 ```
 
-最后一种写法在re-export处稳定报错并建议同时公开owner enum。直接`pub use`一个enum仍自动携带其constructors；private/local `use`不受该public closure规则影响。实现按exact `VariantRef.owner`核对，不能从constructor leaf、alias spelling或唯一名字猜owner，也不能为接受constructor-only facade而隐式扩大type/impl可见性。
+最后一种写法在 re-export 处报错并要求同时公开 owner enum。直接 `pub use` 一个 enum 会携带其 constructors；private/local `use` 不受该 public closure 规则影响。Owner identity 由声明解析决定，不能从 constructor leaf 或 alias spelling 猜测。
 
 ### Private field 与private representation
 
 Public struct的private field可以使用private nominal type，例如`pub struct Wrapper { hidden: PrivatePayload }`。外部module可以持有、传递和销毁`Wrapper`，但不能访问`hidden`、命名`PrivatePayload`或用field literal自行构造该值。相反，public函数签名、pub field与public enum variant payload属于真正public interface，仍不得引用更private type。
 
-Provider随正常public root输出仅供compiler使用的exact physical metadata closure；consumer checker不把其中private nominal加入source-visible`types`、import或constructor namespace。Re-export/diamond原样复用exact owner，metadata lookup只接受`RegisteredNominalRef`，禁止name-first fallback。
-
-### 0.1 保留 type binding 与模块冲突
-
-0.1 的 type namespace 保留集合为：`Int Float Str Bool Unit Never Ptr Range Cell Option List ListIterator Map MapIterator Set SetIterator StringBuilder Result`。Direct type declaration、`use` 或 `pub use` 的最终本地绑定名若命中该集合，稳定报 `E0207`；same-origin delivery或re-export不能豁免保留名冲突，alias只按其最终本地名字判定，改成非保留名后服从普通模块规则。只有固定 canonical builtin/std loader producer 具有内部豁免。该规则不限制 value、function、trait、effect 或 module namespace 的同名符号。
-
-这是一项 0.1 已知限制：最终上移到标准库的类型完成既有标准库/RIIR 迁移后，会逐项恢复为普通 module type；此后两个来源的同名 type binding 不能静默互相覆盖，用户应保留限定路径或使用非冲突的 import alias。真正的语言 builtin type仍保持不可覆盖。该迁移不需要在本规范中建立新的 post-0.1 item。
+Compiler 可以随 public root 运输销毁与 layout 所需的 private metadata，但 consumer source namespace 不能因此获得 private type、constructor 或 field。Re-export 与 diamond 必须复用 exact owner，不能按名称重新选择。预声明语言类型的 binding 规则见[类型系统](type-system.md#语言预声明类型)。
 
 ## Inline `mod` 块
 
@@ -205,7 +197,7 @@ mod tools {
     pub fn first() -> Int { 1 }
 }
 
-mod tools {                         // E0207: Duplicate definition
+mod tools {                         // 非法：重复声明
     pub fn second() -> Int { 2 }
 }
 ```
@@ -255,15 +247,14 @@ mod shapes {
 
 ### Capability 限制（`requires`）
 
-文件本身是隐式模块。文件模块使用第一项 `requires {effects}` header，inline module 使用 `mod name requires {effects}` clause；两者限制模块内所有函数可以使用的 effect 集合，并由同一 typed capability checker 验证。模块内函数使用不在有效 `requires` 集合中的 effect 时，报 E0405。
+文件本身是隐式模块。文件模块使用第一项 `requires {effects}` header，inline module 使用 `mod name requires {effects}` clause；两者限制模块内所有函数可以使用的 effect 集合。Module 内函数使用不在有效 `requires` 集合中的 effect 时编译失败。
 
 #### 文件模块 header
 
 ```vorton
 requires {unsafe};
 
-use std::ptr;
-extern fn vorton_raw_alloc(count: Int) -> Ptr<Int>;
+extern fn host_alloc(count: Int) -> Ptr<Int>;
 ```
 
 文件 header 必须是第一项非注释语法、每文件至多一次，并位于全部 `use` 与声明之前。有 header 时，它是文件模块的 effect ceiling；省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 许可从不隐式获得。使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效文件/inline-module `requires` 集合显式包含 `unsafe`。
@@ -302,48 +293,12 @@ mod console_layer requires {console} {
 - `mut<T>` marker effect 参与 capability 检查；`requires {}` 禁止修改参数或捕获状态等会让 mutation effect 逃逸的操作，局部 `let mut` 仍保持局部
 - `unsafe` 同时要求 `unsafe { ... }` discharge 与包含 `unsafe` 的文件header或inline-module许可；`extern fn`声明也要求该显式许可
 
-## 编译模型
+## Module graph
 
-### 自动检测
-
-编译器通过检查源文件中是否有 `use` 声明来决定编译模式。有 `use` → 多文件模式，无 `use` → 单文件模式。
-
-### 编译流程
-
-```
-1. 从入口文件开始，BFS 发现所有依赖模块
-2. 拓扑排序（Kahn 算法）确定编译顺序
-3. 按序处理每个模块：
-   a. Parse → AST
-   b. 在依赖模块的公开接口环境中 Check → HIR
-   c. 合并为保持模块身份的程序级 HIR
-4. 将程序级 HIR 交给选定 target lowering；目标文件表示与链接策略不属于模块语义
-```
-
-### 循环依赖
-
-循环依赖在拓扑排序阶段检测，报 E0704 错误。
-
-模块与声明的名义身份包含完整模块路径。不同模块中同名的 struct、enum、函数或 trait 不会因为叶名称相同而合并；具体目标符号编码由后端决定。
-
-## 错误码
-
-| 错误码 | 描述 |
-|--------|------|
-| E0207 | 同一 scope/namespace 中的重复 source declaration（包括重复 inline `mod`） |
-| E0405 | Capability 限制或许可违反（文件/inline `requires` 中使用了不允许的 effect，或缺少显式 unsafe 许可） |
-| E0701 | 导入非 pub 符号 |
-| E0702 | 模块未找到 |
-| E0703 | 模块中无此符号 |
-| E0704 | 循环依赖 |
-| E0705 | 重复导入 / 相对路径超出模块嵌套深度 |
-| E0706 | `use` 不在文件顶部 |
-| E0707 | 来自不同 origin 的导入歧义；不用于 source duplicate |
-| E0708 | 项目内 `extern fn` forward declaration 匹配到多个实现 |
+Compiler 从入口文件沿 `use` 发现依赖 module，并在检查 body 前闭合 module graph 与 public interface。循环依赖被拒绝。Module 与 declaration 的 nominal identity 包含完整 module path；不同 module 中同名的 struct、enum、function 或 trait 不会因 leaf name 相同而合并。Target symbol encoding 不属于 module 语义。
 
 ## 限制
 
-- 不支持 first-class modules
-- 0.1 不提供 `sig` 声明或 module-signature conformance；post-0.1 的 B-192 只有在真实 conformance 一并实现时才会重新设计该能力
-- 不支持跨文件相对路径（`super::`/`self::` 仅在 inline `mod` 块内可用）
-- LSP 当前不可用，因此跨文件跳转、引用查找与 hover 尚无受支持入口
+- 不支持 first-class module；
+- 不提供 `sig` declaration 或 module-signature conformance；
+- 不支持跨文件相对 path，`super::` 与 `self::` 只在 inline `mod` 中可用。

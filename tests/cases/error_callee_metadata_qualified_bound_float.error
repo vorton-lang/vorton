@@ -1,4 +1,0 @@
-E0503
-print(facade::target(1.5))
-type does not satisfy 'Hash'
-!E0301

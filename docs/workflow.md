@@ -8,7 +8,7 @@
 - [GitHub Issues](https://github.com/vorton-lang/vorton/issues) 保存当前范围、设计、验收与依赖，是 immutable execution contract。
 - PR 和 Git 保存实现与完成历史；Milestone 的自动 Issue 百分比不是目标完成证明。
 - Worktree、Codex task、GitHub Project 与本地文件都不是平行状态 authority。Project 若启用，只作 GitHub 对象视图。
-- 迁仓前 Markdown backlog/audit 与本地 roadmap 保持删除；新工作不分配 B/A/D 编号。
+- 不建立本地 roadmap、backlog 或其它平行状态系统；工作项不使用仓库内自建编号。
 
 ## 模板
 
@@ -29,4 +29,4 @@ Issue 恰好选择一个 type、一个 priority，并可选择零到多个 area�
 
 ## 当前 CI
 
-当前 CI 只运行 `python .agents/scripts/validate_naming.py` 与 `python .agents/scripts/validate_workflow.py`。Rust workspace 与 compiler gate 只有在对应 Issue 实现后才成立。
+当前 CI 只运行 `python .agents/scripts/validate_current_tree.py`。它验证 current tree 的结构边界，不复制 workflow 或语言规范正文；Cargo 与 compiler gate 只有在对应实现 Issue 建立后才成立。

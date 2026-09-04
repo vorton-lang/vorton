@@ -127,7 +127,7 @@ let update = fn [mut counter: Int, name: Str](step: Int) {
 };
 ```
 
-`fn(step) [mut counter] { ... }` 非法。capture list 可在 lv0 完全省略并由编译器推断，lv2 formatter 可物化；它不进入 `FnType`，不改变函数类型相等性或调用签名。所有显式 mode/capture assertion 都必须与推断结果一致；不一致遵守现有 warning 及 agent profile 的 warning-as-error 规则。
+`fn(step) [mut counter] { ... }` 非法。capture list 可完全省略并由编译器推断；它不进入 `FnType`，不改变函数类型相等性或调用签名。所有显式 mode/capture assertion 都必须与推断结果一致；不一致必须产生诊断。
 
 ## Path、类型与 effect
 
@@ -421,13 +421,13 @@ TuplePattern     ::= '(' Pattern ',' Pattern (',' Pattern)* ','? ')'
 
 ## 明确排除的 0.1 表面
 
-以下形式没有 canonical 产生式，只能在文档中作为非法或历史反例出现：
+以下形式没有 canonical 产生式，只能在文档中作为非法反例出现：
 
 ```vorton
-let old: Int? = none;                    // 非法：类型只能写 Option<Int>
-fn old(mut value) { value = 1; }         // 非法：binder-prefix mode
-fn old(mut self) {}                      // 非法：receiver-prefix mode
-let old = fn(x) [move resource] { x };   // 非法：capture list 在参数之后
+let invalid: Int? = none;                    // 非法：类型只能写 Option<Int>
+fn invalid(mut value) { value = 1; }         // 非法：binder-prefix mode
+fn invalid(mut self) {}                      // 非法：receiver-prefix mode
+let invalid = fn(x) [move resource] { x };   // 非法：capture list 在参数之后
 @derive(Json)                            // 非法：'@' 不是 token
 pub impl Value {}                        // 非法：impl block 无 visibility
 ```

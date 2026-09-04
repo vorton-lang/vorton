@@ -1,6 +1,0 @@
-cross_ok=5
-cross_fail=-1
-intra_ok=42
-intra_fail=-1
-basic_fail=-1
-basic_ok=42

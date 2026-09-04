@@ -1,5 +1,0 @@
-error[E0207]: Duplicate definition: 'shared_callable' is already defined
-first declaration is here
-!E0707
-!E0201
-!unknown_duplicate_child

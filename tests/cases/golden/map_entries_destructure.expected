@@ -1,5 +1,0 @@
-a: ty=1 ntvars=2 nbounds=0
-  tvar=10
-  tvar=20
-b: ty=2 ntvars=1 nbounds=1
-  tvar=30

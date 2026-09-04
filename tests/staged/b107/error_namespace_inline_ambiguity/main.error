@@ -1,8 +1,0 @@
-error[E0707]: Ambiguous value name 'Clash': conflicting payloads 'main::first::one' and 'main::second::two'
-error[E0707]: Ambiguous struct name 'TypeClash': conflicting payloads 'main::first::One' and 'main::second::Two'
-pub use super::second::{two as Clash, Two as TypeClash}
-!$$_
-!E0702
-!E0703
-!E0704
-!E0705

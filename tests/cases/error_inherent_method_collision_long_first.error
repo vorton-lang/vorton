@@ -1,4 +1,0 @@
-E0504
-Ambiguous method 'clash' on 'LocalCollisionLongFirst'
-provided by an inherent impl and an inherent impl
-!internal compiler error

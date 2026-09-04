@@ -1,4 +1,0 @@
-fn main() {
-    let slots: Ptr<Int> = vorton_slot_alloc(-1)
-    vorton_slot_dealloc(slots, -1)
-}

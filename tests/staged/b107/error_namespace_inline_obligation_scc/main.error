@@ -1,9 +1,0 @@
-error[E0704]: Unresolved value import dependency SCC for 'MissingA' in module 'main::b'
-pub use super::b::{MissingB as MissingA}
-!MissingA -> MissingB
-!MissingB -> MissingA
-!$$_
-!E0702
-!E0703
-!E0705
-!E0707

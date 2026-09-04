@@ -1,5 +1,0 @@
-E0504
-Ambiguous method 'collide' on
-Shared
-provided by an inherent impl and an inherent impl
-!internal compiler error

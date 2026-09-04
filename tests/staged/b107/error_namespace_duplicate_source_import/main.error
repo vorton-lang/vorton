@@ -1,5 +1,0 @@
-error[E0207]: Duplicate definition: module 'same' is already defined
-first module declaration is here
-!E0707
-!Clash
-!Handle

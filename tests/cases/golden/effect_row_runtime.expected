@@ -1,7 +1,0 @@
-LOG: read: val-mode
-T1: val-mode
-T2-LOG: read: inner-mode
-T2: inner-mode
-T3: localhost:8080
-T4: prod-dev
-effect_row_runtime: done

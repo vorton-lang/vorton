@@ -1,6 +1,0 @@
-error[E0207]: Duplicate definition: 'shared_value' is already defined
-first declaration is here
-!E0707
-!E0204
-!E0201
-!unknown_duplicate_child

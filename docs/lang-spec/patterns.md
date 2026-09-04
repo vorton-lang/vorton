@@ -85,7 +85,7 @@ check_exhaustive(arms, τ_scrutinee) → null | "missing pattern description"
 **Enum 类型：** 每个变体都必须被至少一个模式覆盖。如果变体有字段，递归检查字段模式的穷尽性。
 
 ```vorton
-// 缺少 none 分支 → E0601
+// 缺少 none 分支，因此编译失败
 match opt {
     some(x) => x,
 }
@@ -149,21 +149,6 @@ named_pattern_to_positional(variant, named_fields):
   返回位置模式列表
 ```
 
-### 交叉列穷尽性
-
-当前实现按列独立检查。多字段交叉组合不验证。例如：
-
-```vorton
-// 被接受为穷尽（尽管 (true, true) 和 (false, false) 未被单独匹配）
-match (a, b) {
-    (true, _) => ...,
-    (_, false) => ...,
-    (false, true) => ...,
-}
-```
-
-这是保守正确的（不会漏报），但可能拒绝一些实际穷尽的模式组合。
-
 ### Or-Pattern
 
 Or-Pattern 允许在单个 match/catch arm 中匹配多个模式，语法为 `p₁ | p₂ | ...`，`|` 分隔备选模式。任一子模式匹配即执行该分支。`|` 只在 arm 的最外层解析；它不是表达式运算符，也不能直接嵌套在 tuple 或构造器字段模式中。
@@ -217,4 +202,4 @@ Guard 是在模式匹配成功后额外检查的布尔条件。Guard 为 false �
 
 ### 非穷尽 Match
 
-如果穷尽性检查失败，编译器报 E0601 错误。若一个已通过检查的 match 在求值时仍没有 arm 匹配，程序触发不可恢复的 match-failure panic；具体 trap、异常或进程终止表示由后端决定，不属于语言语义。
+如果穷尽性检查失败，编译器拒绝该 match。已经通过检查的 match 不存在可到达的无匹配路径。

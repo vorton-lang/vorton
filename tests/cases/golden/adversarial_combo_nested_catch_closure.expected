@@ -1,9 +1,0 @@
-T1: ok(5)
-T2: pre:negative
-T3: after(ok(3))
-T4: outer:ok(10):negative
-T5: ctx(ok(1),ok(2),end)
-T6: negative+ok(7)+tail
-T7: fallback/input
-T8: ok(1)
-adversarial_combo_nested_catch_closure: done

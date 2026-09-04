@@ -1,6 +1,0 @@
-basic: medium
-first: big
-fallthrough: small
-binding: 99
-false-binding: fallback
-catch_arm_guard: done

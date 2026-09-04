@@ -1,8 +1,0 @@
-T1: value-ok
-T2: nf:empty
-T3: inv:42
-T4: timeout
-T5: caught-all
-T6: inv:42
-T7: timeout-caught
-catch_typed_multi: done

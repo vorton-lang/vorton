@@ -1,2 +1,0 @@
-// EXPECT_PANIC
-vorton panic: vorton_slot_move negative count (request=-1)

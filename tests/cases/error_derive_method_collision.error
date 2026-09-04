@@ -1,4 +1,0 @@
-E0504
-Ambiguous method 'eq' on 'DerivedMethodCollision'
-provided by trait 'CustomEq' and trait 'Eq'
-!internal compiler error

@@ -1,7 +1,0 @@
-error[E0707]: Ambiguous value name 'E::V': conflicting payloads 'main::E_V' and 'main::E::V'
-pub fn V
-!E0702
-!E0703
-!E0704
-!E0705
-!Ambiguous value name 'V'

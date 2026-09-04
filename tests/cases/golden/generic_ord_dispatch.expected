@@ -1,8 +1,0 @@
-larger int: 7
-smaller int: 3
-larger str: banana
-smaller str: apple
-sorted asc: true
-unsorted:   false
-sorted str: true
-equal larger: 5

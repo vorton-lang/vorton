@@ -1,5 +1,0 @@
-E0503
-const BAD: fn(Wrap<Float>) -> Int = hash_one
-type does not satisfy 'Hash'
-!E0301
-!apply(GOOD, 41)

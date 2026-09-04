@@ -9,11 +9,11 @@
 
 ## 当前项目事实
 
-- Vorton 当前以 Rust 重建编译器，先闭合 `source → token → AST → diagnostic`，再按 Milestone 目标顺序通过当前 Issue 推进 checker、IR、ownership、C11 后端与 CLI。
-- Rust workspace 与真实 compiler build/test gate 由对应实现 Issue 建立；进入仓库前不得声称 Cargo、compiler 或发布门已通过。
-- `compiler/*.vorton`、`compiler/dist-c/main.c`、`vorton_runtime.cpp`、`std/` 与 `tests/cases/` 只作迁移蓝本、语义 oracle 和已知缺陷复现，不是当前 bootstrap、CI 或发布 authority。
+- Vorton compiler 的当前宿主语言是 Rust；工作按 Milestone 顺序先闭合 `source → token → AST → diagnostic`，再推进 checker、IR、ownership、C11 后端与 CLI。
+- 当前 tree 尚无 Rust workspace；真实 compiler build/test gate 由对应实现 Issue 建立，在此之前不得声称 Cargo、compiler 或发布门已通过。
+- 当前 tree 只以其中实际存在的规范、治理入口与实现为 authority；Git 历史中的源码、测试、文档和构建产物不构成当前实现或验证证据。
 - 目标管线是 Lexer → Parser → AST → Checker（HM + effects）→ HIR → Core/Flow ResourcePlanner → RcIR → C11 → native。具体阶段与 ABI/ownership 不变量只以稳定设计和语言规范为准。
-- Self-host 已后置；只有语言与外部宿主编译器稳定后，经用户新决定才可恢复。
+- Self-host 不属于当前目标；只有语言与外部宿主编译器稳定后，经用户新决定才可加入。
 
 ## 用户保留决定
 

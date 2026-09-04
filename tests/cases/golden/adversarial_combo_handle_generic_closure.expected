@@ -1,7 +1,0 @@
-T1: ENV(count_label):3
-T2: host=localhost, port=8080
-T3: b
-T4: none
-T5: inner:inner_key|outer:outer_key
-T6: STR(str_label):4
-adversarial_combo_handle_generic_closure: done

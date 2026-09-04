@@ -1,9 +1,0 @@
-formatting 42
-T1: val=42
-T2: 42
-T3: 20
-T4: -1
-prepend
-append
-T5: tag:hello:end
-fn_type_effect: done

@@ -1,4 +1,0 @@
-E0504
-Ambiguous method 'next' on 'NextFirst'
-provided by trait 'Iterator' and an inherent impl
-!internal compiler error

@@ -1,4 +1,0 @@
-E0504
-Ambiguous method 'iter' on 'SourceFirst'
-provided by trait 'Iterable' and an inherent impl
-!internal compiler error

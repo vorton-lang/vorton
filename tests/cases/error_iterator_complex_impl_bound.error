@@ -1,4 +1,0 @@
-E0503
-Iteration protocol impl bound 'T: HasItem' uses nested type arguments or associated constraints that protocol lowering does not yet consume
-protocol lowering has not consumed nested impl predicates
-!internal compiler error

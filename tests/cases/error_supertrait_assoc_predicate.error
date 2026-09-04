@@ -1,4 +1,0 @@
-E0503
-Supertrait bound 'Base' uses unsupported associated constraints
-complex supertrait predicates are not supported
-!internal compiler error

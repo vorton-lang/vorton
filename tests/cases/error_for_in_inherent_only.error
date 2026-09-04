@@ -1,4 +1,0 @@
-E0301
-for..in requires an iterable type
-same-spelled inherent methods do not satisfy the iteration protocol
-!E0503

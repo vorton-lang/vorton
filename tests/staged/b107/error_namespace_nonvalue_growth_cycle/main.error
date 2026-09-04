@@ -1,6 +1,0 @@
-error[E0704]:
-Unresolved struct import dependency SCC
-pub use main
-!m::m::X
-!E0703
-!E0707

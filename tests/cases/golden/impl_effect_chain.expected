@@ -1,7 +1,0 @@
-T1: result=42
-T2: err: empty
-T3: 42
-T4: -1
-T5: 84
-T6: -1
-impl_effect_chain: done
