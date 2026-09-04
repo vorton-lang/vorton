@@ -1808,7 +1808,10 @@ impl Parser {
     fn parse_pattern(&mut self) -> Result<Pattern, FrontendDiagnostic> {
         let token = self.current().clone();
         match token.kind {
-            TokenKind::Ident(ref text) if text == "_" && self.nth_tag(1) != Tag::ColonColon => {
+            TokenKind::Ident(ref text)
+                if text == "_"
+                    && !matches!(self.nth_tag(1), Tag::ColonColon | Tag::LParen | Tag::LBrace) =>
+            {
                 self.bump();
                 Ok(Spanned::new(PatternKind::Wildcard, token.span))
             }

@@ -581,13 +581,15 @@ match value {
     (left, right) => 8,
     Red | Green if visible => 9,
     _::Variant => 10,
+    _(_) => 11,
+    _ { field } => 12,
 }
 "#,
     );
     let ExprKind::Match { arms, .. } = expression.kind else {
         panic!("match expected")
     };
-    assert_eq!(arms.len(), 11);
+    assert_eq!(arms.len(), 13);
     assert!(matches!(
         arms[0].pattern.alternatives[0].kind,
         PatternKind::Wildcard
@@ -639,6 +641,36 @@ match value {
         &path.segments[..],
         [PathSegment::Identifier(root), PathSegment::Identifier(variant)]
             if root.text == "_" && variant.text == "Variant"
+    ));
+    let PatternKind::Path {
+        path,
+        fields: Some(PatternFields::Positional(fields)),
+    } = &arms[11].pattern.alternatives[0].kind
+    else {
+        panic!("underscore positional path pattern expected")
+    };
+    assert!(matches!(
+        &path.segments[..],
+        [PathSegment::Identifier(root)] if root.text == "_"
+    ));
+    assert!(matches!(
+        &fields[..],
+        [field] if matches!(field.kind, PatternKind::Wildcard)
+    ));
+    let PatternKind::Path {
+        path,
+        fields: Some(PatternFields::Named { fields, rest: None }),
+    } = &arms[12].pattern.alternatives[0].kind
+    else {
+        panic!("underscore named path pattern expected")
+    };
+    assert!(matches!(
+        &path.segments[..],
+        [PathSegment::Identifier(root)] if root.text == "_"
+    ));
+    assert!(matches!(
+        &fields[..],
+        [field] if field.name.text == "field" && field.pattern.is_none()
     ));
 }
 
