@@ -20,3 +20,11 @@ jobs:
           python-version: '3.11'
       - name: Validate current tree
         run: python .agents/scripts/validate_current_tree.py
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint compiler
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test compiler
+        run: cargo test --workspace --locked
+      - name: Check whitespace errors
+        run: git diff --check
