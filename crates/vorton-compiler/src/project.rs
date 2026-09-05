@@ -311,7 +311,6 @@ pub(crate) struct EntityId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Entity {
-    pub(crate) id: EntityId,
     pub(crate) declared_at: Option<OriginRef>,
     pub(crate) public: bool,
     pub(crate) owner: Option<EntityId>,

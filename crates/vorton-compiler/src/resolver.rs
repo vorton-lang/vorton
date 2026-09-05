@@ -589,7 +589,6 @@ impl ResolverState {
             self.entities.insert(
                 id.clone(),
                 Entity {
-                    id: id.clone(),
                     declared_at: None,
                     public: true,
                     owner: Some(option.clone()),
@@ -646,9 +645,8 @@ impl ResolverState {
     ) {
         let id = language_id(namespace, kind, name, owner);
         self.entities.insert(
-            id.clone(),
+            id,
             Entity {
-                id,
                 declared_at: None,
                 public: true,
                 owner: None,
@@ -669,7 +667,6 @@ impl ResolverState {
         self.entities.insert(
             id.clone(),
             Entity {
-                id: id.clone(),
                 declared_at: None,
                 public: true,
                 owner: Some(owner.clone()),
@@ -697,7 +694,6 @@ impl ResolverState {
             self.entities.insert(
                 id.clone(),
                 Entity {
-                    id: id.clone(),
                     declared_at: info.declared_at.clone(),
                     public: info.public,
                     owner: None,
@@ -742,7 +738,6 @@ impl ResolverState {
             self.entities.insert(
                 id.clone(),
                 Entity {
-                    id: id.clone(),
                     declared_at: declared_at.clone(),
                     public,
                     owner: None,
@@ -985,9 +980,8 @@ impl ResolverState {
             );
             diagnostics.extend(type_declaration_name_diagnostic(&id));
             self.entities.insert(
-                id.clone(),
+                id,
                 Entity {
-                    id,
                     declared_at: Some(origin),
                     public: member.visibility.is_some(),
                     owner: None,
@@ -1036,7 +1030,6 @@ impl ResolverState {
         self.entities.insert(
             id.clone(),
             Entity {
-                id: id.clone(),
                 declared_at,
                 public,
                 owner: Some(owner.clone()),
@@ -1065,9 +1058,8 @@ impl ResolverState {
             Some(owner_key_from_entity(owner)),
         );
         self.entities.insert(
-            id.clone(),
+            id,
             Entity {
-                id,
                 declared_at: None,
                 public: false,
                 owner: Some(owner.clone()),
@@ -1101,9 +1093,8 @@ impl ResolverState {
             Some(owner),
         );
         self.entities.insert(
-            id.clone(),
+            id,
             Entity {
-                id,
                 declared_at: None,
                 public: false,
                 owner: None,
@@ -1334,14 +1325,14 @@ impl ResolverState {
             }
         }
         if include_language {
-            for entity in self.entities.values() {
-                if entity.id.origin == DeclarationOrigin::Language
-                    && entity.id.kind != EntityKind::LanguageConstructor
-                    && entity.id.name == name
+            for entity in self.entities.keys() {
+                if entity.origin == DeclarationOrigin::Language
+                    && entity.owner.is_none()
+                    && entity.name == name
                 {
                     result
                         .accessible
-                        .insert(LookupContainer::Entity(entity.id.clone()));
+                        .insert(LookupContainer::Entity(entity.clone()));
                 }
             }
         }
@@ -2357,9 +2348,8 @@ impl<'state> BodyResolver<'state> {
     fn insert_scoped_entity(&mut self, identity: EntityId) {
         let declared_at = entity_origin(&identity);
         self.state.entities.insert(
-            identity.clone(),
+            identity,
             Entity {
-                id: identity,
                 declared_at,
                 public: false,
                 owner: None,
@@ -5111,11 +5101,11 @@ fn make(value: Int) -> Option<Int> {
         .expect("explicit language constructor imports resolve");
         let constructors = resolved
             .entities
-            .values()
-            .filter(|entity| entity.id.kind == EntityKind::LanguageConstructor)
+            .iter()
+            .filter(|(identity, _)| identity.kind == EntityKind::LanguageConstructor)
             .collect::<Vec<_>>();
         assert_eq!(constructors.len(), 2);
-        assert!(constructors.iter().all(|constructor| {
+        assert!(constructors.iter().all(|(_, constructor)| {
             constructor
                 .owner
                 .as_ref()
@@ -6039,6 +6029,33 @@ fn ambiguous() -> Int { Source.read() }
             vec![],
         ))
         .expect("special Type spelling does not occupy the Value namespace");
+
+        for (source, namespace, expected_name) in [
+            ("fn bad(value: Item) {}", NameNamespace::Type, "Item"),
+            ("fn bad() { eq }", NameNamespace::Value, "eq"),
+            ("fn bad() { raise }", NameNamespace::Value, "raise"),
+        ] {
+            let diagnostic = resolve_project(&project(source, vec![]))
+                .expect_err("owner-scoped Language members are not implicit root bindings");
+            assert!(matches!(
+                diagnostic.kind,
+                ProjectDiagnosticKind::UnresolvedName {
+                    namespace: actual,
+                    ref name,
+                } if actual == namespace && name == expected_name
+            ));
+        }
+
+        resolve_project(&project(
+            "type Item = Int; fn eq() -> Int { 1 } fn raise(value: Int) -> Int { value } fn call(value: Item) -> Int { eq() + raise(value) }",
+            vec![],
+        ))
+        .expect("source root bindings do not conflict with owner-scoped Language members");
+        resolve_project(&project(
+            "use Eq::eq; use Iterable::Item; use fail::raise; fn call(value: Item) { eq; raise(value); }",
+            vec![],
+        ))
+        .expect("explicit owner-member imports still bind their exact Language entities");
 
         let diagnostic = resolve_project(&project("fn bad<Int>(value: Int) {}", vec![]))
             .expect_err("generic cannot shadow language type");
