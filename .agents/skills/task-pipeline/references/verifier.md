@@ -5,16 +5,17 @@
 ## 输入
 
 - Issue：`<Issue URL / #N>`，唯一 contract
+- Contract revision：`<Readiness 采用的 UserContentEdit ID、lastEditedAt/editedAt、editor；或创建时正文及 Issue createdAt>`
 - PR：`<唯一 active PR URL>`
 - SHA：`<PR head 的 exact 40-hex commit>`
-- Canonical gates：`<Issue 与该 SHA repository authority 指定的命令>`
+- Canonical gates：`<Issue 与该 SHA repository authority 指定的命令；whitespace 命令已展开 PR base 与 exact candidate SHA>`
 
-在 SHA 对应的 clean worktree 中读取 `AGENTS.md`、本 skill、Issue、PR diff 与相关 repository authority。
+在 SHA 对应的 clean worktree 中读取 `AGENTS.md`、本 skill、Issue 当前正文、完整分页的原生编辑历史、PR diff 与相关 repository authority。按主 skill 独立核对输入的 Contract revision 仍可定位且仍为当前正文；发现新正文编辑时先查看实际变化，修订身份或变化无法核对时不得猜测。
 
 ## 允许
 
 - 只读检查 candidate，按原命令运行 canonical gates，并在仓库外临时目录创建最小行为探针。
-- 多个行为或删除探针复用同一个仓库外隔离副本；每个探针结束后恢复并核对 exact SHA 与 clean 状态，只有无法可靠恢复时才新建副本。
+- 需要的多个行为或删除/合并探针复用同一个仓库外隔离副本；每个探针结束后恢复并核对 exact SHA 与 clean 状态，只有无法可靠恢复时才新建副本。已有明确结构或合同依据的必要内容可直接引用；只有具体取舍能由实验裁决时才要求实验，不设次数或文件数配额。
 - 预期失败的负向探针以 `EXPECTED_REJECT` 记录命令、预期拒绝点与实际拒绝点；只有偏离预期的失败才作为 finding 或基础设施错误。
 - 为每个 finding 报告 contract/invariant、触发条件、期望、实际结果和 exact evidence。
 - 确认遗留 lifecycle authority、错误 SHA、空洞模板或越权外部写入任一情况都不能得到 `PASS`。
@@ -43,6 +44,7 @@ Candidate/证据、Debt Gate、重试与资源、task 归档只按主 skill 的�
 Issue: #N
 Stage: VERIFICATION
 Status: PASS | PRODUCT_FAIL | EVIDENCE_GAP | INFRA_BLOCKED
+Contract revision: <UserContentEdit ID, lastEditedAt/editedAt, editor | 创建时正文, Issue createdAt>
 PR: <URL>
 SHA: <40-hex verified commit>
 Canonical gates:
