@@ -59,7 +59,7 @@ Source
 
 ## 类型、Trait 与 Effect 闭合
 
-HM 类型推断、record/effect row unification、trait bound 与 associated type selection 在 TypedHIR 前完成。一次 scheme instantiation 只产生一份 mapping receipt；type actual、effect formal-to-actual 与 dictionary/evidence 共同消费该 receipt，不能分别从结果类型重建映射。
+HM 类型推断、effect row unification、trait bound 与 associated type selection 在 TypedHIR 前完成。一次 scheme instantiation 只产生一份 mapping receipt；type actual、effect formal-to-actual 与 dictionary/evidence 共同消费该 receipt，不能分别从结果类型重建映射。
 
 自递归和互递归 callable 以调用图的 strongly connected component 为绑定组。组内使用共享 monomorphic provisional variables，所有 body 约束闭合后才原子 final-zonk、generalize 和 publish。组内不支持 polymorphic recursion；组外使用已发布 scheme 正常实例化。
 

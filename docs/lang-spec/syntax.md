@@ -133,16 +133,13 @@ let update = fn [mut counter: Int, name: Str](step: Int) {
 Path             ::= PathSegment ('::' PathSegment)*
 PathSegment      ::= Ident | 'super'
 
-TypeExpr         ::= NamedType | FnType | TupleType | RecordType
+TypeExpr         ::= NamedType | FnType | TupleType
 NamedType        ::= Path TypeArgs?
 FnType           ::= 'fn' '(' FnTypeParams? ')' '->' TypeExpr
                      EffectAnnotation?
 FnTypeParams     ::= FnTypeParam (',' FnTypeParam)* ','?
 FnTypeParam      ::= ParamMode? TypeExpr
 TupleType        ::= '(' TypeExpr ',' TypeExpr (',' TypeExpr)* ','? ')'
-RecordType       ::= '{' RecordField (',' RecordField)*
-                     (',' '..' Ident)? ','? '}'
-RecordField      ::= Ident ':' TypeExpr
 
 TypeParams       ::= '<' TypeParam (',' TypeParam)* ','? '>'
 TypeParam        ::= Ident (':' TypeBound ('+' TypeBound)*)?
@@ -158,6 +155,8 @@ EffectExpr       ::= Path EffectArgs?
                    | 'unsafe'
 EffectArgs       ::= '<' TypeExpr (',' TypeExpr)* ','? '>'
 ```
+
+Canonical 0.1 不提供结构化 record 类型；封闭 `{ x: Int }` 与开放 `{ x: Int, ..r }` 在所有 `TypeExpr` 位置均非法。该排除不影响花括号承载的 effect set、block、named construction 与 pattern。
 
 所有命名类型、value path、named-field construction 与 pattern path 都使用统一 `Path`；大小写不参与分类。`super` 的合法层级以及 contextual `self` 的路径位置由模块解析检查，而非 Lexer 按字符类别区分。
 

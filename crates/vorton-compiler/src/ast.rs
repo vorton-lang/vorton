@@ -331,7 +331,6 @@ pub enum TypeKind {
     Named(NamedTypeKind),
     Function(FunctionType),
     Tuple(Vec<TypeExpr>),
-    Record(RecordType),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,12 +345,6 @@ pub struct FunctionTypeParameter {
     pub span: Span,
     pub mode: Option<Spanned<ParameterMode>>,
     pub ty: TypeExpr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordType {
-    pub fields: Vec<NamedField>,
-    pub rest: Option<Identifier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
