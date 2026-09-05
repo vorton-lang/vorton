@@ -979,45 +979,8 @@ impl ResolverState {
 
     fn check_own_bindings(&self) -> Result<(), ProjectDiagnostic> {
         for table in self.own_bindings.values() {
-            for ((namespace, name), deliveries) in table {
-                let Some(public_namespace) = namespace.public() else {
-                    continue;
-                };
-                if is_language_name(*namespace, name)
-                    && !deliveries.keys().all(|target| {
-                        target.origin == DeclarationOrigin::Language
-                            && target.name.as_str() == name.as_str()
-                    })
-                {
-                    let primary = sorted_delivery_origins(deliveries).into_iter().next();
-                    return Err(ProjectDiagnostic {
-                        kind: ProjectDiagnosticKind::ReservedLanguageBinding {
-                            namespace: public_namespace,
-                            name: name.clone(),
-                        },
-                        primary,
-                        related: Vec::new(),
-                    });
-                }
-                if deliveries.len() > 1 {
-                    let mut origins = sorted_delivery_origins(deliveries).into_iter();
-                    let primary = origins.next();
-                    return Err(ProjectDiagnostic {
-                        kind: ProjectDiagnosticKind::NameConflict {
-                            namespace: public_namespace,
-                            name: name.clone(),
-                        },
-                        primary,
-                        related: origins.collect(),
-                    });
-                }
-                if *namespace == Namespace::Type && name == "Self" {
-                    return Err(ProjectDiagnostic {
-                        kind: ProjectDiagnosticKind::InvalidSelf,
-                        primary: sorted_delivery_origins(deliveries).into_iter().next(),
-                        related: Vec::new(),
-                    });
-                }
+            if let Some(diagnostic) = first_binding_diagnostic(table) {
+                return Err(diagnostic);
             }
         }
         Ok(())
@@ -1403,44 +1366,8 @@ impl ResolverState {
 
     fn check_import_bindings(&self) -> Result<(), ProjectDiagnostic> {
         for table in self.bindings.values() {
-            for ((namespace, name), deliveries) in table {
-                let Some(public_namespace) = namespace.public() else {
-                    continue;
-                };
-                if is_language_name(*namespace, name)
-                    && !deliveries.keys().all(|target| {
-                        target.origin == DeclarationOrigin::Language
-                            && target.name.as_str() == name.as_str()
-                    })
-                {
-                    return Err(ProjectDiagnostic {
-                        kind: ProjectDiagnosticKind::ReservedLanguageBinding {
-                            namespace: public_namespace,
-                            name: name.clone(),
-                        },
-                        primary: sorted_delivery_origins(deliveries).into_iter().next(),
-                        related: Vec::new(),
-                    });
-                }
-                if deliveries.len() > 1 {
-                    let mut origins = sorted_delivery_origins(deliveries).into_iter();
-                    let primary = origins.next();
-                    return Err(ProjectDiagnostic {
-                        kind: ProjectDiagnosticKind::NameConflict {
-                            namespace: public_namespace,
-                            name: name.clone(),
-                        },
-                        primary,
-                        related: origins.collect(),
-                    });
-                }
-                if *namespace == Namespace::Type && name == "Self" {
-                    return Err(ProjectDiagnostic {
-                        kind: ProjectDiagnosticKind::InvalidSelf,
-                        primary: sorted_delivery_origins(deliveries).into_iter().next(),
-                        related: Vec::new(),
-                    });
-                }
+            if let Some(diagnostic) = first_binding_diagnostic(table) {
+                return Err(diagnostic);
             }
         }
         Ok(())
@@ -2359,7 +2286,7 @@ impl ExpectedName {
     }
 
     fn accepts_selection(self) -> bool {
-        !matches!(self, Self::Effect)
+        matches!(self, Self::Type | Self::Value | Self::MethodReceiver)
     }
 }
 
@@ -2765,21 +2692,43 @@ impl BodyResolver<'_> {
                             }
                         }
                     } else if is_selection_base(&base) {
-                        let declaration = declared_members.into_iter().next();
-                        push_candidate(
-                            &mut outcome.candidates,
-                            PathCandidate::Selection {
-                                base,
-                                members: vec![ResolvedSelection {
-                                    origin: self.origin(identifier.span),
-                                    name: identifier.text.clone(),
-                                    declaration,
-                                }],
-                            },
-                        );
+                        if declared_members.is_empty() {
+                            push_candidate(
+                                &mut outcome.candidates,
+                                PathCandidate::Selection {
+                                    base,
+                                    members: vec![ResolvedSelection {
+                                        origin: self.origin(identifier.span),
+                                        name: identifier.text.clone(),
+                                        declaration: None,
+                                    }],
+                                },
+                            );
+                        } else {
+                            for declaration in declared_members {
+                                push_candidate(
+                                    &mut outcome.candidates,
+                                    PathCandidate::Selection {
+                                        base: base.clone(),
+                                        members: vec![ResolvedSelection {
+                                            origin: self.origin(identifier.span),
+                                            name: identifier.text.clone(),
+                                            declaration: Some(declaration),
+                                        }],
+                                    },
+                                );
+                            }
+                        }
                     }
                 }
                 PathCandidate::Selection { base, mut members } => {
+                    if members
+                        .last()
+                        .and_then(|member| member.declaration.as_ref())
+                        .is_some_and(|declaration| declaration.namespace != Namespace::Type)
+                    {
+                        continue;
+                    }
                     members.push(ResolvedSelection {
                         origin: self.origin(identifier.span),
                         name: identifier.text.clone(),
@@ -2798,7 +2747,23 @@ impl BodyResolver<'_> {
     fn candidate_matches(&self, candidate: &PathCandidate, expected: ExpectedName) -> bool {
         match candidate {
             PathCandidate::Module(_) => false,
-            PathCandidate::Selection { .. } => expected.accepts_selection(),
+            PathCandidate::Selection { members, .. } => {
+                expected.accepts_selection()
+                    && members
+                        .last()
+                        .and_then(|member| member.declaration.as_ref())
+                        .is_none_or(|declaration| match expected {
+                            ExpectedName::Type => declaration.namespace == Namespace::Type,
+                            ExpectedName::Value => declaration.namespace == Namespace::Value,
+                            ExpectedName::MethodReceiver => matches!(
+                                declaration.namespace,
+                                Namespace::Value | Namespace::Effect
+                            ),
+                            ExpectedName::Effect
+                            | ExpectedName::Construct
+                            | ExpectedName::PatternConstructor => false,
+                        })
+            }
             PathCandidate::Exact(entity) => match expected {
                 ExpectedName::Type => {
                     entity.namespace == Namespace::Type && entity.kind != EntityKind::Module
@@ -2809,11 +2774,12 @@ impl BodyResolver<'_> {
                     matches!(entity.namespace, Namespace::Value | Namespace::Effect)
                 }
                 ExpectedName::Construct | ExpectedName::PatternConstructor => {
-                    (entity.namespace == Namespace::Type && entity.kind != EntityKind::Module)
-                        || matches!(
-                            entity.kind,
-                            EntityKind::EnumConstructor | EntityKind::LanguageConstructor
-                        )
+                    matches!(
+                        entity.kind,
+                        EntityKind::Struct
+                            | EntityKind::EnumConstructor
+                            | EntityKind::LanguageConstructor
+                    )
                 }
             },
         }
@@ -4153,6 +4119,62 @@ fn sorted_delivery_origins(deliveries: &BTreeMap<EntityId, Delivery>) -> Vec<Ori
     origins
 }
 
+fn first_binding_diagnostic(table: &BindingTable) -> Option<ProjectDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for ((namespace, name), deliveries) in table {
+        let Some(public_namespace) = namespace.public() else {
+            continue;
+        };
+        let origins = sorted_delivery_origins(deliveries);
+        let primary = origins.first().cloned();
+        if is_language_name(*namespace, name)
+            && !deliveries.keys().all(|target| {
+                target.origin == DeclarationOrigin::Language
+                    && target.name.as_str() == name.as_str()
+            })
+        {
+            diagnostics.push((
+                (primary.clone(), 0_u8, *namespace, name.clone()),
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::ReservedLanguageBinding {
+                        namespace: public_namespace,
+                        name: name.clone(),
+                    },
+                    primary: primary.clone(),
+                    related: Vec::new(),
+                },
+            ));
+        }
+        if deliveries.len() > 1 {
+            diagnostics.push((
+                (primary.clone(), 1_u8, *namespace, name.clone()),
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::NameConflict {
+                        namespace: public_namespace,
+                        name: name.clone(),
+                    },
+                    primary: primary.clone(),
+                    related: origins.iter().skip(1).cloned().collect(),
+                },
+            ));
+        }
+        if *namespace == Namespace::Type && name == "Self" {
+            diagnostics.push((
+                (primary.clone(), 2_u8, *namespace, name.clone()),
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::InvalidSelf,
+                    primary,
+                    related: Vec::new(),
+                },
+            ));
+        }
+    }
+    diagnostics
+        .into_iter()
+        .min_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, diagnostic)| diagnostic)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4648,6 +4670,40 @@ fn read(value: Choice) -> Int {
     }
 
     #[test]
+    fn qualified_constructor_patterns_require_exact_declarations() {
+        for source in [
+            "enum E { A } fn f(value: E) { match value { E::Missing => (), } }",
+            "enum E { A(Int) } fn f(value: E) { match value { E::Missing(x) => x, } }",
+        ] {
+            let diagnostic = resolve_project(&project(source, vec![]))
+                .expect_err("constructor-shaped pattern cannot defer a missing constructor");
+            assert!(matches!(
+                diagnostic.kind,
+                ProjectDiagnosticKind::UnresolvedName {
+                    namespace: NameNamespace::Value,
+                    ref name,
+                } if name == "Missing"
+            ));
+        }
+    }
+
+    #[test]
+    fn type_position_rejects_known_value_member() {
+        let diagnostic = resolve_project(&project(
+            "trait T { fn method(self: Self); } fn f(value: T::method) {}",
+            vec![],
+        ))
+        .expect_err("a known Value method is not a Type selection");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::UnresolvedName {
+                namespace: NameNamespace::Type,
+                ref name,
+            } if name == "method"
+        ));
+    }
+
+    #[test]
     fn generic_self_and_capture_rules_resolve_without_type_selection() {
         let resolved = resolve_project(&project(
             r#"
@@ -4911,6 +4967,34 @@ fn ambiguous() -> Int { Source.read() }
         })
         .expect_err("same error with reverse construction");
         assert_eq!(left_error, right_error);
+    }
+
+    #[test]
+    fn declaration_conflicts_are_ordered_by_source_span_not_spelling() {
+        let diagnostic =
+            resolve_project(&project("fn z() {} fn z() {} fn a() {} fn a() {}", vec![]))
+                .expect_err("the earliest declaration conflict wins");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::NameConflict {
+                namespace: NameNamespace::Value,
+                ref name,
+            } if name == "z"
+        ));
+        assert_eq!(
+            diagnostic
+                .primary
+                .expect("first conflicting declaration")
+                .span,
+            Span::new(3, 4)
+        );
+        assert_eq!(
+            diagnostic.related,
+            vec![OriginRef {
+                source: SourceRef::Root,
+                span: Span::new(13, 14),
+            }]
+        );
     }
 
     fn left_source_maps() -> BTreeMap<FileModulePath, String> {
