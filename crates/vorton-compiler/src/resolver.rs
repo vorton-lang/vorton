@@ -502,17 +502,29 @@ impl ResolverState {
     fn index_entities(&mut self) -> Result<(), ProjectDiagnostic> {
         self.index_language_entities();
         self.index_modules();
+        let mut diagnostics = Vec::new();
         let bodies = self
             .modules
             .iter()
             .filter_map(|(module, info)| info.body.clone().map(|body| (module.clone(), body)))
             .collect::<Vec<_>>();
         for (module, body) in bodies {
-            self.index_declarations(&module, &body)?;
+            diagnostics.extend(
+                self.index_declarations(&module, &body)
+                    .into_iter()
+                    .map(|diagnostic| (module.clone(), diagnostic)),
+            );
             self.imports
                 .extend(flatten_imports(&module, &body.origin, &body.uses));
         }
-        self.check_own_bindings()?;
+        for (module, table) in &self.own_bindings {
+            if let Some(diagnostic) = first_binding_diagnostic(table) {
+                diagnostics.push((module.clone(), diagnostic));
+            }
+        }
+        if let Some(diagnostic) = first_stage_diagnostic(diagnostics) {
+            return Err(diagnostic);
+        }
         self.bindings = self.own_bindings.clone();
         Ok(())
     }
@@ -627,10 +639,11 @@ impl ResolverState {
         &mut self,
         module: &ModuleRef,
         body: &ModuleBodyAst,
-    ) -> Result<(), ProjectDiagnostic> {
+    ) -> Vec<ProjectDiagnostic> {
+        let mut diagnostics = Vec::new();
         for declaration in &body.declarations {
             let Some((id, public)) = declaration_entity(module, &body.origin, declaration) else {
-                self.index_impl_members(module, &body.origin, declaration)?;
+                diagnostics.extend(self.index_impl_members(module, &body.origin, declaration));
                 continue;
             };
             if id.kind == EntityKind::Module {
@@ -662,9 +675,9 @@ impl ResolverState {
                 id.namespace,
                 id.name.clone(),
             );
-            self.index_owned_members(module, &body.origin, declaration, &id)?;
+            diagnostics.extend(self.index_owned_members(module, &body.origin, declaration, &id));
         }
-        Ok(())
+        diagnostics
     }
 
     fn index_owned_members(
@@ -673,7 +686,8 @@ impl ResolverState {
         source: &SourceRef,
         declaration: &Declaration,
         owner: &EntityId,
-    ) -> Result<(), ProjectDiagnostic> {
+    ) -> Vec<ProjectDiagnostic> {
+        let mut diagnostics = Vec::new();
         let owner_key = owner_key_from_entity(owner);
         match &declaration.kind {
             DeclarationKind::Struct(declared) => {
@@ -687,7 +701,14 @@ impl ResolverState {
                         &field.name.text,
                         Some(owner_key.clone()),
                     );
-                    self.insert_member(owner, id, field.visibility.is_some(), EntityShape::Plain)?;
+                    if let Some(diagnostic) = self.insert_member(
+                        owner,
+                        id,
+                        field.visibility.is_some(),
+                        EntityShape::Plain,
+                    ) {
+                        diagnostics.push(diagnostic);
+                    }
                 }
                 self.insert_self_entity(module, source, owner);
             }
@@ -707,12 +728,14 @@ impl ResolverState {
                         &variant.name.text,
                         Some(owner_key.clone()),
                     );
-                    self.insert_member(
+                    if let Some(diagnostic) = self.insert_member(
                         owner,
                         variant_id.clone(),
                         owner_public(self, owner),
                         shape,
-                    )?;
+                    ) {
+                        diagnostics.push(diagnostic);
+                    }
                     let variant_owner = owner_key_from_entity(&variant_id);
                     match &variant.fields {
                         VariantFields::Unit => {}
@@ -727,7 +750,11 @@ impl ResolverState {
                                     &format!("#{index}"),
                                     Some(variant_owner.clone()),
                                 );
-                                self.insert_member(&variant_id, id, true, EntityShape::Plain)?;
+                                if let Some(diagnostic) =
+                                    self.insert_member(&variant_id, id, true, EntityShape::Plain)
+                                {
+                                    diagnostics.push(diagnostic);
+                                }
                             }
                         }
                         VariantFields::Named(fields) => {
@@ -741,7 +768,11 @@ impl ResolverState {
                                     &field.name.text,
                                     Some(variant_owner.clone()),
                                 );
-                                self.insert_member(&variant_id, id, true, EntityShape::Plain)?;
+                                if let Some(diagnostic) =
+                                    self.insert_member(&variant_id, id, true, EntityShape::Plain)
+                                {
+                                    diagnostics.push(diagnostic);
+                                }
                             }
                         }
                     }
@@ -769,7 +800,11 @@ impl ResolverState {
                         &name.text,
                         Some(owner_key.clone()),
                     );
-                    self.insert_member(owner, id, owner_public(self, owner), EntityShape::Plain)?;
+                    if let Some(diagnostic) =
+                        self.insert_member(owner, id, owner_public(self, owner), EntityShape::Plain)
+                    {
+                        diagnostics.push(diagnostic);
+                    }
                 }
                 self.insert_self_entity(module, source, owner);
             }
@@ -784,12 +819,16 @@ impl ResolverState {
                         &operation.name.text,
                         Some(owner_key.clone()),
                     );
-                    self.insert_member(owner, id, owner_public(self, owner), EntityShape::Plain)?;
+                    if let Some(diagnostic) =
+                        self.insert_member(owner, id, owner_public(self, owner), EntityShape::Plain)
+                    {
+                        diagnostics.push(diagnostic);
+                    }
                 }
             }
             _ => {}
         }
-        Ok(())
+        diagnostics
     }
 
     fn index_impl_members(
@@ -797,7 +836,7 @@ impl ResolverState {
         module: &ModuleRef,
         source: &SourceRef,
         declaration: &Declaration,
-    ) -> Result<(), ProjectDiagnostic> {
+    ) -> Vec<ProjectDiagnostic> {
         let (members, owner_kind) = match &declaration.kind {
             DeclarationKind::InherentImpl(implementation) => {
                 (&implementation.members, EntityKind::InherentImpl)
@@ -805,8 +844,9 @@ impl ResolverState {
             DeclarationKind::TraitImpl(implementation) => {
                 (&implementation.members, EntityKind::TraitImpl)
             }
-            _ => return Ok(()),
+            _ => return Vec::new(),
         };
+        let mut diagnostics = Vec::new();
         let owner = OwnerKey {
             module: module.clone(),
             source: source.clone(),
@@ -830,14 +870,17 @@ impl ResolverState {
                 source: source.clone(),
                 span: name.span,
             };
-            if let Some(previous) = seen.insert((namespace, name.text.clone()), origin.clone()) {
-                return Err(ProjectDiagnostic {
+            let key = (namespace, name.text.clone());
+            if let Some(previous) = seen.get(&key) {
+                diagnostics.push(ProjectDiagnostic {
                     kind: ProjectDiagnosticKind::MemberConflict {
                         name: name.text.clone(),
                     },
-                    primary: Some(origin),
-                    related: vec![previous],
+                    primary: Some(origin.clone()),
+                    related: vec![previous.clone()],
                 });
+            } else {
+                seen.insert(key, origin.clone());
             }
             let id = source_id(
                 module,
@@ -861,7 +904,7 @@ impl ResolverState {
             );
         }
         self.insert_impl_self(module, source, declaration.span, owner_kind);
-        Ok(())
+        diagnostics
     }
 
     fn insert_member(
@@ -870,7 +913,7 @@ impl ResolverState {
         id: EntityId,
         public: bool,
         shape: EntityShape,
-    ) -> Result<(), ProjectDiagnostic> {
+    ) -> Option<ProjectDiagnostic> {
         let declared_at = match &id.site {
             EntitySite::Source(origin) => Some(origin.clone()),
             EntitySite::Language | EntitySite::Module(_) => None,
@@ -883,20 +926,18 @@ impl ResolverState {
             .flatten()
             .find(|candidate| candidate.namespace == id.namespace)
             .cloned();
-        if let Some(existing) = existing {
-            return Err(ProjectDiagnostic {
-                kind: ProjectDiagnosticKind::MemberConflict {
-                    name: id.name.clone(),
-                },
-                primary: declared_at,
-                related: self
-                    .entities
-                    .get(&existing)
-                    .and_then(|entity| entity.declared_at.clone())
-                    .into_iter()
-                    .collect(),
-            });
-        }
+        let diagnostic = existing.map(|existing| ProjectDiagnostic {
+            kind: ProjectDiagnosticKind::MemberConflict {
+                name: id.name.clone(),
+            },
+            primary: declared_at.clone(),
+            related: self
+                .entities
+                .get(&existing)
+                .and_then(|entity| entity.declared_at.clone())
+                .into_iter()
+                .collect(),
+        });
         self.entities.insert(
             id.clone(),
             Entity {
@@ -915,7 +956,7 @@ impl ResolverState {
             .entry(id.name.clone())
             .or_default()
             .push(id);
-        Ok(())
+        diagnostic
     }
 
     fn insert_self_entity(&mut self, module: &ModuleRef, source: &SourceRef, owner: &EntityId) {
@@ -977,15 +1018,6 @@ impl ResolverState {
         );
     }
 
-    fn check_own_bindings(&self) -> Result<(), ProjectDiagnostic> {
-        for table in self.own_bindings.values() {
-            if let Some(diagnostic) = first_binding_diagnostic(table) {
-                return Err(diagnostic);
-            }
-        }
-        Ok(())
-    }
-
     fn resolve_imports(&mut self) -> Result<(), ProjectDiagnostic> {
         loop {
             let mut changed = false;
@@ -1037,9 +1069,16 @@ impl ResolverState {
             }
         }
 
-        self.check_import_directives()?;
-        self.check_import_bindings()?;
-        self.check_constructor_owner_closure()?;
+        let mut diagnostics = self.import_directive_diagnostics();
+        for (module, table) in &self.bindings {
+            if let Some(diagnostic) = first_binding_diagnostic(table) {
+                diagnostics.push((module.clone(), diagnostic));
+            }
+        }
+        diagnostics.extend(self.constructor_owner_diagnostics());
+        if let Some(diagnostic) = first_stage_diagnostic(diagnostics) {
+            return Err(diagnostic);
+        }
         Ok(())
     }
 
@@ -1244,14 +1283,19 @@ impl ResolverState {
         }
     }
 
-    fn check_import_directives(&self) -> Result<(), ProjectDiagnostic> {
+    fn import_directive_diagnostics(&self) -> Vec<(ModuleRef, ProjectDiagnostic)> {
+        let mut diagnostics = Vec::new();
         for directive in &self.imports {
             if let Some(kind) = &directive.invalid {
-                return Err(ProjectDiagnostic {
-                    kind: kind.clone(),
-                    primary: Some(directive.origin.clone()),
-                    related: Vec::new(),
-                });
+                diagnostics.push((
+                    directive.module.clone(),
+                    ProjectDiagnostic {
+                        kind: kind.clone(),
+                        primary: Some(directive.origin.clone()),
+                        related: Vec::new(),
+                    },
+                ));
+                continue;
             }
             let path = path_text(&directive.path);
             if directive.candidates.is_empty() {
@@ -1262,18 +1306,26 @@ impl ResolverState {
                 } else {
                     ProjectDiagnosticKind::UnresolvedImport { path }
                 };
-                return Err(ProjectDiagnostic {
-                    kind,
-                    primary: Some(directive.origin.clone()),
-                    related: Vec::new(),
-                });
+                diagnostics.push((
+                    directive.module.clone(),
+                    ProjectDiagnostic {
+                        kind,
+                        primary: Some(directive.origin.clone()),
+                        related: Vec::new(),
+                    },
+                ));
+                continue;
             }
             if directive.candidates.len() > 1 {
-                return Err(ProjectDiagnostic {
-                    kind: ProjectDiagnosticKind::AmbiguousImport { path },
-                    primary: Some(directive.origin.clone()),
-                    related: declaration_origins(&directive.candidates, &self.entities),
-                });
+                diagnostics.push((
+                    directive.module.clone(),
+                    ProjectDiagnostic {
+                        kind: ProjectDiagnosticKind::AmbiguousImport { path },
+                        primary: Some(directive.origin.clone()),
+                        related: declaration_origins(&directive.candidates, &self.entities),
+                    },
+                ));
+                continue;
             }
             let target = directive
                 .candidates
@@ -1285,21 +1337,24 @@ impl ResolverState {
                     .get(target)
                     .is_some_and(|entity| entity.public)
             {
-                return Err(ProjectDiagnostic {
-                    kind: ProjectDiagnosticKind::PrivateReExport {
-                        name: directive.local_name.clone(),
+                diagnostics.push((
+                    directive.module.clone(),
+                    ProjectDiagnostic {
+                        kind: ProjectDiagnosticKind::PrivateReExport {
+                            name: directive.local_name.clone(),
+                        },
+                        primary: Some(directive.origin.clone()),
+                        related: self
+                            .entities
+                            .get(target)
+                            .and_then(|entity| entity.declared_at.clone())
+                            .into_iter()
+                            .collect(),
                     },
-                    primary: Some(directive.origin.clone()),
-                    related: self
-                        .entities
-                        .get(target)
-                        .and_then(|entity| entity.declared_at.clone())
-                        .into_iter()
-                        .collect(),
-                });
+                ));
             }
         }
-        Ok(())
+        diagnostics
     }
 
     fn import_reaches_cycle(&self, directive: &ImportDirective) -> bool {
@@ -1364,16 +1419,8 @@ impl ResolverState {
             .collect()
     }
 
-    fn check_import_bindings(&self) -> Result<(), ProjectDiagnostic> {
-        for table in self.bindings.values() {
-            if let Some(diagnostic) = first_binding_diagnostic(table) {
-                return Err(diagnostic);
-            }
-        }
-        Ok(())
-    }
-
-    fn check_constructor_owner_closure(&self) -> Result<(), ProjectDiagnostic> {
+    fn constructor_owner_diagnostics(&self) -> Vec<(ModuleRef, ProjectDiagnostic)> {
+        let mut diagnostics = Vec::new();
         for (module, table) in &self.bindings {
             let public_types = table
                 .iter()
@@ -1403,21 +1450,24 @@ impl ResolverState {
                     .get(target)
                     .and_then(|entity| entity.owner.as_ref());
                 if owner.is_some_and(|owner| !public_types.contains(owner)) {
-                    return Err(ProjectDiagnostic {
-                        kind: ProjectDiagnosticKind::MissingConstructorOwner {
-                            constructor: target.name.clone(),
+                    diagnostics.push((
+                        module.clone(),
+                        ProjectDiagnostic {
+                            kind: ProjectDiagnosticKind::MissingConstructorOwner {
+                                constructor: target.name.clone(),
+                            },
+                            primary: Some(directive.origin.clone()),
+                            related: owner
+                                .and_then(|owner| self.entities.get(owner))
+                                .and_then(|entity| entity.declared_at.clone())
+                                .into_iter()
+                                .collect(),
                         },
-                        primary: Some(directive.origin.clone()),
-                        related: owner
-                            .and_then(|owner| self.entities.get(owner))
-                            .and_then(|entity| entity.declared_at.clone())
-                            .into_iter()
-                            .collect(),
-                    });
+                    ));
                 }
             }
         }
-        Ok(())
+        diagnostics
     }
 
     fn resolve_bodies(mut self) -> Result<ResolvedProject, ProjectDiagnostic> {
@@ -4127,52 +4177,100 @@ fn first_binding_diagnostic(table: &BindingTable) -> Option<ProjectDiagnostic> {
         };
         let origins = sorted_delivery_origins(deliveries);
         let primary = origins.first().cloned();
+        let mut record = |diagnostic: ProjectDiagnostic| {
+            diagnostics.push((
+                (
+                    primary.as_ref().map(|origin| origin.span),
+                    diagnostic_kind_rank(&diagnostic.kind),
+                    *namespace,
+                    name.clone(),
+                ),
+                diagnostic,
+            ));
+        };
         if is_language_name(*namespace, name)
             && !deliveries.keys().all(|target| {
                 target.origin == DeclarationOrigin::Language
                     && target.name.as_str() == name.as_str()
             })
         {
-            diagnostics.push((
-                (primary.clone(), 0_u8, *namespace, name.clone()),
-                ProjectDiagnostic {
-                    kind: ProjectDiagnosticKind::ReservedLanguageBinding {
-                        namespace: public_namespace,
-                        name: name.clone(),
-                    },
-                    primary: primary.clone(),
-                    related: Vec::new(),
+            record(ProjectDiagnostic {
+                kind: ProjectDiagnosticKind::ReservedLanguageBinding {
+                    namespace: public_namespace,
+                    name: name.clone(),
                 },
-            ));
+                primary: primary.clone(),
+                related: Vec::new(),
+            });
         }
         if deliveries.len() > 1 {
-            diagnostics.push((
-                (primary.clone(), 1_u8, *namespace, name.clone()),
-                ProjectDiagnostic {
-                    kind: ProjectDiagnosticKind::NameConflict {
-                        namespace: public_namespace,
-                        name: name.clone(),
-                    },
-                    primary: primary.clone(),
-                    related: origins.iter().skip(1).cloned().collect(),
+            record(ProjectDiagnostic {
+                kind: ProjectDiagnosticKind::NameConflict {
+                    namespace: public_namespace,
+                    name: name.clone(),
                 },
-            ));
+                primary: primary.clone(),
+                related: origins.iter().skip(1).cloned().collect(),
+            });
         }
         if *namespace == Namespace::Type && name == "Self" {
-            diagnostics.push((
-                (primary.clone(), 2_u8, *namespace, name.clone()),
-                ProjectDiagnostic {
-                    kind: ProjectDiagnosticKind::InvalidSelf,
-                    primary,
-                    related: Vec::new(),
-                },
-            ));
+            record(ProjectDiagnostic {
+                kind: ProjectDiagnosticKind::InvalidSelf,
+                primary: primary.clone(),
+                related: Vec::new(),
+            });
         }
     }
     diagnostics
         .into_iter()
         .min_by(|(left, _), (right, _)| left.cmp(right))
         .map(|(_, diagnostic)| diagnostic)
+}
+
+fn first_stage_diagnostic(
+    diagnostics: Vec<(ModuleRef, ProjectDiagnostic)>,
+) -> Option<ProjectDiagnostic> {
+    diagnostics
+        .into_iter()
+        .min_by(|(left_module, left), (right_module, right)| {
+            left_module
+                .cmp(right_module)
+                .then_with(|| {
+                    left.primary
+                        .as_ref()
+                        .map(|origin| origin.span)
+                        .cmp(&right.primary.as_ref().map(|origin| origin.span))
+                })
+                .then_with(|| {
+                    diagnostic_kind_rank(&left.kind).cmp(&diagnostic_kind_rank(&right.kind))
+                })
+        })
+        .map(|(_, diagnostic)| diagnostic)
+}
+
+fn diagnostic_kind_rank(kind: &ProjectDiagnosticKind) -> u8 {
+    match kind {
+        ProjectDiagnosticKind::Frontend(_) => 0,
+        ProjectDiagnosticKind::InvalidModuleName { .. } => 1,
+        ProjectDiagnosticKind::ModuleBodyConflict { .. } => 2,
+        ProjectDiagnosticKind::PathEscapesRoot => 3,
+        ProjectDiagnosticKind::InvalidPath => 4,
+        ProjectDiagnosticKind::NameConflict { .. } => 5,
+        ProjectDiagnosticKind::MemberConflict { .. } => 6,
+        ProjectDiagnosticKind::ReservedLanguageBinding { .. } => 7,
+        ProjectDiagnosticKind::UnresolvedImport { .. } => 8,
+        ProjectDiagnosticKind::AmbiguousImport { .. } => 9,
+        ProjectDiagnosticKind::InaccessibleImport { .. } => 10,
+        ProjectDiagnosticKind::ImportCycle { .. } => 11,
+        ProjectDiagnosticKind::PrivateReExport { .. } => 12,
+        ProjectDiagnosticKind::MissingConstructorOwner { .. } => 13,
+        ProjectDiagnosticKind::UnresolvedName { .. } => 14,
+        ProjectDiagnosticKind::AmbiguousName { .. } => 15,
+        ProjectDiagnosticKind::InaccessibleName { .. } => 16,
+        ProjectDiagnosticKind::DuplicateBinding { .. } => 17,
+        ProjectDiagnosticKind::PatternBindingMismatch => 18,
+        ProjectDiagnosticKind::InvalidSelf => 19,
+    }
 }
 
 #[cfg(test)]
@@ -4449,7 +4547,7 @@ pub fn read() -> Int { self::local() + helper() + plus() }
         assert_eq!(root_values.len(), 1);
 
         let diagnostic = resolve_project(&project(
-            "use left::item; use right::item;",
+            "use left::item; use right::item; use missing;",
             vec![
                 (vec!["left"], "pub fn item() -> Int { 1 }"),
                 (vec!["right"], "pub fn item() -> Int { 2 }"),
@@ -4971,9 +5069,11 @@ fn ambiguous() -> Int { Source.read() }
 
     #[test]
     fn declaration_conflicts_are_ordered_by_source_span_not_spelling() {
-        let diagnostic =
-            resolve_project(&project("fn z() {} fn z() {} fn a() {} fn a() {}", vec![]))
-                .expect_err("the earliest declaration conflict wins");
+        let diagnostic = resolve_project(&project(
+            "fn z() {} fn z() {} struct S { field: Int, field: Int }",
+            vec![],
+        ))
+        .expect_err("the earliest declaration conflict wins");
         assert!(matches!(
             diagnostic.kind,
             ProjectDiagnosticKind::NameConflict {
