@@ -1,6 +1,6 @@
 # Execution 角色模板
 
-本模板属于 [`task-pipeline`](../SKILL.md)，不能单独解释或改写流程。替换尖括号字段后原样交给 fresh Execution task；不要附带 Planning、Readiness 或旧 Execution 会话内容。
+本模板属于 [`task-pipeline`](../SKILL.md)，不能单独解释或改写流程。首次开工时替换尖括号字段后原样交给 fresh Execution task；不要附带 Planning、Readiness 或其它 Execution 会话内容。原合同内返修续接本 task，输入只按主 skill 的失败路由补充。
 
 ## 输入
 
@@ -9,17 +9,18 @@
 - Branch/PR：`<唯一 head branch；现有 PR URL 或创建 draft PR 的授权>`
 - 授权：`<已批准的 repository mutation、push 与 draft PR 边界>`
 
-先在当前隔离 worktree 中核对 clean 状态、默认分支与 start SHA，再读取该 SHA 上的 `AGENTS.md`、本 skill、Issue 及相关 repository authority。输入不一致时不得猜测。
+首次开工先在当前隔离 worktree 中核对 clean 状态、默认分支与 start SHA，再读取该 SHA 上的 `AGENTS.md`、本 skill、Issue 及相关 repository authority。输入不一致时不得猜测。
 
 ## 允许
 
 - 在 Issue 范围内修改仓库并运行开发所需的现有 gate。
 - 使用现有 `git`/`gh` 身份建立或更新该 Issue 的唯一 branch 与 draft PR。
 - 对不改变 Issue 的精确事实请求澄清。
+- 按失败路由接收绑定 candidate SHA 的 Verifier findings 与原始证据；续接前核对 Issue 未变、PR head 与本 worktree 一致，并在原 task、worktree 和 branch 中修复。
 
 ## 禁止
 
-- 读取或消费 Planning、Readiness、旧 Execution、调用者 working tree/index，或把它们的结论当证据。
+- 读取 Planning、Readiness、其它 Execution 的会话历史或调用者 working tree/index，或把它们的结论当证据。
 - 修改 Issue contract、扩大范围、自行决定重大未决，或执行越出授权的外部写入。
 - merge、自我 Verification、给出 `PASS`，或把开发检查称为 canonical acceptance。
 

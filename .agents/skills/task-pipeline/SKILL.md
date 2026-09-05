@@ -10,20 +10,23 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 ## 工作单元与授权
 
 - 一个用户确认的 Issue 是一个工作单元，同时只允许一个 active PR、一个 PR head branch 和一个 writer；PR 面向默认分支并使用 `Closes #N`。
-- Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由 fresh task，以及在已有预授权下执行 merge；关闭或重新打开 Milestone 必须另有用户明确授权；不得修改仓库。
+- Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由阶段 task、在已有 PR 写入授权内维护 `验证` 区的阶段与证据记录，以及在已有预授权下执行 merge；关闭或重新打开 Milestone 必须另有用户明确授权；不得修改仓库。
 - 经用户确认的 Issue body 是 Execution 与 Verification 的 immutable contract；Issue 评论、PR、handoff 或 task 输出都不能追加或覆盖合同。合同变化只按下文统一失败路由处理。
-- Worktree 只是隔离 checkout；不得把调用会话的 working tree、index、未提交改动、摘要或结论当作输入。
+- Worktree 只是隔离 checkout；不得把调用会话的 working tree、index 或未提交改动当作输入。调用会话的摘要和结论不得替代本阶段独立取证；原合同内返修仅按失败路由接收 Verifier findings 与原始证据。
 - Milestone/Issue/PR 的描述与活动状态以及 PR/default-branch 的 exact remote head 必须直接从 GitHub 读取；仓库文件、diff 和 authority 应从本阶段 clean worktree 或已有本地 Git object 批量读取。只有缺少所需 object 或 contract 明确指向其它外部 authority 时，才联网取得 repository 内容，禁止逐文件远程抓取。
 - GitHub 上的 Milestone、Issue、PR、Discussion、评论、commit、tag、tree 与 diff，以及本地可得的 Git 历史，不因状态、年代或与 `canonical-clean-tree` 的先后关系而限制读取。Closed 或 `not_planned` 对象只代表历史状态，不能充当当前 Issue contract。
-- 创建 fresh task 时，只有 `threadId` 可用于后续编排；`clientThreadId` 只表示 worktree setup pending，不得传给 thread tools，也不得用 `list_threads` 忙轮询。工具尚未提供 `threadId` 时等待 setup 完成或报告可见性阻塞。
+- 阶段 task 可由独立用户级 session 或 subagent 承载。Planning 可在保持角色输入、权限、独立取证、可恢复性与可追查性的前提下自主选择或替换载体，并向用户简短说明；载体替换不改变阶段职责、Issue contract 或验收要求，也不得留下仍可写入的旧 Execution。
+- fresh task 不得继承父会话或其它阶段的会话历史，只接收本阶段允许的输入。启动 subagent 必须显式设置 `fork_turns: "none"` 或宿主等价配置；subagent 共享文件系统不提供 checkout 隔离，Execution 与 Verification 仍各用自己的 clean worktree 和 exact SHA。
+- 用户级 session 使用返回的 `threadId` 编排；`clientThreadId` 只表示 worktree setup pending，不得传给 thread tools，也不得用 `list_threads` 忙轮询。尚未取得 `threadId` 时等待 setup 完成或报告可见性阻塞。Subagent 使用其工具返回的 agent ID 或任务路径编排，不得把两类标识混用。
 
 ## Milestone 与 Issue 路由
 
-- 正常推进只允许 `Milestone → 当前 Issue → fresh Readiness → fresh Execution → fresh Verification` 的单向路由；任何非成功终态只按下文统一失败路由推进，不得把后阶段摘要变成前阶段输入。
+- 正常开工只允许 `Milestone → 当前 Issue → fresh Readiness → fresh Execution → fresh Verification` 的单向路由；任何非成功终态只按下文统一失败路由推进。除原合同内返修所需、绑定 candidate SHA 的 Verifier findings 与原始证据外，不得把后阶段摘要变成前阶段输入。
 - Planning 在选择工作前必须读取全部 open Milestone 描述，并按已确认的 `1/5 → 5/5` 顺序选择最早未关闭目标。多个未来 Milestone 可以同时 open，但前一 Milestone 未关闭时，不得为后一 Milestone 启动 Issue。
 - Issue 归入其验收首先依赖的最早目标，文件修改位置不决定归属。后序工作发现前序 contract 缺陷时，立即暂停后序；由 Planning 取得用户确认后重新打开前序目标，不得在后序 Issue 中静默修补或让两个目标并行。
 - 同一 Milestone 默认只推进一个 active Issue。只有各 Issue 的 fresh Readiness 均已 `CLEAR`、修改面相互独立且用户明确批准时才允许并行。
 - Milestone 的自动 Issue 百分比不构成目标完成证明。最后一个已知 Issue 合并后，Planning 必须对目标结果做一次整体只读核对；只有用户确认目标完成并授权写入后，Planning 才可关闭 Milestone。
+- 每个 Issue 完成后，以及发现影响主线的新事实时，Planning 必须先依据当前 Milestone、Issue、PR/Git 与绑定 SHA 的验证证据做主线核对，再向用户简短说明：本次填补哪个目标缺口、实际完成及证据、剩余缺口与下一步理由。明确区分实现已提交、验收通过与已合并，不把尚待验收或合并的工作计为已闭合缺口；核对只作为面向用户的说明，不另建进度文档或状态系统。
 - Milestone 正文只保存目标与边界，不保存执行步骤、进度清单、旧 Issue 链接或未来实现方案；不得用本地 roadmap 或其它载体建立第二状态系统。
 
 ## Canonical clean-tree provenance 与历史材料
@@ -68,7 +71,7 @@ Confirmed facts:
 
 ### Execution
 
-Execution 必须是 fresh task，在 start SHA 对应的 clean worktree 中由唯一 writer 完成 Issue 范围内的修改、开发反馈门、commit、push 与唯一 draft PR。它不得读取 Planning、Readiness、旧 Execution 或调用者 worktree/index，不得修改 contract、替用户解决重大未决、merge，或把自己的开发检查称为 Verification/PASS。输入、权限、停止条件与固定终态见 [Executor 模板](references/executor.md)。
+Execution 首次开工必须是 fresh task，在 start SHA 对应的 clean worktree 中由唯一 writer 完成 Issue 范围内的修改、开发反馈门、commit、push 与唯一 draft PR。它不得读取 Planning、Readiness、其它 Execution 的会话历史或调用者 worktree/index，不得修改 contract、替用户解决重大未决、merge，或把自己的开发检查称为 Verification/PASS。原合同内返修按失败路由续接原 Execution。输入、权限、停止条件与固定终态见 [Executor 模板](references/executor.md)。
 
 ### Verification
 
@@ -87,14 +90,15 @@ Verification 必须是 fresh、read-only task，在 PR head SHA 对应的 clean 
 ## 失败路由、重试与资源
 
 - 不静默重跑失败命令，先保留 exact failure。`NEEDS_CLARIFICATION` 只在 Issue 不变时由同一 Execution task 续接。
-- 原合同内的局部实现缺陷由当前 Execution 修复；`PRODUCT_FAIL` 或合同不变但实现路线失败时，删除失败路径并启动 fresh Execution，不得建立 compatibility bridge、双实现或临时第二 authority。任一修复产生新 SHA 后重开 fresh Verification。
+- 合同及用户保留决定不变时，局部实现缺陷与 `PRODUCT_FAIL` 均由原 Execution task 续接修复，沿用该 Issue 的唯一 branch、PR 与 worktree，不因该 verdict 重启。Planning 只转交绑定 candidate SHA 的 Verifier findings 与原始证据；Execution 自行复核触发条件，不将 Verifier 判断当作新的合同。任一修复产生新 SHA 后重开 fresh Verification。
+- 合同不变但实现路线失败时，由原 Execution 删除失败路径并重做，不得建立 compatibility bridge、双实现或临时第二 authority。
 - `NEEDS_DECISION`，或发现规范、公开语义、保证、依赖、抽象边界、验收需要改变时，第一次即停止并返回 Planning；由用户决定并更新 Issue body 后重开 fresh Readiness，不得边实现边追加 Issue 评论。
 - `EVIDENCE_GAP` 回到 Planning；`INFRA_BLOCKED` 只处理已确认且与 candidate 行为无关的基础设施阻塞。Execution `FAILED` 按已确认原因进入上述对应路由，不得自动重跑。
 - 默认不设置 task-local 资源限制。只有实测失败、实测超时或相同且已记录的 case 才能按证据设置限制；未知时长不能用预测式 wall timeout。
 
 ## Merge 与归档
 
-- Readiness、Execution、Verification 的 task ID 都记录在 PR 的 `验证` 区；普通命令流水不写 Issue 评论。
-- 归档可能清理 task worktree；Planning 只有确认 task 不可能再被合法恢复时才可归档。Executor 与 Verifier 的 exact 可恢复边界分别见对应角色模板。
+- Planning 将 Readiness、Execution、每轮 Verification 的载体与可追查标识记录在 PR 的 `验证` 区：用户级 session 记录 `threadId`，subagent 记录所属主会话 `threadId` 与 agent ID；同时保留各轮对应的 SHA 与裁决。记录不得追加或覆盖 Issue contract；普通命令流水不写 Issue 评论。
+- 归档或释放 task 可能使会话或 worktree 不可恢复；Planning 只有确认 task 不可能再被合法恢复时才可执行。Executor 与 Verifier 的 exact 可恢复边界分别见对应角色模板。
 - 归档不是 merge 前置条件。只有未变化 SHA 的 canonical gates、Debt Gate `PASS`、Verifier `PASS` 和已有 merge 预授权同时成立时，Planning 才可 merge。
-- Merge 后，Planning 归档该 Issue 剩余的 Executor 与后台 task。只有用户能决定主 Planning 会话失效、重置或更换并主动开启新的主会话；agent 只能凭具体证据建议，不得自行创建 replacement Planning。
+- Merge 后，Planning 归档或释放该 Issue 剩余的 Executor 与后台 task。只有用户能决定主 Planning 会话失效、重置或更换并主动开启新的主会话；agent 只能凭具体证据建议，不得自行创建 replacement Planning。
