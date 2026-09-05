@@ -1719,13 +1719,13 @@ impl<'state> BodyResolver<'state> {
                 let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
                 self.type_scopes
                     .push(self.impl_associated_type_scope(&implementation.members, &owner));
+                let previous_self = self
+                    .self_entity
+                    .replace(self.self_id_for_impl(declaration.span, EntityKind::TraitImpl));
                 let type_parameters =
                     self.push_type_parameters(&implementation.type_parameters, owner.clone())?;
                 let trait_type = self.resolve_named_type(&implementation.trait_type)?;
                 let target = self.resolve_named_type(&implementation.target)?;
-                let previous_self = self
-                    .self_entity
-                    .replace(self.self_id_for_impl(declaration.span, EntityKind::TraitImpl));
                 let members = self.resolve_impl_members(&implementation.members, &owner)?;
                 self.self_entity = previous_self;
                 self.type_scopes.pop();
@@ -1884,9 +1884,9 @@ impl<'state> BodyResolver<'state> {
         let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
         self.type_scopes
             .push(self.impl_associated_type_scope(members, &owner));
+        let previous_self = self.self_entity.replace(self.self_id_for_impl(span, kind));
         let type_parameters = self.push_type_parameters(parameters, owner.clone())?;
         let target = self.resolve_named_type(target)?;
-        let previous_self = self.self_entity.replace(self.self_id_for_impl(span, kind));
         let members = self.resolve_impl_members(members, &owner)?;
         self.self_entity = previous_self;
         self.type_scopes.pop();
@@ -4834,6 +4834,14 @@ fn read(value: Choice) -> Int {
 
     #[test]
     fn generic_self_and_capture_rules_resolve_without_type_selection() {
+        for source in [
+            "trait Rel<T> {} struct Foo {} impl Rel<Self> for Foo {}",
+            "trait Rel<T> {} struct Foo<T> {} impl<T: Rel<Self>> Foo<Self> {}",
+        ] {
+            resolve_project(&project(source, vec![]))
+                .expect("impl Self covers trait signature, target, and generic bounds");
+        }
+
         let resolved = resolve_project(&project(
             r#"
 struct Boxed<T> { value: T }
