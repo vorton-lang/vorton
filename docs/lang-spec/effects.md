@@ -18,6 +18,10 @@ Effect row 中的 atom 共享组合与推断机制，但拥有不同的执行与
 
 Effect class 在 typed contract 冻结前固定。System effect 绝不能获得 handler evidence；handled effect 绝不能直接变成 host operation。`main` 可以保留 system effect，由目标环境执行；未消除的用户 handled effect 不得逃出 `main`。
 
+`console`、`fs`、`process`、`fail<T>`、`mut<T>` 与 `unsafe` 使用独立 `Language` origin，不由隐藏 source 或自动 prelude 声明。它们在 Effect namespace 中不可被 source effect/alias、import 或 re-export 重定义；相同 spelling 在其他 namespace 仍按各自规则处理。`mut` 与 `unsafe` 保持已有特殊 surface，其他 language effect 使用普通 resolved path。
+
+Effect 与 effect alias 只在 Effect context 中作为 exact identity；它们不是 Type/Value 的 type-relative `::` selection base。Failure 的 `fail.raise` 是下文明确的 Language operation；system effect 本规范不声明静态 operation member。Resolver 不能因内部 member table 未命中而发明或延期 `console::Item`、`console::operation` 一类选择。
+
 ## Effect Row
 
 ```text
@@ -94,7 +98,7 @@ fn write_log(message: Str) -> Unit with {Logger} {
 }
 ```
 
-Operation signature 规定参数、返回类型和调用时产生的 handled effect。Operation 通过 `EffectName.operation(...)` 调用。
+Operation signature 规定参数、返回类型和调用时产生的 handled effect。Operation 通过 `EffectName.operation(...)` 调用。Receiver 必须解析到 exact handled-effect declaration（或明确的 Language failure effect），operation 必须解析到该 owner 的 exact declaration；缺失 operation、effect alias receiver 或 system-effect receiver 都在 Resolver 拒绝。`EffectName::operation(...)` 不是 operation call 的替代拼写。
 
 Effect operation 只有 signature，不允许 body。Custom effect 必须由显式 `handle...with` 提供解释；不存在自动 default evidence、部分默认或 default-body fallback。
 

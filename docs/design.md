@@ -39,7 +39,7 @@ Source
 |---|---|
 | `Token` | Lexer 按唯一词法规范产生 token 与 span；空白和注释不改变语法角色。 |
 | `AST` | Parser 忠实保存 canonical surface、结构与 span；不承载名称、类型、effect 或后端结论。 |
-| `ResolvedAST` | 每个声明、引用、member、constructor、effect operation、import/re-export 与 extern bridge 都获得 exact identity；下游不再查询名称。 |
+| `ResolvedAST` | 每个 lexical/nominal 声明、binding、constructor、import/re-export 与根引用获得 exact identity；已闭合 owner 集合中由当前语法直接选择的 member 同样 exact。只有依赖 receiver/base type、适用 impl 或 associated selection 的 obligation 才保留 occurrence、已知 base/owner 与源码选择信息，最终 target 留给 Checker。 |
 | `TypedHIR` | HM metavariable 已求解；类型、effect row、callee、impl、associated type、call-site instantiation 与公开模块接口冻结。合法多态变量转为带 owner 与 ordinal 的 formal；其它 raw 变量被拒绝。 |
 | `CoreHIR` | 所有语言级隐式行为已 elaborated 为 explicit typed construct、callable body、edge 或 intrinsic contract。此层是最后的 Vorton semantic representation，不含资源操作。 |
 | `FlowIR` | Structured control 降为 ownership-neutral CFG/ANF；pattern projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 建立；project-wide binder、call、alias 与 capture graph 冻结。 |
@@ -53,7 +53,15 @@ Source
 
 具名声明和引用使用包含 origin module、namespace、declaration 与 owner 的 exact reference。Re-export 原样转发同一 identity；same-origin diamond 是幂等 delivery，不创建新声明。不同 origin 的相同叶名称永不合并。
 
-局部 binder 使用 owner-scoped identity；normalization 创建的 block、temporary、projection 与 result slot 使用由冻结树位置导出的稳定 path identity。Identity 只由对应阶段建立，不能由共享计数器、遍历顺序或生成符号反推。
+Compiler library 的 Resolver 入口只消费匿名根 source 与抽象 file-module key 到 UTF-8 source 的纯内存映射，不读取文件系统、cwd 或 OS path。File 与 inline module 构成同一逻辑树；key 前缀可形成无 body 的 synthetic node。只有根 source、实际 import/re-export 可达的 file body，以及这些 source 内的 inline body进入当前解析闭包。未达 source 不执行 frontend 或语义检查，普通 expression/type path 也不能隐式扩大闭包。
+
+Language declaration 使用独立 `Language` origin，不通过隐藏 source、虚构 module 或自动 source prelude 注入。Source declaration、generic 与 local binding 的 identity 从冻结的 module、owner、declaration site 与语法角色构造；不得依赖共享全局计数器或偶然遍历顺序。
+
+名称选择先在每个适用 namespace 内应用词法 shadowing，再按 path 的 root、每个中间 container 与 terminal category 过滤并合并候选。不能用不合法的跨 namespace candidate 抢占合法结果，也不能为得到结果而回退到同 namespace 已被遮蔽的 declaration。Enum constructor、custom-effect operation 与已知 named construction/pattern field 的 owner 集合已经闭合，缺失或类别错误必须在 Resolver 拒绝；普通 field/method receiver 与 type-relative impl/associated selection 仍是 Checker obligation。Effect 与 effect alias 不是 Type/Value 的 type-relative `::` base。
+
+局部 binder 使用 owner-scoped identity；sequential shadowing 创建新 identity，or-pattern 各分支的同名 binder 则共享一个 arm-scoped logical identity。Normalization 创建的 block、temporary、projection 与 result slot 使用由冻结树位置导出的稳定 path identity。Identity 只由对应阶段建立，不能由共享计数器、遍历顺序或生成符号反推。
+
+项目诊断按 project input、reachable-source frontend、module graph、declaration/index、import/export 与 body-name 的阶段顺序选择。一个阶段内统一按 logical module path、primary UTF-8 span 与稳定错误类别选首错；只在源码有序遍历已经证明后继位置不可能产生更小候选时短路，不能让 spelling、物理 source key、table/subpass 或偶然 traversal 抢先。
 
 所有可执行 body 汇入同一 project-wide `ExecutableInventory`，包括具名函数、method、closure、handler、compiler-defined glue 与 exact intrinsic body。Enum constructor 是 typed construction operation，不冒充 callable。FlowIR freeze 前 inventory 与 call graph 必须闭合；之后新增 executable、binder、edge 或 reachability 都是 internal error。
 
@@ -177,7 +185,7 @@ Raw memory 中的 initialized state 与 ownership 由 unsafe 封装作者负责�
 
 每个阶段都验证自己冻结的 contract，并拒绝上游 unknown 或下游事实提前出现。至少保持以下双向边界：
 
-- ResolvedAST 后没有 unresolved name；AST 不预装 semantic identity。
+- ResolvedAST 后没有普通 unresolved name；闭合 owner-member lookup 不能留下空 target。待 Checker 决定的 member/associated selection 必须已有 exact occurrence 与全部已知 base/owner，不能退化为字符串占位。AST 不预装 semantic identity。
 - TypedHIR 后没有 raw type/effect metavariable；AST/ResolvedAST 不预装最终 type selection。
 - CoreHIR 后没有 implicit language behavior；CoreHIR 不含 resource operation 或 target layout。
 - FlowIR 后 binder、call graph 与 CFG topology 不变；FlowIR 不含 RC instruction。

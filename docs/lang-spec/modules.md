@@ -1,304 +1,163 @@
 # 模块系统
 
-Vorton 使用基于文件的模块系统。每个 `.vorton` 文件是一个模块。模块通过 `use` 声明导入其他模块的公开符号。
+Vorton 的 file source 与 inline `mod` 共同组成一棵逻辑模块树。`requires`、`use`、inline `mod` 与 path 的唯一产生式见[语法](syntax.md)；本页只定义解析后的模块身份、可见性、导入与项目闭包语义。
 
-`requires`、`use`、inline `mod` 与 path 的唯一产生式见[语法](syntax.md)；本页只定义解析后的模块身份、可见性与依赖语义。
+## 项目输入与模块身份
 
-## 模块标识
+Compiler library 接受一个纯内存项目：匿名根 source，以及以非空 identifier segment 序列为 key 的 file sources。Key 是大小写敏感的抽象地址，不是文件名、扩展名、工作目录或操作系统路径。宿主负责把实际文件投影为这个输入；目录遍历、cwd、symlink、扩展名补全和 OS 错误不属于语言或 Resolver。
 
-模块名由文件路径派生，`::` 分隔符映射到文件系统目录分隔符：
+File source key 的每个 segment 必须符合 ASCII `Ident` 字符规则，且不能是保留关键字或 `self`、`super`、`root`。Contextual `type`、`alias` 与 `_` 仍可作 segment。平台文件名冲突由宿主 adapter 处理。
 
+Key 的目录前缀形成没有 source body 的 synthetic module。例如仅提供 `parser::lexer` source 时，`parser` 仍是可寻址 module。一个路径可以同时拥有 body 和 child：`parser` 与 `parser::lexer` 可以都是 file source。一个逻辑路径至多拥有一个 body；file body 与 inline body 撞到同一路径、或两个 inline body 重复声明同一路径时拒绝，不支持 partial module 或静默合并。
+
+```text
+匿名根 source
+├── parser                 file body 或 synthetic node
+│   └── lexer              file body
+└── tools                  inline body
 ```
-use parser::lexer;   →  parser/lexer.vorton
-use utils;           →  utils.vorton
-```
 
-项目根目录是入口文件所在目录。
+Module 与具名 declaration 的 identity 包含完整逻辑 module path；不同 module 中相同 leaf spelling 永不因此合并。Target symbol encoding 不是 module identity。
 
-## 导入语法
+## 可达 source
 
-### 单符号导入
+Compiler 总是解析匿名根 source。之后只有通过已解析 source 中实际 `use` / `pub use` 路径可达的 file body 才被解析；同一已解析 source 内的全部 inline module 一并进入项目。输入 key 自身的合法性仍属于项目输入检查。
+
+可达解析先于 import 唯一性：`use` path 触达的每个 module candidate 都先加入 frontend 解析闭包，随后才在完整候选集上检查歧义。例如 module 与 function 同名导致该 import 最终歧义时，被 path 触达的 module source 若有 Lexer/Parser 错误，仍先返回该 source 的 frontend diagnostic。
+
+未达 file body 不执行 Lexer、Parser 或语义检查，因此其中的坏源码不影响当前项目闭包。普通表达式、类型或 pattern 中的限定 path 不能触发 source 载入；需要 file body 时必须有实际 import/re-export 令它可达。
+
+## Path 起点
+
+路径规则对 file 与 inline module 完全一致：
+
+- 裸 path 从当前逻辑 module 出发；
+- `self::` 明确从当前 module 出发；
+- 一个或多个 `super::` 逐级从逻辑父 module 出发，越过匿名根时报错；
+- contextual `root::` 从匿名根出发。`root` 仍是普通 `Ident` token，不新增 lexer token。
 
 ```vorton
 use parser::Token;
+use self::helpers::format;
+use super::shared::Config;
+use root::platform::clock;
 ```
 
-从 `parser.vorton` 导入 `Token`。
+限定 path 可跨 file/inline 边界。Resolver 对每个适用 namespace 先取得词法上最内层的 binding，再按 root、每个 `::` container 与 terminal category 筛选并合并候选。同 namespace 不回退被 generic/local 遮蔽的外层 declaration；另一个 namespace 中不符合该语法的 candidate 也不能抢占合法 module、type 或 value。
 
-### 多符号导入
+Lexical/nominal root 与已知 declaration 必须 exact。Enum constructor 等当前语法要求从闭合 owner 集合中选择的 member 缺失或类别错误时立即拒绝。只有 field/method receiver、generic/`Self` 的 associated item、适用 impl 等确实依赖 Checker 类型信息的选择才保留显式 obligation；它保存 occurrence 与所有已知 exact base/owner，不伪造 target。Effect declaration、effect alias 与 Language effect 不能冒充 Type/Value 的 type-relative `::` base。
+
+## 导入与别名
+
+### 单 entity 与分组导入
 
 ```vorton
-use parser::{Token, parse, Lexer};
+use parser::Token;
+use parser::{Lexer, parse as parse_token};
 ```
 
-从同一模块导入多个符号。
+每个 `use` item 必须跨合法 namespace 唯一对应一个 exact entity。若同一 spelling 同时可指 module、function 或其他不同 entity，单项、分组、alias 与 `pub use` 都报歧义；一次 `use` 不会同时向多个 namespace 注入名称。
 
-### 整模块导入
+### Module-only binding
 
 ```vorton
 use parser;
+use parser as syntax;
+
+fn read(token: syntax::Token) {}
 ```
 
-该形式把 `parser` 的所有 `pub` 符号直接导入当前作用域，不创建可通过 `parser::Token` 访问的 module value。
+`use parser;` 只把 `parser` module 本身绑定到当前 Type namespace，不导入其全部 symbol。Module 可以用 `as` 改名。0.1 没有 glob import。
 
-### 重命名导入
+### Enum constructor
+
+Enum constructor 默认只能由 owner-qualified path 使用：
 
 ```vorton
-use parser::{Token as T};
+Shape::Circle
+Option::Some(value)
+Option::None
 ```
 
-命名导入可以用 `as` 创建局部别名。整模块 `use parser as p` 不受支持。
-
-### 嵌套路径
+只有显式导入才建立 bare constructor binding：
 
 ```vorton
-use checker::env::TypeEnv;
+use Shape::{Circle, Rect};
+use Option::{Some, None};
 ```
 
-映射到 `checker/env.vorton` 中的 `TypeEnv`。
+导入或 re-export enum 本身不会隐式导入、导出或注入其 constructors。
 
-### 相对路径（`super::`/`self::`）
+## Namespace 与声明
 
-在 inline `mod` 块内部，可以使用相对路径引用外层模块的符号。
+普通 module scope 有三个 namespace：
 
-#### `super::` 引用父模块
+- Type：module、struct、enum、type alias、extern type、trait、generic type parameter 与语言预声明 type/trait；
+- Value：function、const、extern function、enum constructor，以及 parameter、local/pattern binding；
+- Effect：effect declaration、effect alias 与语言 effect binding。
 
-```vorton
-mod outer {
-    pub fn value() -> Int { 42 }
+Field、method、associated item 与 effect operation 保持 owner-scoped，不向普通 module scope 隐式注入。Module declaration、普通具名 declaration 与 import 在整个 module scope 可见，因而支持 forward reference。
 
-    mod inner {
-        use super::value;      // 导入父模块 outer 的 value
-        pub fn get() -> Int { value() }
-    }
-}
-```
+同一 scope、namespace 与 spelling 若对应不同 exact entity 就冲突。声明顺序、先导入者或后覆盖者都没有优先级。相同 exact origin 经多条 import/re-export path 重复 delivery 是幂等的；不同 alias 可以指向同一 entity。两个 source declaration 始终是不同 declaration，不能用 diamond 规则合并。
 
-`super::` 可以在 `use` 声明中使用，也可以在表达式中直接使用：
+## Visibility 与 re-export
 
-```vorton
-mod outer {
-    pub fn value() -> Int { 42 }
-
-    mod inner {
-        pub fn get() -> Int { super::value() }   // 表达式中直接访问
-    }
-}
-```
-
-支持多级 `super` 链式引用和多符号导入：
-
-```vorton
-use super::super::some_fn;        // 向上两层
-use super::{value, helper};       // 从父模块导入多个符号
-```
-
-在文件顶层使用 `super::` 会因超出模块嵌套深度而报错。
-
-#### `self::` 引用当前模块
-
-```vorton
-mod math {
-    pub fn add(a: Int, b: Int) -> Int { a + b }
-
-    pub fn double(x: Int) -> Int {
-        self::add(x, x)    // 显式引用当前模块的 add
-    }
-}
-```
-
-`self::` 用于消除歧义，显式指定当前模块的符号。
-
-## 导出和可见性
-
-### `pub` 修饰符
+未标 `pub` 的 declaration 对 owner module 及其 descendants 可见；其他 module 只能经过可访问的 path 使用 `pub` entity。File module 和 synthetic prefix 没有隐含 private/pub 文件属性；inline module 的 visibility 由其 declaration 决定。
 
 ```vorton
 pub fn greet() -> Str { "hello" }
-pub struct Point { pub x: Int, pub y: Int }
+pub struct Point { pub x: Int, y: Int }
 ```
 
-未标记 `pub` 的声明不可被其他模块导入。`pub` 不改变声明在自身 module 内的可见性。
-
-### `pub use` 再导出
+合法 `pub use` facade 可以公开 private module 中的 `pub` item，但不能把 private item 变成 public：
 
 ```vorton
-pub use inner::greet;
-```
+pub use hidden::greet;
 
-将依赖模块的导出提升为当前模块的公开接口。支持模块门面模式。
-
-0.1的public export必须对enum constructor保持owner closure：一个facade若单独公开或重命名constructor，其最终public type exports中也必须包含该constructor的exact owner enum；不要求两者来自同一条`pub use`。
-
-```vorton
-// 合法：owner enum 与constructor同时公开
-pub use leaf::{Token, Wrap};
-
-// 合法：两者都可重命名
-pub use leaf::{Token as PublicToken, Wrap as Make};
-
-// 非法：facade只公开constructor，缺少owner enum
-pub use leaf::Wrap;
-```
-
-最后一种写法在 re-export 处报错并要求同时公开 owner enum。直接 `pub use` 一个 enum 会携带其 constructors；private/local `use` 不受该 public closure 规则影响。Owner identity 由声明解析决定，不能从 constructor leaf 或 alias spelling 猜测。
-
-### Private field 与private representation
-
-Public struct的private field可以使用private nominal type，例如`pub struct Wrapper { hidden: PrivatePayload }`。外部module可以持有、传递和销毁`Wrapper`，但不能访问`hidden`、命名`PrivatePayload`或用field literal自行构造该值。相反，public函数签名、pub field与public enum variant payload属于真正public interface，仍不得引用更private type。
-
-Compiler 可以随 public root 运输销毁与 layout 所需的 private metadata，但 consumer source namespace 不能因此获得 private type、constructor 或 field。Re-export 与 diamond 必须复用 exact owner，不能按名称重新选择。预声明语言类型的 binding 规则见[类型系统](type-system.md#语言预声明类型)。
-
-## Inline `mod` 块
-
-除了基于文件的模块外，Vorton 支持在同一文件内定义 inline 模块块。
-
-### 基本语法
-
-```vorton
-mod math {
-    pub fn add(a: Int, b: Int) -> Int { a + b }
-    pub fn double(x: Int) -> Int { x + x }
-}
-
-fn main() {
-    let sum = math::add(1, 2);
+mod hidden {
+    pub fn greet() -> Str { "hello" }
 }
 ```
 
-`mod` 块内的声明通过 `mod_name::symbol` 限定路径访问。未标记 `pub` 的声明在模块外不可见。
-
-### 嵌套模块
-
-`mod` 块可以嵌套，形成多级命名空间：
+Public constructor export 必须保持 owner closure：当前 facade 的最终 public Type exports 中必须包含 constructor 的 exact owner enum。Owner 与 constructor 可由不同 import、使用不同 alias、按任意声明顺序送达；缺 owner 时在 constructor re-export 处报错，Compiler 不会自动 re-export owner。
 
 ```vorton
-mod outer {
-    pub mod inner {
-        pub fn greet(name: Str) -> Str {
-            "hello ${name}"
-        }
-    }
-}
-
-fn main() {
-    let msg = outer::inner::greet("world");   // 多级限定路径
-}
+pub use root::leaf::Shape as PublicShape;
+pub use root::leaf::Shape::{Circle as MakeCircle}; // 合法
 ```
 
-嵌套模块中的 `pub` 控制对外层的可见性——内层模块需要 `pub` 才能被外层模块之外访问，内层的声明也需要 `pub`。
+Public struct 的 private field 可以包含 private nominal type；外部 source 可以持有该 public value，但不能访问 private field 或命名 private representation。Public signature、pub field 与 public enum payload 的完整 interface visibility 由 Checker 在类型信息完备后检查。
 
-### 声明唯一性（不支持 partial module）
+## Inline `mod` 与 capability
 
-同一 direct parent scope 中，每个 inline module 名称只能声明一次：
-
-```vorton
-mod tools {
-    pub fn first() -> Int { 1 }
-}
-
-mod tools {                         // 非法：重复声明
-    pub fn second() -> Int { 2 }
-}
-```
-
-重复的第二个 `mod tools` 本身就是错误；编译器不会把两个 block 合并后再检查其成员。一个合法 module block 内，同一 namespace 的 direct declaration 同样必须唯一。
-
-相同 leaf 位于不同 parent 时是不同 logical module，因此合法：
+Inline module 可嵌套，并可包含全部普通 declaration family：
 
 ```vorton
-mod outer {
-    mod inner {}
-}
+mod math requires {} {
+    pub fn add(left: Int, right: Int) -> Int { left + right }
 
-mod inner {}
-```
-
-`use`、`pub use` 与 same-origin diamond 只是把既有 declaration delivery 到其他 scope；同一 exact origin 的重复 delivery 可以幂等复用，不构成重复 source declaration。多个 `impl` block 也不属于 partial module，按 impl/coherence 规则独立处理。
-
-### `mod` 块内的 `use` 声明
-
-`mod` 块内部可以使用 `use` 导入外部模块的符号，也可以使用 `super::`/`self::` 相对路径（见上文）：
-
-```vorton
-mod outer {
-    pub fn value() -> Int { 42 }
-
-    mod inner {
-        use super::value;
-        pub fn get_outer() -> Int { value() }
+    pub mod integer {
+        pub fn twice(value: Int) -> Int { super::add(value, value) }
     }
 }
 ```
 
-### `mod` 块内的声明
+File body 的第一项 `requires {effects};` 与 inline `mod name requires {effects}` 都给 module 设置 effect ceiling。省略 ceiling 时普通 system/handled/fail/mut 不增加额外限制，但 `unsafe` 许可从不隐式获得。`requires {}` 只允许纯 computation；`mut<T>` 对 caller/capture state 的修改参与 ceiling，局部 `let mut` rebind 仍保持局部。Extern declaration 与 unsafe primitive 还必须满足 [Effect 规范](effects.md)中的专用规则。
 
-`mod` 块内可以包含所有声明类型：函数、struct、enum、trait、impl、effect、const、嵌套 mod 等。
+## Module graph 与 ResolvedAST
 
-```vorton
-mod shapes {
-    pub struct Circle { pub radius: Float }
+Resolver 在 body-name 检查前闭合当前可达 module graph、declaration index 和 import/export fixed point。普通 module 可以相互引用，包括父 module 令 child source 可达、child 引用父 declaration；只要每条 import 最终唯一到达真实 source 或 Language entity，回边本身不是错误。
 
-    impl Circle {
-        pub fn area(self) -> Float { 3.14159 * self.radius * self.radius }
-    }
-}
-```
+仅由 import/re-export 相互转发、没有任何真实 declaration origin 的无解环仍报错。该规则不放宽 effect alias 循环、trait 继承循环或 Checker 中其他非法递归。
 
-### Capability 限制（`requires`）
+ResolvedAST 为每个 lexical/nominal declaration、binding、import 与引用保存 exact identity。Re-export 转发原 identity；Language entity 使用独立 Language origin，不伪装成隐藏 source。依赖类型的 member/associated selection 保存 occurrence、已知 base/owner 与选择 spelling，留给 Checker 冻结最终 target。ResolvedAST 之后不得重新 parse 或执行第二套 lexical resolver。
 
-文件本身是隐式模块。文件模块使用第一项 `requires {effects}` header，inline module 使用 `mod name requires {effects}` clause；两者限制模块内所有函数可以使用的 effect 集合。Module 内函数使用不在有效 `requires` 集合中的 effect 时编译失败。
+项目每次只返回一个结构化首错，不暴露 partial ResolvedAST。阶段优先级依次为项目输入、可达 source frontend、module graph、declaration/index、import/export 与 body-name；同阶段按错误所属 logical module path、primary UTF-8 byte span 与稳定错误类别排序。物理 source key、名称 spelling、table/subpass 或遍历偶然性不能改变结果；related origins 同样保持稳定顺序。
 
-#### 文件模块 header
-
-```vorton
-requires {unsafe};
-
-extern fn host_alloc(count: Int) -> Ptr<Int>;
-```
-
-文件 header 必须是第一项非注释语法、每文件至多一次，并位于全部 `use` 与声明之前。有 header 时，它是文件模块的 effect ceiling；省略 header 时，普通 system/handled/fail/mut 不增加额外 ceiling，但 `unsafe` 许可从不隐式获得。使用或 discharge unsafe 原语、以及声明 `extern fn`，都要求有效文件/inline-module `requires` 集合显式包含 `unsafe`。
-
-Header只提供模块许可：unsafe原语仍必须位于`unsafe {}`责任块。Extern声明本身是“签名忠实于C实现”的ABI签字，调用extern函数不向调用点传播unsafe。Vorton不提供逐声明`unsafe extern fn`第二套授权语法。
-
-#### 纯模块（无 effect）
-
-```vorton
-mod pure_logic requires {} {
-    pub fn add(a: Int, b: Int) -> Int { a + b }
-    pub fn double(x: Int) -> Int { x + x }
-    // 此模块内不能使用 fs、fail 等任何 effect
-}
-```
-
-`requires {}` 表示空 effect 集合——模块内只允许纯函数。任何尝试使用 system、handled、fail、mut 或 unsafe effect 的函数都会报错。
-
-#### 受限模块（指定 effect 子集）
-
-```vorton
-mod console_layer requires {console} {
-    pub fn greet(name: Str) -> Unit with {console} {
-        print("Hello, ${name}!");
-    }
-    // 此模块内只允许 console effect，使用 fs、process 或 fail 会报错
-}
-```
-
-#### Capability 检查规则
-
-- 检查覆盖模块内所有顶层函数和显式 impl 方法
-- 纯函数（无 effect）在任何 `requires` 集合中都合法——开放的 effect row 尾部不会被误判
-- `console` / `fs` / `process` 是 system effect：它们参与静态 capability 检查，但不能由 `handle` 消除，也不产生 handler evidence
-- 用户 custom effect 是 handled effect：它同样参与 `requires` 检查，并且必须在离开 `main` 前由显式 handler 消除
-- `mut<T>` marker effect 参与 capability 检查；`requires {}` 禁止修改参数或捕获状态等会让 mutation effect 逃逸的操作，局部 `let mut` 仍保持局部
-- `unsafe` 同时要求 `unsafe { ... }` discharge 与包含 `unsafe` 的文件header或inline-module许可；`extern fn`声明也要求该显式许可
-
-## Module graph
-
-Compiler 从入口文件沿 `use` 发现依赖 module，并在检查 body 前闭合 module graph 与 public interface。循环依赖被拒绝。Module 与 declaration 的 nominal identity 包含完整 module path；不同 module 中同名的 struct、enum、function 或 trait 不会因 leaf name 相同而合并。Target symbol encoding 不属于 module 语义。
-
-## 限制
+## 0.1 限制
 
 - 不支持 first-class module；
+- 不支持 glob import；
+- 不支持 scoped visibility；
 - 不提供 `sig` declaration 或 module-signature conformance；
-- 不支持跨文件相对 path，`super::` 与 `self::` 只在 inline `mod` 中可用。
+- Compiler library 不提供 OS loader、package manager 或 source discovery adapter。

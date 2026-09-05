@@ -9,14 +9,16 @@
 | 通配符 | `_` | 任何值 |
 | 绑定 | `x` | 任何值，绑定到 `x` |
 | 字面量 | `42`、`"hi"`、`true` | 值相等 |
-| 位置构造器 | `Some(x)` | enum 变体 tag 匹配，递归匹配字段 |
-| 命名构造器 | `Ok { value: x }` | enum 变体 tag 匹配，按名称匹配字段 |
+| 位置构造器 | `Option::Some(x)` | enum 变体 tag 匹配，递归匹配字段 |
+| 命名构造器 | `Shape::Point { x, y }` | enum 变体 tag 匹配，按名称匹配字段 |
 | Tuple | `(a, b)` | 元素逐个匹配 |
 | Arm-level Or | `A \| B` | match/catch arm 顶层的任一备选模式匹配 |
 
 ### 绑定 vs Unit 变体消歧
 
-Pattern path 使用统一 `Ident`/`Path` token；首字母大小写不参与分类。如果 bare single-segment path 的 exact 名称解析到当前作用域中的零字段 enum variant（如 `none`），它被归为构造器模式，否则才是 binding。限定 path 和带 payload 的 pattern 同样只按解析到的声明身份判断。
+Pattern path 使用统一 `Ident`/`Path` token；首字母大小写不参与分类。如果 bare single-segment path 的 exact 名称解析到当前作用域中的零字段 enum variant（如显式导入后的 `None`），它被归为 constructor pattern，否则才是 binding。限定 path 和带 payload 的 pattern 不回退为新 binding，同样只按 exact declaration identity 判断。Enum constructor 默认使用 owner-qualified path；bare constructor 必须经显式 import 建立。
+
+Qualified 或 constructor-shaped pattern 必须在 Resolver 命中 exact enum constructor；已知 named constructor 的 field occurrence 同样必须命中该 owner 的 exact field。缺失 constructor、缺失 field 或错误 member category 不能作为 unresolved-name 占位或 type-dependent selection 下沉。Field 的类型兼容性与 pattern 穷尽性仍由 Checker 处理。
 
 ### 命名构造器模式的特殊语法
 
@@ -67,6 +69,8 @@ bind_pattern(p₁ | p₂ | ..., τ):
   返回统一后的环境
 ```
 
+同一 pattern 内重复 binder 是错误。Or-pattern 每个 alternative 必须绑定同一 spelling 集合，arm 内对应 spelling 共享同一个 logical binding identity；不同 alternative 的 source occurrence 不会创建多个 arm binding。类型兼容性仍由 Checker 验证。
+
 ## 穷尽性检查
 
 使用 Maranget 风格矩阵算法。目标：验证 match 表达式覆盖了被匹配类型的所有可能值。
@@ -85,9 +89,9 @@ check_exhaustive(arms, τ_scrutinee) → null | "missing pattern description"
 **Enum 类型：** 每个变体都必须被至少一个模式覆盖。如果变体有字段，递归检查字段模式的穷尽性。
 
 ```vorton
-// 缺少 none 分支，因此编译失败
+// 缺少 None 分支，因此编译失败
 match opt {
-    some(x) => x,
+    Option::Some(x) => x,
 }
 ```
 
@@ -166,8 +170,7 @@ match color {
 
 ```vorton
 match val {
-    Some(x) | Other(x) => x,   // 合法：两个子模式都绑定 x
-    None => 0,
+    Choice::Left(x) | Choice::Right(x) => x, // 合法：两边共享 x
 }
 ```
 

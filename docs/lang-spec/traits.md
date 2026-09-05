@@ -2,6 +2,10 @@
 
 Vorton 的 trait 系统提供有界多态性（bounded polymorphism）。具体 receiver 在类型检查时解析到唯一 impl；受 trait bound 的类型变量通过隐式 dictionary evidence 调用。Evidence 的目标表示不是语言规范的一部分。
 
+语言以 `Language` origin 预声明的 trait 只有 `Eq`、`Hash`、`Clone`、`Debug`、`Ord`、`Drop`、`Iterable` 与 `Iterator`。下文 `Show`、`Describable` 等均是示例中显式声明的普通 source trait，不构成额外 builtin。
+
+本规范明确使用的 Language member identity 是 `Eq::eq`、`Ord::cmp`、`Drop::drop`、`Iterable::{Item, Iter, iter}` 与 `Iterator::next`。Resolver 可冻结这些 owner/member identity，但不由命名习惯为 `Hash`、`Clone`、`Debug` 或其他 builtin 发明 source-visible member、signature 或 runtime operation；其余 trait/impl selection 在 Checker 信息完备后决定。`Eq` 的 member contract 由下文规则封闭为唯一 `eq`。
+
 ## Trait 声明
 
 ```vorton
@@ -10,7 +14,7 @@ trait Show {
 }
 ```
 
-声明一组类型必须实现的方法。`Self` 类型变量引用实现该 trait 的具体类型。
+声明一组类型必须实现的方法。`Self` 是 owner-scoped 的特殊 Type identity，引用实现该 trait 的具体类型；它不是全局 builtin。Owner 环境在 trait generic bounds、supertrait 与 member signature 解析前建立，并由内部 method/closure 继承。
 
 完整且唯一的 trait、impl、method signature 与 associated type 产生式见[语法](syntax.md#program-与声明)。本页不建立第二份文法。
 
@@ -123,6 +127,8 @@ impl Processor for Greeter {    // 覆盖为 Str
 }
 ```
 
+Associated Type 仍属于 Type namespace 的 owner-scoped declaration，因此不能命名为 `Self`，也不能使用 `Int`、`Option`、`Eq` 等 Language Type/Trait spelling；该规则同样覆盖 trait declaration、inherent impl 与 trait impl。普通 Value method 或其他 namespace 的同名 declaration 不受此条影响。
+
 ## Impl 块
 
 ### 固有方法
@@ -158,6 +164,8 @@ impl<T: Show> Show for List<T> {
 ```
 
 Impl 块可以有自己的类型参数和约束。
+
+Impl 的 owner `Self` 在 generic bounds、trait/target 与 member 之前建立；impl generic 随后在整个 bounds、trait/target、member signature/body 与内部 closure 中可见。Member generic 不得遮蔽仍可见的 impl generic。具体 substitution、适用 impl 与 associated selection 在 Checker 完成。
 
 ## Trait Bound
 
