@@ -503,6 +503,7 @@ struct ImportDirective {
 struct ResolverState {
     modules: BTreeMap<ModuleRef, ModuleInfo>,
     entities: BTreeMap<EntityId, Entity>,
+    closed_member_owners: BTreeSet<EntityId>,
     own_bindings: BTreeMap<ModuleRef, BindingTable>,
     bindings: BTreeMap<ModuleRef, BindingTable>,
     imports: Vec<ImportDirective>,
@@ -513,6 +514,7 @@ impl ResolverState {
         Self {
             modules,
             entities: BTreeMap::new(),
+            closed_member_owners: BTreeSet::new(),
             own_bindings: BTreeMap::new(),
             bindings: BTreeMap::new(),
             imports: Vec::new(),
@@ -556,6 +558,12 @@ impl ResolverState {
         for name in LANGUAGE_TRAITS {
             self.insert_language_entity(Namespace::Type, EntityKind::LanguageTrait, name, None);
         }
+        self.closed_member_owners.insert(language_id(
+            Namespace::Type,
+            EntityKind::LanguageTrait,
+            "Eq",
+            None,
+        ));
         for name in LANGUAGE_EFFECTS {
             self.insert_language_entity(Namespace::Effect, EntityKind::LanguageEffect, name, None);
         }
@@ -742,6 +750,12 @@ impl ResolverState {
                     shape: EntityShape::Plain,
                 },
             );
+            if matches!(
+                &declaration.kind,
+                DeclarationKind::Trait(declared) if declared.item.supertraits.is_empty()
+            ) {
+                self.closed_member_owners.insert(id.clone());
+            }
             add_delivery(
                 self.own_bindings.entry(module.clone()).or_default(),
                 Delivery {
@@ -2527,12 +2541,9 @@ impl BodyResolver<'_> {
                 }
                 TypeArgument::AssociatedType { name, value, .. } => {
                     ResolvedTypeArgument::AssociatedType {
-                        member: Box::new(self.selection_for_reference(
-                            &reference,
-                            &name.text,
-                            name.span,
-                            EntityKind::AssociatedType,
-                        )),
+                        member: Box::new(
+                            self.associated_type_argument_for_reference(&reference, name)?,
+                        ),
                         value: Box::new(self.resolve_type(value)?),
                     }
                 }
@@ -2905,7 +2916,7 @@ impl BodyResolver<'_> {
                                 outcome.inaccessible.push(member);
                             }
                         }
-                    } else if !declared_members.is_empty() && is_declared_selection_base(&base) {
+                    } else if !declared_members.is_empty() && is_selection_base(&base) {
                         for declaration in declared_members {
                             push_candidate(
                                 &mut outcome.candidates,
@@ -2919,7 +2930,7 @@ impl BodyResolver<'_> {
                                 },
                             );
                         }
-                    } else if is_selection_base(&base) {
+                    } else if self.selection_can_be_pending(&base) {
                         push_candidate(
                             &mut outcome.candidates,
                             PathCandidate::Selection {
@@ -3001,6 +3012,10 @@ impl BodyResolver<'_> {
         }
     }
 
+    fn selection_can_be_pending(&self, base: &EntityId) -> bool {
+        is_selection_base(base) && !self.state.closed_member_owners.contains(base)
+    }
+
     fn normalize_type_dependent_candidate(
         &self,
         candidate: PathCandidate,
@@ -3077,6 +3092,32 @@ impl BodyResolver<'_> {
             name: name.to_owned(),
             declaration,
         }
+    }
+
+    fn associated_type_argument_for_reference(
+        &self,
+        reference: &ResolvedReference,
+        name: &Identifier,
+    ) -> Result<ResolvedSelection, ProjectDiagnostic> {
+        let selection = self.selection_for_reference(
+            reference,
+            &name.text,
+            name.span,
+            EntityKind::AssociatedType,
+        );
+        let closed_owner_missing = reference_exact_target(reference).is_some_and(|target| {
+            self.state.closed_member_owners.contains(target) && selection.declaration.is_none()
+        });
+        if closed_owner_missing {
+            return Err(self.diagnostic(
+                ProjectDiagnosticKind::UnresolvedName {
+                    namespace: NameNamespace::Type,
+                    name: name.text.clone(),
+                },
+                self.origin(name.span),
+            ));
+        }
+        Ok(selection)
     }
 
     fn required_member_for_reference(
@@ -3782,6 +3823,8 @@ impl BodyResolver<'_> {
             PatternFields::Named { fields, rest } => {
                 let mut resolved = Vec::new();
                 for field in fields {
+                    let member =
+                        self.required_member_for_reference(target, &field.name, EntityKind::Field)?;
                     let pattern = if let Some(pattern) = &field.pattern {
                         self.resolve_pattern(pattern, anchor, expected, bindings, seen)?
                     } else {
@@ -3796,14 +3839,7 @@ impl BodyResolver<'_> {
                             )?),
                         }
                     };
-                    resolved.push(ResolvedNamedPatternField {
-                        member: self.required_member_for_reference(
-                            target,
-                            &field.name,
-                            EntityKind::Field,
-                        )?,
-                        pattern,
-                    });
+                    resolved.push(ResolvedNamedPatternField { member, pattern });
                 }
                 ResolvedPatternFields::Named {
                     fields: resolved,
@@ -3952,12 +3988,6 @@ fn reference_exact_target(reference: &ResolvedReference) -> Option<&EntityId> {
 }
 
 fn is_selection_base(entity: &EntityId) -> bool {
-    if entity.origin == DeclarationOrigin::Language
-        && entity.kind == EntityKind::LanguageTrait
-        && entity.name == "Eq"
-    {
-        return false;
-    }
     matches!(
         entity.kind,
         EntityKind::Struct
@@ -3970,10 +4000,6 @@ fn is_selection_base(entity: &EntityId) -> bool {
             | EntityKind::LanguageType
             | EntityKind::LanguageTrait
     )
-}
-
-fn is_declared_selection_base(entity: &EntityId) -> bool {
-    is_selection_base(entity) || entity.kind == EntityKind::LanguageTrait
 }
 
 fn push_candidate(candidates: &mut Vec<PathCandidate>, candidate: PathCandidate) {
@@ -5103,14 +5129,18 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
         ));
 
         let diagnostic = resolve_project(&project(
-            "enum Packet { One { value: Int } } fn bad(packet: Packet) { match packet { Packet::One { missing } => missing, } }",
+            "enum E { V { good: Int } } fn f(value: E) { match value { E::V { missing: Missing::Ctor } => (), } }",
             vec![],
         ))
-        .expect_err("a closed constructor pattern cannot defer a missing field");
+        .expect_err("the earlier closed field error wins over its nested pattern error");
         assert!(matches!(
             diagnostic.kind,
             ProjectDiagnosticKind::UnresolvedName { ref name, .. } if name == "missing"
         ));
+        assert_eq!(
+            diagnostic.primary.expect("unknown field origin").span,
+            Span::new(65, 72)
+        );
 
         let diagnostic = resolve_project(&project(
             "use Choice::Build; enum Choice { Build { value: Int } } struct Build { value: Int } fn bad() { Build { value: 1 } }",
@@ -5356,6 +5386,32 @@ fn language(value: Iterable::Item) {}
             diagnostic.kind,
             ProjectDiagnosticKind::UnresolvedName { ref name, .. } if name == "Missing"
         ));
+
+        let diagnostic = resolve_project(&project(
+            "trait Source { type Item; } fn f<T: Source<Missing = Int>>(value: T) {}",
+            vec![],
+        ))
+        .expect_err("a closed trait owner cannot defer an unknown associated binding");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::UnresolvedName {
+                namespace: NameNamespace::Type,
+                ref name,
+            } if name == "Missing"
+        ));
+        assert_eq!(
+            diagnostic
+                .primary
+                .expect("unknown associated binding origin")
+                .span,
+            Span::new(43, 50)
+        );
+
+        resolve_project(&project(
+            "trait Parent { type Item; } trait Child: Parent {} fn keep<T: Child<Item = Int>>(value: T) {}",
+            vec![],
+        ))
+        .expect("a supertrait member set stays pending until inherited selection is complete");
     }
 
     #[test]
