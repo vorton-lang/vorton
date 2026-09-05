@@ -6,7 +6,7 @@
 
 Lexer 从左到右扫描，并在当前位置选择可成立的最长 token。多字符运算符优先于其前缀；关键字只在完整标识符拼写相等时成立，例如 `move_value` 是一个 `Ident`，不是 `'move'` 后跟另一个 token。空白与注释被丢弃，其他字符必须形成下列 token，否则产生词法错误。
 
-除字符串、原始字符串和行注释内容外，canonical 0.1 源码只接受下文定义的 ASCII 标识符字符、数字、运算符和定界符。`@` 没有 token；`@derive(Json)`、`@repr(C)` 等形式因此在词法阶段非法，不能产生 attribute/derive AST 占位。
+除字符串、原始字符串和行注释内容外，canonical 0.1 源码只接受下文定义的 ASCII 标识符字符、数字、运算符和定界符。`@` 与独立 `#` 没有 token；`@derive(Json)`、`#[test]` 等形式因此在词法阶段非法，不能产生 attribute/derive AST 占位。
 
 ## 空白与注释
 
@@ -50,13 +50,13 @@ Lexer 只产生一种 `Ident`。首字母大小写不产生 type、value、varia
 
 ```text
 fn       let      mut      move     const    struct   enum     match
-impl     effect   handle   with     if       else     catch    test
+impl     effect   handle   with     if       else     catch
 return   for      in       pub      where    true     false    trait
 try      while    break    continue loop     use      as       extern
 mod      super    requires unsafe
 ```
 
-`type`、`self` 和 `alias` 是 contextual spelling：Lexer 仍把它们生成为 `Ident`，Parser 只在相应产生式中按精确拼写解释。`delegate` 和 `sig` 也是普通 `Ident`，canonical 0.1 没有对应声明产生式。`where` 与 `try` 保留但没有 canonical 0.1 语法产生式，因而不能作为标识符或静默占位。
+`type`、`self` 和 `alias` 是 contextual spelling：Lexer 仍把它们生成为 `Ident`，Parser 只在相应产生式中按精确拼写解释。`test`、`delegate` 和 `sig` 是普通 `Ident`，canonical 0.1 没有 native-test 声明产生式。`where` 与 `try` 保留但没有 canonical 0.1 语法产生式，因而不能作为标识符或静默占位。
 
 ## 运算符与定界符
 

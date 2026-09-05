@@ -21,7 +21,6 @@ DeclKind         ::= FnDecl
                    | ExternDecl
                    | TypeAliasDecl
                    | ConstDecl
-                   | TestDecl
                    | ModDecl
 
 FnDecl           ::= 'fn' Ident TypeParams? '(' NamedParams? ')'
@@ -74,7 +73,6 @@ ExternKind       ::= 'fn' Ident TypeParams? '(' NamedParams? ')'
 
 TypeAliasDecl    ::= 'type' Ident TypeParams? '=' TypeExpr ';'
 ConstDecl        ::= 'const' Ident (':' TypeExpr)? '=' Expr ';'
-TestDecl         ::= 'test' StringLit Block
 ModDecl          ::= 'mod' Ident ('requires' EffectSet)?
                      '{' UseDecl* Decl* '}'
 
@@ -87,7 +85,7 @@ UseItem          ::= Ident ('as' Ident)?
 
 文件 `requires` 必须是第一项非注释语法且每文件至多一个；随后所有 `use` 必须先于普通声明。inline `mod` 内同样先列 `use`。路径与模块的名称解析约束见[模块系统](modules.md)。
 
-无 body 的 file `requires`、`use`、type alias、const、effect alias、`extern fn`、`extern type`、trait method signature、associated type declaration/assignment 与 effect operation 都必须以 `;` 结束。带 body 的 `fn`、`struct`、`enum`、`impl`、`trait`、`effect`、inline `mod` 和 `test` 后面不写 `;`。Struct field 与 enum variant 由逗号分隔，最后一项可带 trailing comma；effect operation 不接受逗号代替分号。
+无 body 的 file `requires`、`use`、type alias、const、effect alias、`extern fn`、`extern type`、trait method signature、associated type declaration/assignment 与 effect operation 都必须以 `;` 结束。带 body 的 `fn`、`struct`、`enum`、`impl`、`trait`、`effect` 和 inline `mod` 后面不写 `;`。Struct field 与 enum variant 由逗号分隔，最后一项可带 trailing comma；effect operation 不接受逗号代替分号。
 
 ```vorton
 requires {unsafe};
@@ -428,8 +426,10 @@ let invalid: Int? = none;                    // 非法：类型只能写 Option<
 fn invalid(mut value) { value = 1; }         // 非法：binder-prefix mode
 fn invalid(mut self) {}                      // 非法：receiver-prefix mode
 let invalid = fn(x) [move resource] { x };   // 非法：capture list 在参数之后
-@derive(Json)                            // 非法：'@' 不是 token
-pub impl Value {}                        // 非法：impl block 无 visibility
+test "name" {}                               // 非法：没有 native-test 声明
+#[test] fn probe() {}                         // 非法：'#' 不是 token
+@derive(Json)                                // 非法：'@' 不是 token
+pub impl Value {}                            // 非法：impl block 无 visibility
 ```
 
 同样非法的还有缺失必需 `;` 的普通 statement/无 body declaration、以逗号结束的 effect operation，以及带 body 的 source trait method。Parser 不建立 compatibility mode、feature flag、Attribute/Derive 节点或 future hook。

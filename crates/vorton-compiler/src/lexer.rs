@@ -34,7 +34,6 @@ pub(crate) enum TokenKind {
     If,
     Else,
     Catch,
-    Test,
     Return,
     For,
     In,
@@ -120,7 +119,6 @@ pub(crate) enum Tag {
     If,
     Else,
     Catch,
-    Test,
     Return,
     For,
     In,
@@ -207,7 +205,6 @@ impl TokenKind {
             Self::If => Tag::If,
             Self::Else => Tag::Else,
             Self::Catch => Tag::Catch,
-            Self::Test => Tag::Test,
             Self::Return => Tag::Return,
             Self::For => Tag::For,
             Self::In => Tag::In,
@@ -303,7 +300,6 @@ impl Tag {
             Self::If => "if",
             Self::Else => "else",
             Self::Catch => "catch",
-            Self::Test => "test",
             Self::Return => "return",
             Self::For => "for",
             Self::In => "in",
@@ -774,7 +770,6 @@ fn keyword(spelling: &str) -> Option<TokenKind> {
         "if" => TokenKind::If,
         "else" => TokenKind::Else,
         "catch" => TokenKind::Catch,
-        "test" => TokenKind::Test,
         "return" => TokenKind::Return,
         "for" => TokenKind::For,
         "in" => TokenKind::In,
@@ -815,7 +810,7 @@ mod tests {
     #[test]
     fn scans_every_fixed_token() {
         let source = "fn let mut move const struct enum match impl effect handle with if else \
-            catch test return for in pub where true false trait try while break continue loop \
+            catch return for in pub where true false trait try while break continue loop \
             use as extern mod super requires unsafe \
             + - * / % == != < > <= >= && || ! | = += -= *= /= %= .. ..= . :: ? -> => \
             ( ) { } [ ] , : ;";
@@ -837,7 +832,6 @@ mod tests {
                 Tag::If,
                 Tag::Else,
                 Tag::Catch,
-                Tag::Test,
                 Tag::Return,
                 Tag::For,
                 Tag::In,
@@ -902,14 +896,14 @@ mod tests {
 
     #[test]
     fn applies_boundaries_longest_match_and_decimal_rules() {
-        let tokens = lex("move_value 1..2 12.340 type self alias rvalue").unwrap();
+        let tokens = lex("move_value 1..2 12.340 type self alias rvalue test").unwrap();
         assert!(matches!(&tokens[0].kind, TokenKind::Ident(value) if value == "move_value"));
         assert!(matches!(&tokens[1].kind, TokenKind::Integer(value) if value == "1"));
         assert_eq!(tokens[2].kind.tag(), Tag::DotDot);
         assert!(matches!(&tokens[3].kind, TokenKind::Integer(value) if value == "2"));
         assert!(matches!(&tokens[4].kind, TokenKind::Float(value) if value == "12.340"));
         assert!(
-            tokens[5..9]
+            tokens[5..10]
                 .iter()
                 .all(|token| token.kind.tag() == Tag::Ident)
         );

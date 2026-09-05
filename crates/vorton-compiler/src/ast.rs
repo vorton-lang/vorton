@@ -104,7 +104,6 @@ pub enum DeclarationKind {
     Extern(Declared<ExternDeclaration>),
     TypeAlias(Declared<TypeAliasDeclaration>),
     Const(Declared<ConstDeclaration>),
-    Test(Declared<TestDeclaration>),
     Module(Declared<ModuleDeclaration>),
 }
 
@@ -290,12 +289,6 @@ pub struct ConstDeclaration {
     pub name: Identifier,
     pub annotation: Option<TypeExpr>,
     pub value: Expr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestDeclaration {
-    pub name: StringValue,
-    pub body: Block,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
