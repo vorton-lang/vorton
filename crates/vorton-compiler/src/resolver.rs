@@ -391,13 +391,17 @@ fn build_module_graph(
             .body = Some(body);
     }
 
+    let mut diagnostics = Vec::new();
     for (module, parsed_source) in parsed {
-        register_inline_modules(
+        diagnostics.extend(register_inline_modules(
             module,
             &parsed_source.origin,
             &parsed_source.program.declarations,
             &mut modules,
-        )?;
+        ));
+    }
+    if let Some(diagnostic) = first_stage_diagnostic(diagnostics) {
+        return Err(diagnostic);
     }
     Ok(modules)
 }
@@ -407,25 +411,30 @@ fn register_inline_modules(
     source: &SourceRef,
     declarations: &[Declaration],
     modules: &mut BTreeMap<ModuleRef, ModuleInfo>,
-) -> Result<(), ProjectDiagnostic> {
+) -> Vec<(ModuleRef, ProjectDiagnostic)> {
+    let mut diagnostics = Vec::new();
     for declaration in declarations {
         let DeclarationKind::Module(declared) = &declaration.kind else {
             continue;
         };
         let name = &declared.item.name;
-        if is_reserved_module_segment(&name.text) {
-            return Err(ProjectDiagnostic {
-                kind: ProjectDiagnosticKind::InvalidModuleName {
-                    name: name.text.clone(),
-                },
-                primary: Some(OriginRef {
-                    source: source.clone(),
-                    span: name.span,
-                }),
-                related: Vec::new(),
-            });
-        }
         let module = parent.child(&name.text);
+        if is_reserved_module_segment(&name.text) {
+            diagnostics.push((
+                module,
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::InvalidModuleName {
+                        name: name.text.clone(),
+                    },
+                    primary: Some(OriginRef {
+                        source: source.clone(),
+                        span: name.span,
+                    }),
+                    related: Vec::new(),
+                },
+            ));
+            continue;
+        }
         let origin = OriginRef {
             source: source.clone(),
             span: name.span,
@@ -438,11 +447,17 @@ fn register_inline_modules(
         });
         if entry.file_body_present || entry.body.is_some() {
             let related = entry.declared_at.clone().into_iter().collect();
-            return Err(ProjectDiagnostic {
-                kind: ProjectDiagnosticKind::ModuleBodyConflict { module: module.0 },
-                primary: Some(origin),
-                related,
-            });
+            diagnostics.push((
+                module.clone(),
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::ModuleBodyConflict {
+                        module: module.0.clone(),
+                    },
+                    primary: Some(origin),
+                    related,
+                },
+            ));
+            continue;
         }
         entry.declared_at = Some(origin);
         entry.public = declared.visibility.is_some();
@@ -453,9 +468,14 @@ fn register_inline_modules(
             uses: declared.item.uses.clone(),
             declarations: declared.item.declarations.clone(),
         });
-        register_inline_modules(&module, source, &declared.item.declarations, modules)?;
+        diagnostics.extend(register_inline_modules(
+            &module,
+            source,
+            &declared.item.declarations,
+            modules,
+        ));
     }
-    Ok(())
+    diagnostics
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4482,6 +4502,17 @@ pub fn read() -> Int { self::local() + helper() + plus() }
             diagnostic.kind,
             ProjectDiagnosticKind::ModuleBodyConflict { ref module }
                 if module == &vec!["same".to_owned()]
+        ));
+
+        let diagnostic = resolve_project(&project(
+            "mod z { mod dup {} mod dup {} } mod a { mod dup {} mod dup {} }",
+            vec![],
+        ))
+        .expect_err("module-graph conflicts use logical path order");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::ModuleBodyConflict { ref module }
+                if module == &vec!["a".to_owned(), "dup".to_owned()]
         ));
     }
 
