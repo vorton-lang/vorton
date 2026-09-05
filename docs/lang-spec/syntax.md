@@ -166,12 +166,12 @@ EffectArgs       ::= '<' TypeExpr (',' TypeExpr)* ','? '>'
 
 Canonical 0.1 不提供结构化 record 类型；封闭 `{ x: Int }` 与开放 `{ x: Int, ..r }` 在所有 `TypeExpr` 位置均非法。该排除不影响花括号承载的 effect set、block、named construction 与 pattern。
 
-所有命名类型、value path、named-field construction 与 pattern path 都使用统一 `Path`；大小写不参与分类。`super` 的合法层级以及 contextual `self` 的路径位置由模块解析检查，而非 Lexer 按字符类别区分。
+所有命名类型、value path、named-field construction 与 pattern path 都使用统一 `Path`；大小写不参与分类。`super` 的合法层级，以及 path 开头 contextual `self::` / `root::` 的含义由模块解析检查，而非 Lexer 按字符类别区分；`root` 不新增 lexer token。
 
 `Option<T>` 是唯一 Option 类型拼写，类型产生式不含 postfix `?`：
 
 ```vorton
-let item: Option<Int> = some(1);
+let item: Option<Int> = Option::Some(1);
 let value = item?;
 ```
 
@@ -429,7 +429,7 @@ TuplePattern     ::= '(' Pattern ',' Pattern (',' Pattern)* ','? ')'
 以下形式没有 canonical 产生式，只能在文档中作为非法反例出现：
 
 ```vorton
-let invalid: Int? = none;                    // 非法：类型只能写 Option<Int>
+let invalid: Int? = Option::None;            // 非法：类型只能写 Option<Int>
 fn invalid(mut value) { value = 1; }         // 非法：binder-prefix mode
 fn invalid(mut self) {}                      // 非法：receiver-prefix mode
 let invalid = fn(x) [move resource] { x };   // 非法：capture list 在参数之后

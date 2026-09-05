@@ -12,7 +12,7 @@
 | [Effect 系统](effects.md) | Effect 声明、row types、传播、handling |
 | [Trait 系统](traits.md) | Trait 声明、impl 块、约束、关联类型与 dispatch 语义 |
 | [模式匹配](patterns.md) | 模式形式、绑定规则、穷尽性检查 |
-| [模块系统](modules.md) | 基于文件的模块、导入、可见性与依赖语义 |
+| [模块系统](modules.md) | 纯内存项目、逻辑模块树、导入、可见性与依赖语义 |
 
 ## 记号约定
 

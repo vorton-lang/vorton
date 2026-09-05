@@ -8,19 +8,19 @@ Vorton 是一门面向 native 应用开发的编程语言，也是其编译器�
 
 ```vorton
 enum Shape {
-    circle(Float),
-    rect(Float, Float),
+    Circle(Float),
+    Rect(Float, Float),
 }
 
 fn area(shape: Shape) -> Float {
     match shape {
-        circle(r) => 3.14159 * r * r,
-        rect(w, h) => w * h,
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rect(w, h) => w * h,
     }
 }
 
 fn sample() -> Float {
-    area(rect(3.0, 4.0))
+    area(Shape::Rect(3.0, 4.0))
 }
 ```
 
@@ -44,7 +44,7 @@ fn message() -> Str {
 
 ## 当前构建与 CI
 
-根 workspace 固定使用 Rust `1.98.0`。Compiler library 的唯一入口是 `vorton_compiler::parse(&str)`；它返回完整 typed surface AST 或单个结构化 frontend diagnostic。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
+根 workspace 固定使用 Rust `1.98.0`。Compiler library 提供保持独立的两个入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 对纯内存逻辑模块树返回 owned opaque `ResolvedProject` 或带 source key 与 UTF-8 byte span 的结构化 `ProjectDiagnostic`。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
 
 ```powershell
 python .agents/scripts/validate_current_tree.py

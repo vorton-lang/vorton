@@ -58,14 +58,19 @@ Tuple 是结构类型：不同上下文中的 `(Int, Str)` 是同一类型。不
 ### Option 类型
 
 ```
-Option<T> = some(T) | none
+Option<T> = Some(T) | None
 ```
 
-内置 enum，且 `Option<T>` 是唯一类型拼写。类型位置不接受 `T?`；表达式位置的 postfix `expr?` 是独立的传播语法。
+语言内置 enum，且 `Option<T>` 是唯一类型拼写。Constructor 的精确拼写是 `Some` 与 `None`；默认使用 `Option::Some` / `Option::None`，只有显式 constructor import 才产生 bare binding。类型位置不接受 `T?`；表达式位置的 postfix `expr?` 是独立的传播语法。
 
-### 语言预声明类型
+### Language origin 的预声明 type 与 trait
 
-`Option<T>`、`List<T>`、`Range<T>` 与 `Ptr<T>` 是 canonical 语义和推断规则使用的预声明 nominal type。List literal 产生 `List<T>`，range expression 产生 `Range<Int>`，raw address 使用 `Ptr<T>`。本规范不为这些类型声明普通方法。
+下列 binding 由语言以独立 `Language` origin 提供，不是隐藏 source file、虚构 module 或 source prelude：
+
+- Type：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`Option<T>`、`List<T>`、`Range<T>`、`Ptr<T>`；
+- Trait（同属 Type namespace）：`Eq`、`Hash`、`Clone`、`Debug`、`Ord`、`Drop`、`Iterable`、`Iterator`。
+
+List literal 产生 `List<T>`，range expression 产生 `Range<Int>`，raw address 使用 `Ptr<T>`。本规范不为这些 type 声明普通方法，也不把 `Weak`、`Show`、`Json`、`Result`、`Cell`、`Map`、`Set` 或 `StringBuilder` 等普通 source/library 名称隐式加入 Language origin。
 
 ### 0.1 raw payload 的 generic aggregate 边界
 
@@ -73,7 +78,7 @@ Vorton 0.1 不允许 `Ptr` 或 non-RC `extern type` 递归出现在 generic aggr
 
 该限制使 shared generic aggregate 不需要按 payload 名称或布局猜测资源策略。若 generic function 不形成这类 aggregate storage，本条不额外禁止 direct type actual；其 ownership 仍由类型与 ResourcePlanner contract 决定。
 
-预声明语言类型在 type namespace 中不可被 source declaration、import 或 re-export 覆盖。它们不是词法关键字，不限制 value、function、trait、effect 或 module namespace 的同名 binding。
+Language type/trait 在 Type namespace 中不可被 file/inline module、source declaration、import、re-export、任一 generic parameter list 或 owner-scoped associated Type declaration 覆盖。Trait、inherent impl 与 trait impl 的 associated Type 不是保留名检查的例外。它们不是词法关键字，不限制 Value 或 Effect namespace 的同名 binding。
 
 ### Private nominal representation
 
@@ -301,7 +306,7 @@ apply(subst, τ):
   ─────────────────────────────────────────────
   Γ ⊢ V(e₁..eₘ) : E<α₁..αₙ> / (ε₁ ∪ ... ∪ εₘ)
 
-0.1 的位置 constructor 不是普通函数值。带 payload 的 constructor 标识符不能脱离直接构造语法作为参数、返回值、变量或 dynamic callee；例如 `apply(some, value)` 非法，必须显式写成 `apply(fn(x) { some(x) }, value)`。直接位置构造、named-field 构造与 nullary variant 求值保持各自语义；编译器不得隐式生成 constructor wrapper。
+0.1 的位置 constructor 不是普通函数值。带 payload 的 constructor 标识符不能脱离直接构造语法作为参数、返回值、变量或 dynamic callee；例如 `apply(Some, value)` 非法，必须显式写成 `apply(fn(x) { Option::Some(x) }, value)`。直接位置构造、named-field 构造与 nullary variant 求值保持各自语义；编译器不得隐式生成 constructor wrapper。
 
 ── Enum 变体构造（命名）──
   当名称解析为有命名字段的 enum 变体时触发。
@@ -452,6 +457,13 @@ Vorton 0.1 的语言级 `Eq` contract 只包含 `eq`；不存在 `ne` member、o
 
 - 作用域是词法的且嵌套的（函数体、块、for-in 体、match 分支、if-let 体）。
 - `let` / `let mut` 绑定从声明点到封闭作用域末尾可见。
+- `let` 的 RHS 使用旧环境；同 scope 后续同名 `let` 创建新的 exact identity，可改变类型，不是 assignment。
 - 函数参数在函数体内可见。
 - For-in 循环变量在循环体内可见。
-- Match 分支模式绑定在该分支的 body 内可见。
+- Match/catch 分支模式绑定在该分支的 guard 与 body 内可见，不泄露到其他 arm。
+- If-let pattern 只在成功分支可见；loop/branch/closure 各保持自己的 lexical scope。
+- 显式 closure capture entry 在 closure 创建点的外层 Value scope 解析，不创建新 source binder；capture 完整性、mode/type assertion 与 escape/ownership 由后续检查完成。
+
+Generic parameter 在所属 declaration 的 bounds、signature 与 body 全部可见；trait/impl 外层 generic 也对 member 与内部 closure 可见。所有声明 family 和 member generic list 使用同一规则：同一 table 不得重复，内层 generic 不得遮蔽仍可见的外层 generic。Generic 可以遮蔽普通 module Type binding，但不能遮蔽 Language Type/Trait；筛选 qualified-path candidate 时不能绕过这项同 namespace shadowing。
+
+`Self` 是 struct、enum、trait 与 impl owner scope 中的特殊 Type identity，并由内部 method 与 closure 继承。Owner 环境先于该声明的 generic bounds 和 header 建立，因此 `Self` 覆盖 struct/enum/trait 的 bounds、fields/members，以及 impl 的 bounds、trait/target、member signature/body。它分别表示当前 nominal、trait 的实现者或 impl target，不是全局 Language builtin，也不是 lexer keyword。普通 Type declaration/module/generic binder 与 owner-scoped associated Type 都不能占用 `Self`；owner scope 外按特殊 Type 使用 `Self` 报错。Substitution、associated selection 与 impl/coherence 仍由 Checker 完成。

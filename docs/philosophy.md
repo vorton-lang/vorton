@@ -70,7 +70,7 @@ CLI、服务端与系统编程必须保有 native、无强制托管 runtime 和�
 
 ## 错误处理
 
-`Option<T>` 是数据，`fail<E>` 是计算 effect。Option 表达“有或没有”，且只由 `some(T)` 与 `none` 构成；failure 默认沿调用链传播。`catch` 对 failure payload 做穷尽匹配并消除被处理的 failure；`handle...with` 为用户 handled effect 提供动态解释。把 failure 保存为普通数据属于库层选择，不是第二套语言错误机制。
+`Option<T>` 是数据，`fail<E>` 是计算 effect。Option 表达“有或没有”，且只由 `Some(T)` 与 `None` 构成；failure 默认沿调用链传播。`catch` 对 failure payload 做穷尽匹配并消除被处理的 failure；`handle...with` 为用户 handled effect 提供动态解释。把 failure 保存为普通数据属于库层选择，不是第二套语言错误机制。
 
 不可恢复的 panic 与可处理的 failure 不互换。编译器必须保持二者的控制流、资源清理和 effect contract 区别。
 
