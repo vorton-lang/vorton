@@ -1631,7 +1631,6 @@ impl ResolverState {
             resolved_modules.push((
                 module.clone(),
                 ResolvedModule {
-                    reference: module,
                     body: resolved_body,
                 },
             ));
@@ -1653,6 +1652,7 @@ struct BodyResolver<'state> {
     type_scopes: Vec<BTreeMap<String, EntityId>>,
     value_scopes: Vec<BTreeMap<String, EntityId>>,
     self_entity: Option<EntityId>,
+    self_target: Option<ResolvedNamedType>,
     owner: OwnerKey,
 }
 
@@ -1676,6 +1676,7 @@ impl<'state> BodyResolver<'state> {
             type_scopes: Vec::new(),
             value_scopes: Vec::new(),
             self_entity: None,
+            self_target: None,
             owner,
         }
     }
@@ -1809,12 +1810,15 @@ impl<'state> BodyResolver<'state> {
                 let previous_self = self
                     .self_entity
                     .replace(self.self_id_for_impl(declaration.span, EntityKind::TraitImpl));
+                let previous_self_target = self.self_target.take();
                 let type_parameters =
                     self.push_type_parameters(&implementation.type_parameters, owner.clone())?;
                 let trait_type = self.resolve_named_type(&implementation.trait_type)?;
                 let target = self.resolve_named_type(&implementation.target)?;
+                self.self_target = Some(target.clone());
                 let members = self.resolve_impl_members(&implementation.members, &owner)?;
                 self.self_entity = previous_self;
+                self.self_target = previous_self_target;
                 self.type_scopes.pop();
                 self.type_scopes.pop();
                 self.owner = previous_owner;
@@ -1972,10 +1976,13 @@ impl<'state> BodyResolver<'state> {
         self.type_scopes
             .push(self.impl_associated_type_scope(members, &owner));
         let previous_self = self.self_entity.replace(self.self_id_for_impl(span, kind));
+        let previous_self_target = self.self_target.take();
         let type_parameters = self.push_type_parameters(parameters, owner.clone())?;
         let target = self.resolve_named_type(target)?;
+        self.self_target = Some(target.clone());
         let members = self.resolve_impl_members(members, &owner)?;
         self.self_entity = previous_self;
+        self.self_target = previous_self_target;
         self.type_scopes.pop();
         self.type_scopes.pop();
         self.owner = previous_owner;
@@ -2425,6 +2432,7 @@ enum PathCandidate {
     Exact(EntityId),
     Selection {
         base: EntityId,
+        namespace: Namespace,
         members: Vec<ResolvedSelection>,
     },
 }
@@ -2432,9 +2440,26 @@ enum PathCandidate {
 impl PathCandidate {
     fn namespace(&self) -> Namespace {
         match self {
-            Self::Module(_) | Self::Selection { .. } => Namespace::Type,
+            Self::Module(_) => Namespace::Type,
             Self::Exact(entity) => entity.namespace,
+            Self::Selection { namespace, .. } => *namespace,
         }
+    }
+}
+
+fn path_candidate_from_reference(reference: &ResolvedReference) -> PathCandidate {
+    match reference {
+        ResolvedReference::Exact { target, .. } => PathCandidate::Exact(target.clone()),
+        ResolvedReference::Selection {
+            base,
+            namespace,
+            members,
+            ..
+        } => PathCandidate::Selection {
+            base: base.clone(),
+            namespace: *namespace,
+            members: members.clone(),
+        },
     }
 }
 
@@ -2443,6 +2468,8 @@ struct BodyLookupOutcome {
     candidates: Vec<PathCandidate>,
     inaccessible: Vec<EntityId>,
     invalid: Option<ProjectDiagnosticKind>,
+    self_reference: Option<ResolvedSelfReference>,
+    missing_self_type: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2466,19 +2493,91 @@ impl ExpectedName {
         }
     }
 
-    fn accepts_type_scope(self) -> bool {
-        matches!(
-            self,
-            Self::Type
-                | Self::Construct
-                | Self::PatternConstructor
-                | Self::Value
-                | Self::MethodReceiver
-        )
+    fn accepts_exact(self, entity: &EntityId) -> bool {
+        match self {
+            Self::Type => entity.namespace == Namespace::Type && entity.kind != EntityKind::Module,
+            Self::Value => entity.namespace == Namespace::Value,
+            Self::Effect => entity.namespace == Namespace::Effect,
+            Self::Construct => matches!(
+                entity.kind,
+                EntityKind::Struct | EntityKind::EnumConstructor | EntityKind::LanguageConstructor
+            ),
+            Self::PatternConstructor => matches!(
+                entity.kind,
+                EntityKind::EnumConstructor | EntityKind::LanguageConstructor
+            ),
+            Self::MethodReceiver => {
+                matches!(entity.namespace, Namespace::Value | Namespace::Effect)
+            }
+        }
     }
 
-    fn accepts_selection(self) -> bool {
-        matches!(self, Self::Type | Self::Value | Self::MethodReceiver)
+    fn accepts_selection_namespace(self, namespace: Namespace) -> bool {
+        match self {
+            Self::Type => namespace == Namespace::Type,
+            Self::Value | Self::MethodReceiver => namespace == Namespace::Value,
+            Self::Effect | Self::Construct | Self::PatternConstructor => false,
+        }
+    }
+
+    fn root_namespaces(self) -> &'static [Namespace] {
+        match self {
+            Self::Type => &[Namespace::Type],
+            Self::Value => &[Namespace::Value],
+            Self::Effect => &[Namespace::Effect],
+            Self::Construct => &[Namespace::Type, Namespace::Value],
+            Self::PatternConstructor => &[Namespace::Value],
+            Self::MethodReceiver => &[Namespace::Value, Namespace::Effect],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PathRequirement {
+    Container,
+    Terminal(ExpectedName),
+}
+
+impl PathRequirement {
+    fn at(segment_index: usize, segment_count: usize, expected: ExpectedName) -> Self {
+        if segment_index + 1 == segment_count {
+            Self::Terminal(expected)
+        } else {
+            Self::Container
+        }
+    }
+
+    fn accepts_exact(self, entity: &EntityId) -> bool {
+        match self {
+            Self::Container => entity.kind == EntityKind::Module || is_selection_base(entity),
+            Self::Terminal(expected) => expected.accepts_exact(entity),
+        }
+    }
+
+    fn accepts_selection(self, namespace: Namespace) -> bool {
+        match self {
+            Self::Container => namespace == Namespace::Type,
+            Self::Terminal(expected) => expected.accepts_selection_namespace(namespace),
+        }
+    }
+
+    fn pending_namespace(self) -> Option<Namespace> {
+        match self {
+            Self::Container | Self::Terminal(ExpectedName::Type) => Some(Namespace::Type),
+            Self::Terminal(ExpectedName::Value | ExpectedName::MethodReceiver) => {
+                Some(Namespace::Value)
+            }
+            Self::Terminal(
+                ExpectedName::Effect | ExpectedName::Construct | ExpectedName::PatternConstructor,
+            ) => None,
+        }
+    }
+
+    fn root_namespaces(self) -> &'static [Namespace] {
+        match self {
+            Self::Container => &[Namespace::Type],
+            Self::Terminal(expected) => expected.root_namespaces(),
+        }
     }
 }
 
@@ -2584,6 +2683,7 @@ impl BodyResolver<'_> {
                 ResolvedReference::Exact {
                     occurrence: self.origin(effect.span),
                     target: language_id(Namespace::Effect, EntityKind::LanguageEffect, "mut", None),
+                    self_reference: None,
                 },
                 arguments
                     .iter()
@@ -2599,6 +2699,7 @@ impl BodyResolver<'_> {
                         "unsafe",
                         None,
                     ),
+                    self_reference: None,
                 },
                 Vec::new(),
             ),
@@ -2636,12 +2737,7 @@ impl BodyResolver<'_> {
         if let Some(kind) = outcome.invalid {
             return Err(self.diagnostic(kind, self.origin(path.span)));
         }
-        let mut accepted = outcome
-            .candidates
-            .into_iter()
-            .map(|candidate| self.normalize_type_dependent_candidate(candidate, path))
-            .filter(|candidate| self.candidate_matches(candidate, expected))
-            .collect::<Vec<_>>();
+        let mut accepted = outcome.candidates;
         deduplicate_candidates(&mut accepted);
         if let Some(method) = method
             && accepted
@@ -2654,6 +2750,8 @@ impl BodyResolver<'_> {
             let name = path_terminal_name(path).unwrap_or_else(|| path_text(path));
             let kind = if !outcome.inaccessible.is_empty() {
                 ProjectDiagnosticKind::InaccessibleName { name }
+            } else if outcome.missing_self_type {
+                ProjectDiagnosticKind::InvalidSelf
             } else {
                 ProjectDiagnosticKind::UnresolvedName {
                     namespace: expected.namespace(),
@@ -2678,15 +2776,23 @@ impl BodyResolver<'_> {
                 related,
             });
         }
+        let self_reference = outcome.self_reference.map(Box::new);
         Ok(match accepted.pop().expect("one accepted path candidate") {
             PathCandidate::Exact(target) => ResolvedReference::Exact {
                 occurrence: self.origin(path.span),
                 target,
+                self_reference,
             },
-            PathCandidate::Selection { base, members } => ResolvedReference::Selection {
+            PathCandidate::Selection {
+                base,
+                namespace,
+                members,
+            } => ResolvedReference::Selection {
                 occurrence: self.origin(path.span),
                 base,
+                namespace,
                 members,
+                self_reference,
             },
             PathCandidate::Module(_) => unreachable!("modules do not match body name contexts"),
         })
@@ -2718,6 +2824,7 @@ impl BodyResolver<'_> {
             };
         };
         let qualified = path.segments.len() > 1;
+        let first_requirement = PathRequirement::at(0, path.segments.len(), expected);
         let mut outcome = BodyLookupOutcome::default();
         let mut candidates;
         let mut index;
@@ -2744,64 +2851,96 @@ impl BodyResolver<'_> {
                 index = 1;
             }
             PathSegment::Identifier(identifier) => {
-                if identifier.text == "Self"
-                    && expected.accepts_type_scope()
-                    && (!matches!(expected, ExpectedName::Value | ExpectedName::MethodReceiver)
-                        || qualified)
-                {
-                    let Some(self_entity) = &self.self_entity else {
-                        outcome.invalid = Some(ProjectDiagnosticKind::InvalidSelf);
-                        return outcome;
+                let mut names =
+                    self.lookup_module_name_for_body(&self.module, &identifier.text, true);
+                for namespace in first_requirement.root_namespaces() {
+                    let binding = match namespace {
+                        Namespace::Type => self.lookup_type_binding(&identifier.text),
+                        Namespace::Value => self.lookup_value_binding(&identifier.text),
+                        Namespace::Effect | Namespace::Member => None,
                     };
-                    candidates = vec![PathCandidate::Exact(self_entity.clone())];
-                } else {
-                    let mut names =
-                        self.lookup_module_name_for_body(&self.module, &identifier.text, true);
-                    let uses_type_root = qualified
-                        || matches!(
-                            expected,
-                            ExpectedName::Type
-                                | ExpectedName::Construct
-                                | ExpectedName::PatternConstructor
-                        );
-                    if uses_type_root
-                        && let Some(binding) = self.lookup_type_binding(&identifier.text)
-                    {
+                    if let Some(binding) = binding {
                         names
                             .candidates
-                            .retain(|candidate| candidate.namespace() != Namespace::Type);
-                        push_candidate(&mut names.candidates, PathCandidate::Exact(binding));
-                    }
-
-                    let uses_value_root = qualified
-                        || matches!(
-                            expected,
-                            ExpectedName::Value
-                                | ExpectedName::Construct
-                                | ExpectedName::PatternConstructor
-                                | ExpectedName::MethodReceiver
-                        );
-                    if uses_value_root
-                        && let Some(binding) = self.lookup_value_binding(&identifier.text)
-                    {
+                            .retain(|candidate| candidate.namespace() != *namespace);
                         names
-                            .candidates
-                            .retain(|candidate| candidate.namespace() != Namespace::Value);
+                            .inaccessible
+                            .retain(|entity| entity.namespace != *namespace);
                         push_candidate(&mut names.candidates, PathCandidate::Exact(binding));
                     }
-                    candidates = names.candidates;
-                    outcome.inaccessible.extend(names.inaccessible);
                 }
+                let self_candidate = if identifier.text == "Self"
+                    && first_requirement
+                        .root_namespaces()
+                        .contains(&Namespace::Type)
+                {
+                    names
+                        .candidates
+                        .retain(|candidate| candidate.namespace() != Namespace::Type);
+                    names
+                        .inaccessible
+                        .retain(|entity| entity.namespace != Namespace::Type);
+                    match &self.self_entity {
+                        Some(identity) => {
+                            let candidate =
+                                if qualified || matches!(expected, ExpectedName::Construct) {
+                                    self.self_lookup_candidate(identity)
+                                } else {
+                                    PathCandidate::Exact(identity.clone())
+                                };
+                            push_candidate(&mut names.candidates, candidate.clone());
+                            Some((
+                                candidate,
+                                ResolvedSelfReference {
+                                    origin: self.origin(identifier.span),
+                                    identity: identity.clone(),
+                                    target: self.self_target.clone().map(Box::new),
+                                },
+                            ))
+                        }
+                        None => {
+                            outcome.missing_self_type = true;
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                candidates = names
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| self.normalize_type_dependent_candidate(candidate, identifier))
+                    .filter(|candidate| {
+                        self.candidate_matches_requirement(candidate, first_requirement)
+                    })
+                    .collect();
+                if let Some((candidate, reference)) = self_candidate
+                    && candidates.contains(&candidate)
+                {
+                    outcome.self_reference = Some(reference);
+                }
+                outcome.inaccessible.extend(
+                    names
+                        .inaccessible
+                        .into_iter()
+                        .filter(|entity| first_requirement.accepts_exact(entity)),
+                );
                 index = 1;
             }
         }
 
+        if index == path.segments.len()
+            && matches!(candidates.as_slice(), [PathCandidate::Module(_)])
+        {
+            candidates.clear();
+        }
         while index < path.segments.len() {
             let PathSegment::Identifier(identifier) = &path.segments[index] else {
                 outcome.invalid = Some(ProjectDiagnosticKind::InvalidPath);
                 return outcome;
             };
-            let step = self.advance_body_candidates(candidates, identifier);
+            let requirement = PathRequirement::at(index, path.segments.len(), expected);
+            let step = self.advance_body_candidates(candidates, identifier, requirement);
             candidates = step.candidates;
             outcome.inaccessible.extend(step.inaccessible);
             if candidates.is_empty() {
@@ -2863,6 +3002,7 @@ impl BodyResolver<'_> {
         &self,
         candidates: Vec<PathCandidate>,
         identifier: &Identifier,
+        requirement: PathRequirement,
     ) -> BodyLookupOutcome {
         let mut outcome = BodyLookupOutcome::default();
         for candidate in candidates {
@@ -2870,18 +3010,36 @@ impl BodyResolver<'_> {
                 PathCandidate::Module(module) => {
                     let names = self.lookup_module_name_for_body(&module, &identifier.text, false);
                     for candidate in names.candidates {
-                        push_candidate(&mut outcome.candidates, candidate);
+                        let candidate =
+                            self.normalize_type_dependent_candidate(candidate, identifier);
+                        if self.candidate_matches_requirement(&candidate, requirement) {
+                            push_candidate(&mut outcome.candidates, candidate);
+                        }
                     }
-                    outcome.inaccessible.extend(names.inaccessible);
+                    outcome.inaccessible.extend(
+                        names
+                            .inaccessible
+                            .into_iter()
+                            .filter(|entity| requirement.accepts_exact(entity)),
+                    );
                 }
                 PathCandidate::Exact(base) => {
                     if base.kind == EntityKind::Module {
                         let names =
                             self.lookup_module_name_for_body(&base.module, &identifier.text, false);
                         for candidate in names.candidates {
-                            push_candidate(&mut outcome.candidates, candidate);
+                            let candidate =
+                                self.normalize_type_dependent_candidate(candidate, identifier);
+                            if self.candidate_matches_requirement(&candidate, requirement) {
+                                push_candidate(&mut outcome.candidates, candidate);
+                            }
                         }
-                        outcome.inaccessible.extend(names.inaccessible);
+                        outcome.inaccessible.extend(
+                            names
+                                .inaccessible
+                                .into_iter()
+                                .filter(|entity| requirement.accepts_exact(entity)),
+                        );
                         continue;
                     }
                     let declared_members = self
@@ -2891,50 +3049,49 @@ impl BodyResolver<'_> {
                         .and_then(|entity| entity.members.get(&identifier.text))
                         .cloned()
                         .unwrap_or_default();
-                    let hard_members = declared_members
-                        .iter()
-                        .filter(|member| {
-                            matches!(
-                                member.kind,
-                                EntityKind::EnumConstructor | EntityKind::LanguageConstructor
-                            )
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !hard_members.is_empty() {
-                        for member in hard_members {
-                            let accessible =
-                                self.state.entities.get(&member).is_some_and(|entity| {
-                                    entity.public || self.module.is_descendant_of(&member.module)
-                                });
-                            if accessible {
-                                push_candidate(
-                                    &mut outcome.candidates,
-                                    PathCandidate::Exact(member),
-                                );
-                            } else {
-                                outcome.inaccessible.push(member);
+                    let mut matching_member_exists = false;
+                    for declaration in declared_members {
+                        let candidate = match declaration.kind {
+                            EntityKind::EnumConstructor | EntityKind::LanguageConstructor => {
+                                PathCandidate::Exact(declaration.clone())
                             }
-                        }
-                    } else if !declared_members.is_empty() && is_selection_base(&base) {
-                        for declaration in declared_members {
-                            push_candidate(
-                                &mut outcome.candidates,
+                            EntityKind::Method | EntityKind::AssociatedType | EntityKind::Field => {
                                 PathCandidate::Selection {
                                     base: base.clone(),
+                                    namespace: declaration.namespace,
                                     members: vec![ResolvedSelection {
                                         origin: self.origin(identifier.span),
                                         name: identifier.text.clone(),
-                                        declaration: Some(declaration),
+                                        declaration: Some(declaration.clone()),
                                     }],
-                                },
-                            );
+                                }
+                            }
+                            EntityKind::EffectOperation => continue,
+                            _ => continue,
+                        };
+                        if !self.candidate_matches_requirement(&candidate, requirement) {
+                            continue;
                         }
-                    } else if self.selection_can_be_pending(&base) {
+                        matching_member_exists = true;
+                        let accessible =
+                            self.state.entities.get(&declaration).is_some_and(|entity| {
+                                entity.public || self.module.is_descendant_of(&declaration.module)
+                            });
+                        if accessible {
+                            push_candidate(&mut outcome.candidates, candidate);
+                        } else {
+                            outcome.inaccessible.push(declaration);
+                        }
+                    }
+                    if !matching_member_exists
+                        && let Some(namespace) = requirement.pending_namespace()
+                        && self.selection_can_be_pending(&base, namespace)
+                    {
                         push_candidate(
                             &mut outcome.candidates,
                             PathCandidate::Selection {
                                 base,
+                                namespace,
                                 members: vec![ResolvedSelection {
                                     origin: self.origin(identifier.span),
                                     name: identifier.text.clone(),
@@ -2944,14 +3101,17 @@ impl BodyResolver<'_> {
                         );
                     }
                 }
-                PathCandidate::Selection { base, mut members } => {
-                    if members
-                        .last()
-                        .and_then(|member| member.declaration.as_ref())
-                        .is_some_and(|declaration| declaration.namespace != Namespace::Type)
-                    {
+                PathCandidate::Selection {
+                    base,
+                    namespace,
+                    mut members,
+                } => {
+                    if namespace != Namespace::Type {
                         continue;
                     }
+                    let Some(namespace) = requirement.pending_namespace() else {
+                        continue;
+                    };
                     members.push(ResolvedSelection {
                         origin: self.origin(identifier.span),
                         name: identifier.text.clone(),
@@ -2959,7 +3119,11 @@ impl BodyResolver<'_> {
                     });
                     push_candidate(
                         &mut outcome.candidates,
-                        PathCandidate::Selection { base, members },
+                        PathCandidate::Selection {
+                            base,
+                            namespace,
+                            members,
+                        },
                     );
                 }
             }
@@ -2967,59 +3131,28 @@ impl BodyResolver<'_> {
         outcome
     }
 
-    fn candidate_matches(&self, candidate: &PathCandidate, expected: ExpectedName) -> bool {
+    fn candidate_matches_requirement(
+        &self,
+        candidate: &PathCandidate,
+        requirement: PathRequirement,
+    ) -> bool {
         match candidate {
-            PathCandidate::Module(_) => false,
-            PathCandidate::Selection { members, .. } => {
-                expected.accepts_selection()
-                    && members
-                        .last()
-                        .and_then(|member| member.declaration.as_ref())
-                        .is_none_or(|declaration| match expected {
-                            ExpectedName::Type => declaration.namespace == Namespace::Type,
-                            ExpectedName::Value => declaration.namespace == Namespace::Value,
-                            ExpectedName::MethodReceiver => matches!(
-                                declaration.namespace,
-                                Namespace::Value | Namespace::Effect
-                            ),
-                            ExpectedName::Effect
-                            | ExpectedName::Construct
-                            | ExpectedName::PatternConstructor => false,
-                        })
-            }
-            PathCandidate::Exact(entity) => match expected {
-                ExpectedName::Type => {
-                    entity.namespace == Namespace::Type && entity.kind != EntityKind::Module
-                }
-                ExpectedName::Value => entity.namespace == Namespace::Value,
-                ExpectedName::Effect => entity.namespace == Namespace::Effect,
-                ExpectedName::MethodReceiver => {
-                    matches!(entity.namespace, Namespace::Value | Namespace::Effect)
-                }
-                ExpectedName::Construct => {
-                    matches!(
-                        entity.kind,
-                        EntityKind::Struct
-                            | EntityKind::EnumConstructor
-                            | EntityKind::LanguageConstructor
-                    )
-                }
-                ExpectedName::PatternConstructor => matches!(
-                    entity.kind,
-                    EntityKind::EnumConstructor | EntityKind::LanguageConstructor
-                ),
-            },
+            PathCandidate::Module(_) => matches!(requirement, PathRequirement::Container),
+            PathCandidate::Exact(entity) => requirement.accepts_exact(entity),
+            PathCandidate::Selection { namespace, .. } => requirement.accepts_selection(*namespace),
         }
     }
 
-    fn selection_can_be_pending(&self, base: &EntityId) -> bool {
-        is_selection_base(base) && !self.state.closed_member_owners.contains(base)
+    fn selection_can_be_pending(&self, base: &EntityId, namespace: Namespace) -> bool {
+        matches!(namespace, Namespace::Type | Namespace::Value)
+            && is_selection_base(base)
+            && !self.state.closed_member_owners.contains(base)
     }
 
     fn normalize_type_dependent_candidate(
         &self,
         candidate: PathCandidate,
-        path: &Path,
+        identifier: &Identifier,
     ) -> PathCandidate {
         let PathCandidate::Exact(declaration) = &candidate else {
             return candidate;
@@ -3039,16 +3172,12 @@ impl BodyResolver<'_> {
         let Some(base) = base else {
             return candidate;
         };
-        let segment = path.segments.last().expect("resolved path is nonempty");
-        let name = match segment {
-            PathSegment::Identifier(identifier) => identifier.text.clone(),
-            PathSegment::Super(_) => declaration.name.clone(),
-        };
         PathCandidate::Selection {
             base,
+            namespace: declaration.namespace,
             members: vec![ResolvedSelection {
-                origin: self.origin(path_segment_span(segment)),
-                name,
+                origin: self.origin(identifier.span),
+                name: identifier.text.clone(),
                 declaration: Some(declaration.clone()),
             }],
         }
@@ -3066,6 +3195,18 @@ impl BodyResolver<'_> {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn self_lookup_candidate(&self, identity: &EntityId) -> PathCandidate {
+        if let Some(target) = &self.self_target {
+            return path_candidate_from_reference(&target.reference);
+        }
+        self.state
+            .entities
+            .get(identity)
+            .and_then(|entity| entity.owner.clone())
+            .map(PathCandidate::Exact)
+            .unwrap_or_else(|| PathCandidate::Exact(identity.clone()))
     }
 
     fn selection_for_reference(
@@ -3105,10 +3246,12 @@ impl BodyResolver<'_> {
             name.span,
             EntityKind::AssociatedType,
         );
-        let closed_owner_missing = reference_exact_target(reference).is_some_and(|target| {
-            self.state.closed_member_owners.contains(target) && selection.declaration.is_none()
-        });
-        if closed_owner_missing {
+        let missing_without_pending_boundary =
+            reference_exact_target(reference).is_some_and(|target| {
+                selection.declaration.is_none()
+                    && !self.selection_can_be_pending(target, Namespace::Type)
+            });
+        if missing_without_pending_boundary {
             return Err(self.diagnostic(
                 ProjectDiagnosticKind::UnresolvedName {
                     namespace: NameNamespace::Type,
@@ -3776,6 +3919,7 @@ impl BodyResolver<'_> {
                         target: ResolvedReference::Exact {
                             occurrence: self.origin(path.span),
                             target,
+                            self_reference: None,
                         },
                         fields: None,
                     }
@@ -3997,6 +4141,7 @@ fn is_selection_base(entity: &EntityId) -> bool {
             | EntityKind::Trait
             | EntityKind::TypeParameter
             | EntityKind::SelfType
+            | EntityKind::AssociatedType
             | EntityKind::LanguageType
             | EntityKind::LanguageTrait
     )
@@ -4570,6 +4715,13 @@ mod tests {
         match &expression.kind {
             ResolvedExprKind::Path(reference) => reference,
             _ => panic!("expected path expression"),
+        }
+    }
+
+    fn named_type_reference(ty: &ResolvedType) -> &ResolvedReference {
+        match &ty.kind {
+            ResolvedTypeKind::Named(named) => &named.reference,
+            _ => panic!("expected a named type"),
         }
     }
 
@@ -5151,6 +5303,38 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
             diagnostic.kind,
             ProjectDiagnosticKind::AmbiguousName { ref name } if name == "Build"
         ));
+
+        let resolved = resolve_project(&project(
+            "use Choice::Self; enum Choice { Self { value: Int } } fn value_self(value: Int) { Self { value } }",
+            vec![],
+        ))
+        .expect("missing Type Self does not erase a legal Value constructor");
+        let tail = function(module_body(&resolved, &[]), "value_self")
+            .body
+            .tail
+            .as_deref()
+            .expect("Value Self construction tail");
+        let ResolvedExprKind::NamedConstruct { target, .. } = &tail.kind else {
+            panic!("Value Self is a named constructor");
+        };
+        assert!(matches!(
+            target,
+            ResolvedReference::Exact {
+                target,
+                self_reference: None,
+                ..
+            } if target.kind == EntityKind::EnumConstructor && target.name == "Self"
+        ));
+
+        let diagnostic = resolve_project(&project(
+            "use Choice::Self; enum Choice { Self { value: Int } } struct Owner { value: Int } impl Owner { fn make(value: Int) { Self { value } } }",
+            vec![],
+        ))
+        .expect_err("Type Self and Value Self remain independent construct candidates");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::AmbiguousName { ref name } if name == "Self"
+        ));
     }
 
     #[test]
@@ -5252,6 +5436,184 @@ trait Identity<T> { fn identity(self: Self) -> T; }
             diagnostic.kind,
             ProjectDiagnosticKind::DuplicateBinding { ref name } if name == "T"
         ));
+    }
+
+    #[test]
+    fn self_qualified_paths_use_the_resolved_impl_target() {
+        let resolved = resolve_project(&project(
+            r#"
+enum Choice { Ready }
+impl Choice {
+    fn read(value: Self) { match value { Self::Ready => (), } }
+}
+struct Packet { value: Int }
+impl Packet {
+    fn make(value: Int) -> Self { Self { value } }
+}
+trait Make { fn make(value: Int) -> Self; }
+impl Make for Packet {
+    fn make(value: Int) -> Self { Self { value } }
+}
+struct Boxed<T> { value: T }
+impl<T> Boxed<T> {
+    fn keep(value: Self) -> Self { value }
+}
+"#,
+            vec![],
+        ))
+        .expect("impl Self paths reuse the resolved target identity");
+        let root = module_body(&resolved, &[]);
+        let mut packet_constructions = 0;
+        for declaration in &root.declarations {
+            let implementation = match &declaration.kind {
+                ResolvedDeclarationKind::InherentImpl(implementation) => implementation,
+                ResolvedDeclarationKind::TraitImpl { implementation, .. } => implementation,
+                _ => continue,
+            };
+            let target = exact(&implementation.target.reference);
+            assert!(matches!(
+                implementation.target.reference,
+                ResolvedReference::Exact {
+                    self_reference: None,
+                    ..
+                }
+            ));
+            let ResolvedImplMemberKind::Function(function) = &implementation.members[0].kind else {
+                panic!("test impl member is a function");
+            };
+            if target.name == "Choice" {
+                let tail = function.body.tail.as_deref().expect("Choice match tail");
+                let ResolvedExprKind::Match { arms, .. } = &tail.kind else {
+                    panic!("Choice body is a match");
+                };
+                let ResolvedPatternKind::Constructor {
+                    target: constructor,
+                    ..
+                } = &arms[0].pattern.kind
+                else {
+                    panic!("Self::Ready is a constructor pattern");
+                };
+                let ResolvedReference::Exact {
+                    target: constructor,
+                    self_reference: Some(self_reference),
+                    ..
+                } = constructor
+                else {
+                    panic!("Self::Ready retains Self and its resolved target");
+                };
+                assert_eq!(self_reference.identity.kind, EntityKind::SelfType);
+                assert_eq!(
+                    exact(
+                        &self_reference
+                            .target
+                            .as_deref()
+                            .expect("Self has a resolved Choice target")
+                            .reference
+                    ),
+                    target
+                );
+                assert_eq!(constructor.name, "Ready");
+                assert_eq!(
+                    constructor.owner.as_ref().expect("constructor owner").name,
+                    "Choice"
+                );
+            } else if target.name == "Packet" {
+                packet_constructions += 1;
+                let tail = function
+                    .body
+                    .tail
+                    .as_deref()
+                    .expect("Packet construct tail");
+                let ResolvedExprKind::NamedConstruct {
+                    target: constructed,
+                    entries,
+                } = &tail.kind
+                else {
+                    panic!("Self is a named construction");
+                };
+                let ResolvedReference::Exact {
+                    target: constructed,
+                    self_reference: Some(self_reference),
+                    ..
+                } = constructed
+                else {
+                    panic!("Self construction retains Self and its resolved target");
+                };
+                assert_eq!(constructed, target);
+                assert_eq!(self_reference.identity.kind, EntityKind::SelfType);
+                assert_eq!(
+                    exact(
+                        &self_reference
+                            .target
+                            .as_deref()
+                            .expect("Self has a resolved Packet target")
+                            .reference
+                    ),
+                    target
+                );
+                let return_type = function.return_type.as_ref().expect("Self return type");
+                let ResolvedReference::Exact {
+                    target: self_identity,
+                    self_reference: Some(return_self),
+                    ..
+                } = named_type_reference(return_type)
+                else {
+                    panic!("direct Self type retains its identity and target relation");
+                };
+                assert_eq!(self_identity.kind, EntityKind::SelfType);
+                assert_eq!(&return_self.identity, self_identity);
+                assert_eq!(
+                    exact(
+                        &return_self
+                            .target
+                            .as_deref()
+                            .expect("return Self has a resolved target")
+                            .reference
+                    ),
+                    target
+                );
+                let ResolvedConstructEntry::Field { member, .. } = &entries[0] else {
+                    panic!("Packet construction has a field");
+                };
+                assert_eq!(
+                    member
+                        .declaration
+                        .as_ref()
+                        .expect("Self field is exact")
+                        .kind,
+                    EntityKind::Field
+                );
+            } else if target.name == "Boxed" {
+                let return_type = function
+                    .return_type
+                    .as_ref()
+                    .expect("generic Self return type");
+                let ResolvedReference::Exact {
+                    target: self_identity,
+                    self_reference: Some(self_reference),
+                    ..
+                } = named_type_reference(return_type)
+                else {
+                    panic!("generic Self retains its complete impl target");
+                };
+                assert_eq!(self_identity.kind, EntityKind::SelfType);
+                let target = self_reference
+                    .target
+                    .as_deref()
+                    .expect("generic Self has a resolved target");
+                assert_eq!(exact(&target.reference).name, "Boxed");
+                let ResolvedTypeArgument::Type(argument) = &target.arguments[0] else {
+                    panic!("Boxed target keeps its type argument");
+                };
+                let parameter = exact(named_type_reference(argument));
+                assert_eq!(parameter.kind, EntityKind::TypeParameter);
+                assert_eq!(parameter.name, "T");
+            }
+        }
+        assert_eq!(
+            packet_constructions, 2,
+            "inherent and trait impls both link Self"
+        );
     }
 
     #[test]
@@ -5379,6 +5741,130 @@ fn language(value: Iterable::Item) {}
                 .kind,
             EntityKind::AssociatedType
         );
+
+        let categorized = resolve_project(&project(
+            r#"
+enum E { V }
+impl E { type V = Int; }
+fn enum_member(value: E::V) {}
+struct Box { Item: Int }
+impl Box { type Item = Int; }
+fn struct_member(value: Box::Item) {}
+trait Parent { type Item; }
+trait Child: Parent { fn Item(self: Self); }
+fn inherited_member(value: Child::Item) {}
+trait Outer {
+    type Item;
+    fn direct(value: Item::Nested);
+    fn via_self(value: Self::Item::Nested);
+}
+"#,
+            vec![],
+        ))
+        .expect("member categories are formed independently before selection");
+        let categorized_root = module_body(&categorized, &[]);
+        for (name, expected_base) in [
+            ("enum_member", EntityKind::Enum),
+            ("struct_member", EntityKind::Struct),
+            ("inherited_member", EntityKind::Trait),
+        ] {
+            let annotation = function(categorized_root, name).parameters[0]
+                .annotation
+                .as_ref()
+                .expect("categorized parameter annotation");
+            let ResolvedReference::Selection {
+                base,
+                namespace,
+                members,
+                self_reference,
+                ..
+            } = named_type_reference(annotation)
+            else {
+                panic!("categorized member remains an explicit selection");
+            };
+            assert_eq!(*namespace, Namespace::Type);
+            assert_eq!(base.kind, expected_base);
+            assert_eq!(members.len(), 1);
+            assert!(members[0].declaration.is_none());
+            assert!(self_reference.is_none());
+        }
+
+        let outer = categorized_root
+            .declarations
+            .iter()
+            .find(|declaration| {
+                declaration
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.name == "Outer")
+            })
+            .expect("Outer trait declaration");
+        let ResolvedDeclarationKind::Trait { members, .. } = &outer.kind else {
+            panic!("Outer is a resolved trait");
+        };
+        for member in &members[1..] {
+            let ResolvedTraitMemberKind::Method(signature) = &member.kind else {
+                panic!("Outer member is a method");
+            };
+            let annotation = signature.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("nested associated annotation");
+            let ResolvedReference::Selection {
+                base,
+                namespace,
+                members,
+                self_reference,
+                ..
+            } = named_type_reference(annotation)
+            else {
+                panic!("nested associated path is a selection");
+            };
+            assert_eq!(base.name, "Outer");
+            assert_eq!(*namespace, Namespace::Type);
+            assert_eq!(members.len(), 2);
+            assert_eq!(
+                members[0]
+                    .declaration
+                    .as_ref()
+                    .expect("Outer::Item is exact")
+                    .kind,
+                EntityKind::AssociatedType
+            );
+            assert_eq!(members[1].name, "Nested");
+            assert!(members[1].declaration.is_none());
+            if member.identity.name == "via_self" {
+                let self_reference = self_reference
+                    .as_deref()
+                    .expect("Self::Item keeps its Self root identity");
+                assert_eq!(self_reference.identity.kind, EntityKind::SelfType);
+                assert_eq!(
+                    self_reference
+                        .identity
+                        .owner
+                        .as_ref()
+                        .expect("Self keeps its trait owner")
+                        .name,
+                    "Outer"
+                );
+                assert!(self_reference.target.is_none());
+            } else {
+                assert!(self_reference.is_none());
+            }
+        }
+
+        let diagnostic = resolve_project(&project(
+            "trait Closed { fn V(self: Self); } fn take(value: Closed::V) {}",
+            vec![],
+        ))
+        .expect_err("a closed wrong-category member cannot manufacture a Type candidate");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::UnresolvedName {
+                namespace: NameNamespace::Type,
+                ref name,
+            } if name == "V"
+        ));
 
         let diagnostic = resolve_project(&project("fn bad(value: Eq::Missing) {}", vec![]))
             .expect_err("the closed Eq member contract cannot invent an associated item");

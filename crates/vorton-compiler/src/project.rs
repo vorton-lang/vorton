@@ -329,7 +329,6 @@ pub(crate) enum EntityShape {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedModule {
-    pub(crate) reference: ModuleRef,
     pub(crate) body: Option<ResolvedModuleBody>,
 }
 
@@ -514,12 +513,22 @@ pub(crate) enum ResolvedReference {
     Exact {
         occurrence: OriginRef,
         target: EntityId,
+        self_reference: Option<Box<ResolvedSelfReference>>,
     },
     Selection {
         occurrence: OriginRef,
         base: EntityId,
+        namespace: Namespace,
         members: Vec<ResolvedSelection>,
+        self_reference: Option<Box<ResolvedSelfReference>>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedSelfReference {
+    pub(crate) origin: OriginRef,
+    pub(crate) identity: EntityId,
+    pub(crate) target: Option<Box<ResolvedNamedType>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
