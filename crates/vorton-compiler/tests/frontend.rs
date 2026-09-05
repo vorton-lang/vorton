@@ -31,7 +31,6 @@ use api::Thing as LocalThing;
 pub fn transform<T: Show + Eq + Source<Item = Int>>(
     value: move T,
     callback: fn(mut T, move Resource) -> Unit with {console},
-    row: {x: Int, ..rest},
     pair: (Int, Str),
 ) -> Option<T> with {console, mut<T>} {
     value
@@ -119,13 +118,6 @@ pub mod inner requires {} {
     ));
     assert!(matches!(
         function.item.parameters[2]
-            .annotation
-            .as_ref()
-            .map(|annotation| &annotation.ty.kind),
-        Some(TypeKind::Record(RecordType { rest: Some(_), .. }))
-    ));
-    assert!(matches!(
-        function.item.parameters[3]
             .annotation
             .as_ref()
             .map(|annotation| &annotation.ty.kind),
@@ -1013,6 +1005,32 @@ fn rejects_excluded_or_ambiguous_surfaces() {
         &attribute_source[diagnostic.span.start..diagnostic.span.end],
         "#"
     );
+}
+
+#[test]
+fn rejects_record_types_at_the_opening_brace() {
+    let invalid = [
+        "fn closed(value: { x: Int }) {}",
+        "fn open(value: { x: Int, ..r }) {}",
+        "type Nested = Option<{ x: Int }>;",
+    ];
+
+    for source in invalid {
+        let diagnostic = parse(source).unwrap_err();
+        assert_eq!(
+            &source[diagnostic.span.start..diagnostic.span.end],
+            "{",
+            "{source}"
+        );
+        let FrontendDiagnosticKind::UnexpectedToken { found, expected } = diagnostic.kind else {
+            panic!("record type should fail in the parser for {source}")
+        };
+        assert_eq!(found, FoundToken::Fixed("{".to_owned()), "{source}");
+        assert!(
+            !expected.contains(&ExpectedToken::Fixed("{".to_owned())),
+            "{source}"
+        );
+    }
 }
 
 #[test]

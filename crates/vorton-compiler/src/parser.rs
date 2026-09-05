@@ -649,7 +649,6 @@ impl Parser {
         match self.current_tag() {
             Tag::Fn => self.parse_function_type(),
             Tag::LParen => self.parse_tuple_type(),
-            Tag::LBrace => self.parse_record_type(),
             Tag::Ident | Tag::Super => {
                 let named = self.parse_named_type()?;
                 Ok(Spanned::new(TypeKind::Named(named.kind), named.span))
@@ -753,28 +752,6 @@ impl Parser {
         let end = self.expect(Tag::RParen)?.span.end;
         Ok(Spanned::new(
             TypeKind::Tuple(elements),
-            Span::new(start, end),
-        ))
-    }
-
-    fn parse_record_type(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
-        let start = self.expect(Tag::LBrace)?.span.start;
-        let mut fields = vec![self.parse_named_field()?];
-        let mut rest = None;
-        while self.eat(Tag::Comma).is_some() {
-            if self.at(Tag::RBrace) {
-                break;
-            }
-            if self.eat(Tag::DotDot).is_some() {
-                rest = Some(self.expect_identifier()?);
-                self.eat(Tag::Comma);
-                break;
-            }
-            fields.push(self.parse_named_field()?);
-        }
-        let end = self.expect(Tag::RBrace)?.span.end;
-        Ok(Spanned::new(
-            TypeKind::Record(RecordType { fields, rest }),
             Span::new(start, end),
         ))
     }
@@ -1991,7 +1968,6 @@ fn type_expectations() -> Vec<ExpectedToken> {
         Tag::Super.expected(),
         Tag::Fn.expected(),
         Tag::LParen.expected(),
-        Tag::LBrace.expected(),
     ]
 }
 

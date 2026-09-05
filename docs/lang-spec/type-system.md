@@ -1,6 +1,6 @@
 # 类型系统
 
-Vorton 使用 Hindley-Milner 类型推断（let-polymorphism），扩展了 effect row、record row polymorphism 和 trait bound。
+Vorton 使用 Hindley-Milner 类型推断（let-polymorphism），扩展了 effect row 和 trait bound。
 
 类型表达式、参数和调用的唯一 source EBNF 见[语法](syntax.md)；本页的公式是名称解析后的类型规则，不是第二份 parser grammar。
 
@@ -54,19 +54,6 @@ TupleType = (T₁, T₂, ..., Tₙ)    其中 n ≥ 2
 ```
 
 Tuple 是结构类型：不同上下文中的 `(Int, Str)` 是同一类型。不支持单元素 tuple；`(T)` 就是 `T`。
-
-### Record 类型（Row Polymorphism）
-
-```
-RecordType = { f₁: T₁, ..., fₙ: Tₙ }           (* 封闭 *)
-RecordType = { f₁: T₁, ..., fₙ: Tₙ, ..α }      (* 开放，带 row 尾变量 α *)
-```
-
-Record 是结构类型。开放 record `{ x: Int, ..α }` 匹配任何至少有 `x: Int` 字段的值。尾变量 `α` 捕获其余字段。
-
-Record 类型仅出现在函数参数位置。没有匿名 record 字面量语法。
-
-**Struct → Record 强制转换：** 如果 struct 有所有必需字段且类型匹配，则 struct 类型满足 record 类型约束。
 
 ### Option 类型
 
@@ -209,46 +196,8 @@ unify(E<T₁..Tₙ>, E<U₁..Uₙ>)  =  unify(T₁, U₁) ∧ ... ∧ unify(Tₙ
 unify((T₁..Tₙ), (U₁..Uₘ))  其中 n = m  =  unify(T₁, U₁) ∧ ... ∧ unify(Tₙ, Uₙ)
 unify((T₁..Tₙ), (U₁..Uₘ))  其中 n ≠ m  =  Error
 
-── Record ──
-见下方 Record Row Unification。
-
 ── Effect Row ──
 见 Effect 系统规范。
-```
-
-### Record Row Unification
-
-```
-unify_record_rows(
-  A = { f₁: T₁, ..., fₘ: Tₘ, ..α? },
-  B = { g₁: U₁, ..., gₙ: Uₙ, ..β? }
-):
-
-第 1 步：统一公共字段
-  对 A 和 B 中都有的字段名：统一其类型。
-
-第 2 步：划分非公共字段
-  A_only = A 有但 B 没有的字段
-  B_only = B 有但 A 没有的字段
-
-第 3 步：检查约束
-  如果 A_only 非空但 B 没有尾变量 → Error（B 无法接受额外字段）
-  如果 B_only 非空但 A 没有尾变量 → Error（A 无法接受额外字段）
-
-第 4 步：求解尾变量
-  两边都开放（α, β），两边都有剩余：
-    创建 fresh γ
-    绑定 α ↦ { B_only, ..γ }
-    绑定 β ↦ { A_only, ..γ }
-
-  两边都开放，一边无剩余：
-    将无剩余的尾绑定到另一个尾。
-
-  一边开放，一边封闭：
-    将开放尾绑定到剩余字段（无 row 变量）。
-
-  相同尾（α = β）：
-    无约束。
 ```
 
 ### 替换应用（Substitution Application）
@@ -257,7 +206,7 @@ unify_record_rows(
 apply(subst, τ):
   对类型变量：追踪绑定链（α → τ₁ → τ₂ → ... → 具体类型）
   对复合类型：递归应用到所有子组件
-  对 record/effect row：将尾绑定展平到字段列表中
+  对 effect row：将尾绑定展平到 row 中
 ```
 
 ## 推断规则
