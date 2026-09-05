@@ -2,6 +2,8 @@
 
 Vorton 的 trait 系统提供有界多态性（bounded polymorphism）。具体 receiver 在类型检查时解析到唯一 impl；受 trait bound 的类型变量通过隐式 dictionary evidence 调用。Evidence 的目标表示不是语言规范的一部分。
 
+语言以 `Language` origin 预声明的 trait 只有 `Eq`、`Hash`、`Clone`、`Debug`、`Ord`、`Drop`、`Iterable` 与 `Iterator`。下文 `Show`、`Describable` 等均是示例中显式声明的普通 source trait，不构成额外 builtin。
+
 ## Trait 声明
 
 ```vorton
@@ -10,7 +12,7 @@ trait Show {
 }
 ```
 
-声明一组类型必须实现的方法。`Self` 类型变量引用实现该 trait 的具体类型。
+声明一组类型必须实现的方法。`Self` 是 owner-scoped 的特殊 Type identity，引用实现该 trait 的具体类型；它不是全局 builtin，由 trait 内部 method/closure 继承。
 
 完整且唯一的 trait、impl、method signature 与 associated type 产生式见[语法](syntax.md#program-与声明)。本页不建立第二份文法。
 
@@ -158,6 +160,8 @@ impl<T: Show> Show for List<T> {
 ```
 
 Impl 块可以有自己的类型参数和约束。
+
+Impl generic 在整个 target、bound 与 member 中可见；member generic 不得遮蔽仍可见的 impl generic。Impl 内的 `Self` 表示当前 impl target，具体 substitution 与 associated selection 在 Checker 完成。
 
 ## Trait Bound
 

@@ -1,7 +1,7 @@
 //! Public typed surface AST for canonical Vorton 0.1.
 
 /// A UTF-8 byte half-open interval in the source passed to [`crate::parse`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

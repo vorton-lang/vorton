@@ -18,6 +18,8 @@ Effect row 中的 atom 共享组合与推断机制，但拥有不同的执行与
 
 Effect class 在 typed contract 冻结前固定。System effect 绝不能获得 handler evidence；handled effect 绝不能直接变成 host operation。`main` 可以保留 system effect，由目标环境执行；未消除的用户 handled effect 不得逃出 `main`。
 
+`console`、`fs`、`process`、`fail<T>`、`mut<T>` 与 `unsafe` 使用独立 `Language` origin，不由隐藏 source 或自动 prelude 声明。它们在 Effect namespace 中不可被 source effect/alias、import 或 re-export 重定义；相同 spelling 在其他 namespace 仍按各自规则处理。`mut` 与 `unsafe` 保持已有特殊 surface，其他 language effect 使用普通 resolved path。
+
 ## Effect Row
 
 ```text

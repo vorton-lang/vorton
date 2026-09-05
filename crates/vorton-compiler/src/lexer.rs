@@ -794,6 +794,10 @@ fn keyword(spelling: &str) -> Option<TokenKind> {
     })
 }
 
+pub(crate) fn is_keyword(spelling: &str) -> bool {
+    keyword(spelling).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
