@@ -2351,7 +2351,11 @@ impl ExpectedName {
     fn accepts_type_scope(self) -> bool {
         matches!(
             self,
-            Self::Type | Self::Construct | Self::PatternConstructor | Self::Value
+            Self::Type
+                | Self::Construct
+                | Self::PatternConstructor
+                | Self::Value
+                | Self::MethodReceiver
         )
     }
 
@@ -2556,6 +2560,7 @@ impl BodyResolver<'_> {
                 ..BodyLookupOutcome::default()
             };
         };
+        let qualified = path.segments.len() > 1;
         let mut outcome = BodyLookupOutcome::default();
         let mut candidates;
         let mut index;
@@ -2573,22 +2578,19 @@ impl BodyResolver<'_> {
                 }
                 candidates = vec![PathCandidate::Module(base)];
             }
-            PathSegment::Identifier(identifier)
-                if path.segments.len() > 1 && identifier.text == "root" =>
-            {
+            PathSegment::Identifier(identifier) if qualified && identifier.text == "root" => {
                 candidates = vec![PathCandidate::Module(ModuleRef::root())];
                 index = 1;
             }
-            PathSegment::Identifier(identifier)
-                if path.segments.len() > 1 && identifier.text == "self" =>
-            {
+            PathSegment::Identifier(identifier) if qualified && identifier.text == "self" => {
                 candidates = vec![PathCandidate::Module(self.module.clone())];
                 index = 1;
             }
             PathSegment::Identifier(identifier) => {
                 if identifier.text == "Self"
                     && expected.accepts_type_scope()
-                    && (!matches!(expected, ExpectedName::Value) || path.segments.len() > 1)
+                    && (!matches!(expected, ExpectedName::Value | ExpectedName::MethodReceiver)
+                        || qualified)
                 {
                     let Some(self_entity) = &self.self_entity else {
                         outcome.invalid = Some(ProjectDiagnosticKind::InvalidSelf);
@@ -2596,6 +2598,7 @@ impl BodyResolver<'_> {
                     };
                     candidates = vec![PathCandidate::Exact(self_entity.clone())];
                 } else if matches!(expected, ExpectedName::Value)
+                    && !qualified
                     && self.lookup_value_binding(&identifier.text).is_some()
                 {
                     candidates = vec![PathCandidate::Exact(
@@ -2603,6 +2606,7 @@ impl BodyResolver<'_> {
                             .expect("value binding was present"),
                     )];
                 } else if matches!(expected, ExpectedName::MethodReceiver)
+                    && !qualified
                     && self.lookup_value_binding(&identifier.text).is_some()
                 {
                     candidates = vec![PathCandidate::Exact(
@@ -2622,7 +2626,8 @@ impl BodyResolver<'_> {
                     }
                     outcome.inaccessible.extend(module_names.inaccessible);
                 } else if expected.accepts_type_scope()
-                    && (!matches!(expected, ExpectedName::Value) || path.segments.len() > 1)
+                    && (!matches!(expected, ExpectedName::Value | ExpectedName::MethodReceiver)
+                        || qualified)
                     && self.lookup_type_binding(&identifier.text).is_some()
                 {
                     candidates = vec![PathCandidate::Exact(
@@ -4518,6 +4523,21 @@ pub fn read() -> Int { self::local() + helper() + plus() }
 
     #[test]
     fn module_import_binds_only_the_module_and_supports_aliases() {
+        let shadowed = resolve_project(&project(
+            "mod tools { pub fn run() {} } fn test(tools: Int) { tools::run() }",
+            vec![],
+        ))
+        .expect("non-container local Value does not hide a qualified module prefix");
+        let test = function(module_body(&shadowed, &[]), "test");
+        let tail = test.body.tail.as_deref().expect("qualified call tail");
+        let ResolvedExprKind::Call { callee, .. } = &tail.kind else {
+            panic!("qualified module member is called");
+        };
+        assert_eq!(
+            exact(path_expression(callee)).module,
+            ModuleRef(vec!["tools".to_owned()])
+        );
+
         resolve_project(&project(
             "use lib as library; fn main() -> Int { library::item() }",
             vec![(vec!["lib"], "pub fn item() -> Int { 1 }")],
@@ -4902,6 +4922,7 @@ trait Identity<T> { fn identity(self: Self) -> T; }
             r#"
 trait HasItem { type Item; fn get(self: Self) -> Item; }
 fn read<T: HasItem>(value: T) -> T::Item { value.get() }
+fn shadow<T>(T: Int) { T::member }
 "#,
             vec![],
         ))
@@ -4943,8 +4964,11 @@ fn read<T: HasItem>(value: T) -> T::Item { value.get() }
             EntityKind::AssociatedType
         );
 
-        let function = function(root, "read");
-        let return_type = function.return_type.as_ref().expect("return annotation");
+        let read_function = function(root, "read");
+        let return_type = read_function
+            .return_type
+            .as_ref()
+            .expect("return annotation");
         let ResolvedTypeKind::Named(named) = &return_type.kind else {
             panic!("named associated type");
         };
@@ -4954,12 +4978,24 @@ fn read<T: HasItem>(value: T) -> T::Item { value.get() }
         assert_eq!(base.kind, EntityKind::TypeParameter);
         assert_eq!(members[0].name, "Item");
         assert!(members[0].declaration.is_none());
-        let tail = function.body.tail.as_deref().expect("method call tail");
+        let tail = read_function
+            .body
+            .tail
+            .as_deref()
+            .expect("method call tail");
         let ResolvedExprKind::MethodCall { method, .. } = &tail.kind else {
             panic!("method call remains a member selection");
         };
         assert_eq!(method.name, "get");
         assert!(method.declaration.is_none());
+
+        let shadow = function(root, "shadow");
+        let ResolvedReference::Selection { base, .. } =
+            path_expression(shadow.body.tail.as_deref().expect("selection tail"))
+        else {
+            panic!("generic remains the qualified selection base");
+        };
+        assert_eq!(base.kind, EntityKind::TypeParameter);
     }
 
     #[test]
