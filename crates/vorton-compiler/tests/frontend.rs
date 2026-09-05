@@ -1,6 +1,6 @@
 use vorton_compiler::ast::*;
 use vorton_compiler::diagnostic::{
-    ExpectedToken, FoundToken, FrontendDiagnosticKind, LexicalDiagnosticKind,
+    ExpectedToken, FoundToken, FrontendDiagnosticKind, LexicalDiagnosticKind, TokenClass,
 };
 use vorton_compiler::parse;
 
@@ -73,7 +73,7 @@ extern fn host<T>(value: T) -> Unit with {unsafe};
 extern type Handle<T>;
 type Mapper<T> = fn(T) -> T;
 const origin: Point = Point { x: 0, y: 0 };
-test "frontend" { () }
+fn test(test: Int) -> Int { test }
 
 pub mod inner requires {} {
     use super::Thing;
@@ -223,10 +223,25 @@ pub mod inner requires {} {
         program.declarations[11].kind,
         DeclarationKind::Const(_)
     ));
-    assert!(matches!(
-        program.declarations[12].kind,
-        DeclarationKind::Test(_)
-    ));
+    let DeclarationKind::Function(test_function) = &program.declarations[12].kind else {
+        panic!("ordinary function named test expected")
+    };
+    assert_eq!(test_function.item.name.text, "test");
+    assert_eq!(test_function.item.parameters[0].name.text, "test");
+    let ExprKind::Path(test_reference) = &test_function
+        .item
+        .body
+        .tail
+        .as_deref()
+        .expect("test function should return its parameter")
+        .kind
+    else {
+        panic!("ordinary test identifier reference expected")
+    };
+    let [PathSegment::Identifier(test_reference)] = test_reference.segments.as_slice() else {
+        panic!("single test identifier path expected")
+    };
+    assert_eq!(test_reference.text, "test");
     let DeclarationKind::Module(module) = &program.declarations[13].kind else {
         panic!("module declaration expected")
     };
@@ -972,10 +987,31 @@ fn rejects_excluded_or_ambiguous_surfaces() {
         assert!(parse(source).is_err(), "unexpectedly accepted {source:?}");
     }
 
+    for source in [r#"test "name" {}"#, r#"pub test "name" {}"#] {
+        let diagnostic = parse(source).unwrap_err();
+        assert_eq!(&source[diagnostic.span.start..diagnostic.span.end], "test");
+        let FrontendDiagnosticKind::UnexpectedToken { found, expected } = diagnostic.kind else {
+            panic!("native-test declaration should fail in the parser")
+        };
+        assert_eq!(found, FoundToken::Class(TokenClass::Identifier));
+        assert!(!expected.contains(&ExpectedToken::Fixed("test".to_owned())));
+    }
+
     let diagnostic = parse("fn invalid() { @derive(Json); }").unwrap_err();
     assert_eq!(
         diagnostic.kind,
         FrontendDiagnosticKind::Lexical(LexicalDiagnosticKind::UnexpectedCharacter)
+    );
+
+    let attribute_source = "#[test] fn probe() {}";
+    let diagnostic = parse(attribute_source).unwrap_err();
+    assert_eq!(
+        diagnostic.kind,
+        FrontendDiagnosticKind::Lexical(LexicalDiagnosticKind::UnexpectedCharacter)
+    );
+    assert_eq!(
+        &attribute_source[diagnostic.span.start..diagnostic.span.end],
+        "#"
     );
 }
 

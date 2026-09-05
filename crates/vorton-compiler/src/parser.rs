@@ -167,13 +167,6 @@ impl Parser {
                     item: self.parse_const_declaration()?,
                 })
             }
-            Tag::Test => {
-                self.bump();
-                DeclarationKind::Test(Declared {
-                    visibility,
-                    item: self.parse_test_declaration()?,
-                })
-            }
             Tag::Mod => {
                 self.bump();
                 DeclarationKind::Module(Declared {
@@ -595,21 +588,6 @@ impl Parser {
             name,
             annotation,
             value,
-        })
-    }
-
-    fn parse_test_declaration(&mut self) -> Result<TestDeclaration, FrontendDiagnostic> {
-        let token = self.expect(Tag::String)?;
-        let TokenKind::String(value) = token.kind else {
-            unreachable!("tag and token kind disagree")
-        };
-        let body = self.parse_block()?;
-        Ok(TestDeclaration {
-            name: StringValue {
-                span: token.span,
-                value,
-            },
-            body,
         })
     }
 
@@ -1993,7 +1971,6 @@ fn declaration_expectations(
         Tag::Effect.expected(),
         Tag::Extern.expected(),
         Tag::Const.expected(),
-        Tag::Test.expected(),
         Tag::Mod.expected(),
         ExpectedToken::Fixed("type".to_owned()),
     ];
