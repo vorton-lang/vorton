@@ -911,6 +911,7 @@ impl ResolverState {
                 &name.text,
                 Some(owner.clone()),
             );
+            diagnostics.extend(type_declaration_name_diagnostic(&id));
             self.entities.insert(
                 id.clone(),
                 Entity {
@@ -946,17 +947,19 @@ impl ResolverState {
             .flatten()
             .find(|candidate| candidate.namespace == id.namespace)
             .cloned();
-        let diagnostic = existing.map(|existing| ProjectDiagnostic {
-            kind: ProjectDiagnosticKind::MemberConflict {
-                name: id.name.clone(),
-            },
-            primary: declared_at.clone(),
-            related: self
-                .entities
-                .get(&existing)
-                .and_then(|entity| entity.declared_at.clone())
-                .into_iter()
-                .collect(),
+        let diagnostic = type_declaration_name_diagnostic(&id).or_else(|| {
+            existing.map(|existing| ProjectDiagnostic {
+                kind: ProjectDiagnosticKind::MemberConflict {
+                    name: id.name.clone(),
+                },
+                primary: declared_at.clone(),
+                related: self
+                    .entities
+                    .get(&existing)
+                    .and_then(|entity| entity.declared_at.clone())
+                    .into_iter()
+                    .collect(),
+            })
         });
         self.entities.insert(
             id.clone(),
@@ -4153,6 +4156,27 @@ fn is_language_name(namespace: Namespace, name: &str) -> bool {
     }
 }
 
+fn type_declaration_name_diagnostic(entity: &EntityId) -> Option<ProjectDiagnostic> {
+    if entity.origin == DeclarationOrigin::Language || entity.namespace != Namespace::Type {
+        return None;
+    }
+    let kind = if entity.name == "Self" {
+        ProjectDiagnosticKind::InvalidSelf
+    } else if is_language_name(Namespace::Type, &entity.name) {
+        ProjectDiagnosticKind::ReservedLanguageBinding {
+            namespace: NameNamespace::Type,
+            name: entity.name.clone(),
+        }
+    } else {
+        return None;
+    };
+    Some(ProjectDiagnostic {
+        kind,
+        primary: entity_origin(entity),
+        related: Vec::new(),
+    })
+}
+
 fn path_text(path: &Path) -> String {
     path.segments
         .iter()
@@ -5099,6 +5123,29 @@ fn ambiguous() -> Int { Source.read() }
         ))
         .expect_err("import cannot occupy owner-scoped Self in the Type namespace");
         assert_eq!(diagnostic.kind, ProjectDiagnosticKind::InvalidSelf);
+
+        for source in [
+            "trait Bad { type Self; }",
+            "struct Bad {} impl Bad { type Self = Bad; }",
+        ] {
+            let diagnostic = resolve_project(&project(source, vec![]))
+                .expect_err("owner-scoped Type declaration cannot occupy Self");
+            assert_eq!(diagnostic.kind, ProjectDiagnosticKind::InvalidSelf);
+        }
+        for source in [
+            "trait Bad { type Int; }",
+            "struct Bad {} impl Bad { type Int = Bad; }",
+        ] {
+            let diagnostic = resolve_project(&project(source, vec![]))
+                .expect_err("owner-scoped Type declaration cannot redefine a language type");
+            assert!(matches!(
+                diagnostic.kind,
+                ProjectDiagnosticKind::ReservedLanguageBinding {
+                    namespace: NameNamespace::Type,
+                    ref name,
+                } if name == "Int"
+            ));
+        }
     }
 
     #[test]
