@@ -3,7 +3,7 @@
 ## 语言与 authority
 
 - 所有对话回复、解释和讨论使用中文；技术术语、代码和命令可保留英文。
-- 当前仓库是 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)。[GitHub Milestones](https://github.com/vorton-lang/vorton/milestones) 是持久目标与目标顺序的唯一真值；GitHub Issue 是当前范围、设计、验收与依赖的 immutable execution contract；完成历史只查 PR 与 Git。
+- 当前仓库是 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)。[GitHub Milestones](https://github.com/vorton-lang/vorton/milestones) 是持久目标与目标顺序的唯一真值；阶段采用的 GitHub Issue 原生正文修订是当前范围、设计、验收与依赖的 immutable execution contract；完成历史只查 PR 与 Git。
 - 所有仓库变更、PR verification 与 merge 路由必须完整读取并遵守 [`task-pipeline`](.agents/skills/task-pipeline/SKILL.md)；它是唯一任务 lifecycle authority。
 - 语言公理见 [`docs/philosophy.md`](docs/philosophy.md)，稳定设计见 [`docs/design.md`](docs/design.md)，用户规范见 [`docs/lang-spec/`](docs/lang-spec/)。GitHub Milestone、模板和标签入口见 [`docs/workflow.md`](docs/workflow.md)。
 

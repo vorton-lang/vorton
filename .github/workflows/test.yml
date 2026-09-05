@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -27,4 +29,61 @@ jobs:
       - name: Test compiler
         run: cargo test --workspace --locked
       - name: Check whitespace errors
-        run: git diff --check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+
+          require_commit() {
+            local label="$1"
+            local sha="$2"
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "$label is not a 40-hex commit SHA: $sha" >&2
+              return 1
+            fi
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              echo "$label commit object is unavailable: $sha" >&2
+              return 1
+            fi
+          }
+
+          case "$EVENT_NAME" in
+            pull_request)
+              require_commit "pull_request.base.sha" "$PR_BASE_SHA"
+              require_commit "pull_request.head.sha" "$PR_HEAD_SHA"
+              if ! merge_base="$(git merge-base "$PR_BASE_SHA" "$PR_HEAD_SHA")"; then
+                echo "PR endpoints have no merge-base: $PR_BASE_SHA $PR_HEAD_SHA" >&2
+                exit 1
+              fi
+              if [[ -z "$merge_base" || "$merge_base" == "$PR_HEAD_SHA" ]]; then
+                echo "PR endpoints do not produce a non-empty candidate range" >&2
+                exit 1
+              fi
+              echo "whitespace range: $PR_BASE_SHA...$PR_HEAD_SHA (merge-base $merge_base)"
+              git diff --check "$PR_BASE_SHA...$PR_HEAD_SHA"
+              ;;
+            push)
+              require_commit "before" "$PUSH_BEFORE_SHA"
+              require_commit "after" "$PUSH_AFTER_SHA"
+              checkout_sha="$(git rev-parse HEAD)"
+              if [[ "$checkout_sha" != "$PUSH_AFTER_SHA" ]]; then
+                echo "checkout is not the exact push after commit: $checkout_sha != $PUSH_AFTER_SHA" >&2
+                exit 1
+              fi
+              if [[ "$PUSH_BEFORE_SHA" == "$PUSH_AFTER_SHA" ]]; then
+                echo "push endpoints do not produce a commit range" >&2
+                exit 1
+              fi
+              echo "whitespace range: $PUSH_BEFORE_SHA $PUSH_AFTER_SHA"
+              git diff --check "$PUSH_BEFORE_SHA" "$PUSH_AFTER_SHA"
+              ;;
+            *)
+              echo "unsupported event for whitespace range: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
