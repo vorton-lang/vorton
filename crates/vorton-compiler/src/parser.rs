@@ -213,11 +213,7 @@ impl Parser {
         let name = self.expect_identifier()?;
         let type_parameters = self.parse_type_parameters()?;
         let parameters = self.parse_named_parameters()?;
-        let return_type = if self.eat(Tag::Arrow).is_some() {
-            Some(self.parse_type_expr()?)
-        } else {
-            None
-        };
+        let return_type = self.parse_optional_return_type()?;
         let effects = if self.eat(Tag::With).is_some() {
             Some(self.parse_effect_set()?)
         } else {
@@ -507,7 +503,7 @@ impl Parser {
             let operation_name = self.expect_identifier()?;
             let parameters = self.parse_named_parameters()?;
             self.expect(Tag::Arrow)?;
-            let return_type = self.parse_type_expr()?;
+            let return_type = self.parse_return_type_expr()?;
             let end = self.expect(Tag::Semicolon)?.span.end;
             operations.push(EffectOperation {
                 span: Span::new(start, end),
@@ -648,12 +644,27 @@ impl Parser {
     fn parse_type_expr(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
         match self.current_tag() {
             Tag::Fn => self.parse_function_type(),
-            Tag::LParen => self.parse_tuple_type(),
+            Tag::LParen => self.parse_parenthesized_type(),
             Tag::Ident | Tag::Super => {
                 let named = self.parse_named_type()?;
                 Ok(Spanned::new(TypeKind::Named(named.kind), named.span))
             }
             _ => Err(self.unexpected(type_expectations())),
+        }
+    }
+
+    fn parse_optional_return_type(&mut self) -> Result<Option<TypeExpr>, FrontendDiagnostic> {
+        if self.eat(Tag::Arrow).is_some() {
+            Ok(Some(self.parse_return_type_expr()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn parse_return_type_expr(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
+        match self.current_tag() {
+            Tag::Ident | Tag::Super | Tag::LParen => self.parse_type_expr(),
+            _ => Err(self.unexpected(return_type_expectations())),
         }
     }
 
@@ -721,7 +732,7 @@ impl Parser {
         }
         self.expect(Tag::RParen)?;
         self.expect(Tag::Arrow)?;
-        let return_type = Box::new(self.parse_type_expr()?);
+        let return_type = Box::new(self.parse_return_type_expr()?);
         let effects = if self.eat(Tag::With).is_some() {
             Some(self.parse_effect_set()?)
         } else {
@@ -740,10 +751,14 @@ impl Parser {
         ))
     }
 
-    fn parse_tuple_type(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
+    fn parse_parenthesized_type(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
         let start = self.expect(Tag::LParen)?.span.start;
-        let first = self.parse_type_expr()?;
-        self.expect(Tag::Comma)?;
+        let mut first = self.parse_type_expr()?;
+        if self.eat(Tag::Comma).is_none() {
+            let end = self.expect(Tag::RParen)?.span.end;
+            first.span = Span::new(start, end);
+            return Ok(first);
+        }
         let second = self.parse_type_expr()?;
         let mut elements = vec![first, second];
         while self.eat(Tag::Comma).is_some() && !self.at(Tag::RParen) {
@@ -1400,11 +1415,7 @@ impl Parser {
             None
         };
         let parameters = self.parse_named_parameters()?;
-        let return_type = if self.eat(Tag::Arrow).is_some() {
-            Some(self.parse_type_expr()?)
-        } else {
-            None
-        };
+        let return_type = self.parse_optional_return_type()?;
         let effects = if self.eat(Tag::With).is_some() {
             Some(self.parse_effect_set()?)
         } else {
@@ -1967,6 +1978,14 @@ fn type_expectations() -> Vec<ExpectedToken> {
         Tag::Ident.expected(),
         Tag::Super.expected(),
         Tag::Fn.expected(),
+        Tag::LParen.expected(),
+    ]
+}
+
+fn return_type_expectations() -> Vec<ExpectedToken> {
+    vec![
+        Tag::Ident.expected(),
+        Tag::Super.expected(),
         Tag::LParen.expected(),
     ]
 }

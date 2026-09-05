@@ -4,13 +4,17 @@ use vorton_compiler::diagnostic::{
 };
 use vorton_compiler::parse;
 
-fn first_function_body(source: &str) -> Block {
+fn first_function(source: &str) -> FunctionDeclaration {
     let mut program = parse(source).expect("source should parse");
     let declaration = program.declarations.remove(0);
     let DeclarationKind::Function(function) = declaration.kind else {
         panic!("first declaration should be a function")
     };
-    function.item.body
+    function.item
+}
+
+fn first_function_body(source: &str) -> Block {
+    first_function(source).body
 }
 
 fn tail_expression(expression: &str) -> Expr {
@@ -949,6 +953,233 @@ fn probe() with {Reader<Str>, mut, unsafe} { () }
 }
 
 #[test]
+fn parses_grouped_types_without_changing_other_type_carriers() {
+    let source = r#"
+fn grouped(
+    named: (Single),
+    nested: ((Single)),
+    function: (fn() -> Int),
+    tuple: ((Int, Str)),
+    callback: fn() -> Unit,
+    boxed: Box<fn() -> Unit>,
+) -> Reader {}
+type Mapper = fn() -> Unit;
+enum Payload { one(Single,), }
+"#;
+    let program = parse(source).unwrap();
+    let DeclarationKind::Function(grouped) = &program.declarations[0].kind else {
+        panic!("grouped function expected")
+    };
+    let parameters = &grouped.item.parameters;
+
+    for (parameter, expected_source) in
+        [(&parameters[0], "(Single)"), (&parameters[1], "((Single))")]
+    {
+        let ty = &parameter.annotation.as_ref().unwrap().ty;
+        assert!(matches!(ty.kind, TypeKind::Named(_)));
+        assert_eq!(&source[ty.span.start..ty.span.end], expected_source);
+    }
+
+    let grouped_function = &parameters[2].annotation.as_ref().unwrap().ty;
+    assert!(matches!(grouped_function.kind, TypeKind::Function(_)));
+    assert_eq!(
+        &source[grouped_function.span.start..grouped_function.span.end],
+        "(fn() -> Int)"
+    );
+
+    let grouped_tuple = &parameters[3].annotation.as_ref().unwrap().ty;
+    assert!(matches!(
+        grouped_tuple.kind,
+        TypeKind::Tuple(ref elements) if elements.len() == 2
+    ));
+    assert_eq!(
+        &source[grouped_tuple.span.start..grouped_tuple.span.end],
+        "((Int, Str))"
+    );
+
+    assert!(matches!(
+        parameters[4].annotation.as_ref().unwrap().ty.kind,
+        TypeKind::Function(_)
+    ));
+    let TypeKind::Named(boxed) = &parameters[5].annotation.as_ref().unwrap().ty.kind else {
+        panic!("Box should remain a named type")
+    };
+    assert!(matches!(
+        boxed.arguments[0],
+        TypeArgument::Type(Spanned {
+            kind: TypeKind::Function(_),
+            ..
+        })
+    ));
+    assert!(matches!(
+        grouped.item.return_type.as_ref().map(|ty| &ty.kind),
+        Some(TypeKind::Named(_))
+    ));
+    assert!(matches!(
+        program.declarations[1].kind,
+        DeclarationKind::TypeAlias(Declared {
+            item: TypeAliasDeclaration {
+                value: Spanned {
+                    kind: TypeKind::Function(_),
+                    ..
+                },
+                ..
+            },
+            ..
+        })
+    ));
+    assert!(matches!(
+        program.declarations[2].kind,
+        DeclarationKind::Enum(Declared {
+            item: EnumDeclaration { ref variants, .. },
+            ..
+        }) if matches!(variants[0].fields, VariantFields::Positional(ref fields) if fields.len() == 1)
+    ));
+}
+
+#[test]
+fn requires_grouping_for_function_types_in_every_return_position() {
+    let cases = [
+        (
+            "fn make() -> (fn() -> Int) {}",
+            "fn make() -> fn() -> Int {}",
+        ),
+        (
+            "mod inner { fn make() -> (fn() -> Int) {} }",
+            "mod inner { fn make() -> fn() -> Int {} }",
+        ),
+        (
+            "impl Maker { fn make() -> (fn() -> Int) {} }",
+            "impl Maker { fn make() -> fn() -> Int {} }",
+        ),
+        (
+            "impl Make for Maker { fn make() -> (fn() -> Int) {} }",
+            "impl Make for Maker { fn make() -> fn() -> Int {} }",
+        ),
+        (
+            "trait Make { fn make() -> (fn() -> Int); }",
+            "trait Make { fn make() -> fn() -> Int; }",
+        ),
+        (
+            "extern fn make() -> (fn() -> Int);",
+            "extern fn make() -> fn() -> Int;",
+        ),
+        (
+            "effect Make { fn make() -> (fn() -> Int); }",
+            "effect Make { fn make() -> fn() -> Int; }",
+        ),
+        (
+            "fn outer() { fn() -> (fn() -> Int) {} }",
+            "fn outer() { fn() -> fn() -> Int {} }",
+        ),
+        (
+            "type Factory = fn() -> (fn() -> Int);",
+            "type Factory = fn() -> fn() -> Int;",
+        ),
+    ];
+
+    for (grouped, bare) in cases {
+        parse(grouped).unwrap_or_else(|diagnostic| {
+            panic!("grouped return should parse for {grouped:?}: {diagnostic:?}")
+        });
+
+        let diagnostic = parse(bare).expect_err("bare function return should fail");
+        let offending_start = bare.rfind("fn() -> Int").unwrap();
+        assert_eq!(
+            diagnostic.span,
+            Span {
+                start: offending_start,
+                end: offending_start + "fn".len(),
+            },
+            "{bare}"
+        );
+        let FrontendDiagnosticKind::UnexpectedToken { found, expected } = diagnostic.kind else {
+            panic!("bare function return should fail in the parser for {bare}")
+        };
+        assert_eq!(found, FoundToken::Fixed("fn".to_owned()), "{bare}");
+        assert!(
+            expected.contains(&ExpectedToken::Fixed("(".to_owned())),
+            "{bare}"
+        );
+        assert!(
+            !expected.contains(&ExpectedToken::Fixed("fn".to_owned())),
+            "{bare}"
+        );
+    }
+
+    parse("type Nested = fn() -> (fn() -> (fn() -> Int));")
+        .expect("nested function returns should accept grouping at every arrow");
+
+    let operation = "effect Make { fn make() -> (fn() -> Int) with {fs}; }";
+    let diagnostic = parse(operation).expect_err("effect operation has no outer annotation");
+    assert_eq!(
+        &operation[diagnostic.span.start..diagnostic.span.end],
+        "with"
+    );
+}
+
+#[test]
+fn preserves_grouped_return_effect_ownership_and_spans() {
+    let cases = [
+        ("fn make() -> (fn() -> Int) {}", None, None),
+        (
+            "fn make() -> (fn() -> Int) with {fs} {}",
+            None,
+            Some("{fs}"),
+        ),
+        (
+            "fn make() -> (fn() -> Int with {fs}) {}",
+            Some("{fs}"),
+            None,
+        ),
+        (
+            "fn make() -> (fn() -> Int with {fs}) with {} {}",
+            Some("{fs}"),
+            Some("{}"),
+        ),
+        ("fn make() -> (fn() -> Int with {}) {}", Some("{}"), None),
+        ("fn make() -> (fn() -> Int) with {} {}", None, Some("{}")),
+    ];
+
+    for (source, inner_effects, outer_effects) in cases {
+        let function = first_function(source);
+        let return_type = function.return_type.as_ref().unwrap();
+        let TypeKind::Function(returned_function) = &return_type.kind else {
+            panic!("grouped return should preserve the function carrier for {source}")
+        };
+        let grouped_start = source.find("-> (").unwrap() + "-> ".len();
+        let grouped_end = source.rfind(')').unwrap() + 1;
+        assert_eq!(
+            &source[return_type.span.start..return_type.span.end],
+            &source[grouped_start..grouped_end],
+            "{source}"
+        );
+        assert_eq!(
+            &source
+                [returned_function.return_type.span.start..returned_function.return_type.span.end],
+            "Int",
+            "{source}"
+        );
+        assert_eq!(
+            returned_function
+                .effects
+                .as_ref()
+                .map(|effects| &source[effects.span.start..effects.span.end]),
+            inner_effects,
+            "{source}"
+        );
+        assert_eq!(
+            function
+                .effects
+                .as_ref()
+                .map(|effects| &source[effects.span.start..effects.span.end]),
+            outer_effects,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn rejects_excluded_or_ambiguous_surfaces() {
     let invalid = [
         "fn invalid(value: Int?) {}",
@@ -965,7 +1196,8 @@ fn rejects_excluded_or_ambiguous_surfaces() {
         "fn invalid() { Thing { field, ..base } }",
         "fn invalid() { (single,) }",
         "fn invalid() { match value { Variant() => 0 } }",
-        "fn invalid(value: (Single)) {}",
+        "fn invalid(value: (Single,)) {}",
+        "fn invalid(value: ()) {}",
         "fn first() {} use later;",
         "fn invalid() { if packet { ready: true } {} }",
         "fn invalid() { if let item = packet { ready: true } {} }",

@@ -53,7 +53,7 @@ EnumType = Name<T₁, ..., Tₙ> { V₁(S₁, ...) | V₂ { f: S, ... } | V₃ }
 TupleType = (T₁, T₂, ..., Tₙ)    其中 n ≥ 2
 ```
 
-Tuple 是结构类型：不同上下文中的 `(Int, Str)` 是同一类型。不支持单元素 tuple；`(T)` 就是 `T`。
+Tuple 是结构类型：不同上下文中的 `(Int, Str)` 是同一类型。不支持单元素 tuple；source 中的 `(T)` 是透明类型分组，仍表示 `T`。分组及返回函数类型的括号要求见[语法](syntax.md#path类型与-effect)。
 
 ### Option 类型
 
