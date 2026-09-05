@@ -29,7 +29,7 @@ EffectRow = { e₁, e₂, ..., eₙ, ..α }     // 开放 row
 - 开放 row 至少包含列出的 effect，其余由尾变量 `α` 捕获；
 - `{}` 表示纯计算。
 
-规范中的函数类型可写成 `(T₁, ..., Tₙ) -> R / ε`。源码函数类型用 `fn(T₁, ..., Tₙ) -> R with { ... }` 表示显式 row；省略 `with` 时可保留开放尾以支持 effect 多态。
+规范中的函数类型可写成 `(T₁, ..., Tₙ) -> R / ε`。源码函数类型用 `fn(T₁, ..., Tₙ) -> R with { ... }` 表示显式 row；省略 `with` 时可保留开放尾以支持 effect 多态。该函数类型直接出现在返回箭头后时须按[统一返回类型语法](syntax.md#path类型与-effect)写入透明分组，组内 `with` 仍属于返回的函数类型。
 
 普通推断 metavariable 必须在 TypedHIR 前求解。只有由函数 scheme 正式量化的开放尾可以保留，并获得稳定的 owner 与 ordinal；无法归属 formal scheme 的 raw tail 是编译错误。Effect alias 在此之前递归展开。
 

@@ -25,7 +25,7 @@ DeclKind         ::= FnDecl
 
 FnDecl           ::= 'fn' Ident TypeParams? '(' NamedParams? ')'
                      ReturnType? EffectAnnotation? Block
-ReturnType       ::= '->' TypeExpr
+ReturnType       ::= '->' ReturnTypeExpr
 
 NamedParams      ::= NamedParam (',' NamedParam)* ','?
 NamedParam       ::= Ident (':' ParamType)?
@@ -63,7 +63,7 @@ TraitAssocType   ::= 'type' Ident AssocBounds? ('=' TypeExpr)? ';'
 AssocBounds      ::= ':' TypeBound ('+' TypeBound)*
 
 EffectDecl       ::= 'effect' Ident TypeParams? '{' EffectOp* '}'
-EffectOp         ::= 'fn' Ident '(' NamedParams? ')' '->' TypeExpr ';'
+EffectOp         ::= 'fn' Ident '(' NamedParams? ')' ReturnType ';'
 EffectAliasDecl  ::= 'effect' 'alias' Ident TypeParams? '=' EffectSet ';'
 
 ExternDecl       ::= 'extern' ExternKind
@@ -133,12 +133,14 @@ let update = fn [mut counter: Int, name: Str](step: Int) {
 Path             ::= PathSegment ('::' PathSegment)*
 PathSegment      ::= Ident | 'super'
 
-TypeExpr         ::= NamedType | FnType | TupleType
+TypeExpr         ::= NamedType | FnType | GroupedType | TupleType
+ReturnTypeExpr   ::= NamedType | GroupedType | TupleType
 NamedType        ::= Path TypeArgs?
-FnType           ::= 'fn' '(' FnTypeParams? ')' '->' TypeExpr
+FnType           ::= 'fn' '(' FnTypeParams? ')' ReturnType
                      EffectAnnotation?
 FnTypeParams     ::= FnTypeParam (',' FnTypeParam)* ','?
 FnTypeParam      ::= ParamMode? TypeExpr
+GroupedType      ::= '(' TypeExpr ')'
 TupleType        ::= '(' TypeExpr ',' TypeExpr (',' TypeExpr)* ','? ')'
 
 TypeParams       ::= '<' TypeParam (',' TypeParam)* ','? '>'
@@ -155,6 +157,12 @@ EffectExpr       ::= Path EffectArgs?
                    | 'unsafe'
 EffectArgs       ::= '<' TypeExpr (',' TypeExpr)* ','? '>'
 ```
+
+`GroupedType` 是透明分组：`(T)` 与 `T` 表示同一类型，且可以嵌套。它不创建名义类型或单元素 tuple。`TupleType` 仍至少包含两个元素；`(T,)` 与 `()` 都不是合法类型，单位类型写作 `Unit`。
+
+每个 `ReturnType` 都使用同一条 source-shape 限制：箭头后若直接展开函数类型，必须先写成 `GroupedType`，因此 `-> (fn() -> Int)` 合法而 `-> fn() -> Int` 非法。该规则递归适用于 `FnType` 自身的返回位置，并由普通函数、impl method、trait method signature、`extern fn`、effect operation 与 closure 共用。它只检查直接语法形状；callback 参数、type alias 右侧、type argument 等普通 `TypeExpr` 位置仍可裸写 `fn(...) -> ...`，命名返回类型也不根据未来解析结果要求括号。
+
+`with` 始终归属最近的 callable。组内 `FnType` 的 `EffectAnnotation` 属于返回的函数类型；分组闭合后，只有原产生式允许的外层 `EffectAnnotation` 才属于外层 callable。例如 `fn make() -> (fn() -> Int with {fs}) with {} {}` 的 `{fs}` 属于返回函数，`{}` 属于 `make`。省略 annotation 与显式 `with {}` 保持不同的 source 信息。Effect operation 没有外层 `EffectAnnotation`，但其分组返回函数仍可在组内标注 effect。
 
 Canonical 0.1 不提供结构化 record 类型；封闭 `{ x: Int }` 与开放 `{ x: Int, ..r }` 在所有 `TypeExpr` 位置均非法。该排除不影响花括号承载的 effect set、block、named construction 与 pattern。
 
