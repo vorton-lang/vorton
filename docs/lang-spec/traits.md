@@ -42,6 +42,55 @@ Vorton 0.1 不支持 return-position `impl Trait`、opaque type 或由推断产�
 
 Vorton 0.1 的 source trait member 只有方法签名，不允许函数体。Trait declaration 中出现 `{ ... }` 方法体必须稳定报错，并建议把实现写入每个 `impl Trait for Type`；每个 impl 必须显式提供 trait 的全部方法。该限制不删除 associated type default，也不影响编译器内建或 auto-derived 的 exact impl body。
 
+### 按 impl 关联的 effect scheme
+
+Trait method 省略外层 `with` 时，声明该 exact method 拥有按选定 impl 确定的完整公开 effect scheme。它不是 pure 默认值，不是待补的 contract，也不把当前全部 impl 汇总为一个 row。
+
+设 impl body 推断 row 为 `A`，impl 自己显式写出的上界为 `I`，trait 显式上界为 `B`：
+
+- trait 无 `B`、impl 有 `I`：检查 `A ⊆ I`，该 impl 的公开关联 scheme 为 `I`；
+- trait 与 impl 都省略：该 impl 的公开关联 scheme 为 `A`；
+- trait 有 `B`：impl 有 `I` 时检查 `A ⊆ I ⊆ B`，否则检查 `A ⊆ B`；所有普通 trait-method 调用与 scheme 引用都使用 `B`。
+
+这些关系对合法 type/effect formal 的每次实例化成立。修改某个 impl 可以改变该 impl 尚未固定的推断 contract；增删无关 impl 不得改写其他实现或 trait 的抽象关系。Trait 暂时没有 impl 也不会被默认判定为 pure，具体调用仍需要合法 evidence。
+
+```vorton
+trait Fetch {
+    fn fetch<effect E>(
+        self,
+        callback: fn(Str) -> Unit with {E}
+    ) -> Unit;
+}
+
+struct Memory {}
+
+impl Fetch for Memory {
+    fn fetch(
+        self,
+        callback: fn(Str) -> Unit
+    ) -> Unit {
+        callback("cached")
+    }
+}
+
+struct Disk {}
+
+impl Fetch for Disk {
+    fn fetch(
+        self,
+        callback: fn(Str) -> Unit
+    ) -> Unit {
+        callback(read_file("data.txt"))
+    }
+}
+```
+
+Checker 将对应 signature 位置映射到 trait formal。于是 `Memory` 可以得到 `Fetch::fetch(E) = E`，`Disk` 可以得到 `Fetch::fetch(E) = {fs, E}`；完全不调用 callback 的实现也可以不传播 `E`。Scheme 关联整个 method effect 表达式，而不是给 impl 附加一个固定集合。
+
+受 `T: Trait` evidence 约束的 generic caller 保留正式 method scheme application；concrete call 使用唯一选定 impl 的 mapping。Type actual、callback effect actual、trait evidence 与 method scheme 必须来自同一次实例化，不能为 generic body 重新推断一份关系。
+
+每个 method scheme 独立。Canonical 0.1 不表达跨方法共享或相等的抽象 effect，也不同时提供“保留每个 impl 精度”和“单独声明全局 cap”的第二种 contract 模式。需要引用 method scheme 时使用 [exact `TraitPath::method<...>` 形式](effects.md#完整方法-scheme-引用)。
+
 ### Supertrait 继承
 
 ```vorton

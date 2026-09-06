@@ -14,6 +14,13 @@ struct Parser {
     index: usize,
 }
 
+#[derive(Clone, Copy)]
+enum ParameterAnnotations {
+    Inferred,
+    TraitSignature,
+    Required,
+}
+
 impl Parser {
     fn parse_program(&mut self, source_length: usize) -> Result<Program, FrontendDiagnostic> {
         let requires = if self.at(Tag::Requires) {
@@ -197,11 +204,12 @@ impl Parser {
     }
 
     fn parse_function_declaration(&mut self) -> Result<FunctionDeclaration, FrontendDiagnostic> {
-        let signature = self.parse_function_signature()?;
+        let signature = self.parse_function_signature(ParameterAnnotations::Inferred)?;
         let body = self.parse_block()?;
         Ok(FunctionDeclaration {
             name: signature.name,
             type_parameters: signature.type_parameters,
+            effect_parameters: signature.effect_parameters,
             parameters: signature.parameters,
             return_type: signature.return_type,
             effects: signature.effects,
@@ -209,10 +217,13 @@ impl Parser {
         })
     }
 
-    fn parse_function_signature(&mut self) -> Result<FunctionSignature, FrontendDiagnostic> {
+    fn parse_function_signature(
+        &mut self,
+        annotations: ParameterAnnotations,
+    ) -> Result<FunctionSignature, FrontendDiagnostic> {
         let name = self.expect_identifier()?;
-        let type_parameters = self.parse_type_parameters()?;
-        let parameters = self.parse_named_parameters()?;
+        let (type_parameters, effect_parameters) = self.parse_callable_parameters()?;
+        let parameters = self.parse_named_parameters(annotations)?;
         let return_type = self.parse_optional_return_type()?;
         let effects = if self.eat(Tag::With).is_some() {
             Some(self.parse_effect_set()?)
@@ -222,13 +233,17 @@ impl Parser {
         Ok(FunctionSignature {
             name,
             type_parameters,
+            effect_parameters,
             parameters,
             return_type,
             effects,
         })
     }
 
-    fn parse_named_parameters(&mut self) -> Result<Vec<NamedParameter>, FrontendDiagnostic> {
+    fn parse_named_parameters(
+        &mut self,
+        annotations: ParameterAnnotations,
+    ) -> Result<Vec<NamedParameter>, FrontendDiagnostic> {
         self.expect(Tag::LParen)?;
         let mut parameters = Vec::new();
         if !self.at(Tag::RParen) {
@@ -244,8 +259,13 @@ impl Parser {
                         mode,
                         ty,
                     })
-                } else {
+                } else if matches!(annotations, ParameterAnnotations::Inferred)
+                    || matches!(annotations, ParameterAnnotations::TraitSignature)
+                        && name.text == "self"
+                {
                     None
+                } else {
+                    return Err(self.unexpected(vec![Tag::Colon.expected()]));
                 };
                 let end = annotation
                     .as_ref()
@@ -447,7 +467,8 @@ impl Parser {
         while !self.at(Tag::RBrace) {
             let start = self.current().span.start;
             let kind = if self.eat(Tag::Fn).is_some() {
-                let signature = self.parse_function_signature()?;
+                let signature =
+                    self.parse_function_signature(ParameterAnnotations::TraitSignature)?;
                 self.expect(Tag::Semicolon)?;
                 TraitMemberKind::Method(signature)
             } else if self.at_contextual("type") {
@@ -501,7 +522,7 @@ impl Parser {
         while !self.at(Tag::RBrace) {
             let start = self.expect(Tag::Fn)?.span.start;
             let operation_name = self.expect_identifier()?;
-            let parameters = self.parse_named_parameters()?;
+            let parameters = self.parse_named_parameters(ParameterAnnotations::Required)?;
             self.expect(Tag::Arrow)?;
             let return_type = self.parse_return_type_expr()?;
             let end = self.expect(Tag::Semicolon)?.span.end;
@@ -537,7 +558,10 @@ impl Parser {
 
     fn parse_extern_declaration(&mut self) -> Result<ExternDeclaration, FrontendDiagnostic> {
         if self.eat(Tag::Fn).is_some() {
-            let signature = self.parse_function_signature()?;
+            let signature = self.parse_function_signature(ParameterAnnotations::Required)?;
+            if signature.effects.is_none() {
+                return Err(self.unexpected(vec![Tag::With.expected()]));
+            }
             self.expect(Tag::Semicolon)?;
             Ok(ExternDeclaration::Function(signature))
         } else if self.at_contextual("type") {
@@ -618,27 +642,62 @@ impl Parser {
         }
         let mut parameters = Vec::new();
         loop {
-            let start = self.current().span.start;
-            let name = self.expect_identifier()?;
-            let mut bounds = Vec::new();
-            if self.eat(Tag::Colon).is_some() {
-                bounds.push(self.parse_named_type()?);
-                while self.eat(Tag::Plus).is_some() {
-                    bounds.push(self.parse_named_type()?);
-                }
-            }
-            let end = bounds.last().map_or(name.span.end, |bound| bound.span.end);
-            parameters.push(TypeParameter {
-                span: Span::new(start, end),
-                name,
-                bounds,
-            });
+            parameters.push(self.parse_type_parameter()?);
             if self.eat(Tag::Comma).is_none() || self.at(Tag::Greater) {
                 break;
             }
         }
         self.expect(Tag::Greater)?;
         Ok(parameters)
+    }
+
+    fn parse_callable_parameters(
+        &mut self,
+    ) -> Result<(Vec<TypeParameter>, Vec<EffectParameter>), FrontendDiagnostic> {
+        if self.eat(Tag::Less).is_none() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let mut type_parameters = Vec::new();
+        let mut effect_parameters = Vec::new();
+        let mut saw_effect = false;
+        loop {
+            if self.at(Tag::Effect) {
+                saw_effect = true;
+                let start = self.bump().span.start;
+                let name = self.expect_identifier()?;
+                effect_parameters.push(EffectParameter {
+                    span: Span::new(start, name.span.end),
+                    name,
+                });
+            } else if saw_effect {
+                return Err(self.unexpected(vec![Tag::Effect.expected()]));
+            } else {
+                type_parameters.push(self.parse_type_parameter()?);
+            }
+            if self.eat(Tag::Comma).is_none() || self.at(Tag::Greater) {
+                break;
+            }
+        }
+        self.expect(Tag::Greater)?;
+        Ok((type_parameters, effect_parameters))
+    }
+
+    fn parse_type_parameter(&mut self) -> Result<TypeParameter, FrontendDiagnostic> {
+        let start = self.current().span.start;
+        let name = self.expect_identifier()?;
+        let mut bounds = Vec::new();
+        if self.eat(Tag::Colon).is_some() {
+            bounds.push(self.parse_named_type()?);
+            while self.eat(Tag::Plus).is_some() {
+                bounds.push(self.parse_named_type()?);
+            }
+        }
+        let end = bounds.last().map_or(name.span.end, |bound| bound.span.end);
+        Ok(TypeParameter {
+            span: Span::new(start, end),
+            name,
+            bounds,
+        })
     }
 
     fn parse_type_expr(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
@@ -793,15 +852,17 @@ impl Parser {
         let start = self.current().span.start;
         let kind = if self.eat(Tag::Mut).is_some() {
             EffectKind::Mutation {
-                arguments: self.parse_effect_arguments()?,
+                arguments: self.parse_effect_type_arguments()?,
             }
         } else if self.eat(Tag::Unsafe).is_some() {
             EffectKind::Unsafe
         } else if self.at(Tag::Ident) || self.at(Tag::Super) {
             let path = self.parse_path(false)?;
+            let (arguments, effect_arguments) = self.parse_effect_application_arguments()?;
             EffectKind::Named {
                 path,
-                arguments: self.parse_effect_arguments()?,
+                arguments,
+                effect_arguments,
             }
         } else {
             return Err(self.unexpected(vec![
@@ -814,7 +875,7 @@ impl Parser {
         Ok(Spanned::new(kind, Span::new(start, self.previous_end())))
     }
 
-    fn parse_effect_arguments(&mut self) -> Result<Vec<TypeExpr>, FrontendDiagnostic> {
+    fn parse_effect_type_arguments(&mut self) -> Result<Vec<TypeExpr>, FrontendDiagnostic> {
         if self.eat(Tag::Less).is_none() {
             return Ok(Vec::new());
         }
@@ -824,6 +885,33 @@ impl Parser {
         }
         self.expect(Tag::Greater)?;
         Ok(arguments)
+    }
+
+    fn parse_effect_application_arguments(
+        &mut self,
+    ) -> Result<(Vec<TypeExpr>, Vec<EffectRowArgument>), FrontendDiagnostic> {
+        if self.eat(Tag::Less).is_none() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let mut arguments = vec![self.parse_type_expr()?];
+        let mut effect_arguments = Vec::new();
+        let mut saw_effect = false;
+        while self.eat(Tag::Comma).is_some() && !self.at(Tag::Greater) {
+            if let Some(effect) = self.eat(Tag::Effect) {
+                saw_effect = true;
+                let effects = self.parse_effect_set()?;
+                effect_arguments.push(EffectRowArgument {
+                    span: Span::new(effect.span.start, effects.span.end),
+                    effects,
+                });
+            } else if saw_effect {
+                return Err(self.unexpected(vec![Tag::Effect.expected(), Tag::Greater.expected()]));
+            } else {
+                arguments.push(self.parse_type_expr()?);
+            }
+        }
+        self.expect(Tag::Greater)?;
+        Ok((arguments, effect_arguments))
     }
 
     fn parse_path(&mut self, stop_before_use_items: bool) -> Result<Path, FrontendDiagnostic> {
@@ -1388,7 +1476,7 @@ impl Parser {
             let effect = self.parse_path(false)?;
             self.expect(Tag::Dot)?;
             let operation = self.expect_identifier()?;
-            let parameters = self.parse_named_parameters()?;
+            let parameters = self.parse_named_parameters(ParameterAnnotations::Inferred)?;
             self.expect(Tag::FatArrow)?;
             let body = self.parse_expr()?;
             let mut end = body.span.end;
@@ -1414,7 +1502,7 @@ impl Parser {
         } else {
             None
         };
-        let parameters = self.parse_named_parameters()?;
+        let parameters = self.parse_named_parameters(ParameterAnnotations::Inferred)?;
         let return_type = self.parse_optional_return_type()?;
         let effects = if self.eat(Tag::With).is_some() {
             Some(self.parse_effect_set()?)

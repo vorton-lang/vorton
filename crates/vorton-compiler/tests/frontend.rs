@@ -953,6 +953,121 @@ fn probe() with {Reader<Str>, mut, unsafe} { () }
 }
 
 #[test]
+fn preserves_callable_effect_parameters_and_method_scheme_arguments() {
+    let source = r#"
+trait Fetch {
+    fn fetch<T, effect E, effect F>(
+        self,
+        callback: fn(T) -> Unit with {E}
+    ) -> Unit;
+}
+
+fn run<T: Fetch, effect E, effect F>(
+    source: T,
+    inferred: fn(Str) -> Unit,
+    pure: fn(Str) -> Unit with {},
+    callback: fn(Str) -> Unit with {E}
+) -> Unit with {Fetch::fetch<T, Str, effect {E, fs}, effect {F}>} {
+    source.fetch(callback)
+}
+
+extern fn invoke<effect E>(callback: fn() -> Unit with {E}) -> Unit with {E};
+"#;
+    let program = parse(source).expect("callable effect surface parses");
+
+    let DeclarationKind::Trait(trait_declaration) = &program.declarations[0].kind else {
+        panic!("trait expected")
+    };
+    let TraitMemberKind::Method(method) = &trait_declaration.item.members[0].kind else {
+        panic!("trait method expected")
+    };
+    assert_eq!(
+        method
+            .effect_parameters
+            .iter()
+            .map(|parameter| parameter.name.text.as_str())
+            .collect::<Vec<_>>(),
+        ["E", "F"]
+    );
+    assert_eq!(
+        &source[method.effect_parameters[0].span.start..method.effect_parameters[0].span.end],
+        "effect E"
+    );
+    assert!(method.parameters[0].annotation.is_none());
+
+    let DeclarationKind::Function(function) = &program.declarations[1].kind else {
+        panic!("function expected")
+    };
+    assert_eq!(function.item.type_parameters.len(), 1);
+    assert_eq!(function.item.effect_parameters.len(), 2);
+    let callback_effects = function.item.parameters[3]
+        .annotation
+        .as_ref()
+        .and_then(|annotation| match &annotation.ty.kind {
+            TypeKind::Function(function) => function.effects.as_ref(),
+            _ => None,
+        })
+        .expect("callback has an explicit effect row");
+    assert_eq!(callback_effects.effects.len(), 1);
+    assert!(matches!(
+        function.item.parameters[1]
+            .annotation
+            .as_ref()
+            .map(|annotation| &annotation.ty.kind),
+        Some(TypeKind::Function(FunctionType { effects: None, .. }))
+    ));
+    assert!(matches!(
+        function.item.parameters[2]
+            .annotation
+            .as_ref()
+            .map(|annotation| &annotation.ty.kind),
+        Some(TypeKind::Function(FunctionType {
+            effects: Some(EffectSet { effects, .. }),
+            ..
+        })) if effects.is_empty()
+    ));
+
+    let outer_effects = function.item.effects.as_ref().expect("outer effect bound");
+    let EffectKind::Named {
+        path,
+        arguments,
+        effect_arguments,
+    } = &outer_effects.effects[0].kind
+    else {
+        panic!("method scheme application expected")
+    };
+    assert_eq!(path.segments.len(), 2);
+    assert_eq!(arguments.len(), 2);
+    assert_eq!(effect_arguments.len(), 2);
+    assert_eq!(
+        &source[effect_arguments[0].span.start..effect_arguments[0].span.end],
+        "effect {E, fs}"
+    );
+    assert_eq!(effect_arguments[0].effects.effects.len(), 2);
+
+    let DeclarationKind::Extern(external) = &program.declarations[2].kind else {
+        panic!("extern expected")
+    };
+    let ExternDeclaration::Function(external) = &external.item else {
+        panic!("extern function expected")
+    };
+    assert_eq!(external.effect_parameters.len(), 1);
+    assert!(external.effects.is_some());
+
+    let impl_program = parse(
+        "struct Worker {} impl Worker { fn invoke<effect E>(callback: fn() -> Unit with {E}) -> Unit with {E} { callback() } }",
+    )
+    .expect("impl methods reuse callable parameters");
+    let DeclarationKind::InherentImpl(implementation) = &impl_program.declarations[1].kind else {
+        panic!("inherent impl expected")
+    };
+    let ImplMemberKind::Function(method) = &implementation.members[0].kind else {
+        panic!("impl method expected")
+    };
+    assert_eq!(method.effect_parameters.len(), 1);
+}
+
+#[test]
 fn parses_grouped_types_without_changing_other_type_carriers() {
     let source = r#"
 fn grouped(
@@ -1061,8 +1176,8 @@ fn requires_grouping_for_function_types_in_every_return_position() {
             "trait Make { fn make() -> fn() -> Int; }",
         ),
         (
-            "extern fn make() -> (fn() -> Int);",
-            "extern fn make() -> fn() -> Int;",
+            "extern fn make() -> (fn() -> Int) with {};",
+            "extern fn make() -> fn() -> Int with {};",
         ),
         (
             "effect Make { fn make() -> (fn() -> Int); }",
@@ -1189,6 +1304,23 @@ fn rejects_excluded_or_ambiguous_surfaces() {
         "pub impl Value {}",
         "effect Bad { fn op() -> Unit, }",
         "trait Bad { fn method() {} }",
+        "trait Bad { fn method(value); }",
+        "effect Bad { fn operation(value) -> Unit; }",
+        "extern fn missing_effect(value: Int);",
+        "extern fn missing_type(value) with {};",
+        "fn invalid<effect E, T>() {}",
+        "fn invalid<effect E>() with {Query::method<effect {E}>} {}",
+        "fn invalid<T, effect E>() with {Query::method<T, effect {E}, T>} {}",
+        "fn invalid() { fn<effect E>() {} }",
+        "struct Invalid<effect E> {}",
+        "enum Invalid<effect E> {}",
+        "trait Invalid<effect E> {}",
+        "effect Invalid<effect E> {}",
+        "effect alias Invalid<effect E> = {};",
+        "impl<effect E> Invalid {}",
+        "extern type Invalid<effect E>;",
+        "type Invalid<effect E> = Int;",
+        "type Invalid = fn<effect E>() -> Unit;",
         "fn invalid() { ordinary() next(); }",
         "fn invalid() { while ready {}; () }",
         "fn invalid() { transfer(mut make_state()); }",

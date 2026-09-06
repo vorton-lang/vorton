@@ -111,6 +111,7 @@ pub enum DeclarationKind {
 pub struct FunctionDeclaration {
     pub name: Identifier,
     pub type_parameters: Vec<TypeParameter>,
+    pub effect_parameters: Vec<EffectParameter>,
     pub parameters: Vec<NamedParameter>,
     pub return_type: Option<TypeExpr>,
     pub effects: Option<EffectSet>,
@@ -121,6 +122,7 @@ pub struct FunctionDeclaration {
 pub struct FunctionSignature {
     pub name: Identifier,
     pub type_parameters: Vec<TypeParameter>,
+    pub effect_parameters: Vec<EffectParameter>,
     pub parameters: Vec<NamedParameter>,
     pub return_type: Option<TypeExpr>,
     pub effects: Option<EffectSet>,
@@ -306,6 +308,12 @@ pub struct TypeParameter {
     pub bounds: Vec<NamedType>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectParameter {
+    pub span: Span,
+    pub name: Identifier,
+}
+
 pub type NamedType = Spanned<NamedTypeKind>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,11 +368,18 @@ pub enum EffectKind {
     Named {
         path: Path,
         arguments: Vec<TypeExpr>,
+        effect_arguments: Vec<EffectRowArgument>,
     },
     Mutation {
         arguments: Vec<TypeExpr>,
     },
     Unsafe,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectRowArgument {
+    pub span: Span,
+    pub effects: EffectSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
