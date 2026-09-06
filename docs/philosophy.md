@@ -52,6 +52,8 @@ System effect 只描述静态宿主能力，不能被用户 handler 截获；用
 
 资源释放是语言语义，不是垃圾回收策略。`Drop` 在词法 scope 退出时发生；只有证明提前释放不可观测时，优化器才可依照 as-if 规则提前执行。用户 `Drop` 或可被 `Weak<T>` 观察的目标固定在 scope-end。
 
+这里的结构化 scope 退出包括 normal return、failure 与语言定义的控制/handler exit。不可恢复的 panic 直接终止程序，不承诺 stack unwinding 或尚存值的 `Drop`；它不能被用作带 cleanup 保证的第二种 failure。
+
 内存由 ownership 与引用计数管理，不引入 tracing GC 或 cycle collector。无环值必须精确回收；环由显式 `Weak<T>` 打破。确定性不等于常数延迟，级联析构仍可能形成可预测的单点工作量。
 
 ### 7. 核心场景不可堵死

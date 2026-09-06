@@ -101,6 +101,14 @@ fn sequence<effect E>(
 }
 ```
 
+## Panic
+
+Panic 是不可恢复的程序终止，不是 effect atom，也不等于 `fail<E>`。`catch` 和 `handle...with` 都不能捕获 panic；普通 checked `Int` 算术可能 panic，但不会因此向 callable row 加入 failure 或其他 effect。
+
+Panic 发生后不再求值后续表达式，并终止整个程序。语言不保证对尚存值执行 `Drop`，也不要求 stack unwinding。此前已经发生的 mutation、IO、资源移交或其他 effect 保持发生，不自动回滚。Normal return、failure、`break`、`continue` 与 handler exit 的既有 cleanup 规则不变；它们仍是会执行结构化 cleanup 的路径。
+
+`with {}` 只表示没有 row effect，不保证 callable 不会 panic、一定终止或没有浮点舍入误差。本规范不规定 panic renderer、退出码、报错文字、栈追踪或后端采用 abort 还是其他等价终止机制。
+
 ## 完整方法 scheme 引用
 
 Effect row 可以用 `TraitPath::method<SelfActual, ..., effect {row}>` 引用 trait 的完整公开方法 scheme。`TraitPath` 必须名称解析到 exact trait，terminal 必须是该 owner 的 exact method；module/import/re-export alias 可以改变可见路径，但不能改变 identity。裸方法名、`T::method` 或从 impl 集合按名称猜测都非法。

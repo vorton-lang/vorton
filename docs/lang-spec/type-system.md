@@ -10,14 +10,67 @@ Vorton 使用 Hindley-Milner 类型推断（let-polymorphism），扩展了 effe
 
 | 类型 | 描述 |
 |------|------|
-| `Int` | 有符号整数 |
-| `Float` | 浮点数 |
+| `Int` | 固定 64 位的有符号整数，范围为 −2^63 至 2^63−1 |
+| `Float` | 采用 IEEE 754 binary64 值模型的浮点数 |
 | `Str` | 字符串 |
 | `Bool` | 布尔值 |
 | `Unit` | 唯一值为 `()` 的单位类型 |
 | `Never` | 底类型（无值） |
 
 `Never` 与任何类型统一（它是类型格的底部元素）。它是永不返回的操作（如 `fail.raise`）的返回类型。
+
+## 数值语义
+
+Lexer、Parser 与 AST 只按[词法和语法规范](lexical.md#数值字面量)忠实保留十进制字面量拼写；范围检查与数值解释由 Checker 完成。`Int` 与 `Float` 的普通算术只接受同型 operand，不做隐式跨数值类型转换，也不建立数值重载体系。
+
+### `Int` 算术与字面量
+
+`Int` 的范围固定为 `−9223372036854775808..=9223372036854775807`，不随宿主字长、目标平台、构建模式或优化级别变化。普通 `+`、`-`、`*`、`/`、`%`、一元 `-` 及对应复合赋值始终检查；`unsafe` block 不改变这些运算符的语义。
+
+- 加、减、乘或一元取负的数学结果超出 `Int` 范围时 panic；
+- 除数为零的 `/` 与 `%` 均 panic；
+- `−9223372036854775808 / -1` 与 `−9223372036854775808 % -1` 均 panic；
+- 其他合法除法的商向零截断，余数满足 `a = q * b + r`；非零 `r` 与 `a` 同号，且 `|r| < |b|`。
+
+因此 `7 / 3 = 2`、`7 % 3 = 1`，而 `−7 / 3 = −2`、`−7 % 3 = −1`。这些 panic 不引入 `fail` effect；不可恢复终止与资源边界见 [Panic](effects.md#panic)。普通运算不得静默回绕或饱和。将来的未检查算术只能作为独立 `unsafe` 库或语言能力另行决定，回绕算术只能由独立库能力提供；本规范不设计接口或预留实现占位。
+
+独立的正 `Int` 字面量不得大于 `9223372036854775807`。唯一边界特例是一元负号直接作用于十进制拼写 `9223372036854775808`；负号和字面量之间可以只有任意层透明括号。Checker 将整个形状解释为最小 `Int`：
+
+```vorton
+let min = -9223372036854775808;
+let grouped_min = -((9223372036854775808));
+let too_large = 9223372036854775808; // 错误：独立正字面量超出范围
+let overflow = -min;                 // 运行时 panic：这是普通取负
+```
+
+该特例不扩展到任意子表达式；其他超范围 `Int` 字面量均被拒绝。模式语法也没有负字面量，详细边界见[模式匹配](patterns.md#数值模式与穷尽性边界)。源码字面量检查只解释当前 literal，不构成通用 const evaluator。
+
+### `Float` 值、算术与字面量
+
+`Float` 采用与 Rust `f64` 对应的 IEEE binary64 值模型，包括有限正常值、subnormal、正负零、正负 Infinity 与 NaN。普通 `+`、`-`、`*`、`/` 的结果按 round-to-nearest ties-to-even 舍入；运算不读取用户可改变的动态舍入环境。一元 `-` 是对应的浮点符号操作。
+
+浮点除零、溢出和无效算术按对应普通浮点规则产生 Infinity、NaN 等结果，不使用整数的 checked panic，也不增加 `fail` effect。下溢正常产生 subnormal 或有符号零。NaN 的算术传播和 bit pattern 只采用 Rust 的对应保证；Vorton 不额外固定算术 NaN 的 payload、符号或跨目标 bitwise 结果。
+
+普通 `%` 是截断余数，非零结果与被除数同号。它按数学余数语义得到对应 binary64 结果，不要求后端通过可能发生额外舍入或溢出的浮点除、乘、减序列实现：
+
+| 输入 | 结果 |
+|---|---|
+| `5.5 % 2.0` | `1.5` |
+| `-5.5 % 2.0` | `-1.5` |
+| `1.0 / 0.0` | positive Infinity |
+| `0.0 / 0.0` | NaN |
+| `-0.0 % 2.0` | `-0.0` |
+| NaN 参与、无限被除数、或正负零除数 | NaN |
+| 有限被除数、无限除数 | 被除数本身 |
+| 结果为零 | 保留被除数的符号 |
+
+源码 `Float` 字面量先作为精确十进制值解释，再恰好舍入一次到 binary64，使用 round-to-nearest ties-to-even。舍入为 Infinity 时 Checker 报字面量范围错误；subnormal 或舍入为零都合法。Infinity 与 NaN 是运行时值，不是新增的 source 关键字或字面量。
+
+普通运算不能因优化而隐式融合为 FMA、保留额外中间精度或 flush subnormal to zero；只有保持上述可观察结果的优化才合法。Vorton 不承诺可观察 IEEE exception flags、可切换的全局舍入模式或完整浮点环境；普通 `%` 也不映射到 IEEE nearest-integer remainder，本规范不增加第二个 remainder API。这里固定的对应边界以 Rust 的 [`f64`](https://doc.rust-lang.org/std/primitive.f64.html) 与 [`Rem`](https://doc.rust-lang.org/std/ops/trait.Rem.html) 普通行为为参考，不把 Rust 文档的后续变化自动纳入 Vorton，也不由此引入 Rust 的其余数值 API。
+
+### 数值复合赋值
+
+`+=`、`-=`、`*=`、`/=`、`%=` 使用对应的普通数值运算，目标和 RHS 必须是同型 `Int` 或同型 `Float`。每次复合赋值依次完整求值 RHS 一次、取得目标当前值、执行运算并写回；不得复制 place 或 RHS 求值。RHS failure 不执行本次写回，RHS 已经发生的其他 mutation、IO 或资源移交不自动回滚。具体 lowering 在后续实现阶段决定。
 
 ### 函数类型
 
@@ -65,12 +118,16 @@ Option<T> = Some(T) | None
 
 语言内置 enum，且 `Option<T>` 是唯一类型拼写。Constructor 的精确拼写是 `Some` 与 `None`；默认使用 `Option::Some` / `Option::None`，只有显式 constructor import 才产生 bare binding。类型位置不接受 `T?`；表达式位置的 postfix `expr?` 是独立的传播语法。
 
+### Ordering 类型
+
+`Ordering` 是 Language origin 的预声明 enum，只有 `Less`、`Equal`、`Greater` 三个 variant。Constructor 默认写作 `Ordering::Less`、`Ordering::Equal`、`Ordering::Greater`；只有显式 constructor import 才产生 bare binding。它承载比较 trait 的结果，不隐式提供额外数值方法或 source declaration。
+
 ### Language origin 的预声明 type 与 trait
 
 下列 binding 由语言以独立 `Language` origin 提供，不是隐藏 source file、虚构 module 或 source prelude：
 
-- Type：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`Option<T>`、`List<T>`、`Range<T>`、`Ptr<T>`；
-- Trait（同属 Type namespace）：`Eq`、`Hash`、`Clone`、`Debug`、`Ord`、`Drop`、`Iterable`、`Iterator`。
+- Type：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`Option<T>`、`Ordering`、`List<T>`、`Range<T>`、`Ptr<T>`；
+- Trait（同属 Type namespace）：`PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Clone`、`Debug`、`Drop`、`Iterable`、`Iterator`。
 
 List literal 产生 `List<T>`，range expression 产生 `Range<Int>`，raw address 使用 `Ptr<T>`。本规范不为这些 type 声明普通方法，也不把 `Weak`、`Show`、`Json`、`Result`、`Cell`、`Map`、`Set` 或 `StringBuilder` 等普通 source/library 名称隐式加入 Language origin。
 
@@ -252,15 +309,16 @@ apply(subst, τ):
 ── 比较（==, !=）──
   Γ ⊢ e₁ : τ₁ / ε₁     Γ ⊢ e₂ : τ₂ / ε₂
   unify(τ₁, τ₂)
-  τ₁ 实现 Eq trait；== 解糖为 exact Eq.eq() trait dispatch，
-  != 解糖为同一次 exact Eq.eq() dispatch 的 Bool 取反
+  τ₁ 实现 PartialEq trait；== 解糖为 exact PartialEq::eq trait dispatch，
+  != 解糖为同一次 exact PartialEq::eq dispatch 结果的 Bool 取反
   ──────────────────────────────────────
   Γ ⊢ e₁ op e₂ : Bool / (ε₁ ∪ ε₂)
 
 ── 排序比较（<, >, <=, >=）──
   Γ ⊢ e₁ : τ₁ / ε₁     Γ ⊢ e₂ : τ₂ / ε₂
   unify(τ₁, τ₂)
-  τ₁ 实现 Ord trait 时解糖为 Ord.cmp() trait dispatch
+  τ₁ 实现 PartialOrd trait；求值一次 exact PartialOrd::partial_cmp dispatch，
+  按返回的 Option<Ordering> 映射当前运算符
   ──────────────────────────────────────
   Γ ⊢ e₁ op e₂ : Bool / (ε₁ ∪ ε₂)
 
@@ -397,7 +455,7 @@ apply(subst, τ):
   见 Effect 系统规范。
 ```
 
-Vorton 0.1 的语言级 `Eq` contract 只包含 `eq`；不存在 `ne` member、override slot 或默认 body。`!=` 的唯一语义是 `!Eq.eq(left, right)`，不能获得独立 dispatch。Source trait 同样只允许 method signature，不提供 default method body。
+四个比较 trait 的 exact member、运算符映射、primitive evidence 和关系律见 [Trait 系统](traits.md#比较-trait)。`PartialEq` 只有 `eq`，`Eq` 没有新增方法；不存在 `ne` member、override slot 或默认 body。`Ord::cmp` 是显式全序接口，不会成为排序运算符的第二条 dispatch 路径。Source trait 同样只允许 method signature，不提供 default method body。
 
 ### 语句
 
@@ -422,6 +480,12 @@ Vorton 0.1 的语言级 `Eq` contract 只包含 `eq`；不存在 `ne` member、o
   x 可变     Γ ⊢ e : τ / ε     unify(Γ(x), τ)
   ─────────────────────────────────────────────────────
   Γ ⊢ x = e ⇒ (Γ, ε)
+
+── 数值复合赋值 ──
+  p 是可变 place     Γ(p) = τ     Γ ⊢ e : τ / ε     τ ∈ { Int, Float }
+  op ∈ { +, -, *, /, % }
+  ────────────────────────────────────────────────────────────────
+  Γ ⊢ p op= e ⇒ (Γ, ε)
 
 ── If-let ──
   Γ ⊢ e : τ / ε₀
@@ -448,6 +512,8 @@ Vorton 0.1 的语言级 `Eq` contract 只包含 `eq`；不存在 `ne` member、o
 ```
 
 字段赋值要求其root binding可变，并保持同一字段类型。0.1中`IndexExpr`只产生读取值，不是lvalue；index assignment在进入类型/ownership lowering前稳定拒绝。容器更新通过物化签名为`self: mut Self`的具名方法参与普通调用与mutation推断。
+
+数值复合赋值遵守[同一数值运算和确定求值顺序](#数值复合赋值)：RHS 只求值一次，随后读取目标当前值并完成一次写回。运算 panic 前已经发生的 RHS effects 不回滚；RHS failure 则不执行该次写回。
 
 所有 direct、method 与 indirect call 都先求 callable/receiver，再按源码从左到右逐个求 argument，并完成该 argument 对应的资源移交。后续 argument 求值或 callee failure 不恢复已经完成的移交；callee 尚未进入时，已经取得的 argument temporary 仍必须按其 ownership contract 清理。Struct update 的提交规则不扩展为普通调用事务。Checker 冻结 type、effect 与 parameter mode contract，资源阶段只消费该 contract 安排操作，不能反向改变 mode 或 effect。一般业务回滚、callback 的次数和业务时机、重试策略仍由库 contract 规定，不成为新的语言事务保证。
 

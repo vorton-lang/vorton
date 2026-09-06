@@ -71,6 +71,12 @@ bind_pattern(p₁ | p₂ | ..., τ):
 
 同一 pattern 内重复 binder 是错误。Or-pattern 每个 alternative 必须绑定同一 spelling 集合，arm 内对应 spelling 共享同一个 logical binding identity；不同 alternative 的 source occurrence 不会创建多个 arm binding。类型兼容性仍由 Checker 验证。
 
+### 数值模式与穷尽性边界
+
+数值字面量 pattern 只覆盖按对应 primitive equality 与它相等的值。Pattern grammar 不包含一元运算，因此没有负 literal pattern；例如 `-1` 不能作为单个 pattern，负数分支需要 binding/wildcard 加 guard 或其他普通控制逻辑。
+
+`Int` 虽然只有 2^64 个值，也仍属于非封闭 pattern 分类；穷尽性检查不会枚举全部整数。`Float` 的有限 bit-pattern 集合、NaN 或巨大值域同样不会形成可枚举的 pattern constructor 集合。`Int`、`Float`、`Str` 等分类都必须由 wildcard 或 binding 兜底；若 guard 存在，它仍不参与穷尽性证明。
+
 ## 穷尽性检查
 
 使用 Maranget 风格矩阵算法。目标：验证 match 表达式覆盖了被匹配类型的所有可能值。
@@ -99,7 +105,7 @@ match opt {
 
 **Tuple 类型：** 构建模式矩阵，按列检查每个元素的穷尽性。
 
-**其他类型（Int、Str 等）：** 无穷类型，要求有通配符或绑定模式作为兜底。
+**非封闭 pattern 类型（Int、Float、Str 等）：** 要求有通配符或绑定模式作为兜底。这里按语言的 pattern constructor 分类，而不是按数学值域是否有限判断。
 
 ### 矩阵算法
 
@@ -114,14 +120,14 @@ check_matrix(rows: Pattern[][], col_types: Type[]) → null | Pattern[]
 递归情况：
   取第一列的类型 T
 
-  如果 T 是有穷类型（Bool、Enum、Unit、Tuple）：
+  如果 T 是封闭 constructor 类型（Bool、Enum、Unit、Tuple）：
     对 T 的每个构造器 ctor：
       特化 rows：收集匹配 ctor 的行
       子列类型 = ctor.fields ++ 其余列类型
       递归 check_matrix(特化后的 rows, 子列类型)
       如果不穷尽：格式化缺失模式
 
-  如果 T 是无穷类型：
+  如果 T 是非封闭 pattern 类型：
     收集第一列为通配符/绑定的行
     递归 check_matrix(这些行, 其余列类型)
     如果不穷尽：返回 ["_", ...rest_missing]
