@@ -2,9 +2,11 @@
 
 Vorton 的 trait 系统提供有界多态性（bounded polymorphism）。具体 receiver 在类型检查时解析到唯一 impl；受 trait bound 的类型变量通过隐式 dictionary evidence 调用。Evidence 的目标表示不是语言规范的一部分。
 
-语言以 `Language` origin 预声明的 trait 只有 `Eq`、`Hash`、`Clone`、`Debug`、`Ord`、`Drop`、`Iterable` 与 `Iterator`。下文 `Show`、`Describable` 等均是示例中显式声明的普通 source trait，不构成额外 builtin。
+语言以 `Language` origin 预声明的 trait 只有 `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Clone`、`Debug`、`Drop`、`Iterable` 与 `Iterator`。下文 `Show`、`Describable` 等均是示例中显式声明的普通 source trait，不构成额外 builtin。
 
-本规范明确使用的 Language member identity 是 `Eq::eq`、`Ord::cmp`、`Drop::drop`、`Iterable::{Item, Iter, iter}` 与 `Iterator::next`。Resolver 可冻结这些 owner/member identity，但不由命名习惯为 `Hash`、`Clone`、`Debug` 或其他 builtin 发明 source-visible member、signature 或 runtime operation；其余 trait/impl selection 在 Checker 信息完备后决定。`Eq` 的 member contract 由下文规则封闭为唯一 `eq`。
+本规范明确使用的 Language member identity 是 `PartialEq::eq`、`PartialOrd::partial_cmp`、`Ord::cmp`、`Drop::drop`、`Iterable::{Item, Iter, iter}` 与 `Iterator::next`。Resolver 可冻结这些 owner/member identity，但不由命名习惯为 `Hash`、`Clone`、`Debug` 或其他 builtin 发明 source-visible member、signature 或 runtime operation；其余 trait/impl selection 在 Checker 信息完备后决定。
+
+`PartialEq`、`PartialOrd`、`Ordering` 及其成员是后续 Resolver/Checker 必须共同消费的 exact Language identity。本规范冻结其目标语义，不表示当前只有 frontend/Resolver 入口的 compiler 已实现这些 identity、数值检查或比较执行。
 
 ## Trait 声明
 
@@ -41,6 +43,51 @@ Vorton 0.1 不支持 return-position `impl Trait`、opaque type 或由推断产�
 ### 0.1 方法签名边界
 
 Vorton 0.1 的 source trait member 只有方法签名，不允许函数体。Trait declaration 中出现 `{ ... }` 方法体必须稳定报错，并建议把实现写入每个 `impl Trait for Type`；每个 impl 必须显式提供 trait 的全部方法。该限制不删除 associated type default，也不影响编译器内建或 auto-derived 的 exact impl body。
+
+## 比较 trait
+
+比较能力由四个 Language trait 与一个 Language enum 封闭。下列是概念签名，不要求或允许程序在 source 中重新声明这些 builtin：
+
+```text
+PartialEq:
+  eq(self: Self, other: Self) -> Bool with {}
+
+Eq: PartialEq
+  无新增方法
+
+PartialOrd: PartialEq
+  partial_cmp(self: Self, other: Self) -> Option<Ordering> with {}
+
+Ord: Eq + PartialOrd
+  cmp(self: Self, other: Self) -> Ordering with {}
+```
+
+`self` 与 `other` 都按 `borrow` 传递，比较方法本身是 closed pure；operand 在调用前的求值 effects 仍按普通从左到右规则传播。`Ordering` 的三个 variant 是 `Ordering::Less`、`Ordering::Equal`、`Ordering::Greater`，完整类型身份见[类型系统](type-system.md#ordering-类型)。
+
+`==` 唯一 dispatch 到 exact `PartialEq::eq`，`!=` 对同一次调用结果取 Bool 反值，不存在 `ne` member、默认 body 或第二条 equality 路径。四个排序运算符各只求值一次 exact `PartialOrd::partial_cmp`：
+
+| 运算符 | 返回 `true` 的结果 |
+|---|---|
+| `<` | `Option::Some(Ordering::Less)` |
+| `>` | `Option::Some(Ordering::Greater)` |
+| `<=` | `Option::Some(Ordering::Less)` 或 `Option::Some(Ordering::Equal)` |
+| `>=` | `Option::Some(Ordering::Greater)` 或 `Option::Some(Ordering::Equal)` |
+
+返回 `Option::None` 时四个排序运算符都为 `false`。`Ord::cmp` 是供显式全序消费方使用的唯一接口，不作为运算符的额外 dispatch 分支。
+
+`PartialEq` 要求 equality 对称且传递，`Eq` 再要求自反；`PartialOrd` 必须与 `PartialEq` 一致并满足其部分序关系，`Ord` 必须形成全序且与两者一致。对同一类型，`PartialEq::eq(a, b)` 为 `true` 当且仅当 `PartialOrd::partial_cmp(a, b)` 是 `Option::Some(Ordering::Equal)`；具有 `Ord` 时，`partial_cmp(a, b)` 必须总是 `Option::Some(cmp(a, b))`。Compiler-defined primitive 和结构实现必须满足这些关系。编译器不承诺证明任意手写 impl 的数学定律；违反关系律是实现者的逻辑错误，不能据此使 compiler 或 `unsafe` 产生 undefined behavior。这些边界对应 Rust 的 [`PartialEq`](https://doc.rust-lang.org/std/cmp/trait.PartialEq.html)、[`Eq`](https://doc.rust-lang.org/std/cmp/trait.Eq.html)、[`PartialOrd`](https://doc.rust-lang.org/std/cmp/trait.PartialOrd.html) 与 [`Ord`](https://doc.rust-lang.org/std/cmp/trait.Ord.html)，但后续 Rust 文档变化不会自动修改 Vorton contract。
+
+### Primitive comparison evidence
+
+| 类型 | `PartialEq` | `Eq` | `PartialOrd` | `Ord` | 顺序规则 |
+|---|---:|---:|---:|---:|---|
+| `Int` | 是 | 是 | 是 | 是 | 64 位有符号数值顺序 |
+| `Str` | 是 | 是 | 是 | 是 | UTF-8 byte sequence 的词典序 |
+| `Bool` | 是 | 是 | 是 | 是 | `false < true` |
+| `Unit` | 是 | 是 | 是 | 是 | 唯一值只与自身相等 |
+| `Float` | 是 | 否 | 是 | 否 | Rust `f64` 对应的部分比较 |
+
+`Float` 的 NaN 不等于自身或任何值，并且与任何值的 `partial_cmp` 都得到 `Option::None`；正负零相等，Infinity 按对应数值关系比较。因此 `NaN != NaN` 为 `true`，四个涉及 NaN 的排序运算符均为 `false`，`-0.0 == 0.0` 为 `true`。语言不为 `Float` 提供 `Eq` 或 `Ord` evidence，也不通过 `total_cmp` 一类全序接口暗中补足它。
 
 ### 按 impl 关联的 effect scheme
 
@@ -276,13 +323,22 @@ Vorton 0.1 不提供 `delegate` declaration。`delegate field: Trait` 必须产�
 
 编译器自动为所有 struct/enum 类型派生满足字段约束的以下 trait：
 
-- **Eq**: 当所有字段都实现 Eq 时自动派生。`==`/`!=` 运算符解糖为 `Eq.eq()` 调用。
+- **PartialEq**：当所有字段都实现 `PartialEq` 时自动派生。Struct 按字段声明顺序比较并在首个不相等字段短路；enum 先判断 variant，相异 variant 不相等，相同 variant 再按字段声明顺序比较。
+- **Eq**：当所有字段都实现 `Eq` 时自动派生，并与同一结构化 `PartialEq` 实现一致。`Eq` 没有新增方法。
+- **PartialOrd**：当所有字段都实现 `PartialOrd` 时自动派生。Struct 按字段声明顺序做词典序比较；enum 先按 variant 声明顺序比较，只有相同 variant 才比较字段。首个非 `Ordering::Equal` 或 `Option::None` 的字段结果就是整体结果，因此不会跳过含 NaN 字段产生的不可比结果。
+- **Ord**：当所有字段都实现 `Ord` 时自动派生，并与同一结构化 equality/partial ordering 一致；字段和 variant 顺序与 `PartialOrd` 相同。
 - **Hash**: 仅当该 struct/enum 同时走编译器的结构化 auto-Eq 路径，且所有字段都可获得 Hash evidence 时自动派生。Struct 按字段声明顺序组合 hash；enum 先组合稳定的 variant discriminator，再组合字段。已有 manual Eq 不会隐式获得结构化 Hash，避免 `Eq` / `Hash` coherence 失配。
 - **Clone**: 当所有字段都实现 Clone 时自动派生。
 - **Debug**: 当所有字段都实现 Debug 时自动派生。
-- **Ord**: 当所有字段都实现 Ord 时自动派生。`<`/`>`/`<=`/`>=` 运算符解糖为 `Ord.cmp()` 调用。
 
-派生按依赖 fixpoint 扩展到嵌套与递归用户类型。`Hash` 的基础 evidence 包括 `Int`、`Str` 与 `Bool`，不包括 `Float` 或 `Unit`；缺少所需 evidence 时保持 fail closed，并在 trait bound 被要求时产生类型错误。
+```vorton
+struct Reading { major: Int, sample: Float }
+enum Phase { Start(Float), End(Float) }
+```
+
+`Reading` 先比较 `major`，只有相等时才比较 `sample`；若后者含 NaN，partial ordering 立即得到 `Option::None`。`Phase` 的 `Start` 先于 `End`，相同 variant 才比较其中的 `Float`。两种类型都可获得结构化 `PartialEq`/`PartialOrd`，不能获得结构化 `Eq`/`Ord`。
+
+每种能力分别要求全部字段具有对应 trait；存在 `PartialEq` 或 `PartialOrd` 不会自动产生 `Eq` 或 `Ord`。派生按依赖 fixpoint 扩展到嵌套与递归用户类型。`Hash` 的基础 evidence 包括 `Int`、`Str` 与 `Bool`，不包括 `Float` 或 `Unit`；缺少所需 evidence 时保持 fail closed，并在 trait bound 被要求时产生类型错误。
 
 这些实现是 compiler-defined 的封闭语义，不对应 source attribute，也不是开放 derive 系统。Canonical 0.1 没有 `@` token、attribute grammar 或 source-level derive directive；其它 trait 需要普通显式 impl。
 

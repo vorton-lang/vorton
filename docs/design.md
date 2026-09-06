@@ -37,11 +37,11 @@ Source
 
 | 层 | 冻结契约 |
 |---|---|
-| `Token` | Lexer 按唯一词法规范产生 token 与 span；空白和注释不改变语法角色。 |
-| `AST` | Parser 忠实保存 canonical surface、结构与 span；不承载名称、类型、effect 或后端结论。 |
+| `Token` | Lexer 按唯一词法规范产生 token、原始字面量拼写与 span；空白和注释不改变语法角色。 |
+| `AST` | Parser 忠实保存 canonical surface、数值字面量拼写、结构与 span；不承载名称、数值解释、类型、effect 或后端结论。 |
 | `ResolvedAST` | 每个 lexical/nominal 声明、binding、constructor、import/re-export 与根引用获得 exact identity；已闭合 owner 集合中由当前语法直接选择的 member 同样 exact。显式 effect binder/ref 与 `TraitPath::method<...>` 取得 exact trait/method identity，并保留 type/effect actual tree；省略 `with` 的 FnType 保留其结构 occurrence。只有依赖 receiver/base type、适用 impl 或 associated selection 的 obligation 才保留 occurrence、已知 base/owner 与源码选择信息，最终 target 留给 Checker。 |
-| `TypedHIR` | HM metavariable 已求解；类型、effect row、完整 callable scheme、callee、impl、associated type、call-site instantiation 与公开模块接口冻结。合法 type/effect 多态变量转为带 owner 与 ordinal 的 formal；有限 row 合并义务显式附着于 scheme/instantiation，其它 raw 变量被拒绝。 |
-| `CoreHIR` | 所有语言级隐式行为已 elaborated 为 explicit typed construct、callable body、edge 或 intrinsic contract。此层是最后的 Vorton semantic representation，不含资源操作。 |
+| `TypedHIR` | HM metavariable 已求解；类型、effect row、已解释数值字面量、完整 callable scheme、callee、impl、associated type、call-site instantiation 与公开模块接口冻结。合法 type/effect 多态变量转为带 owner 与 ordinal 的 formal；有限 row 合并义务显式附着于 scheme/instantiation，其它 raw 变量被拒绝。 |
+| `CoreHIR` | 所有语言级隐式行为已 elaborated 为 explicit typed construct、callable body、edge 或 intrinsic contract，包括 checked integer panic 与比较 dispatch。此层是最后的 Vorton semantic representation，不含资源操作。 |
 | `FlowIR` | Structured control 降为 ownership-neutral CFG/ANF；pattern projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 建立；project-wide binder、call、alias 与 capture graph 冻结。 |
 | `RcIR` | 唯一 ResourcePlanner 在既有图上显式加入 `Clone`、`Take`、`Drop` 与 `Cleanup`，并输出可独立检查的 certificate；binder 集合与 FlowIR 相同。 |
 | `AbiIR` | 已验证语义被投影为 type/tag/field layout、symbol、prototype、closure/dictionary/evidence layout、drop glue、HostImport、extern 与 failure ABI。 |
@@ -93,6 +93,14 @@ First-class callable 的 body effect 冻结在函数类型中。普通 closure �
 
 Trait call 在 TypedHIR 固定为 exact inherent method、builtin intrinsic、concrete trait impl 或 formal dictionary selection。CoreHIR 之后没有 method lookup、impl search 或按名称 dispatch。
 
+### 数值与比较闭合
+
+Checker 是数值字面量解释的唯一 authority。它从 AST 保留的十进制拼写产生固定的 `Int` 或 binary64 值，处理直接一元负号作用于边界字面量的唯一特例，并拒绝其他超范围字面量；这项局部解释不能扩张为通用 const evaluator。TypedHIR 同时冻结每个数值运算的同型 operand、每个比较点的 exact Language trait/member identity，以及结构派生所需的 field evidence。
+
+CoreHIR 在一处显式化 checked `Int` 运算及其 panic、普通 `Float` 运算、`PartialEq::eq`、`PartialOrd::partial_cmp` 到四个排序运算符的映射，以及 `Ord::cmp` 的独立显式调用。Compiler-defined struct/enum 比较 body 同样在 CoreHIR freeze 前按字段与 variant 声明顺序进入 executable inventory。后续层只能运输这些选择，不能按 C 运算符、宿主 trait 或名称重新决定 overflow、rounding、comparison 或 derivation。
+
+`Float` lowering 必须保持语言规范固定的 binary64 普通结果：不得把分离的运算隐式融合为 FMA，不得让额外中间精度或 flush-to-zero 改变结果，也不得将 NaN/Infinity、部分比较或截断 `%` 改写为后端更方便的另一套语义。动态舍入模式、IEEE exception flags、额外 remainder API 与数学函数库没有当前 carrier 或 fallback。
+
 ## CoreHIR 语义闭包
 
 CoreHIR 是所有语言 feature 的统一 elaboration 终点。每个 surface construct 必须拥有唯一 TypedHIR-to-CoreHIR lowering，或证明自身已经是 canonical core construct。
@@ -123,7 +131,7 @@ CoreHIR validator 拒绝 surface-only variant、未选择 callee/impl/evidence�
 
 拥有用户 `Drop` 的类型不能同时实现 `Clone`。Generic `Drop` impl 若需要在销毁时取得 runtime trait evidence，则在没有显式 object-layout evidence contract 时被拒绝；不需要 runtime evidence 的 unbounded generic `Drop` 仍合法。
 
-同一 scope 按 binding 逆序 Drop；aggregate 字段按声明顺序释放，集合元素按其规范顺序释放。Normal return、failure、`break`、`continue` 与 handler exit 都必须执行相同 ownership cleanup。环由显式 weak reference 打破，不引入 cycle collector。
+同一 scope 按 binding 逆序 Drop；aggregate 字段按声明顺序释放，集合元素按其规范顺序释放。Normal return、failure、`break`、`continue` 与 handler exit 都必须执行相同 ownership cleanup。Panic 直接终止程序，不要求建立 unwind cleanup edge，也不保证尚存值的 `Drop`；panic 前已经完成的 mutation、IO 与资源移交保持发生。环由显式 weak reference 打破，不引入 cycle collector。
 
 ### Mutation 与 alias
 
@@ -165,6 +173,7 @@ C11 主路径遵守：
 - 需要定序的操作先物化为 temporary；
 - 字符串携带显式长度并保持 binary-safe；
 - fixed-width integer 运算显式实现语言的 overflow 与 division 规则，避免 C signed-overflow undefined behavior；
+- binary64 运算显式保留语言规定的舍入、特殊值与截断余数结果，不能依赖 C 浮点环境、隐式 contraction、额外精度或 flush-to-zero；
 - match 与 catch 保持 source arm order；
 - 生成文本对相同输入确定，source mapping 可回到原始 span。
 
