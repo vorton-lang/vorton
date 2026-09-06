@@ -23,7 +23,7 @@ DeclKind         ::= FnDecl
                    | ConstDecl
                    | ModDecl
 
-FnDecl           ::= 'fn' Ident TypeParams? '(' NamedParams? ')'
+FnDecl           ::= 'fn' Ident CallableParams? '(' NamedParams? ')'
                      ReturnType? EffectAnnotation? Block
 ReturnType       ::= '->' ReturnTypeExpr
 
@@ -57,7 +57,7 @@ TraitDecl        ::= 'trait' Ident TypeParams? Supertraits?
                      '{' TraitMember* '}'
 Supertraits      ::= ':' TypeBound ('+' TypeBound)*
 TraitMember      ::= TraitMethodSig | TraitAssocType
-TraitMethodSig   ::= 'fn' Ident TypeParams? '(' NamedParams? ')'
+TraitMethodSig   ::= 'fn' Ident CallableParams? '(' NamedParams? ')'
                      ReturnType? EffectAnnotation? ';'
 TraitAssocType   ::= 'type' Ident AssocBounds? ('=' TypeExpr)? ';'
 AssocBounds      ::= ':' TypeBound ('+' TypeBound)*
@@ -67,8 +67,8 @@ EffectOp         ::= 'fn' Ident '(' NamedParams? ')' ReturnType ';'
 EffectAliasDecl  ::= 'effect' 'alias' Ident TypeParams? '=' EffectSet ';'
 
 ExternDecl       ::= 'extern' ExternKind
-ExternKind       ::= 'fn' Ident TypeParams? '(' NamedParams? ')'
-                     ReturnType? EffectAnnotation? ';'
+ExternKind       ::= 'fn' Ident CallableParams? '(' NamedParams? ')'
+                     ReturnType? EffectAnnotation ';'
                    | 'type' Ident TypeParams? ';'
 
 TypeAliasDecl    ::= 'type' Ident TypeParams? '=' TypeExpr ';'
@@ -93,7 +93,7 @@ use geometry::{Point, distance};
 
 type Length = Float;
 const origin: Point = Point { x: 0.0, y: 0.0 };
-extern fn host_distance(left: Point, right: Point) -> Float;
+extern fn host_distance(left: Point, right: Point) -> Float with {unsafe};
 
 trait Measure {
     type Output;
@@ -114,7 +114,9 @@ Impl block 本身没有 visibility，因此 `pub impl Value {}` 非法；只有 
 
 ### 参数、receiver 与 closure capture
 
-参数的 ownership/mutation mode 由编译器推断；源码 mode 是可省略的 assertion，不改变推断结果。Named parameter 的 mode 只能出现在冒号后、类型前：`item: mut Item` 或 `item: move Item`。Receiver 使用同一形式，例如 `self: mut Self`、`self: move Self`；`fn update(mut item)` 与 `fn update(mut self)` 都非法。未命名函数类型参数则写 `fn(mut Item, move Resource) -> Unit`。
+有 body callable 的 ownership/mutation mode 由编译器推断；其源码 mode 是可省略的 assertion，不改变推断结果。Named parameter 的 mode 只能出现在冒号后、类型前：`item: mut Item` 或 `item: move Item`。Receiver 使用同一形式，例如 `self: mut Self`、`self: move Self`；`fn update(mut item)` 与 `fn update(mut self)` 都非法。未命名函数类型参数则写 `fn(mut Item, move Resource) -> Unit`。
+
+有 body 的普通函数、inherent/trait impl method 与 closure 可以省略普通参数类型并由后续 Checker 推断。无 body 的 trait method、`extern fn` 与 effect operation 的普通参数必须写出类型；trait receiver 可以单独写作 `self`，其声明类型为 `Self`。这些无 body signature 省略 parameter mode 表示固定的 `borrow`，显式 `mut`/`move` 也是固定 contract；impl body 可以推断自己的 mode，但必须满足 trait declaration。Trait method 与 `extern fn` 省略返回类型都表示 `Unit`；effect operation 仍必须写返回类型。`extern fn` 必须写外层 `with`，pure 声明写作 `with {}`。
 
 Closure capture list 只属于 closure literal，并固定写在参数列表之前：
 
@@ -146,23 +148,45 @@ TupleType        ::= '(' TypeExpr ',' TypeExpr (',' TypeExpr)* ','? ')'
 TypeParams       ::= '<' TypeParam (',' TypeParam)* ','? '>'
 TypeParam        ::= Ident (':' TypeBound ('+' TypeBound)*)?
 TypeBound        ::= NamedType
+CallableParams   ::= '<' TypeParam (',' TypeParam)*
+                     (',' EffectParam (',' EffectParam)*)? ','? '>'
+                   | '<' EffectParam (',' EffectParam)* ','? '>'
+EffectParam      ::= 'effect' Ident
 TypeArgs         ::= '<' TypeArgument (',' TypeArgument)* ','? '>'
 TypeArgument     ::= TypeExpr | AssocTypeBinding
 AssocTypeBinding ::= Ident '=' TypeExpr
 
 EffectAnnotation ::= 'with' EffectSet
 EffectSet        ::= '{' (EffectExpr (',' EffectExpr)* ','?)? '}'
-EffectExpr       ::= Path EffectArgs?
-                   | 'mut' EffectArgs?
+EffectExpr       ::= Path EffectApplyArgs?
+                   | 'mut' EffectTypeArgs?
                    | 'unsafe'
-EffectArgs       ::= '<' TypeExpr (',' TypeExpr)* ','? '>'
+EffectApplyArgs  ::= '<' TypeExpr (',' TypeExpr)*
+                     (',' EffectRowArg (',' EffectRowArg)*)? ','? '>'
+EffectTypeArgs   ::= '<' TypeExpr (',' TypeExpr)* ','? '>'
+EffectRowArg     ::= 'effect' EffectSet
 ```
+
+`CallableParams` 只属于具名 callable：top-level/inline `FnDecl`、inherent/trait impl method、trait method signature 和 top-level `extern fn`。普通 type parameters 必须排在所有 `effect E` parameters 之前。Struct、enum、trait/impl 声明头、effect/effect alias、type alias、`extern type`、`FnType` 与 closure 不接受 effect parameter binder。
+
+在 effect row 内，已绑定的 `E` 表示整条 row，因此 `{E, fs}` 合并 `E` 的内容与 `fs`。显式方法 scheme application 使用：
+
+```vorton
+TraitPath::method<
+    SelfActual,
+    trait_type_actuals,
+    method_type_actuals,
+    effect {row_actuals}
+>
+```
+
+Type actual 必须全部位于 `effect { ... }` actual 之前；第一个 type actual 是 `SelfActual`。`EffectApplyArgs` 同时承载普通 effect 的既有 type arguments 和这种 method scheme application；名称解析后，普通 effect 不接受 row actual。Row actual 可以包含当前 effect formals、既有 effect atom 和嵌套的确定 method scheme application。FnType、closure、effect operation 与 effect alias 不获得独立 effect binder 或匿名 effect 函数。这里的 `<...>` 只属于 effect expression；value call 仍从 receiver/arguments 推断 type/effect actual，不增加 turbofish 或显式 generic-call arguments。
 
 `GroupedType` 是透明分组：`(T)` 与 `T` 表示同一类型，且可以嵌套。它不创建名义类型或单元素 tuple。`TupleType` 仍至少包含两个元素；`(T,)` 与 `()` 都不是合法类型，单位类型写作 `Unit`。
 
 每个 `ReturnType` 都使用同一条 source-shape 限制：箭头后若直接展开函数类型，必须先写成 `GroupedType`，因此 `-> (fn() -> Int)` 合法而 `-> fn() -> Int` 非法。该规则递归适用于 `FnType` 自身的返回位置，并由普通函数、impl method、trait method signature、`extern fn`、effect operation 与 closure 共用。它只检查直接语法形状；callback 参数、type alias 右侧、type argument 等普通 `TypeExpr` 位置仍可裸写 `fn(...) -> ...`，命名返回类型也不根据未来解析结果要求括号。
 
-`with` 始终归属最近的 callable。组内 `FnType` 的 `EffectAnnotation` 属于返回的函数类型；分组闭合后，只有原产生式允许的外层 `EffectAnnotation` 才属于外层 callable。例如 `fn make() -> (fn() -> Int with {fs}) with {} {}` 的 `{fs}` 属于返回函数，`{}` 属于 `make`。省略 annotation 与显式 `with {}` 保持不同的 source 信息。Effect operation 没有外层 `EffectAnnotation`，但其分组返回函数仍可在组内标注 effect。
+`with` 始终归属最近的 callable。组内 `FnType` 的 `EffectAnnotation` 属于返回的函数类型；分组闭合后，只有原产生式允许的外层 `EffectAnnotation` 才属于外层 callable。例如 `fn make() -> (fn() -> Int with {fs}) with {} {}` 的 `{fs}` 属于返回函数，`{}` 属于 `make`。省略 annotation 与显式 `with {}` 保持不同的 source 信息；没有 `with infer` 或其他与省略同义的 marker。Effect operation 没有外层 `EffectAnnotation`，但其分组返回函数仍可在组内标注 effect。
 
 Canonical 0.1 不提供结构化 record 类型；封闭 `{ x: Int }` 与开放 `{ x: Int, ..r }` 在所有 `TypeExpr` 位置均非法。该排除不影响花括号承载的 effect set、block、named construction 与 pattern。
 
@@ -437,6 +461,8 @@ test "name" {}                               // 非法：没有 native-test 声�
 #[test] fn probe() {}                         // 非法：'#' 不是 token
 @derive(Json)                                // 非法：'@' 不是 token
 pub impl Value {}                            // 非法：impl block 无 visibility
+struct Invalid<effect E> {}                 // 非法：nominal header 无 effect binder
+extern fn invalid(value: Int);              // 非法：extern 必须写外层 with
 ```
 
 同样非法的还有缺失必需 `;` 的普通 statement/无 body declaration、以逗号结束的 effect operation，以及带 body 的 source trait method。Parser 不建立 compatibility mode、feature flag、Attribute/Derive 节点或 future hook。

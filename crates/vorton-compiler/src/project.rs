@@ -252,6 +252,7 @@ pub(crate) enum EntityKind {
     ExternType,
     Trait,
     TypeParameter,
+    EffectParameter,
     SelfType,
     Function,
     Const,
@@ -403,6 +404,7 @@ pub(crate) enum ResolvedDeclarationKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedFunction {
     pub(crate) type_parameters: Vec<ResolvedTypeParameter>,
+    pub(crate) effect_parameters: Vec<ResolvedEffectParameter>,
     pub(crate) parameters: Vec<ResolvedParameter>,
     pub(crate) return_type: Option<ResolvedType>,
     pub(crate) effects: Option<ResolvedEffectSet>,
@@ -413,6 +415,7 @@ pub(crate) struct ResolvedFunction {
 pub(crate) struct ResolvedFunctionSignature {
     pub(crate) identity: EntityId,
     pub(crate) type_parameters: Vec<ResolvedTypeParameter>,
+    pub(crate) effect_parameters: Vec<ResolvedEffectParameter>,
     pub(crate) parameters: Vec<ResolvedParameter>,
     pub(crate) return_type: Option<ResolvedType>,
     pub(crate) effects: Option<ResolvedEffectSet>,
@@ -431,6 +434,12 @@ pub(crate) struct ResolvedTypeParameter {
     pub(crate) span: Span,
     pub(crate) binding: ResolvedBinding,
     pub(crate) bounds: Vec<ResolvedNamedType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedEffectParameter {
+    pub(crate) span: Span,
+    pub(crate) binding: ResolvedBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,6 +597,13 @@ pub(crate) struct ResolvedEffect {
     pub(crate) span: Span,
     pub(crate) reference: ResolvedReference,
     pub(crate) arguments: Vec<ResolvedType>,
+    pub(crate) effect_arguments: Vec<ResolvedEffectRowArgument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedEffectRowArgument {
+    pub(crate) span: Span,
+    pub(crate) effects: ResolvedEffectSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

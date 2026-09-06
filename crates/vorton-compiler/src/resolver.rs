@@ -1641,6 +1641,7 @@ struct BodyResolver<'state> {
     module: ModuleRef,
     source: SourceRef,
     type_scopes: Vec<BTreeMap<String, EntityId>>,
+    effect_scopes: Vec<BTreeMap<String, EntityId>>,
     value_scopes: Vec<BTreeMap<String, EntityId>>,
     self_entity: Option<EntityId>,
     self_target: Option<ResolvedNamedType>,
@@ -1665,6 +1666,7 @@ impl<'state> BodyResolver<'state> {
             module,
             source,
             type_scopes: Vec::new(),
+            effect_scopes: Vec::new(),
             value_scopes: Vec::new(),
             self_entity: None,
             self_target: None,
@@ -2146,6 +2148,8 @@ impl<'state> BodyResolver<'state> {
         let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
         let type_parameters =
             self.push_type_parameters(&function.type_parameters, owner.clone())?;
+        let effect_parameters =
+            self.push_effect_parameters(&function.effect_parameters, owner.clone())?;
         let (parameters, value_scope) = self.resolve_parameters(&function.parameters, owner)?;
         let return_type = function
             .return_type
@@ -2160,10 +2164,12 @@ impl<'state> BodyResolver<'state> {
         self.value_scopes.push(value_scope);
         let body = self.resolve_block(&function.body)?;
         self.value_scopes.pop();
+        self.effect_scopes.pop();
         self.type_scopes.pop();
         self.owner = previous_owner;
         Ok(ResolvedFunction {
             type_parameters,
+            effect_parameters,
             parameters,
             return_type,
             effects,
@@ -2180,6 +2186,8 @@ impl<'state> BodyResolver<'state> {
         let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
         let type_parameters =
             self.push_type_parameters(&function.type_parameters, owner.clone())?;
+        let effect_parameters =
+            self.push_effect_parameters(&function.effect_parameters, owner.clone())?;
         let (parameters, _) = self.resolve_parameters(&function.parameters, owner)?;
         let return_type = function
             .return_type
@@ -2191,11 +2199,13 @@ impl<'state> BodyResolver<'state> {
             .as_ref()
             .map(|effects| self.resolve_effect_set(effects))
             .transpose()?;
+        self.effect_scopes.pop();
         self.type_scopes.pop();
         self.owner = previous_owner;
         Ok(ResolvedFunctionSignature {
             identity: identity.clone(),
             type_parameters,
+            effect_parameters,
             parameters,
             return_type,
             effects,
@@ -2297,6 +2307,67 @@ impl<'state> BodyResolver<'state> {
             self.type_scopes.pop();
             return Err(diagnostic);
         }
+        Ok(resolved)
+    }
+
+    fn push_effect_parameters(
+        &mut self,
+        parameters: &[EffectParameter],
+        owner: OwnerKey,
+    ) -> Result<Vec<ResolvedEffectParameter>, ProjectDiagnostic> {
+        let mut scope = BTreeMap::new();
+        let mut resolved = Vec::new();
+        for parameter in parameters {
+            let origin = self.origin(parameter.name.span);
+            let invalid = if is_language_name(Namespace::Effect, &parameter.name.text) {
+                Some(self.diagnostic(
+                    ProjectDiagnosticKind::ReservedLanguageBinding {
+                        namespace: NameNamespace::Effect,
+                        name: parameter.name.text.clone(),
+                    },
+                    origin.clone(),
+                ))
+            } else if let Some(existing) = scope.get(&parameter.name.text) {
+                Some(ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::DuplicateBinding {
+                        name: parameter.name.text.clone(),
+                    },
+                    primary: Some(origin.clone()),
+                    related: entity_origin(existing).into_iter().collect(),
+                })
+            } else {
+                self.effect_scopes
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(&parameter.name.text))
+                    .map(|existing| ProjectDiagnostic {
+                        kind: ProjectDiagnosticKind::DuplicateBinding {
+                            name: parameter.name.text.clone(),
+                        },
+                        primary: Some(origin.clone()),
+                        related: entity_origin(existing).into_iter().collect(),
+                    })
+            };
+            if let Some(diagnostic) = invalid {
+                return Err(diagnostic);
+            }
+            let identity = source_id(
+                &self.module,
+                &self.source,
+                parameter.name.span,
+                Namespace::Effect,
+                EntityKind::EffectParameter,
+                &parameter.name.text,
+                Some(owner.clone()),
+            );
+            scope.insert(parameter.name.text.clone(), identity.clone());
+            self.insert_scoped_entity(identity.clone());
+            resolved.push(ResolvedEffectParameter {
+                span: parameter.span,
+                binding: ResolvedBinding { origin, identity },
+            });
+        }
+        self.effect_scopes.push(scope);
         Ok(resolved)
     }
 
@@ -2467,6 +2538,7 @@ enum ExpectedName {
     Type,
     Value,
     Effect,
+    EffectApplication,
     Construct,
     PatternConstructor,
     MethodReceiver,
@@ -2476,7 +2548,7 @@ impl ExpectedName {
     fn namespace(self) -> NameNamespace {
         match self {
             Self::Type => NameNamespace::Type,
-            Self::Effect => NameNamespace::Effect,
+            Self::Effect | Self::EffectApplication => NameNamespace::Effect,
             Self::Value | Self::Construct | Self::PatternConstructor | Self::MethodReceiver => {
                 NameNamespace::Value
             }
@@ -2488,6 +2560,13 @@ impl ExpectedName {
             Self::Type => entity.namespace == Namespace::Type && entity.kind != EntityKind::Module,
             Self::Value => entity.namespace == Namespace::Value,
             Self::Effect => entity.namespace == Namespace::Effect,
+            Self::EffectApplication => {
+                entity.namespace == Namespace::Effect
+                    || entity.kind == EntityKind::Method
+                        && entity.owner.as_ref().is_some_and(|owner| {
+                            matches!(owner.kind, EntityKind::Trait | EntityKind::LanguageTrait)
+                        })
+            }
             Self::Construct => matches!(
                 entity.kind,
                 EntityKind::Struct | EntityKind::EnumConstructor | EntityKind::LanguageConstructor
@@ -2506,7 +2585,9 @@ impl ExpectedName {
         match self {
             Self::Type => namespace == Namespace::Type,
             Self::Value | Self::MethodReceiver => namespace == Namespace::Value,
-            Self::Effect | Self::Construct | Self::PatternConstructor => false,
+            Self::Effect | Self::EffectApplication | Self::Construct | Self::PatternConstructor => {
+                false
+            }
         }
     }
 
@@ -2515,6 +2596,7 @@ impl ExpectedName {
             Self::Type => &[Namespace::Type],
             Self::Value => &[Namespace::Value],
             Self::Effect => &[Namespace::Effect],
+            Self::EffectApplication => &[Namespace::Effect, Namespace::Type],
             Self::Construct => &[Namespace::Type, Namespace::Value],
             Self::PatternConstructor => &[Namespace::Value],
             Self::MethodReceiver => &[Namespace::Value, Namespace::Effect],
@@ -2558,7 +2640,10 @@ impl PathRequirement {
                 Some(Namespace::Value)
             }
             Self::Terminal(
-                ExpectedName::Effect | ExpectedName::Construct | ExpectedName::PatternConstructor,
+                ExpectedName::Effect
+                | ExpectedName::EffectApplication
+                | ExpectedName::Construct
+                | ExpectedName::PatternConstructor,
             ) => None,
         }
     }
@@ -2661,14 +2746,48 @@ impl BodyResolver<'_> {
     }
 
     fn resolve_effect(&mut self, effect: &EffectExpr) -> Result<ResolvedEffect, ProjectDiagnostic> {
-        let (reference, arguments) = match &effect.kind {
-            EffectKind::Named { path, arguments } => (
-                self.resolve_path(path, ExpectedName::Effect)?,
-                arguments
-                    .iter()
-                    .map(|argument| self.resolve_type(argument))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
+        let (reference, arguments, effect_arguments) = match &effect.kind {
+            EffectKind::Named {
+                path,
+                arguments,
+                effect_arguments,
+            } => {
+                let expected = if arguments.is_empty() && effect_arguments.is_empty() {
+                    ExpectedName::Effect
+                } else {
+                    ExpectedName::EffectApplication
+                };
+                let reference = self.resolve_path(path, expected)?;
+                let target = reference_exact_target(&reference)
+                    .expect("effect expressions never retain type-dependent selection");
+                if target.kind != EntityKind::Method && !effect_arguments.is_empty()
+                    || target.kind == EntityKind::EffectParameter && !arguments.is_empty()
+                {
+                    return Err(self.diagnostic(
+                        ProjectDiagnosticKind::UnresolvedName {
+                            namespace: NameNamespace::Effect,
+                            name: path_text(path),
+                        },
+                        self.origin(effect.span),
+                    ));
+                }
+                (
+                    reference,
+                    arguments
+                        .iter()
+                        .map(|argument| self.resolve_type(argument))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    effect_arguments
+                        .iter()
+                        .map(|argument| {
+                            Ok(ResolvedEffectRowArgument {
+                                span: argument.span,
+                                effects: self.resolve_effect_set(&argument.effects)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
+                )
+            }
             EffectKind::Mutation { arguments } => (
                 ResolvedReference::Exact {
                     occurrence: self.origin(effect.span),
@@ -2679,6 +2798,7 @@ impl BodyResolver<'_> {
                     .iter()
                     .map(|argument| self.resolve_type(argument))
                     .collect::<Result<Vec<_>, _>>()?,
+                Vec::new(),
             ),
             EffectKind::Unsafe => (
                 ResolvedReference::Exact {
@@ -2692,12 +2812,14 @@ impl BodyResolver<'_> {
                     self_reference: None,
                 },
                 Vec::new(),
+                Vec::new(),
             ),
         };
         Ok(ResolvedEffect {
             span: effect.span,
             reference,
             arguments,
+            effect_arguments,
         })
     }
 
@@ -2847,7 +2969,8 @@ impl BodyResolver<'_> {
                     let binding = match namespace {
                         Namespace::Type => self.lookup_type_binding(&identifier.text),
                         Namespace::Value => self.lookup_value_binding(&identifier.text),
-                        Namespace::Effect | Namespace::Member => None,
+                        Namespace::Effect => self.lookup_effect_binding(&identifier.text),
+                        Namespace::Member => None,
                     };
                     if let Some(binding) = binding {
                         names
@@ -3045,6 +3168,17 @@ impl BodyResolver<'_> {
                             EntityKind::EnumConstructor | EntityKind::LanguageConstructor => {
                                 PathCandidate::Exact(declaration.clone())
                             }
+                            EntityKind::Method
+                                if matches!(
+                                    requirement,
+                                    PathRequirement::Terminal(ExpectedName::EffectApplication)
+                                ) && matches!(
+                                    base.kind,
+                                    EntityKind::Trait | EntityKind::LanguageTrait
+                                ) =>
+                            {
+                                PathCandidate::Exact(declaration.clone())
+                            }
                             EntityKind::Method | EntityKind::AssociatedType | EntityKind::Field => {
                                 PathCandidate::Selection {
                                     base: base.clone(),
@@ -3182,6 +3316,13 @@ impl BodyResolver<'_> {
 
     fn lookup_type_binding(&self, name: &str) -> Option<EntityId> {
         self.type_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn lookup_effect_binding(&self, name: &str) -> Option<EntityId> {
+        self.effect_scopes
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
@@ -5891,6 +6032,204 @@ trait Outer {
     }
 
     #[test]
+    fn resolves_callable_effect_formals_method_schemes_and_implicit_positions() {
+        let root = r#"
+use api::Query;
+
+fn run<T: Query, effect E, effect F>(
+    source: T,
+    callback: fn(Str) -> Unit with {E}
+) -> Unit with {Query::fetch<T, Str, effect {E, fs}, effect {F}>} {
+    source.fetch(callback)
+}
+"#;
+        let defs = r#"
+pub trait Fetch {
+    fn fetch<U, effect Callback, effect Extra>(
+        self,
+        callback: fn(U) -> Unit with {Callback},
+        nested: fn(fn(Int) -> Unit) -> (fn(Str) -> Unit)
+    ) -> Unit;
+}
+"#;
+        let resolved = resolve_project(&project(
+            root,
+            vec![
+                (vec!["api"], "pub use root::defs::Fetch as Query;"),
+                (vec!["defs"], defs),
+            ],
+        ))
+        .expect("callable effect identities resolve through a re-export alias");
+
+        let defs_body = module_body(&resolved, &["defs"]);
+        let ResolvedDeclarationKind::Trait { members, .. } = &defs_body.declarations[0].kind else {
+            panic!("Fetch trait expected")
+        };
+        let ResolvedTraitMemberKind::Method(method) = &members[0].kind else {
+            panic!("Fetch::fetch method expected")
+        };
+        assert_eq!(method.effect_parameters.len(), 2);
+        for (parameter, name) in method.effect_parameters.iter().zip(["Callback", "Extra"]) {
+            assert_eq!(parameter.binding.identity.kind, EntityKind::EffectParameter);
+            assert_eq!(parameter.binding.identity.namespace, Namespace::Effect);
+            assert_eq!(parameter.binding.identity.name, name);
+            assert_eq!(
+                parameter
+                    .binding
+                    .identity
+                    .owner
+                    .as_ref()
+                    .expect("effect formal has its method owner")
+                    .name,
+                "fetch"
+            );
+        }
+        let callback = method.parameters[1]
+            .annotation
+            .as_ref()
+            .expect("callback type is present");
+        let ResolvedTypeKind::Function {
+            effects: Some(callback_effects),
+            ..
+        } = &callback.kind
+        else {
+            panic!("callback function type expected")
+        };
+        assert_eq!(
+            exact(&callback_effects.effects[0].reference),
+            &method.effect_parameters[0].binding.identity
+        );
+
+        let nested = method.parameters[2]
+            .annotation
+            .as_ref()
+            .expect("nested callback type is present");
+        let ResolvedTypeKind::Function {
+            parameters,
+            return_type,
+            effects: None,
+        } = &nested.kind
+        else {
+            panic!("outer omitted function row remains structural")
+        };
+        assert!(matches!(
+            &parameters[0].ty.kind,
+            ResolvedTypeKind::Function { effects: None, .. }
+        ));
+        assert!(matches!(
+            &return_type.kind,
+            ResolvedTypeKind::Function { effects: None, .. }
+        ));
+
+        let run = function(module_body(&resolved, &[]), "run");
+        assert_eq!(run.type_parameters.len(), 1);
+        assert_eq!(run.effect_parameters.len(), 2);
+        let scheme = &run
+            .effects
+            .as_ref()
+            .expect("run has a method scheme bound")
+            .effects[0];
+        let target = exact(&scheme.reference);
+        assert_eq!(target, &members[0].identity);
+        assert_eq!(target.kind, EntityKind::Method);
+        assert_eq!(
+            target
+                .owner
+                .as_ref()
+                .expect("method keeps the exact trait owner")
+                .name,
+            "Fetch"
+        );
+        assert_eq!(scheme.arguments.len(), 2);
+        assert_eq!(
+            exact(named_type_reference(&scheme.arguments[0])),
+            &run.type_parameters[0].binding.identity
+        );
+        assert_eq!(scheme.effect_arguments.len(), 2);
+        let first_row = &scheme.effect_arguments[0].effects;
+        assert_eq!(first_row.effects.len(), 2);
+        assert_eq!(
+            exact(&first_row.effects[0].reference),
+            &run.effect_parameters[0].binding.identity
+        );
+        assert_eq!(
+            exact(&first_row.effects[1].reference).kind,
+            EntityKind::LanguageEffect
+        );
+        assert_eq!(
+            exact(&scheme.effect_arguments[1].effects.effects[0].reference),
+            &run.effect_parameters[1].binding.identity
+        );
+    }
+
+    #[test]
+    fn rejects_effect_kind_and_method_scheme_name_boundaries() {
+        for (source, namespace, expected_name) in [
+            (
+                "fn bad<T>() -> Unit with {T} {}",
+                NameNamespace::Effect,
+                "T",
+            ),
+            ("fn bad<effect E>(value: E) {}", NameNamespace::Type, "E"),
+            (
+                "trait Fetch { fn fetch(self); } fn bad<T>() with {T::fetch<T>} {}",
+                NameNamespace::Effect,
+                "fetch",
+            ),
+            (
+                "trait Fetch { fn fetch(self); } fn bad() with {Fetch::missing<Int>} {}",
+                NameNamespace::Effect,
+                "missing",
+            ),
+            (
+                "use Fetch::fetch; trait Fetch { fn fetch(self); } fn bad() with {fetch<Int>} {}",
+                NameNamespace::Effect,
+                "fetch",
+            ),
+            (
+                "effect Reader<T> {} fn bad<effect E>() with {Reader<Int, effect {E}>} {}",
+                NameNamespace::Effect,
+                "Reader",
+            ),
+            (
+                "fn bad<effect E>() with {E<Int>} {}",
+                NameNamespace::Effect,
+                "E",
+            ),
+        ] {
+            let diagnostic = resolve_project(&project(source, vec![]))
+                .expect_err("invalid type/effect or method identity must be rejected");
+            assert!(
+                matches!(
+                    diagnostic.kind,
+                    ProjectDiagnosticKind::UnresolvedName {
+                        namespace: actual_namespace,
+                        ref name,
+                    } if actual_namespace == namespace && name == expected_name
+                ),
+                "{source}: {diagnostic:?}"
+            );
+        }
+
+        let duplicate = resolve_project(&project("fn bad<effect E, effect E>() {}", vec![]))
+            .expect_err("duplicate effect formals are rejected");
+        assert!(matches!(
+            duplicate.kind,
+            ProjectDiagnosticKind::DuplicateBinding { ref name } if name == "E"
+        ));
+
+        let reserved = resolve_project(&project("fn bad<effect fs>() {}", vec![]))
+            .expect_err("language effects cannot be shadowed by formals");
+        assert!(matches!(
+            reserved.kind,
+            ProjectDiagnosticKind::ReservedLanguageBinding {
+                namespace: NameNamespace::Effect,
+                ref name,
+            } if name == "fs"
+        ));
+    }
+
+    #[test]
     fn effect_operation_receiver_is_exact_and_cross_namespace_ambiguity_is_rejected() {
         let resolved = resolve_project(&project(
             r#"
@@ -6070,7 +6409,7 @@ fn ambiguous() -> Int { Source.read() }
             "trait Bad<Int> {}",
             "effect Bad<Int> {}",
             "effect alias Bad<Int> = {};",
-            "extern fn bad<Int>();",
+            "extern fn bad<Int>() with {};",
             "extern type Bad<Int>;",
             "type Bad<Int> = Int;",
             "struct Box {} impl<Int> Box {}",

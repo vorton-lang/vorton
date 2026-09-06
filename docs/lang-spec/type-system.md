@@ -29,7 +29,9 @@ FnType = (T₁, T₂, ..., Tₙ) -> R / ε
 - `R`：返回类型
 - `ε`：effect row（见 [Effect 系统](effects.md)）
 
-**函数声明**省略 effect 标注时，编译器推断 effect row（可能为空 `{}` 或非空）。**函数类型表达式**（如 `fn(Int) -> Str`）省略 `with` 子句时为 open row（支持 effect 多态）。纯函数（无 effect）的 effect row 为 `{}`。
+有 body **函数声明**省略 effect 标注时，编译器推断公开 effect row（可能为空 `{}` 或非空）；显式 row 是允许上界，完整规则见 [Callable may-effect contract](effects.md#callable-的-may-effect-contract)。**函数类型表达式**（如 `fn(Int) -> Str`）省略 `with` 时保留开放 row，显式 `with {}` 则是 closed pure row；两种 source 信息不能合并。
+
+函数值适配只允许把该函数值自身的 effect row 从较小 row 扩大到期望上界。参数数量、经普通 substitution 后的参数类型、返回类型与 parameter mode 必须结构匹配；参数和返回类型没有额外 variance，`borrow`/`mut`/`move` 也不能因 effect 可扩大而互换。FnType 不声明自己的 generic/effect binder，canonical 0.1 不支持 rank-N effect。
 
 ### Struct 类型
 
@@ -95,10 +97,12 @@ TypeVar = α, β, γ, ...
 ## Type Scheme（多态性）
 
 ```
-TypeScheme = ∀α₁, ..., αₙ. T    其中 bounds = { αᵢ: Trait, ... }
+TypeScheme     = ∀α₁, ..., αₙ. T
+CallableScheme = ∀α₁, ..., αₙ; E₁, ..., Eₘ. FnType
+                 [trait bounds, finite row-merge obligations]
 ```
 
-Type scheme 量化类型变量，并可选地用 trait bound 约束它们。Type scheme 被赋予 `let` 绑定、函数声明和方法声明。
+Type scheme 量化类型变量，并可选地用 trait bound 约束它们。Callable scheme 还可以量化由具名 header 显式声明、或由 trait signature 合法结构位置产生的 effect formals。每个 formal 都有 owner 与 ordinal；普通推断 metavariable 不能冒充 formal。Scheme 被赋予 `let` 绑定、函数声明和方法声明，method 的按 impl effect 关系见 [Trait 系统](traits.md#按-impl-关联的-effect-scheme)。
 
 ### 泛化（Generalization）
 
@@ -136,11 +140,14 @@ Vorton 0.1 不支持 polymorphic recursion：同一递归组成员不能在递�
 在多态绑定的每个使用点：
 
 ```
-instantiate(∀α₁..αₙ. τ [bounds]):
+instantiate(∀α₁..αₙ; E₁..Eₘ. τ [bounds, row obligations]):
   for each αᵢ: 创建 fresh β
-  mapping = { α₁ ↦ β₁, ..., αₙ ↦ βₙ }
+  for each Eᵢ: 创建 fresh effect row εᵢ
+  mapping = { α₁ ↦ β₁, ..., αₙ ↦ βₙ,
+              E₁ ↦ ε₁, ..., Eₘ ↦ εₘ }
   τ' = apply(mapping, τ)
   将 bounds 从 αᵢ 转移到 βᵢ
+  将有限 row-merge obligations 转移到同一 mapping
   return τ'
 ```
 
@@ -152,7 +159,7 @@ instantiate(∀α₁..αₙ. τ [bounds]):
 
 该限制不影响 direct call、已经发布 scheme 的 import/re-export provider、lambda、函数参数转发、factory closure、dynamic call 或高阶函数 formal 自身的 open effect row。Provider body 仍只推断一次，函数值使用不能提前 generalize 或 publish provider。
 
-一次实例化的 `mapping` 是唯一替换真值：普通类型实参、effect参数实例和trait dictionary/evidence选择必须使用同一份结果。它们不得分别从最终类型结构重新推导替换关系。
+一次实例化的 `mapping` 是唯一替换真值：普通类型实参、effect actual、trait dictionary/evidence 与显式 method scheme application 必须使用同一份结果。它们不得分别从最终类型结构重新推导替换关系。Call site 的 effect actual 取满足全部约束的唯一最小正规解；无唯一合法最小解时诊断，不任意扩大或按当前 impl 集合猜测。
 
 每个使用点获得 fresh 类型变量，实现多态复用。
 
@@ -442,6 +449,8 @@ Vorton 0.1 的语言级 `Eq` contract 只包含 `eq`；不存在 `ne` member、o
 
 字段赋值要求其root binding可变，并保持同一字段类型。0.1中`IndexExpr`只产生读取值，不是lvalue；index assignment在进入类型/ownership lowering前稳定拒绝。容器更新通过物化签名为`self: mut Self`的具名方法参与普通调用与mutation推断。
 
+所有 direct、method 与 indirect call 都先求 callable/receiver，再按源码从左到右逐个求 argument，并完成该 argument 对应的资源移交。后续 argument 求值或 callee failure 不恢复已经完成的移交；callee 尚未进入时，已经取得的 argument temporary 仍必须按其 ownership contract 清理。Struct update 的提交规则不扩展为普通调用事务。Checker 冻结 type、effect 与 parameter mode contract，资源阶段只消费该 contract 安排操作，不能反向改变 mode 或 effect。一般业务回滚、callback 的次数和业务时机、重试策略仍由库 contract 规定，不成为新的语言事务保证。
+
 ## 方法解析
 
 语法先把 `receiver.method(args)` 唯一分类为 MethodCall；它不能解释为函数值字段调用。函数值字段必须显式写 `(receiver.method)(args)`，后者是 FieldAccess 外加普通 Call。MethodCall 按以下顺序解析：
@@ -465,5 +474,7 @@ Vorton 0.1 的语言级 `Eq` contract 只包含 `eq`；不存在 `ne` member、o
 - 显式 closure capture entry 在 closure 创建点的外层 Value scope 解析，不创建新 source binder；capture 完整性、mode/type assertion 与 escape/ownership 由后续检查完成。
 
 Generic parameter 在所属 declaration 的 bounds、signature 与 body 全部可见；trait/impl 外层 generic 也对 member 与内部 closure 可见。所有声明 family 和 member generic list 使用同一规则：同一 table 不得重复，内层 generic 不得遮蔽仍可见的外层 generic。Generic 可以遮蔽普通 module Type binding，但不能遮蔽 Language Type/Trait；筛选 qualified-path candidate 时不能绕过这项同 namespace shadowing。
+
+显式 effect parameter 属于 Effect namespace，并以所属 callable scheme 为 owner；它在该 callable 的参数、返回、外层 effect row 与 body（包括内部 closure）中可见，不进入 Type namespace。一个 callable 的 effect parameter table 不得重复，也不能遮蔽仍可见的外层 effect formal；Language effect spelling 不能被 formal 覆盖。普通 Type parameter 与 effect parameter 的 kind 由各自 namespace 固定，不能在使用处互换。
 
 `Self` 是 struct、enum、trait 与 impl owner scope 中的特殊 Type identity，并由内部 method 与 closure 继承。Owner 环境先于该声明的 generic bounds 和 header 建立，因此 `Self` 覆盖 struct/enum/trait 的 bounds、fields/members，以及 impl 的 bounds、trait/target、member signature/body。它分别表示当前 nominal、trait 的实现者或 impl target，不是全局 Language builtin，也不是 lexer keyword。普通 Type declaration/module/generic binder 与 owner-scoped associated Type 都不能占用 `Self`；owner scope 外按特殊 Type 使用 `Self` 报错。Substitution、associated selection 与 impl/coherence 仍由 Checker 完成。
