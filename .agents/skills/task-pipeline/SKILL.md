@@ -10,7 +10,7 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 ## 工作单元与授权
 
 - 一个用户确认的 Issue 是一个工作单元，同时只允许一个 active PR、一个 PR head branch 和一个 writer；PR 面向默认分支并使用 `Closes #N`。
-- Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由阶段 task、在已有 PR 写入授权内维护 `验证` 区的阶段与证据记录，以及在已有预授权下执行 merge；关闭或重新打开 Milestone 必须另有用户明确授权；不得修改仓库。
+- Planning 只可讨论、只读调查、创建或更新经用户确认的 Issue、机械路由阶段 task、在已有 PR 写入授权内维护 `验证` 区及其链接的阶段报告评论，以及在已有预授权下执行 merge；关闭或重新打开 Milestone 必须另有用户明确授权；不得修改仓库。
 - 经用户确认并由 Readiness 采用的 Issue 原生正文修订是 Execution 与 Verification 的 immutable contract；Issue 评论、PR、handoff 或 task 输出都不能追加或覆盖合同。正文修订身份与合同变化只按下文规则核对和路由。
 - Worktree 只是隔离 checkout；不得把调用会话的 working tree、index 或未提交改动当作输入。调用会话的摘要和结论不得替代本阶段独立取证；原合同内返修仅按失败路由接收 Verifier findings 与原始证据。
 - Milestone/Issue/PR 的描述与活动状态、Issue 的原生正文编辑历史以及 PR/default-branch 的 exact remote head 必须直接从 GitHub 读取；仓库文件、diff 和 authority 应从本阶段 clean worktree 或已有本地 Git object 批量读取。只有缺少所需 object 或 contract 明确指向其它外部 authority 时，才联网取得 repository 内容，禁止逐文件远程抓取。
@@ -26,7 +26,7 @@ description: Plan and advance Vorton repository goals through GitHub Milestones,
 - `UserContentEdit.diff` 的名字不保证 unified patch 或其它固定格式。应先查看实际载荷；若它是正文快照则按快照核对，否则使用可用的原生历史内容或 GitHub 网页编辑历史核对真实变化，不把单次 API 形态升级为永久保证。
 - Execution 与 Verification 从输入取得 Readiness 采用的原生修订身份，但都必须独立重读当前正文和完整原生历史，核对该修订仍可定位且是否仍为当前正文。有新编辑时先查看实际变化，再按既有合同变化路由处理；不得静默采用新修订，也不得因标签、关闭等普通活动改变 `updatedAt` 就报告正文变化。
 - 分页未读完、历史缺失或删除、并发读取不一致、修订无法唯一定位，或当前正文与原生历史无法对应时，必须报告实际证据缺口并走既有失败路由；不得以自建指纹兜底。原生历史有保留限制，不声称它是不可篡改档案。
-- 采用的修订只记录在既有阶段终态和 PR `验证` 区；面向用户同时显示时间、编辑者与已核对的实际变化内容，不建立 revision registry、快照归档或其它状态载体。
+- 采用的修订只记录在既有阶段终态、PR `验证` 区及其链接的阶段报告评论；面向用户同时显示时间、编辑者与已核对的实际变化内容，不建立 revision registry、快照归档或其它状态载体。
 
 ## Milestone 与 Issue 路由
 
@@ -110,9 +110,15 @@ Verification 必须是 fresh、read-only task，在 PR head SHA 对应的 clean 
 - `EVIDENCE_GAP` 回到 Planning；`INFRA_BLOCKED` 只处理已确认且与 candidate 行为无关的基础设施阻塞。Execution `FAILED` 按已确认原因进入上述对应路由，不得自动重跑。
 - 默认不设置 task-local 资源限制。只有实测失败、实测超时或相同且已记录的 case 才能按证据设置限制；未知时长不能用预测式 wall timeout。
 
+## PR 记录与报告
+
+- PR 正文保持简短：变更摘要、exact candidate SHA、采用的原生合同修订、各 gate 与阶段结论，以及详细报告链接。环境版本、完整命令与结果、失败证据和逐项 Debt Gate 论证放入追加的 PR 报告评论，不在首条重复展开。
+- Planning 将 Readiness、Execution、每轮 Verification 的载体、可追查标识与对应 SHA、裁决保留在 `验证` 区的 `<details>` 折叠区域：用户级 session 记录 `threadId`，subagent 记录所属主会话 `threadId` 与 agent ID。
+- Execution 发布开发检查与净新增责任的报告评论，并在正文提供摘要与链接。Verifier 保持只读，在固定终态中向 Planning 提供裁决和必要原始证据；Planning 发布每轮 Verification 报告评论并更新正文摘要。
+- 同一 candidate 的同一轮阶段证据汇总为一条报告评论，明确阶段、SHA 与采用的原生修订；新候选或新轮次追加报告并保留旧证据。报告评论不追加或覆盖 Issue contract，也不替代后续阶段的独立取证；普通命令流水不写 Issue 评论。
+
 ## Merge 与归档
 
-- Planning 将 Readiness、Execution、每轮 Verification 的载体、可追查标识与采用的原生正文修订记录在 PR 的 `验证` 区：用户级 session 记录 `threadId`，subagent 记录所属主会话 `threadId` 与 agent ID；同时保留各轮对应的 SHA 与裁决。记录不得追加或覆盖 Issue contract；普通命令流水不写 Issue 评论。
 - 归档或释放 task 可能使会话或 worktree 不可恢复；Planning 只有确认 task 不可能再被合法恢复时才可执行。Executor 与 Verifier 的 exact 可恢复边界分别见对应角色模板。
 - 归档不是 merge 前置条件。只有未变化 SHA 的 canonical gates、Debt Gate `PASS`、Verifier `PASS` 和已有 merge 预授权同时成立时，Planning 才可 merge。
 - Merge 后，Planning 归档或释放该 Issue 剩余的 Executor 与后台 task。只有用户能决定主 Planning 会话失效、重置或更换并主动开启新的主会话；agent 只能凭具体证据建议，不得自行创建 replacement Planning。

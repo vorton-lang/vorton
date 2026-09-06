@@ -16,7 +16,7 @@
 
 - 在 Issue 范围内修改仓库并运行开发所需的现有 gate。
 - 按主 skill 同步已批准变更直接影响的 API 说明、示例和入口文档；普通文件枚举不是隐含白名单，明确禁令仍受约束。
-- 使用现有 `git`/`gh` 身份建立或更新该 Issue 的唯一 branch 与 draft PR。
+- 使用现有 `git`/`gh` 身份建立或更新该 Issue 的唯一 branch、draft PR 与对应 Execution 报告评论。
 - 对不改变 Issue 的精确事实请求澄清。
 - 按失败路由接收绑定 candidate SHA 的 Verifier findings 与原始证据；续接前核对 Issue 未变、PR head 与本 worktree 一致，并在原 task、worktree 和 branch 中修复。
 
@@ -28,7 +28,7 @@
 
 ## 共享规则
 
-Candidate/证据、Debt Gate、重试与资源、task 归档只按主 skill 的对应章节执行，不在本模板复述。Executor 在 PR `验证` 区记录采用的 Contract revision，并对每项净新增提供当前 consumer、承担的责任及更小替代为何不足，但不裁定 Debt Gate；Local whitespace 开发检查展开并记录 PR base、merge-base 与 exact candidate SHA。输出 `READY_FOR_VERIFICATION` 后仍须保持 task/worktree 可恢复，直到 PR merge。
+Candidate/证据、Debt Gate、PR 记录与报告、重试与资源、task 归档只按主 skill 的对应章节执行，不在本模板复述。Executor 的报告评论记录采用的 Contract revision、开发检查，以及每项净新增的当前 consumer、承担的责任及更小替代为何不足，但不裁定 Debt Gate；Local whitespace 开发检查展开并记录 PR base、merge-base 与 exact candidate SHA。正文保留主 skill 要求的验证摘要、阶段身份与报告链接。输出 `READY_FOR_VERIFICATION` 后仍须保持 task/worktree 可恢复，直到 PR merge。
 
 ## Status
 
@@ -39,7 +39,7 @@ Candidate/证据、Debt Gate、重试与资源、task 归档只按主 skill 的�
 
 ## 终态事件
 
-完成 candidate 时，先 commit、push 并创建或更新唯一 draft PR。终态只输出以下事件，不附加说明：
+完成 candidate 时，先 commit、push 并创建或更新唯一 draft PR，发布本轮 Execution 报告评论并链接到正文。终态只输出以下事件，不附加说明：
 
 ```text
 Issue: #N

@@ -34,7 +34,7 @@
 
 ## 共享规则
 
-Candidate/证据、Debt Gate、重试与资源、task 归档只按主 skill 的对应章节执行，不在本模板复述。Verifier 把相应裁决写入固定终态事件；fixed SHA verdict 已终结且本 task 不会复用后可归档。
+Candidate/证据、Debt Gate、PR 记录与报告、重试与资源、task 归档只按主 skill 的对应章节执行，不在本模板复述。Verifier 在固定终态中提供裁决及绑定 SHA 的命令、环境、实际结果和 Debt Gate 依据，由 Planning 发布报告评论并更新 PR 正文摘要。fixed SHA verdict 已终结且本 task 不会复用后可归档。
 
 ## 终态事件
 
