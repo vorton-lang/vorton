@@ -67,7 +67,9 @@ Readiness 必须自行从 GitHub 读取当前 Milestone、Issue 当前正文及�
 
 Full access、独立 GitHub 读取或原生正文修订的唯一核对不可用时，Readiness 必须 fail closed 并报告实际可见性、基础设施或修订证据缺口；不得接受 Planning snapshot、调用者 working tree 内容或离线转述作为 fallback。Readiness 输出 `CLEAR`、`REWRITE` 或 `BLOCKED`：`CLEAR` 只授权并要求 Planning 从其独立确定的 start SHA 自动启动 fresh Execution，这里没有新的用户确认点，也不构成 Verification 或 merge 证据；`REWRITE` 回到 Planning，更新 contract 后必须重开 fresh Readiness；`BLOCKED` 表示上述读取能力或修订证据不足。
 
-任务进入 Readiness 前，Planning 使用实际可发现的 `grilling` skill 压测目标与 contract；已安装的 `grill-me` 只可作为调用入口，不能成为替代 authority。找不到 `grilling` 时 fail closed，不自行模拟。
+任务进入 Readiness 前，Planning 使用实际可发现的第三方 `grilling` skill 压测目标与 contract；当前环境有 `grilling-adapter` 时先读取该个人适配层，再完整加载上游方法。已安装的 `grill-me` 只可作为调用入口，不能成为替代 authority。找不到 `grilling` 时 fail closed，不自行模拟。
+
+压测只覆盖影响当前目标与 contract 的重大未决事项，复用用户已经确认的决定与已有授权；没有改变前提的新事实，不重新开启已解决的分支。重大未决事项已解决且当前 contract 已获用户确认时，结束压测并沿既有路由推进，不为“结束 grilling”再增加一次确认。上游方法与个人适配层均不改变本 skill 的阶段、角色权限、Issue 确认与验证门。
 
 Readiness 只输出：
 

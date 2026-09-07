@@ -13,4 +13,4 @@ description: Run one bounded repository-wide correctness audit on a fixed snapsh
 - 除非用户针对当前具体问题明确要求，不执行 security/hardening audit。
 - 每个 confirmed finding 只准备一个使用当前 Issue 模板的草案，包含影响、复现、affected SHA 与 acceptance；Planning 在用户确认准确草案或 batch manifest 后才可创建 Issue。
 
-最终只报告 confirmed findings、被证伪候选及等待确认的 exact Issue drafts。
+最终报告 fixed SHA、实际已审查范围、未覆盖部分和未决证据缺口，以及 confirmed findings、被证伪候选及等待确认的 exact Issue drafts。未决候选保持 unknown，不计入 confirmed findings；没有 confirmed finding 只说明本次实际覆盖范围内未确认问题，不表示未覆盖部分也已通过审查。
