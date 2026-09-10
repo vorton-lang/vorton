@@ -112,9 +112,9 @@ impl Parser {
         if self.at_contextual("generate") {
             return Ok(ModuleItem::Generate(self.parse_generate_item()?));
         }
-        Ok(ModuleItem::Declaration(
+        Ok(ModuleItem::Declaration(Box::new(
             self.parse_declaration(enclosing_end)?,
-        ))
+        )))
     }
 
     fn parse_generate_item(&mut self) -> Result<GenerateItem, FrontendDiagnostic> {
@@ -884,14 +884,18 @@ impl Parser {
 
     fn parse_optional_body_return_type(
         &mut self,
-    ) -> Result<Option<ReturnAnnotation>, FrontendDiagnostic> {
+    ) -> Result<Option<Box<ReturnAnnotation>>, FrontendDiagnostic> {
         if self.eat(Tag::Arrow).is_none() {
             return Ok(None);
         }
         if self.at(Tag::LParen) && self.looks_like_shape_expr() {
-            Ok(Some(ReturnAnnotation::Shape(self.parse_shape_expr()?)))
+            Ok(Some(Box::new(ReturnAnnotation::Shape(
+                self.parse_shape_expr()?,
+            ))))
         } else {
-            Ok(Some(ReturnAnnotation::Type(self.parse_return_type_expr()?)))
+            Ok(Some(Box::new(ReturnAnnotation::Type(
+                self.parse_return_type_expr()?,
+            ))))
         }
     }
 

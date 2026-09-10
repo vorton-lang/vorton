@@ -351,7 +351,7 @@ fn split_module_items(items: &[ModuleItem]) -> (Vec<Declaration>, Vec<GenerateIt
     let mut generates = Vec::new();
     for item in items {
         match item {
-            ModuleItem::Declaration(declaration) => declarations.push(declaration.clone()),
+            ModuleItem::Declaration(declaration) => declarations.push(declaration.as_ref().clone()),
             ModuleItem::Generate(generate) => generates.push(generate.clone()),
         }
     }
@@ -2235,7 +2235,7 @@ impl<'state> BodyResolver<'state> {
         let return_type = function
             .return_type
             .as_ref()
-            .map(|return_type| self.resolve_return_annotation(return_type))
+            .map(|return_type| self.resolve_return_annotation(return_type).map(Box::new))
             .transpose()?;
         let effects = function
             .effects
@@ -2364,6 +2364,7 @@ impl<'state> BodyResolver<'state> {
                 let result = match bound {
                     GenericBound::Named(bound) => self
                         .resolve_named_type(bound)
+                        .map(Box::new)
                         .map(ResolvedGenericBound::Named),
                     GenericBound::Shape(bound) => {
                         self.resolve_shape(bound).map(ResolvedGenericBound::Shape)
@@ -4070,7 +4071,7 @@ impl BodyResolver<'_> {
         let return_type = closure
             .return_type
             .as_ref()
-            .map(|return_type| self.resolve_return_annotation(return_type))
+            .map(|return_type| self.resolve_return_annotation(return_type).map(Box::new))
             .transpose()?;
         let effects = closure
             .effects
@@ -6418,7 +6419,7 @@ where (T, T): Eq + Debug, T::Item: Eq, {
             method.parameters[3].annotation,
             Some(ResolvedParameterAnnotation::Shape(_))
         ));
-        let Some(ResolvedReturnAnnotation::Shape(factory)) = &method.return_type else {
+        let Some(ResolvedReturnAnnotation::Shape(factory)) = method.return_type.as_deref() else {
             panic!("factory return shape expected")
         };
         let ResolvedShapeKind::Grouped(factory) = &factory.kind else {

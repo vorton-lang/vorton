@@ -410,7 +410,7 @@ pub(crate) struct ResolvedFunction {
     pub(crate) type_parameters: Vec<ResolvedTypeParameter>,
     pub(crate) effect_parameters: Vec<ResolvedEffectParameter>,
     pub(crate) parameters: Vec<ResolvedParameter>,
-    pub(crate) return_type: Option<ResolvedReturnAnnotation>,
+    pub(crate) return_type: Option<Box<ResolvedReturnAnnotation>>,
     pub(crate) effects: Option<ResolvedEffectSet>,
     pub(crate) body: ResolvedBlock,
 }
@@ -455,7 +455,7 @@ pub(crate) struct ResolvedTypeParameter {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResolvedGenericBound {
-    Named(ResolvedNamedType),
+    Named(Box<ResolvedNamedType>),
     Shape(ResolvedShape),
 }
 
@@ -881,7 +881,7 @@ pub(crate) struct ResolvedHandler {
 pub(crate) struct ResolvedClosure {
     pub(crate) captures: Vec<ResolvedCapture>,
     pub(crate) parameters: Vec<ResolvedParameter>,
-    pub(crate) return_type: Option<ResolvedReturnAnnotation>,
+    pub(crate) return_type: Option<Box<ResolvedReturnAnnotation>>,
     pub(crate) effects: Option<ResolvedEffectSet>,
     pub(crate) body: ResolvedBlock,
 }

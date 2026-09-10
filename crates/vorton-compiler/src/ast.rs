@@ -88,7 +88,7 @@ pub type Declaration = Spanned<DeclarationKind>;
 /// A root or inline-module item in original source order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleItem {
-    Declaration(Declaration),
+    Declaration(Box<Declaration>),
     Generate(GenerateItem),
 }
 
@@ -129,7 +129,7 @@ pub struct FunctionDeclaration {
     pub type_parameters: Vec<TypeParameter>,
     pub effect_parameters: Vec<EffectParameter>,
     pub parameters: Vec<NamedParameter>,
-    pub return_type: Option<ReturnAnnotation>,
+    pub return_type: Option<Box<ReturnAnnotation>>,
     pub effects: Option<EffectSet>,
     pub body: Block,
 }
@@ -758,7 +758,7 @@ pub struct Handler {
 pub struct ClosureExpression {
     pub captures: Option<CaptureList>,
     pub parameters: Vec<NamedParameter>,
-    pub return_type: Option<ReturnAnnotation>,
+    pub return_type: Option<Box<ReturnAnnotation>>,
     pub effects: Option<EffectSet>,
     pub body: Block,
 }

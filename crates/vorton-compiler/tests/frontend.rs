@@ -9,6 +9,7 @@ fn first_function(source: &str) -> FunctionDeclaration {
     let ModuleItem::Declaration(declaration) = program.items.remove(0) else {
         panic!("first module item should be a declaration")
     };
+    let declaration = *declaration;
     let DeclarationKind::Function(function) = declaration.kind else {
         panic!("first declaration should be a function")
     };
@@ -19,7 +20,7 @@ fn declaration(program: &Program, index: usize) -> &Declaration {
     let ModuleItem::Declaration(declaration) = &program.items[index] else {
         panic!("module item {index} should be a declaration")
     };
-    declaration
+    declaration.as_ref()
 }
 
 fn parameter_type(parameter: &NamedParameter) -> &TypeExpr {
@@ -47,14 +48,14 @@ fn parameter_shape(parameter: &NamedParameter) -> &ShapeExpr {
 }
 
 fn return_type(function: &FunctionDeclaration) -> &TypeExpr {
-    match function.return_type.as_ref().expect("return annotation") {
+    match function.return_type.as_deref().expect("return annotation") {
         ReturnAnnotation::Type(ty) => ty,
         ReturnAnnotation::Shape(_) => panic!("expected an actual return type"),
     }
 }
 
 fn return_shape(function: &FunctionDeclaration) -> &ShapeExpr {
-    match function.return_type.as_ref().expect("return annotation") {
+    match function.return_type.as_deref().expect("return annotation") {
         ReturnAnnotation::Shape(shape) => shape,
         ReturnAnnotation::Type(_) => panic!("expected a callable return shape"),
     }
@@ -534,7 +535,7 @@ impl<T> Use for Target where (T, T): Pair + Debug, T::Item: Eq, {
         ShapeKind::Callable(_)
     ));
     assert!(matches!(
-        closure.return_type,
+        closure.return_type.as_deref(),
         Some(ReturnAnnotation::Shape(_))
     ));
 
