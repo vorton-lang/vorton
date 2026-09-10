@@ -11,9 +11,9 @@ pub mod diagnostic;
 pub use ast::Program;
 pub use diagnostic::FrontendDiagnostic;
 pub use project::{
-    FileModulePath, FileModulePathError, FileModulePathErrorKind, LibraryId, LibrarySources,
-    NameNamespace, OriginRef, ProjectDiagnostic, ProjectDiagnosticKind, ProjectSources,
-    ResolvedProject, SourceRef,
+    CoreRoleDiagnostic, CoreRoleIssue, FileModulePath, FileModulePathError,
+    FileModulePathErrorKind, LibraryId, LibrarySources, NameNamespace, OriginRef,
+    ProjectDiagnostic, ProjectDiagnosticKind, ProjectSources, ResolvedProject, SourceRef,
 };
 
 /// Parses one UTF-8 Vorton source into a complete surface AST.
@@ -26,10 +26,12 @@ pub fn parse(source: &str) -> Result<Program, FrontendDiagnostic> {
     parser::parse(tokens, source.len())
 }
 
-/// Validates and resolves a platform-independent, in-memory Vorton library DAG.
+/// Validates and resolves a platform-independent, in-memory Vorton library DAG
+/// with one host-selected official core library.
 ///
 /// Every source identity and source-backed diagnostic retains its owning
-/// [`LibraryId`]. Reachable `generate` items currently return
+/// [`LibraryId`]. Every reachable non-core library must directly depend on the
+/// supplied core identity. Reachable `generate` items currently return
 /// [`ProjectDiagnosticKind::GenerateUnsupported`] after frontend and module
 /// graph checks, before declaration or body-name resolution.
 pub fn resolve_project(sources: &ProjectSources) -> Result<ResolvedProject, ProjectDiagnostic> {

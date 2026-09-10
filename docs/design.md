@@ -51,13 +51,13 @@ Source
 
 ## Identity 与项目闭包
 
-具名声明和引用使用包含 source `LibraryId`、origin module、namespace、declaration 与 owner 的 exact reference。Re-export 原样转发同一 identity；same-library/same-origin diamond 是幂等 delivery，不创建新声明。不同库或不同 origin 的相同叶名称永不合并。每个 source library root 也是 exact module entity；Language identity 继续使用独立 origin，没有 source `LibraryId`。
+具名声明和引用使用包含 source `LibraryId`、origin module、namespace、declaration 与 owner 的 exact reference。Re-export 原样转发同一 identity；same-library/same-origin diamond 是幂等 delivery，不创建新声明。不同库或不同 origin 的相同叶名称永不合并。每个 source library root 也是 exact module entity；primitive type 与 effect 等 intrinsic 的 Language identity 继续使用独立 origin，没有 source `LibraryId`。Option、Ordering 与 core traits 使用宿主指定 core 库的真实 source identity。
 
-Compiler library 的 Resolver 入口消费宿主指定 `LibraryId` 的显式纯内存依赖 DAG；每个库包含 root source、抽象 file-module key 到 UTF-8 source 的映射，以及指向真实库 ID 的直接依赖别名。它不读取文件系统、cwd、OS path、package registry 或网络。先验证整个输入图，随后只解析 entry 可达库；每个可达库 root 必定进入闭包，各库 file/inline/synthetic tree 仍只由本库已解析 source 的实际 import/re-export 扩展。Consumer 不能打开依赖库未达 file body，也不能通过碰巧相同的 key、ID 数字或别名形成边。
+Compiler library 的 Resolver 入口消费宿主指定 entry、唯一 core `LibraryId` 与显式纯内存依赖 DAG；每个库包含 root source、抽象 file-module key 到 UTF-8 source 的映射，以及指向真实库 ID 的直接依赖别名。它不读取文件系统、cwd、OS path、package registry 或网络。先验证整个输入图和每个可达非 core 库到该 core 的显式直接边，随后只解析 entry 可达库；每个可达库 root 必定进入闭包，各库 file/inline/synthetic tree 仍只由本库已解析 source 的实际 import/re-export 扩展。Consumer 不能打开依赖库未达 file body，也不能通过碰巧相同的 key、ID 数字或别名形成边。
 
-Language declaration 使用独立 `Language` origin，不通过隐藏 source、虚构 module 或自动 source prelude 注入。Source declaration、generic 与 local binding 的 identity 从冻结的 library、module、owner、declaration site 与语法角色构造；不得依赖共享全局计数器或偶然遍历顺序。依赖别名只在所属库 root 建立 private Type binding，指向目标库的真实 root；跨库 import、explicit re-export 与 facade 继续消费同一套 binding 和 exact identity。
+Language intrinsic declaration 使用独立 `Language` origin，不通过隐藏 source、虚构 module 或自动 source prelude 注入。官方 core 的协议 declaration、member、generic、Self 与 reference 全部来自指定 core root source；受保护短名直接引用这些 source entity，不按别名、ID 数值或遍历序重建。其他 source declaration、generic 与 local binding 的 identity 同样从冻结的 library、module、owner、declaration site 与语法角色构造。依赖别名只在所属库 root 建立 private Type binding，指向目标库的真实 root；跨库 import、explicit re-export 与 facade 继续消费同一套 binding 和 exact identity。
 
-`ResolvedProject` 仍是一个 owned、opaque 的名称层结果，统一保留 entry、可达的直接依赖图、各库原声明归属与引用。它不增加可编辑接口摘要、序列化契约或查询框架，也不表示 Checked、TypedHIR 或完整有效接口已经成立。
+`ResolvedProject` 仍是一个 owned、opaque 的名称层结果，统一保留 entry、指定 core、可达的直接依赖图、各库原声明归属与引用，以及已经核对的有限 core 角色引用。它不增加可编辑接口摘要、序列化契约或查询框架，也不表示 Checked、TypedHIR 或完整有效接口已经成立。
 
 名称选择先在每个适用 namespace 内应用词法 shadowing，再按 path 的 root、每个中间 container 与 terminal category 过滤并合并候选。不能用不合法的跨 namespace candidate 抢占合法结果，也不能为得到结果而回退到同 namespace 已被遮蔽的 declaration。Enum constructor、custom-effect operation 与已知 named construction/pattern field 的 owner 集合已经闭合，缺失或类别错误必须在 Resolver 拒绝；普通 field/method receiver 与 type-relative impl/associated selection 仍是 Checker obligation。Effect 与 effect alias 不是 Type/Value 的 type-relative `::` base。
 
@@ -97,7 +97,7 @@ Trait call 在 TypedHIR 固定为 exact inherent method、builtin intrinsic、co
 
 ### 数值与比较闭合
 
-Checker 是数值字面量解释的唯一 authority。它从 AST 保留的十进制拼写产生固定的 `Int` 或 binary64 值，处理直接一元负号作用于边界字面量的唯一特例，并拒绝其他超范围字面量；这项局部解释不能扩张为通用 const evaluator。TypedHIR 同时冻结每个数值运算的同型 operand、每个比较点的 exact Language trait/member identity，以及结构派生所需的 field evidence。
+Checker 是数值字面量解释的唯一 authority。它从 AST 保留的十进制拼写产生固定的 `Int` 或 binary64 值，处理直接一元负号作用于边界字面量的唯一特例，并拒绝其他超范围字面量；这项局部解释不能扩张为通用 const evaluator。TypedHIR 同时冻结每个数值运算的同型 operand、每个比较点的 exact core source trait/member identity，以及结构派生所需的 field evidence。
 
 CoreHIR 在一处显式化 checked `Int` 运算及其 panic、普通 `Float` 运算、`PartialEq::eq`、`PartialOrd::partial_cmp` 到四个排序运算符的映射，以及 `Ord::cmp` 的独立显式调用。Compiler-defined struct/enum 比较 body 同样在 CoreHIR freeze 前按字段与 variant 声明顺序进入 executable inventory。后续层只能运输这些选择，不能按 C 运算符、宿主 trait 或名称重新决定 overflow、rounding、comparison 或 derivation。
 

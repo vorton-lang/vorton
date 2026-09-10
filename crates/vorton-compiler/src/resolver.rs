@@ -4,12 +4,33 @@ use crate::ast::*;
 use crate::project::*;
 
 const LANGUAGE_TYPES: &[&str] = &[
-    "Int", "Float", "Str", "Bool", "Unit", "Never", "Option", "List", "Range", "Ptr",
+    "Int", "Float", "Str", "Bool", "Unit", "Never", "List", "Range", "Ptr",
 ];
-const LANGUAGE_TRAITS: &[&str] = &[
-    "Eq", "Hash", "Clone", "Debug", "Ord", "Drop", "Iterable", "Iterator", "Fn", "FnMut", "FnOnce",
+const CORE_ENUMS: &[&str] = &["Option", "Ordering"];
+const CORE_TRAITS: &[&str] = &[
+    "PartialEq",
+    "Eq",
+    "PartialOrd",
+    "Ord",
+    "Clone",
+    "Copy",
+    "Drop",
+    "Display",
+    "Debug",
+    "Hash",
+    "FnOnce",
+    "FnMut",
+    "Fn",
+    "Iterator",
+    "Iterable",
 ];
 const LANGUAGE_EFFECTS: &[&str] = &["console", "fs", "process", "fail", "mut", "unsafe"];
+
+#[derive(Clone, Copy)]
+enum ExpectedCoreVariant {
+    Unit,
+    Positional(usize),
+}
 
 pub(crate) fn resolve_project(
     sources: &ProjectSources,
@@ -34,7 +55,7 @@ pub(crate) fn resolve_project(
             )
         })
         .collect();
-    let mut state = ResolverState::new(modules, sources.entry, dependencies);
+    let mut state = ResolverState::new(modules, sources.entry, sources.core, dependencies);
     state.index_entities()?;
     state.resolve_imports()?;
     state.resolve_bodies()
@@ -48,6 +69,12 @@ fn validate_library_graph(
             ProjectDiagnosticKind::MissingEntryLibrary {
                 entry: sources.entry,
             },
+        ));
+    }
+
+    if !sources.libraries.contains_key(&sources.core) {
+        return Err(input_diagnostic(
+            ProjectDiagnosticKind::MissingCoreLibrary { core: sources.core },
         ));
     }
 
@@ -100,6 +127,20 @@ fn validate_library_graph(
                 .copied(),
         );
     }
+    if let Some(owner) = reachable.iter().copied().find(|owner| {
+        *owner != sources.core
+            && !sources.libraries[owner]
+                .dependencies
+                .values()
+                .any(|target| *target == sources.core)
+    }) {
+        return Err(input_diagnostic(
+            ProjectDiagnosticKind::MissingDirectCoreDependency {
+                owner,
+                core: sources.core,
+            },
+        ));
+    }
     Ok(reachable)
 }
 
@@ -107,6 +148,25 @@ fn input_diagnostic(kind: ProjectDiagnosticKind) -> ProjectDiagnostic {
     ProjectDiagnostic {
         kind,
         primary: None,
+        related: Vec::new(),
+    }
+}
+
+fn core_role_diagnostic(
+    core: LibraryId,
+    role: &str,
+    member: Option<&str>,
+    issue: CoreRoleIssue,
+    target: &EntityId,
+) -> ProjectDiagnostic {
+    ProjectDiagnostic {
+        kind: ProjectDiagnosticKind::InvalidCoreRole(Box::new(CoreRoleDiagnostic {
+            core,
+            role: role.to_owned(),
+            member: member.map(str::to_owned),
+            issue,
+        })),
+        primary: entity_origin(target),
         related: Vec::new(),
     }
 }
@@ -763,8 +823,11 @@ struct ImportDirective {
 struct ResolverState {
     modules: BTreeMap<ModuleRef, ModuleInfo>,
     entry: LibraryId,
+    core: LibraryId,
     dependencies: BTreeMap<LibraryId, BTreeMap<String, LibraryId>>,
     entities: BTreeMap<EntityId, Entity>,
+    core_bindings: BTreeMap<String, EntityId>,
+    core_roles: Option<CoreRoles>,
     closed_member_owners: BTreeSet<EntityId>,
     own_bindings: BTreeMap<ModuleRef, BindingTable>,
     bindings: BTreeMap<ModuleRef, BindingTable>,
@@ -775,13 +838,17 @@ impl ResolverState {
     fn new(
         modules: BTreeMap<ModuleRef, ModuleInfo>,
         entry: LibraryId,
+        core: LibraryId,
         dependencies: BTreeMap<LibraryId, BTreeMap<String, LibraryId>>,
     ) -> Self {
         Self {
             modules,
             entry,
+            core,
             dependencies,
             entities: BTreeMap::new(),
+            core_bindings: BTreeMap::new(),
+            core_roles: None,
             closed_member_owners: BTreeSet::new(),
             own_bindings: BTreeMap::new(),
             bindings: BTreeMap::new(),
@@ -790,7 +857,7 @@ impl ResolverState {
     }
 
     fn index_entities(&mut self) -> Result<(), ProjectDiagnostic> {
-        self.index_language_entities();
+        self.index_intrinsic_entities();
         self.index_modules();
         let mut diagnostics = Vec::new();
         let bodies = self
@@ -808,92 +875,26 @@ impl ResolverState {
                 .extend(flatten_imports(&module, &body.origin, &body.uses));
         }
         for (module, table) in &self.own_bindings {
-            if let Some(diagnostic) = first_binding_diagnostic(module, table) {
+            if let Some(diagnostic) = first_binding_diagnostic(self.core, module, table) {
                 diagnostics.push((module.clone(), diagnostic));
             }
         }
         if let Some(diagnostic) = first_stage_diagnostic(diagnostics) {
             return Err(diagnostic);
         }
+        let core_roles = self.index_core_roles()?;
+        self.core_bindings = core_role_bindings(&core_roles);
+        self.core_roles = Some(core_roles);
         self.bindings = self.own_bindings.clone();
         Ok(())
     }
 
-    fn index_language_entities(&mut self) {
+    fn index_intrinsic_entities(&mut self) {
         for name in LANGUAGE_TYPES {
             self.insert_language_entity(Namespace::Type, EntityKind::LanguageType, name, None);
         }
-        for name in LANGUAGE_TRAITS {
-            self.insert_language_entity(Namespace::Type, EntityKind::LanguageTrait, name, None);
-        }
-        self.closed_member_owners.insert(language_id(
-            Namespace::Type,
-            EntityKind::LanguageTrait,
-            "Eq",
-            None,
-        ));
         for name in LANGUAGE_EFFECTS {
             self.insert_language_entity(Namespace::Effect, EntityKind::LanguageEffect, name, None);
-        }
-
-        let option = language_id(Namespace::Type, EntityKind::LanguageType, "Option", None);
-        for (name, shape) in [
-            ("Some", EntityShape::ConstructorPositional),
-            ("None", EntityShape::ConstructorUnit),
-        ] {
-            let owner = OwnerKey {
-                module: ModuleRef::language_root(),
-                source: SourceRef::Root,
-                span: Span::new(0, 0),
-                kind: EntityKind::LanguageType,
-                name: "Option".to_owned(),
-            };
-            let id = language_id(
-                Namespace::Value,
-                EntityKind::LanguageConstructor,
-                name,
-                Some(owner),
-            );
-            self.entities.insert(
-                id.clone(),
-                Entity {
-                    declared_at: None,
-                    public: true,
-                    owner: Some(option.clone()),
-                    members: BTreeMap::new(),
-                    shape,
-                },
-            );
-            self.entities
-                .get_mut(&option)
-                .expect("Option language entity exists")
-                .members
-                .entry(name.to_owned())
-                .or_default()
-                .push(id);
-        }
-
-        for (owner_name, member_name, namespace, kind) in [
-            ("Eq", "eq", Namespace::Value, EntityKind::Method),
-            ("Ord", "cmp", Namespace::Value, EntityKind::Method),
-            ("Drop", "drop", Namespace::Value, EntityKind::Method),
-            (
-                "Iterable",
-                "Item",
-                Namespace::Type,
-                EntityKind::AssociatedType,
-            ),
-            (
-                "Iterable",
-                "Iter",
-                Namespace::Type,
-                EntityKind::AssociatedType,
-            ),
-            ("Iterable", "iter", Namespace::Value, EntityKind::Method),
-            ("Iterator", "next", Namespace::Value, EntityKind::Method),
-        ] {
-            let owner = language_id(Namespace::Type, EntityKind::LanguageTrait, owner_name, None);
-            self.insert_language_member(&owner, namespace, kind, member_name);
         }
         let fail = language_id(Namespace::Effect, EntityKind::LanguageEffect, "fail", None);
         self.insert_language_member(
@@ -902,6 +903,333 @@ impl ResolverState {
             EntityKind::EffectOperation,
             "raise",
         );
+    }
+
+    fn index_core_roles(&self) -> Result<CoreRoles, ProjectDiagnostic> {
+        let (option_declaration, option_id) =
+            self.require_core_declaration("Option", EntityKind::Enum, 1)?;
+        let option_variants = self.require_core_enum_variants(
+            "Option",
+            option_declaration,
+            &option_id,
+            &[
+                ("Some", ExpectedCoreVariant::Positional(1)),
+                ("None", ExpectedCoreVariant::Unit),
+            ],
+        )?;
+        let option = CoreOptionRole {
+            declaration: option_id,
+            some: option_variants[0].clone(),
+            none: option_variants[1].clone(),
+        };
+
+        let (ordering_declaration, ordering_id) =
+            self.require_core_declaration("Ordering", EntityKind::Enum, 0)?;
+        let ordering_variants = self.require_core_enum_variants(
+            "Ordering",
+            ordering_declaration,
+            &ordering_id,
+            &[
+                ("Less", ExpectedCoreVariant::Unit),
+                ("Equal", ExpectedCoreVariant::Unit),
+                ("Greater", ExpectedCoreVariant::Unit),
+            ],
+        )?;
+        let ordering = CoreOrderingRole {
+            declaration: ordering_id,
+            less: ordering_variants[0].clone(),
+            equal: ordering_variants[1].clone(),
+            greater: ordering_variants[2].clone(),
+        };
+
+        Ok(CoreRoles {
+            option,
+            ordering,
+            partial_eq: self.require_core_method_trait("PartialEq", "eq")?,
+            eq: self.require_core_empty_trait("Eq")?,
+            partial_ord: self.require_core_method_trait("PartialOrd", "partial_cmp")?,
+            ord: self.require_core_method_trait("Ord", "cmp")?,
+            clone: self.require_core_method_trait("Clone", "clone")?,
+            copy: self.require_core_empty_trait("Copy")?,
+            drop: self.require_core_method_trait("Drop", "drop")?,
+            display: self.require_core_method_trait("Display", "to_str")?,
+            debug: self.require_core_method_trait("Debug", "debug")?,
+            hash: self.require_core_method_trait("Hash", "hash")?,
+            fn_once: self.require_core_empty_trait("FnOnce")?,
+            fn_mut: self.require_core_empty_trait("FnMut")?,
+            function: self.require_core_empty_trait("Fn")?,
+            iterator: self.require_core_iterator()?,
+            iterable: self.require_core_iterable()?,
+        })
+    }
+
+    fn require_core_declaration<'a>(
+        &'a self,
+        role: &str,
+        expected_kind: EntityKind,
+        expected_arity: usize,
+    ) -> Result<(&'a Declaration, EntityId), ProjectDiagnostic> {
+        let root = ModuleRef::root(self.core);
+        let body = self
+            .modules
+            .get(&root)
+            .and_then(|module| module.body.as_ref())
+            .expect("the reachable core root was parsed before declaration indexing");
+        let candidate = body.declarations.iter().find_map(|declaration| {
+            let (identity, _) = declaration_entity(&root, &body.origin, declaration)?;
+            (identity.namespace == Namespace::Type && identity.name == role)
+                .then_some((declaration, identity))
+        });
+        let Some((declaration, identity)) = candidate else {
+            return Err(input_diagnostic(ProjectDiagnosticKind::MissingCoreRole {
+                core: self.core,
+                role: role.to_owned(),
+            }));
+        };
+        if identity.kind != expected_kind {
+            return Err(core_role_diagnostic(
+                self.core,
+                role,
+                None,
+                CoreRoleIssue::DeclarationKind,
+                &identity,
+            ));
+        }
+        if !self
+            .entities
+            .get(&identity)
+            .is_some_and(|entity| entity.public)
+        {
+            return Err(core_role_diagnostic(
+                self.core,
+                role,
+                None,
+                CoreRoleIssue::Visibility,
+                &identity,
+            ));
+        }
+        let parameters = match &declaration.kind {
+            DeclarationKind::Enum(declared) => &declared.item.type_parameters,
+            DeclarationKind::Trait(declared) => &declared.item.type_parameters,
+            _ => unreachable!("the expected core declaration kind was checked"),
+        };
+        if parameters.len() != expected_arity {
+            return Err(core_role_diagnostic(
+                self.core,
+                role,
+                None,
+                CoreRoleIssue::GenericArity {
+                    expected: expected_arity,
+                    actual: parameters.len(),
+                },
+                &identity,
+            ));
+        }
+        if parameters
+            .iter()
+            .any(|parameter| !parameter.bounds.is_empty())
+        {
+            return Err(core_role_diagnostic(
+                self.core,
+                role,
+                None,
+                CoreRoleIssue::GenericBounds,
+                &identity,
+            ));
+        }
+        Ok((declaration, identity))
+    }
+
+    fn require_core_enum_variants(
+        &self,
+        role: &str,
+        declaration: &Declaration,
+        identity: &EntityId,
+        expected: &[(&str, ExpectedCoreVariant)],
+    ) -> Result<Vec<EntityId>, ProjectDiagnostic> {
+        let DeclarationKind::Enum(declared) = &declaration.kind else {
+            unreachable!("the core enum declaration kind was checked")
+        };
+        if declared.item.variants.len() != expected.len()
+            || declared
+                .item
+                .variants
+                .iter()
+                .zip(expected)
+                .any(|(variant, (name, _))| variant.name.text != *name)
+        {
+            return Err(core_role_diagnostic(
+                self.core,
+                role,
+                None,
+                CoreRoleIssue::VariantSet,
+                identity,
+            ));
+        }
+        let mut variants = Vec::new();
+        for (variant, (name, shape)) in declared.item.variants.iter().zip(expected) {
+            let valid_shape = match (&variant.fields, shape) {
+                (VariantFields::Unit, ExpectedCoreVariant::Unit) => true,
+                (VariantFields::Positional(fields), ExpectedCoreVariant::Positional(count)) => {
+                    fields.len() == *count
+                }
+                _ => false,
+            };
+            let member =
+                self.require_core_member(role, identity, name, EntityKind::EnumConstructor)?;
+            if !valid_shape {
+                return Err(core_role_diagnostic(
+                    self.core,
+                    role,
+                    Some(name),
+                    CoreRoleIssue::VariantPayload,
+                    &member,
+                ));
+            }
+            variants.push(member);
+        }
+        Ok(variants)
+    }
+
+    fn require_core_method_trait(
+        &self,
+        role: &str,
+        method: &str,
+    ) -> Result<CoreMethodRole, ProjectDiagnostic> {
+        let (declaration, identity) = self.require_core_declaration(role, EntityKind::Trait, 0)?;
+        let members = self.require_core_trait_members(
+            role,
+            declaration,
+            &identity,
+            &[(method, EntityKind::Method)],
+        )?;
+        Ok(CoreMethodRole {
+            declaration: identity,
+            method: members[0].clone(),
+        })
+    }
+
+    fn require_core_empty_trait(&self, role: &str) -> Result<EntityId, ProjectDiagnostic> {
+        let (declaration, identity) = self.require_core_declaration(role, EntityKind::Trait, 0)?;
+        self.require_core_trait_members(role, declaration, &identity, &[])?;
+        Ok(identity)
+    }
+
+    fn require_core_iterator(&self) -> Result<CoreIteratorRole, ProjectDiagnostic> {
+        let role = "Iterator";
+        let (declaration, identity) = self.require_core_declaration(role, EntityKind::Trait, 0)?;
+        let members = self.require_core_trait_members(
+            role,
+            declaration,
+            &identity,
+            &[
+                ("Item", EntityKind::AssociatedType),
+                ("next", EntityKind::Method),
+            ],
+        )?;
+        Ok(CoreIteratorRole {
+            declaration: identity,
+            item: members[0].clone(),
+            next: members[1].clone(),
+        })
+    }
+
+    fn require_core_iterable(&self) -> Result<CoreIterableRole, ProjectDiagnostic> {
+        let role = "Iterable";
+        let (declaration, identity) = self.require_core_declaration(role, EntityKind::Trait, 0)?;
+        let members = self.require_core_trait_members(
+            role,
+            declaration,
+            &identity,
+            &[
+                ("Item", EntityKind::AssociatedType),
+                ("Iter", EntityKind::AssociatedType),
+                ("iter", EntityKind::Method),
+            ],
+        )?;
+        Ok(CoreIterableRole {
+            declaration: identity,
+            item: members[0].clone(),
+            iter_type: members[1].clone(),
+            iter: members[2].clone(),
+        })
+    }
+
+    fn require_core_trait_members(
+        &self,
+        role: &str,
+        declaration: &Declaration,
+        identity: &EntityId,
+        expected: &[(&str, EntityKind)],
+    ) -> Result<Vec<EntityId>, ProjectDiagnostic> {
+        let DeclarationKind::Trait(declared) = &declaration.kind else {
+            unreachable!("the core trait declaration kind was checked")
+        };
+        let mut actual_names = declared
+            .item
+            .members
+            .iter()
+            .map(|member| match &member.kind {
+                TraitMemberKind::Method(method) => method.name.text.as_str(),
+                TraitMemberKind::AssociatedType(associated) => associated.name.text.as_str(),
+            })
+            .collect::<Vec<_>>();
+        let mut expected_names = expected.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        actual_names.sort_unstable();
+        expected_names.sort_unstable();
+        if actual_names != expected_names {
+            return Err(core_role_diagnostic(
+                self.core,
+                role,
+                None,
+                CoreRoleIssue::MemberSet,
+                identity,
+            ));
+        }
+        let mut members = Vec::new();
+        for (name, kind) in expected {
+            let actual_kind = declared.item.members.iter().find_map(|member| {
+                let (member_name, member_kind) = match &member.kind {
+                    TraitMemberKind::Method(method) => {
+                        (method.name.text.as_str(), EntityKind::Method)
+                    }
+                    TraitMemberKind::AssociatedType(associated) => {
+                        (associated.name.text.as_str(), EntityKind::AssociatedType)
+                    }
+                };
+                (member_name == *name).then_some(member_kind)
+            });
+            if actual_kind != Some(*kind) {
+                return Err(core_role_diagnostic(
+                    self.core,
+                    role,
+                    Some(name),
+                    CoreRoleIssue::MemberKind,
+                    identity,
+                ));
+            }
+            members.push(self.require_core_member(role, identity, name, *kind)?);
+        }
+        Ok(members)
+    }
+
+    fn require_core_member(
+        &self,
+        role: &str,
+        owner: &EntityId,
+        name: &str,
+        kind: EntityKind,
+    ) -> Result<EntityId, ProjectDiagnostic> {
+        self.entities
+            .get(owner)
+            .and_then(|entity| entity.members.get(name))
+            .into_iter()
+            .flatten()
+            .find(|member| member.kind == kind)
+            .cloned()
+            .ok_or_else(|| {
+                core_role_diagnostic(self.core, role, Some(name), CoreRoleIssue::MemberSet, owner)
+            })
     }
 
     fn insert_language_entity(
@@ -1451,7 +1779,7 @@ impl ResolverState {
 
         let mut diagnostics = self.import_directive_diagnostics();
         for (module, table) in &self.bindings {
-            if let Some(diagnostic) = first_binding_diagnostic(module, table) {
+            if let Some(diagnostic) = first_binding_diagnostic(self.core, module, table) {
                 diagnostics.push((module.clone(), diagnostic));
             }
         }
@@ -1629,6 +1957,11 @@ impl ResolverState {
                         .accessible
                         .insert(LookupContainer::Entity(entity.clone()));
                 }
+            }
+            if let Some(entity) = self.core_bindings.get(name) {
+                result
+                    .accessible
+                    .insert(LookupContainer::Entity(entity.clone()));
             }
         }
         if !terminal {
@@ -1819,10 +2152,7 @@ impl ResolverState {
                     continue;
                 };
                 if directive.candidates.len() != 1
-                    || !matches!(
-                        target.kind,
-                        EntityKind::EnumConstructor | EntityKind::LanguageConstructor
-                    )
+                    || !matches!(target.kind, EntityKind::EnumConstructor)
                 {
                     continue;
                 }
@@ -1927,13 +2257,785 @@ impl ResolverState {
         if let Some(diagnostic) = first_stage_diagnostic(diagnostics) {
             return Err(diagnostic);
         }
+        let modules = resolved_modules.into_iter().collect::<BTreeMap<_, _>>();
+        let core_roles = self
+            .core_roles
+            .take()
+            .expect("core roles are indexed before body resolution");
+        validate_core_profile(self.core, &modules, &core_roles)?;
         Ok(ResolvedProject {
             entry: self.entry,
+            core: self.core,
             dependencies: self.dependencies,
-            modules: resolved_modules.into_iter().collect(),
+            modules,
             entities: self.entities,
+            core_roles,
         })
     }
+}
+
+fn validate_core_profile(
+    core: LibraryId,
+    modules: &BTreeMap<ModuleRef, ResolvedModule>,
+    roles: &CoreRoles,
+) -> Result<(), ProjectDiagnostic> {
+    let body = modules
+        .get(&ModuleRef::root(core))
+        .and_then(|module| module.body.as_ref())
+        .expect("the resolved core root always has a body");
+
+    let option = resolved_core_declaration(body, &roles.option.declaration);
+    let ResolvedDeclarationKind::Enum {
+        type_parameters,
+        variants,
+    } = &option.kind
+    else {
+        unreachable!("the core declaration category was checked before body resolution")
+    };
+    let option_parameter = &type_parameters[0].binding.identity;
+    let some = variants
+        .iter()
+        .find(|variant| variant.identity == roles.option.some)
+        .expect("the indexed Option::Some variant is resolved");
+    let some_payload_valid = matches!(
+        &some.fields,
+        ResolvedVariantFields::Positional(fields)
+            if fields.len() == 1 && resolved_type_is_exact(&fields[0], option_parameter)
+    );
+    if !some_payload_valid {
+        return Err(core_role_diagnostic(
+            core,
+            "Option",
+            Some("Some"),
+            CoreRoleIssue::VariantPayload,
+            &roles.option.some,
+        ));
+    }
+    let none = variants
+        .iter()
+        .find(|variant| variant.identity == roles.option.none)
+        .expect("the indexed Option::None variant is resolved");
+    if !matches!(none.fields, ResolvedVariantFields::Unit) {
+        return Err(core_role_diagnostic(
+            core,
+            "Option",
+            Some("None"),
+            CoreRoleIssue::VariantPayload,
+            &roles.option.none,
+        ));
+    }
+
+    let ordering = resolved_core_declaration(body, &roles.ordering.declaration);
+    let ResolvedDeclarationKind::Enum { variants, .. } = &ordering.kind else {
+        unreachable!("the core declaration category was checked before body resolution")
+    };
+    for (name, identity) in [
+        ("Less", &roles.ordering.less),
+        ("Equal", &roles.ordering.equal),
+        ("Greater", &roles.ordering.greater),
+    ] {
+        let variant = variants
+            .iter()
+            .find(|variant| variant.identity == *identity)
+            .expect("the indexed Ordering variant is resolved");
+        if !matches!(variant.fields, ResolvedVariantFields::Unit) {
+            return Err(core_role_diagnostic(
+                core,
+                "Ordering",
+                Some(name),
+                CoreRoleIssue::VariantPayload,
+                identity,
+            ));
+        }
+    }
+
+    let partial_eq_members = validate_core_trait_supertraits(
+        core,
+        body,
+        "PartialEq",
+        &roles.partial_eq.declaration,
+        &[],
+    )?;
+    let eq_members = validate_core_trait_supertraits(
+        core,
+        body,
+        "Eq",
+        &roles.eq,
+        &[&roles.partial_eq.declaration],
+    )?;
+    debug_assert!(eq_members.is_empty());
+    let partial_ord_members = validate_core_trait_supertraits(
+        core,
+        body,
+        "PartialOrd",
+        &roles.partial_ord.declaration,
+        &[&roles.partial_eq.declaration],
+    )?;
+    let ord_members = validate_core_trait_supertraits(
+        core,
+        body,
+        "Ord",
+        &roles.ord.declaration,
+        &[&roles.eq, &roles.partial_ord.declaration],
+    )?;
+    let clone_members =
+        validate_core_trait_supertraits(core, body, "Clone", &roles.clone.declaration, &[])?;
+    let copy_members = validate_core_trait_supertraits(
+        core,
+        body,
+        "Copy",
+        &roles.copy,
+        &[&roles.clone.declaration],
+    )?;
+    debug_assert!(copy_members.is_empty());
+    let drop_members =
+        validate_core_trait_supertraits(core, body, "Drop", &roles.drop.declaration, &[])?;
+    let display_members =
+        validate_core_trait_supertraits(core, body, "Display", &roles.display.declaration, &[])?;
+    let debug_members =
+        validate_core_trait_supertraits(core, body, "Debug", &roles.debug.declaration, &[])?;
+    let hash_members =
+        validate_core_trait_supertraits(core, body, "Hash", &roles.hash.declaration, &[])?;
+    let fn_once_members =
+        validate_core_trait_supertraits(core, body, "FnOnce", &roles.fn_once, &[])?;
+    debug_assert!(fn_once_members.is_empty());
+    let fn_mut_members =
+        validate_core_trait_supertraits(core, body, "FnMut", &roles.fn_mut, &[&roles.fn_once])?;
+    debug_assert!(fn_mut_members.is_empty());
+    let fn_members =
+        validate_core_trait_supertraits(core, body, "Fn", &roles.function, &[&roles.fn_mut])?;
+    debug_assert!(fn_members.is_empty());
+    let iterator_members =
+        validate_core_trait_supertraits(core, body, "Iterator", &roles.iterator.declaration, &[])?;
+    let iterable_members =
+        validate_core_trait_supertraits(core, body, "Iterable", &roles.iterable.declaration, &[])?;
+
+    let bool_type = language_id(Namespace::Type, EntityKind::LanguageType, "Bool", None);
+    let unit_type = language_id(Namespace::Type, EntityKind::LanguageType, "Unit", None);
+    let str_type = language_id(Namespace::Type, EntityKind::LanguageType, "Str", None);
+    let int_type = language_id(Namespace::Type, EntityKind::LanguageType, "Int", None);
+
+    let (parameters, result) = validate_core_method_header(
+        core,
+        "PartialEq",
+        "eq",
+        &roles.partial_eq.method,
+        partial_eq_members,
+        &[ParameterMode::Borrow, ParameterMode::Borrow],
+        CoreMethodEffect::ClosedEmpty,
+    )?;
+    require_core_self_parameter(core, "PartialEq", "eq", &roles.partial_eq, 0, parameters[0])?;
+    require_core_self_parameter(core, "PartialEq", "eq", &roles.partial_eq, 1, parameters[1])?;
+    require_core_return_type(
+        core,
+        "PartialEq",
+        "eq",
+        &roles.partial_eq.method,
+        result,
+        |ty| resolved_type_is_exact(ty, &bool_type),
+    )?;
+
+    let (parameters, result) = validate_core_method_header(
+        core,
+        "PartialOrd",
+        "partial_cmp",
+        &roles.partial_ord.method,
+        partial_ord_members,
+        &[ParameterMode::Borrow, ParameterMode::Borrow],
+        CoreMethodEffect::ClosedEmpty,
+    )?;
+    require_core_self_parameter(
+        core,
+        "PartialOrd",
+        "partial_cmp",
+        &roles.partial_ord,
+        0,
+        parameters[0],
+    )?;
+    require_core_self_parameter(
+        core,
+        "PartialOrd",
+        "partial_cmp",
+        &roles.partial_ord,
+        1,
+        parameters[1],
+    )?;
+    require_core_return_type(
+        core,
+        "PartialOrd",
+        "partial_cmp",
+        &roles.partial_ord.method,
+        result,
+        |ty| {
+            resolved_type_is_unary_application(ty, &roles.option.declaration, |argument| {
+                resolved_type_is_exact(argument, &roles.ordering.declaration)
+            })
+        },
+    )?;
+
+    let (parameters, result) = validate_core_method_header(
+        core,
+        "Ord",
+        "cmp",
+        &roles.ord.method,
+        ord_members,
+        &[ParameterMode::Borrow, ParameterMode::Borrow],
+        CoreMethodEffect::ClosedEmpty,
+    )?;
+    require_core_self_parameter(core, "Ord", "cmp", &roles.ord, 0, parameters[0])?;
+    require_core_self_parameter(core, "Ord", "cmp", &roles.ord, 1, parameters[1])?;
+    require_core_return_type(core, "Ord", "cmp", &roles.ord.method, result, |ty| {
+        resolved_type_is_exact(ty, &roles.ordering.declaration)
+    })?;
+
+    let (parameters, result) = validate_core_method_header(
+        core,
+        "Clone",
+        "clone",
+        &roles.clone.method,
+        clone_members,
+        &[ParameterMode::Borrow],
+        CoreMethodEffect::Inferred,
+    )?;
+    require_core_self_parameter(core, "Clone", "clone", &roles.clone, 0, parameters[0])?;
+    require_core_return_type(core, "Clone", "clone", &roles.clone.method, result, |ty| {
+        resolved_type_is_self(ty, &roles.clone.declaration)
+    })?;
+
+    validate_simple_core_method(
+        core,
+        "Drop",
+        "drop",
+        &roles.drop,
+        drop_members,
+        ParameterMode::MutBorrow,
+        &unit_type,
+    )?;
+    validate_simple_core_method(
+        core,
+        "Display",
+        "to_str",
+        &roles.display,
+        display_members,
+        ParameterMode::Borrow,
+        &str_type,
+    )?;
+    validate_simple_core_method(
+        core,
+        "Debug",
+        "debug",
+        &roles.debug,
+        debug_members,
+        ParameterMode::Borrow,
+        &str_type,
+    )?;
+    validate_simple_core_method(
+        core,
+        "Hash",
+        "hash",
+        &roles.hash,
+        hash_members,
+        ParameterMode::Borrow,
+        &int_type,
+    )?;
+
+    let iterator_item =
+        resolved_core_associated_type(iterator_members, &roles.iterator.item, "Iterator", core)?;
+    if !iterator_item.0.is_empty() {
+        return Err(core_role_diagnostic(
+            core,
+            "Iterator",
+            Some("Item"),
+            CoreRoleIssue::AssociatedTypeBounds,
+            &roles.iterator.item,
+        ));
+    }
+    if iterator_item.1.is_some() {
+        return Err(core_role_diagnostic(
+            core,
+            "Iterator",
+            Some("Item"),
+            CoreRoleIssue::AssociatedTypeDefault,
+            &roles.iterator.item,
+        ));
+    }
+    let (parameters, result) = validate_core_method_header(
+        core,
+        "Iterator",
+        "next",
+        &roles.iterator.next,
+        iterator_members,
+        &[ParameterMode::MutBorrow],
+        CoreMethodEffect::Inferred,
+    )?;
+    require_core_self_parameter(
+        core,
+        "Iterator",
+        "next",
+        &CoreMethodRole {
+            declaration: roles.iterator.declaration.clone(),
+            method: roles.iterator.next.clone(),
+        },
+        0,
+        parameters[0],
+    )?;
+    require_core_return_type(
+        core,
+        "Iterator",
+        "next",
+        &roles.iterator.next,
+        result,
+        |ty| {
+            resolved_type_is_unary_application(ty, &roles.option.declaration, |argument| {
+                resolved_type_is_self_projection(
+                    argument,
+                    &roles.iterator.declaration,
+                    &roles.iterator.item,
+                )
+            })
+        },
+    )?;
+
+    let iterable_item =
+        resolved_core_associated_type(iterable_members, &roles.iterable.item, "Iterable", core)?;
+    if !iterable_item.0.is_empty() {
+        return Err(core_role_diagnostic(
+            core,
+            "Iterable",
+            Some("Item"),
+            CoreRoleIssue::AssociatedTypeBounds,
+            &roles.iterable.item,
+        ));
+    }
+    if iterable_item.1.is_some() {
+        return Err(core_role_diagnostic(
+            core,
+            "Iterable",
+            Some("Item"),
+            CoreRoleIssue::AssociatedTypeDefault,
+            &roles.iterable.item,
+        ));
+    }
+    let iterable_iter = resolved_core_associated_type(
+        iterable_members,
+        &roles.iterable.iter_type,
+        "Iterable",
+        core,
+    )?;
+    if iterable_iter.1.is_some() {
+        return Err(core_role_diagnostic(
+            core,
+            "Iterable",
+            Some("Iter"),
+            CoreRoleIssue::AssociatedTypeDefault,
+            &roles.iterable.iter_type,
+        ));
+    }
+    if iterable_iter.0.len() != 1
+        || !resolved_iterator_bound_matches(&iterable_iter.0[0], &roles.iterator, &roles.iterable)
+    {
+        return Err(core_role_diagnostic(
+            core,
+            "Iterable",
+            Some("Iter"),
+            CoreRoleIssue::AssociatedTypeBounds,
+            &roles.iterable.iter_type,
+        ));
+    }
+    let (parameters, result) = validate_core_method_header(
+        core,
+        "Iterable",
+        "iter",
+        &roles.iterable.iter,
+        iterable_members,
+        &[ParameterMode::Move],
+        CoreMethodEffect::Inferred,
+    )?;
+    let iterable_method = CoreMethodRole {
+        declaration: roles.iterable.declaration.clone(),
+        method: roles.iterable.iter.clone(),
+    };
+    require_core_self_parameter(core, "Iterable", "iter", &iterable_method, 0, parameters[0])?;
+    require_core_return_type(
+        core,
+        "Iterable",
+        "iter",
+        &roles.iterable.iter,
+        result,
+        |ty| {
+            resolved_type_is_self_projection(
+                ty,
+                &roles.iterable.declaration,
+                &roles.iterable.iter_type,
+            )
+        },
+    )?;
+    Ok(())
+}
+
+fn resolved_core_declaration<'a>(
+    body: &'a ResolvedModuleBody,
+    identity: &EntityId,
+) -> &'a ResolvedDeclaration {
+    body.declarations
+        .iter()
+        .find(|declaration| declaration.identity.as_ref() == Some(identity))
+        .expect("every indexed core role has one resolved declaration")
+}
+
+fn validate_core_trait_supertraits<'a>(
+    core: LibraryId,
+    body: &'a ResolvedModuleBody,
+    role: &str,
+    identity: &EntityId,
+    expected: &[&EntityId],
+) -> Result<&'a [ResolvedTraitMember], ProjectDiagnostic> {
+    let declaration = resolved_core_declaration(body, identity);
+    let ResolvedDeclarationKind::Trait {
+        supertraits,
+        members,
+        ..
+    } = &declaration.kind
+    else {
+        unreachable!("the core declaration category was checked before body resolution")
+    };
+    let actual = supertraits
+        .iter()
+        .filter_map(|supertrait| {
+            (supertrait.arguments.is_empty())
+                .then(|| reference_exact_target(&supertrait.reference))
+                .flatten()
+                .cloned()
+        })
+        .collect::<BTreeSet<_>>();
+    let expected = expected
+        .iter()
+        .map(|identity| (*identity).clone())
+        .collect::<BTreeSet<_>>();
+    if supertraits.len() != expected.len() || actual != expected {
+        return Err(core_role_diagnostic(
+            core,
+            role,
+            None,
+            CoreRoleIssue::Supertraits,
+            identity,
+        ));
+    }
+    Ok(members)
+}
+
+#[derive(Clone, Copy)]
+enum CoreMethodEffect {
+    ClosedEmpty,
+    Inferred,
+}
+
+fn validate_core_method_header<'a>(
+    core: LibraryId,
+    role: &str,
+    member_name: &str,
+    identity: &EntityId,
+    members: &'a [ResolvedTraitMember],
+    expected_modes: &[ParameterMode],
+    expected_effect: CoreMethodEffect,
+) -> Result<(Vec<&'a ResolvedType>, &'a ResolvedType), ProjectDiagnostic> {
+    let member = members
+        .iter()
+        .find(|member| member.identity == *identity)
+        .expect("every indexed core member is resolved");
+    let ResolvedTraitMemberKind::Method(signature) = &member.kind else {
+        return Err(core_role_diagnostic(
+            core,
+            role,
+            Some(member_name),
+            CoreRoleIssue::MemberKind,
+            identity,
+        ));
+    };
+    if !signature.type_parameters.is_empty() || !signature.effect_parameters.is_empty() {
+        return Err(core_role_diagnostic(
+            core,
+            role,
+            Some(member_name),
+            CoreRoleIssue::MethodGenericArity {
+                expected_types: 0,
+                actual_types: signature.type_parameters.len(),
+                expected_effects: 0,
+                actual_effects: signature.effect_parameters.len(),
+            },
+            identity,
+        ));
+    }
+    if signature.parameters.len() != expected_modes.len() {
+        return Err(core_role_diagnostic(
+            core,
+            role,
+            Some(member_name),
+            CoreRoleIssue::ParameterCount {
+                expected: expected_modes.len(),
+                actual: signature.parameters.len(),
+            },
+            identity,
+        ));
+    }
+    if signature
+        .parameters
+        .first()
+        .is_none_or(|parameter| parameter.binding.identity.name != "self")
+    {
+        return Err(core_role_diagnostic(
+            core,
+            role,
+            Some(member_name),
+            CoreRoleIssue::Receiver,
+            identity,
+        ));
+    }
+    let mut parameter_types = Vec::new();
+    for (index, (parameter, expected_mode)) in
+        signature.parameters.iter().zip(expected_modes).enumerate()
+    {
+        let actual_mode = parameter.mode.map(|(_, mode)| mode);
+        let effective_mode = actual_mode.unwrap_or(ParameterMode::Borrow);
+        if parameter.escape.is_some() {
+            return Err(core_role_diagnostic(
+                core,
+                role,
+                Some(member_name),
+                CoreRoleIssue::ParameterEscape { index },
+                identity,
+            ));
+        }
+        if effective_mode != *expected_mode {
+            return Err(core_role_diagnostic(
+                core,
+                role,
+                Some(member_name),
+                CoreRoleIssue::ParameterMode {
+                    index,
+                    expected: *expected_mode,
+                    actual: actual_mode,
+                },
+                identity,
+            ));
+        }
+        let Some(ResolvedParameterAnnotation::Type(ty)) = parameter.annotation.as_ref() else {
+            return Err(core_role_diagnostic(
+                core,
+                role,
+                Some(member_name),
+                CoreRoleIssue::ParameterType { index },
+                identity,
+            ));
+        };
+        parameter_types.push(ty);
+    }
+    let Some(result) = signature.return_type.as_ref() else {
+        return Err(core_role_diagnostic(
+            core,
+            role,
+            Some(member_name),
+            CoreRoleIssue::ReturnType,
+            identity,
+        ));
+    };
+    let valid_effect = match expected_effect {
+        CoreMethodEffect::ClosedEmpty => signature
+            .effects
+            .as_ref()
+            .is_some_and(|effects| effects.effects.is_empty()),
+        CoreMethodEffect::Inferred => signature.effects.is_none(),
+    };
+    if !valid_effect {
+        return Err(core_role_diagnostic(
+            core,
+            role,
+            Some(member_name),
+            CoreRoleIssue::EffectProfile,
+            identity,
+        ));
+    }
+    Ok((parameter_types, result))
+}
+
+fn require_core_self_parameter(
+    core: LibraryId,
+    role: &str,
+    member: &str,
+    method: &CoreMethodRole,
+    index: usize,
+    ty: &ResolvedType,
+) -> Result<(), ProjectDiagnostic> {
+    if resolved_type_is_self(ty, &method.declaration) {
+        Ok(())
+    } else {
+        Err(core_role_diagnostic(
+            core,
+            role,
+            Some(member),
+            CoreRoleIssue::ParameterType { index },
+            &method.method,
+        ))
+    }
+}
+
+fn require_core_return_type(
+    core: LibraryId,
+    role: &str,
+    member: &str,
+    identity: &EntityId,
+    ty: &ResolvedType,
+    matches: impl FnOnce(&ResolvedType) -> bool,
+) -> Result<(), ProjectDiagnostic> {
+    if matches(ty) {
+        Ok(())
+    } else {
+        Err(core_role_diagnostic(
+            core,
+            role,
+            Some(member),
+            CoreRoleIssue::ReturnType,
+            identity,
+        ))
+    }
+}
+
+fn validate_simple_core_method(
+    core: LibraryId,
+    role: &str,
+    member: &str,
+    method: &CoreMethodRole,
+    members: &[ResolvedTraitMember],
+    mode: ParameterMode,
+    result_type: &EntityId,
+) -> Result<(), ProjectDiagnostic> {
+    let (parameters, result) = validate_core_method_header(
+        core,
+        role,
+        member,
+        &method.method,
+        members,
+        &[mode],
+        CoreMethodEffect::Inferred,
+    )?;
+    require_core_self_parameter(core, role, member, method, 0, parameters[0])?;
+    require_core_return_type(core, role, member, &method.method, result, |ty| {
+        resolved_type_is_exact(ty, result_type)
+    })
+}
+
+fn resolved_core_associated_type<'a>(
+    members: &'a [ResolvedTraitMember],
+    identity: &EntityId,
+    role: &str,
+    core: LibraryId,
+) -> Result<(&'a [ResolvedNamedType], &'a Option<ResolvedType>), ProjectDiagnostic> {
+    let member = members
+        .iter()
+        .find(|member| member.identity == *identity)
+        .expect("every indexed core member is resolved");
+    match &member.kind {
+        ResolvedTraitMemberKind::AssociatedType { bounds, default } => Ok((bounds, default)),
+        ResolvedTraitMemberKind::Method(_) => Err(core_role_diagnostic(
+            core,
+            role,
+            Some(&identity.name),
+            CoreRoleIssue::MemberKind,
+            identity,
+        )),
+    }
+}
+
+fn resolved_iterator_bound_matches(
+    bound: &ResolvedNamedType,
+    iterator: &CoreIteratorRole,
+    iterable: &CoreIterableRole,
+) -> bool {
+    if reference_exact_target(&bound.reference) != Some(&iterator.declaration)
+        || bound.arguments.len() != 1
+    {
+        return false;
+    }
+    let ResolvedTypeArgument::AssociatedType { member, value } = &bound.arguments[0] else {
+        return false;
+    };
+    member.declaration.as_ref() == Some(&iterator.item)
+        && resolved_type_is_self_projection(value, &iterable.declaration, &iterable.item)
+}
+
+fn resolved_type_is_exact(ty: &ResolvedType, identity: &EntityId) -> bool {
+    let Some(named) = resolved_named_type(ty) else {
+        return false;
+    };
+    named.arguments.is_empty() && reference_exact_target(&named.reference) == Some(identity)
+}
+
+fn resolved_type_is_unary_application(
+    ty: &ResolvedType,
+    identity: &EntityId,
+    argument_matches: impl FnOnce(&ResolvedType) -> bool,
+) -> bool {
+    let Some(named) = resolved_named_type(ty) else {
+        return false;
+    };
+    if reference_exact_target(&named.reference) != Some(identity) || named.arguments.len() != 1 {
+        return false;
+    }
+    let ResolvedTypeArgument::Type(argument) = &named.arguments[0] else {
+        return false;
+    };
+    argument_matches(argument)
+}
+
+fn resolved_type_is_self(ty: &ResolvedType, owner: &EntityId) -> bool {
+    let Some(named) = resolved_named_type(ty) else {
+        return false;
+    };
+    named.arguments.is_empty()
+        && reference_exact_target(&named.reference)
+            .is_some_and(|identity| is_self_identity(identity, owner))
+}
+
+fn resolved_type_is_self_projection(
+    ty: &ResolvedType,
+    owner: &EntityId,
+    member: &EntityId,
+) -> bool {
+    let Some(named) = resolved_named_type(ty) else {
+        return false;
+    };
+    let ResolvedReference::Selection {
+        base,
+        members,
+        self_reference,
+        occurrence: _,
+        namespace,
+    } = &named.reference
+    else {
+        return false;
+    };
+    named.arguments.is_empty()
+        && *namespace == Namespace::Type
+        && (base == owner || is_self_identity(base, owner))
+        && self_reference
+            .as_ref()
+            .is_none_or(|reference| is_self_identity(&reference.identity, owner))
+        && members.len() == 1
+        && members[0].declaration.as_ref() == Some(member)
+}
+
+fn resolved_named_type(ty: &ResolvedType) -> Option<&ResolvedNamedType> {
+    match &ty.kind {
+        ResolvedTypeKind::Named(named) => Some(named),
+        ResolvedTypeKind::Grouped(inner) => resolved_named_type(inner),
+        ResolvedTypeKind::Tuple(_) => None,
+    }
+}
+
+fn is_self_identity(identity: &EntityId, owner: &EntityId) -> bool {
+    identity.kind == EntityKind::SelfType
+        && identity.module == owner.module
+        && identity.owner.as_ref() == Some(&owner_key_from_entity(owner))
 }
 
 struct BodyResolver<'state> {
@@ -2560,7 +3662,7 @@ impl<'state> BodyResolver<'state> {
                     },
                     origin.clone(),
                 ))
-            } else if is_language_name(Namespace::Type, &parameter.name.text) {
+            } else if is_protected_name(Namespace::Type, &parameter.name.text) {
                 Some(self.diagnostic(
                     ProjectDiagnosticKind::ReservedLanguageBinding {
                         library: self.module.library(),
@@ -2665,7 +3767,7 @@ impl<'state> BodyResolver<'state> {
         let mut resolved = Vec::new();
         for parameter in parameters {
             let origin = self.origin(parameter.name.span);
-            let invalid = if is_language_name(Namespace::Effect, &parameter.name.text) {
+            let invalid = if is_protected_name(Namespace::Effect, &parameter.name.text) {
                 Some(self.diagnostic(
                     ProjectDiagnosticKind::ReservedLanguageBinding {
                         library: self.module.library(),
@@ -2923,18 +4025,16 @@ impl ExpectedName {
             Self::EffectApplication => {
                 entity.namespace == Namespace::Effect
                     || entity.kind == EntityKind::Method
-                        && entity.owner.as_ref().is_some_and(|owner| {
-                            matches!(owner.kind, EntityKind::Trait | EntityKind::LanguageTrait)
-                        })
+                        && entity
+                            .owner
+                            .as_ref()
+                            .is_some_and(|owner| owner.kind == EntityKind::Trait)
             }
             Self::Construct => matches!(
                 entity.kind,
-                EntityKind::Struct | EntityKind::EnumConstructor | EntityKind::LanguageConstructor
+                EntityKind::Struct | EntityKind::EnumConstructor
             ),
-            Self::PatternConstructor => matches!(
-                entity.kind,
-                EntityKind::EnumConstructor | EntityKind::LanguageConstructor
-            ),
+            Self::PatternConstructor => matches!(entity.kind, EntityKind::EnumConstructor),
             Self::MethodReceiver => {
                 matches!(entity.namespace, Namespace::Value | Namespace::Effect)
             }
@@ -3554,17 +4654,14 @@ impl BodyResolver<'_> {
                     let mut matching_member_exists = false;
                     for declaration in declared_members {
                         let candidate = match declaration.kind {
-                            EntityKind::EnumConstructor | EntityKind::LanguageConstructor => {
+                            EntityKind::EnumConstructor => {
                                 PathCandidate::Exact(declaration.clone())
                             }
                             EntityKind::Method
                                 if matches!(
                                     requirement,
                                     PathRequirement::Terminal(ExpectedName::EffectApplication)
-                                ) && matches!(
-                                    base.kind,
-                                    EntityKind::Trait | EntityKind::LanguageTrait
-                                ) =>
+                                ) && matches!(base.kind, EntityKind::Trait) =>
                             {
                                 PathCandidate::Exact(declaration.clone())
                             }
@@ -4680,7 +5777,6 @@ fn is_selection_base(entity: &EntityId) -> bool {
             | EntityKind::SelfType
             | EntityKind::AssociatedType
             | EntityKind::LanguageType
-            | EntityKind::LanguageTrait
     )
 }
 
@@ -5026,9 +6122,54 @@ fn owner_public(state: &ResolverState, owner: &EntityId) -> bool {
         .is_some_and(|entity| entity.public)
 }
 
-fn is_language_name(namespace: Namespace, name: &str) -> bool {
+fn core_role_bindings(roles: &CoreRoles) -> BTreeMap<String, EntityId> {
+    [
+        ("Option", &roles.option.declaration),
+        ("Ordering", &roles.ordering.declaration),
+        ("PartialEq", &roles.partial_eq.declaration),
+        ("Eq", &roles.eq),
+        ("PartialOrd", &roles.partial_ord.declaration),
+        ("Ord", &roles.ord.declaration),
+        ("Clone", &roles.clone.declaration),
+        ("Copy", &roles.copy),
+        ("Drop", &roles.drop.declaration),
+        ("Display", &roles.display.declaration),
+        ("Debug", &roles.debug.declaration),
+        ("Hash", &roles.hash.declaration),
+        ("FnOnce", &roles.fn_once),
+        ("FnMut", &roles.fn_mut),
+        ("Fn", &roles.function),
+        ("Iterator", &roles.iterator.declaration),
+        ("Iterable", &roles.iterable.declaration),
+    ]
+    .into_iter()
+    .map(|(name, identity)| (name.to_owned(), identity.clone()))
+    .collect()
+}
+
+fn is_exact_core_binding(core: LibraryId, name: &str, target: &EntityId) -> bool {
+    (CORE_ENUMS.contains(&name) || CORE_TRAITS.contains(&name))
+        && target.name == name
+        && target.namespace == Namespace::Type
+        && target.owner.is_none()
+        && target.module == ModuleRef::root(core)
+        && matches!(
+            &target.site,
+            EntitySite::Source(OriginRef {
+                library,
+                source: SourceRef::Root,
+                ..
+            }) if *library == core
+        )
+}
+
+fn is_protected_name(namespace: Namespace, name: &str) -> bool {
     match namespace {
-        Namespace::Type => LANGUAGE_TYPES.contains(&name) || LANGUAGE_TRAITS.contains(&name),
+        Namespace::Type => {
+            LANGUAGE_TYPES.contains(&name)
+                || CORE_ENUMS.contains(&name)
+                || CORE_TRAITS.contains(&name)
+        }
         Namespace::Effect => LANGUAGE_EFFECTS.contains(&name),
         Namespace::Value | Namespace::Member => false,
     }
@@ -5042,7 +6183,7 @@ fn type_declaration_name_diagnostic(entity: &EntityId) -> Option<ProjectDiagnost
         ProjectDiagnosticKind::InvalidSelf {
             library: entity.module.library(),
         }
-    } else if is_language_name(Namespace::Type, &entity.name) {
+    } else if is_protected_name(Namespace::Type, &entity.name) {
         ProjectDiagnosticKind::ReservedLanguageBinding {
             library: entity.module.library(),
             namespace: NameNamespace::Type,
@@ -5099,7 +6240,11 @@ fn sorted_delivery_origins(deliveries: &BTreeMap<EntityId, Delivery>) -> Vec<Ori
     origins
 }
 
-fn first_binding_diagnostic(module: &ModuleRef, table: &BindingTable) -> Option<ProjectDiagnostic> {
+fn first_binding_diagnostic(
+    core: LibraryId,
+    module: &ModuleRef,
+    table: &BindingTable,
+) -> Option<ProjectDiagnostic> {
     let mut diagnostics = Vec::new();
     for ((namespace, name), deliveries) in table {
         let Some(public_namespace) = namespace.public() else {
@@ -5118,10 +6263,11 @@ fn first_binding_diagnostic(module: &ModuleRef, table: &BindingTable) -> Option<
                 diagnostic,
             ));
         };
-        if is_language_name(*namespace, name)
-            && !deliveries
-                .keys()
-                .all(|target| target.module.is_language() && target.name.as_str() == name.as_str())
+        if is_protected_name(*namespace, name)
+            && !deliveries.keys().all(|target| {
+                (target.module.is_language() && target.name.as_str() == name.as_str())
+                    || is_exact_core_binding(core, name, target)
+            })
         {
             record(ProjectDiagnostic {
                 kind: ProjectDiagnosticKind::ReservedLanguageBinding {
@@ -5184,30 +6330,34 @@ fn first_stage_diagnostic(
 fn diagnostic_kind_rank(kind: &ProjectDiagnosticKind) -> u8 {
     match kind {
         ProjectDiagnosticKind::MissingEntryLibrary { .. } => 0,
-        ProjectDiagnosticKind::InvalidDependencyAlias { .. } => 1,
-        ProjectDiagnosticKind::MissingDependencyTarget { .. } => 2,
-        ProjectDiagnosticKind::LibraryDependencyCycle { .. } => 3,
-        ProjectDiagnosticKind::Frontend(_) => 4,
-        ProjectDiagnosticKind::InvalidModuleName { .. } => 5,
-        ProjectDiagnosticKind::ModuleBodyConflict { .. } => 6,
-        ProjectDiagnosticKind::GenerateUnsupported => 7,
-        ProjectDiagnosticKind::PathEscapesRoot => 8,
-        ProjectDiagnosticKind::InvalidPath => 9,
-        ProjectDiagnosticKind::NameConflict { .. } => 10,
-        ProjectDiagnosticKind::MemberConflict { .. } => 11,
-        ProjectDiagnosticKind::ReservedLanguageBinding { .. } => 12,
-        ProjectDiagnosticKind::UnresolvedImport { .. } => 13,
-        ProjectDiagnosticKind::AmbiguousImport { .. } => 14,
-        ProjectDiagnosticKind::InaccessibleImport { .. } => 15,
-        ProjectDiagnosticKind::ImportCycle { .. } => 16,
-        ProjectDiagnosticKind::PrivateReExport { .. } => 17,
-        ProjectDiagnosticKind::MissingConstructorOwner { .. } => 18,
-        ProjectDiagnosticKind::UnresolvedName { .. } => 19,
-        ProjectDiagnosticKind::AmbiguousName { .. } => 20,
-        ProjectDiagnosticKind::InaccessibleName { .. } => 21,
-        ProjectDiagnosticKind::DuplicateBinding { .. } => 22,
-        ProjectDiagnosticKind::PatternBindingMismatch => 23,
-        ProjectDiagnosticKind::InvalidSelf { .. } => 24,
+        ProjectDiagnosticKind::MissingCoreLibrary { .. } => 1,
+        ProjectDiagnosticKind::InvalidDependencyAlias { .. } => 2,
+        ProjectDiagnosticKind::MissingDependencyTarget { .. } => 3,
+        ProjectDiagnosticKind::LibraryDependencyCycle { .. } => 4,
+        ProjectDiagnosticKind::MissingDirectCoreDependency { .. } => 5,
+        ProjectDiagnosticKind::Frontend(_) => 6,
+        ProjectDiagnosticKind::InvalidModuleName { .. } => 7,
+        ProjectDiagnosticKind::ModuleBodyConflict { .. } => 8,
+        ProjectDiagnosticKind::GenerateUnsupported => 9,
+        ProjectDiagnosticKind::PathEscapesRoot => 10,
+        ProjectDiagnosticKind::InvalidPath => 11,
+        ProjectDiagnosticKind::NameConflict { .. } => 12,
+        ProjectDiagnosticKind::MemberConflict { .. } => 13,
+        ProjectDiagnosticKind::ReservedLanguageBinding { .. } => 14,
+        ProjectDiagnosticKind::MissingCoreRole { .. } => 15,
+        ProjectDiagnosticKind::InvalidCoreRole(_) => 16,
+        ProjectDiagnosticKind::UnresolvedImport { .. } => 17,
+        ProjectDiagnosticKind::AmbiguousImport { .. } => 18,
+        ProjectDiagnosticKind::InaccessibleImport { .. } => 19,
+        ProjectDiagnosticKind::ImportCycle { .. } => 20,
+        ProjectDiagnosticKind::PrivateReExport { .. } => 21,
+        ProjectDiagnosticKind::MissingConstructorOwner { .. } => 22,
+        ProjectDiagnosticKind::UnresolvedName { .. } => 23,
+        ProjectDiagnosticKind::AmbiguousName { .. } => 24,
+        ProjectDiagnosticKind::InaccessibleName { .. } => 25,
+        ProjectDiagnosticKind::DuplicateBinding { .. } => 26,
+        ProjectDiagnosticKind::PatternBindingMismatch => 27,
+        ProjectDiagnosticKind::InvalidSelf { .. } => 28,
     }
 }
 
@@ -5216,6 +6366,8 @@ mod tests {
     use super::*;
 
     const TEST_LIBRARY: LibraryId = LibraryId(0);
+    const TEST_CORE: LibraryId = LibraryId(u32::MAX);
+    const TEST_CORE_SOURCE: &str = include_str!("../../../core/root.vorton");
 
     fn project(root: &str, modules: Vec<(Vec<&str>, &str)>) -> ProjectSources {
         graph(
@@ -5247,11 +6399,87 @@ mod tests {
         }
     }
 
-    fn graph(entry: LibraryId, libraries: Vec<(LibraryId, LibrarySources)>) -> ProjectSources {
+    fn graph(entry: LibraryId, mut libraries: Vec<(LibraryId, LibrarySources)>) -> ProjectSources {
+        for (library_id, library) in &mut libraries {
+            if *library_id != TEST_CORE
+                && !library
+                    .dependencies
+                    .values()
+                    .any(|target| *target == TEST_CORE)
+            {
+                library
+                    .dependencies
+                    .insert("test_core".to_owned(), TEST_CORE);
+            }
+        }
+        if !libraries.iter().any(|(library, _)| *library == TEST_CORE) {
+            libraries.push((
+                TEST_CORE,
+                LibrarySources {
+                    root: TEST_CORE_SOURCE.to_owned(),
+                    modules: BTreeMap::new(),
+                    dependencies: BTreeMap::new(),
+                },
+            ));
+        }
+        raw_graph(entry, TEST_CORE, libraries)
+    }
+
+    fn raw_graph(
+        entry: LibraryId,
+        core: LibraryId,
+        libraries: Vec<(LibraryId, LibrarySources)>,
+    ) -> ProjectSources {
         ProjectSources {
             entry,
+            core,
             libraries: libraries.into_iter().collect(),
         }
+    }
+
+    fn project_with_core_source(core_source: String) -> ProjectSources {
+        graph(
+            TEST_LIBRARY,
+            vec![
+                (TEST_LIBRARY, library("", vec![], vec![])),
+                (TEST_CORE, library(&core_source, vec![], vec![])),
+            ],
+        )
+    }
+
+    fn replaced_core_source(needle: &str, replacement: &str) -> String {
+        let source = TEST_CORE_SOURCE.replace("\r\n", "\n");
+        assert_eq!(
+            source.matches(needle).count(),
+            1,
+            "the core mutation must replace exactly one normalized source fragment"
+        );
+        source.replacen(needle, replacement, 1)
+    }
+
+    fn assert_invalid_core(
+        core_source: String,
+        expected_role: &str,
+        expected_member: Option<&str>,
+        expected_issue: CoreRoleIssue,
+    ) {
+        let diagnostic = resolve_project(&project_with_core_source(core_source))
+            .expect_err("an invalid official core profile must be rejected");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::InvalidCoreRole(Box::new(CoreRoleDiagnostic {
+                core: TEST_CORE,
+                role: expected_role.to_owned(),
+                member: expected_member.map(str::to_owned),
+                issue: expected_issue,
+            }))
+        );
+        let primary = diagnostic
+            .primary
+            .expect("invalid core role has a source origin");
+        assert_eq!(primary.library, TEST_CORE);
+        assert_eq!(primary.source, SourceRef::Root);
+        assert!(diagnostic.related.is_empty());
     }
 
     fn project_with_reachable_libraries(
@@ -5277,17 +6505,17 @@ mod tests {
         root: String,
         modules: BTreeMap<FileModulePath, String>,
     ) -> ProjectSources {
-        ProjectSources {
-            entry: TEST_LIBRARY,
-            libraries: BTreeMap::from([(
+        graph(
+            TEST_LIBRARY,
+            vec![(
                 TEST_LIBRARY,
                 LibrarySources {
                     root,
                     modules,
                     dependencies: BTreeMap::new(),
                 },
-            )]),
-        }
+            )],
+        )
     }
 
     fn module_ref(library: LibraryId, path: &[&str]) -> ModuleRef {
@@ -5381,6 +6609,459 @@ mod tests {
     }
 
     #[test]
+    fn official_core_resolves_as_entry_and_keeps_every_role_source_owned() {
+        let resolved = resolve_project(&raw_graph(
+            TEST_CORE,
+            TEST_CORE,
+            vec![(TEST_CORE, library(TEST_CORE_SOURCE, vec![], vec![]))],
+        ))
+        .expect("the tracked official core resolves as its own entry");
+        assert_eq!(resolved.entry, TEST_CORE);
+        assert_eq!(resolved.core, TEST_CORE);
+
+        let roles = &resolved.core_roles;
+        let declarations = [
+            &roles.option.declaration,
+            &roles.ordering.declaration,
+            &roles.partial_eq.declaration,
+            &roles.eq,
+            &roles.partial_ord.declaration,
+            &roles.ord.declaration,
+            &roles.clone.declaration,
+            &roles.copy,
+            &roles.drop.declaration,
+            &roles.display.declaration,
+            &roles.debug.declaration,
+            &roles.hash.declaration,
+            &roles.fn_once,
+            &roles.fn_mut,
+            &roles.function,
+            &roles.iterator.declaration,
+            &roles.iterable.declaration,
+        ];
+        assert_eq!(declarations.len(), CORE_ENUMS.len() + CORE_TRAITS.len());
+        assert!(declarations.iter().all(|identity| {
+            identity.module == ModuleRef::root(TEST_CORE)
+                && matches!(
+                    identity.site,
+                    EntitySite::Source(OriginRef {
+                        library: TEST_CORE,
+                        source: SourceRef::Root,
+                        ..
+                    })
+                )
+                && resolved
+                    .entities
+                    .get(*identity)
+                    .is_some_and(|entity| entity.public && entity.declared_at.is_some())
+        }));
+        assert_eq!(
+            declarations
+                .iter()
+                .filter(|identity| identity.kind == EntityKind::Enum)
+                .count(),
+            2
+        );
+        assert_eq!(
+            declarations
+                .iter()
+                .filter(|identity| identity.kind == EntityKind::Trait)
+                .count(),
+            15
+        );
+
+        let members = [
+            (&roles.option.some, &roles.option.declaration),
+            (&roles.option.none, &roles.option.declaration),
+            (&roles.ordering.less, &roles.ordering.declaration),
+            (&roles.ordering.equal, &roles.ordering.declaration),
+            (&roles.ordering.greater, &roles.ordering.declaration),
+            (&roles.partial_eq.method, &roles.partial_eq.declaration),
+            (&roles.partial_ord.method, &roles.partial_ord.declaration),
+            (&roles.ord.method, &roles.ord.declaration),
+            (&roles.clone.method, &roles.clone.declaration),
+            (&roles.drop.method, &roles.drop.declaration),
+            (&roles.display.method, &roles.display.declaration),
+            (&roles.debug.method, &roles.debug.declaration),
+            (&roles.hash.method, &roles.hash.declaration),
+            (&roles.iterator.item, &roles.iterator.declaration),
+            (&roles.iterator.next, &roles.iterator.declaration),
+            (&roles.iterable.item, &roles.iterable.declaration),
+            (&roles.iterable.iter_type, &roles.iterable.declaration),
+            (&roles.iterable.iter, &roles.iterable.declaration),
+        ];
+        assert!(members.iter().all(|(identity, owner)| {
+            identity.module.source_library() == Some(TEST_CORE)
+                && resolved.entities.get(*identity).is_some_and(|entity| {
+                    entity.declared_at.is_some() && entity.owner.as_ref() == Some(*owner)
+                })
+        }));
+        assert_eq!(
+            resolved
+                .entities
+                .keys()
+                .filter(|identity| {
+                    identity.module.is_language()
+                        && (CORE_ENUMS.contains(&identity.name.as_str())
+                            || CORE_TRAITS.contains(&identity.name.as_str()))
+                })
+                .count(),
+            0,
+            "migrated roles have no parallel Language entity"
+        );
+        assert_eq!(
+            resolved
+                .entities
+                .keys()
+                .filter(|identity| {
+                    identity.name == "eq"
+                        && identity
+                            .owner
+                            .as_ref()
+                            .is_some_and(|owner| owner.name == "Eq")
+                })
+                .count(),
+            0,
+            "Eq has no legacy eq member"
+        );
+    }
+
+    #[test]
+    fn designated_core_identity_is_alias_independent_and_shared_once_in_a_diamond() {
+        fn resolve_with(core: LibraryId, aliases: [&str; 3]) -> ResolvedProject {
+            let app = LibraryId(10);
+            let left = LibraryId(20);
+            let right = LibraryId(30);
+            resolve_project(&raw_graph(
+                app,
+                core,
+                vec![
+                    (
+                        app,
+                        library(
+                            "use left::keep_left; use right::keep_right; fn keep(value: Option<Int>) -> Option<Int> { keep_right(keep_left(value)) }",
+                            vec![],
+                            vec![
+                                ("left", left),
+                                ("right", right),
+                                (aliases[0], core),
+                                ("same_core", core),
+                            ],
+                        ),
+                    ),
+                    (
+                        left,
+                        library(
+                            "pub fn keep_left(value: Option<Int>) -> Option<Int> { value }",
+                            vec![],
+                            vec![(aliases[1], core)],
+                        ),
+                    ),
+                    (
+                        right,
+                        library(
+                            "pub fn keep_right(value: Option<Int>) -> Option<Int> { value }",
+                            vec![],
+                            vec![(aliases[2], core)],
+                        ),
+                    ),
+                    (core, library(TEST_CORE_SOURCE, vec![], vec![])),
+                ],
+            ))
+            .expect("all diamond consumers point directly at the designated core")
+        }
+
+        let first = resolve_with(LibraryId(40), ["official", "runtime", "foundation"]);
+        let second = resolve_with(LibraryId(400), ["foundation", "official", "runtime"]);
+        assert_eq!(
+            first.core_roles.option.declaration.module.source_library(),
+            Some(LibraryId(40))
+        );
+        assert_eq!(
+            second.core_roles.option.declaration.module.source_library(),
+            Some(LibraryId(400))
+        );
+        for resolved in [&first, &second] {
+            assert_eq!(
+                resolved
+                    .entities
+                    .keys()
+                    .filter(
+                        |identity| identity.kind == EntityKind::Enum && identity.name == "Option"
+                    )
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn core_graph_input_errors_precede_source_and_keep_real_ids() {
+        let missing_entry = LibraryId(7);
+        let missing_core = LibraryId(8);
+        let diagnostic = resolve_project(&raw_graph(missing_entry, missing_core, vec![]))
+            .expect_err("missing entry is the first graph check");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::MissingEntryLibrary {
+                entry: missing_entry
+            }
+        );
+
+        let diagnostic = resolve_project(&raw_graph(
+            TEST_LIBRARY,
+            missing_core,
+            vec![(TEST_LIBRARY, library("@source_is_later", vec![], vec![]))],
+        ))
+        .expect_err("missing core follows the entry check and precedes source");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::MissingCoreLibrary { core: missing_core }
+        );
+        assert!(diagnostic.primary.is_none());
+
+        let dependency = LibraryId(1);
+        let diagnostic = resolve_project(&raw_graph(
+            TEST_LIBRARY,
+            TEST_CORE,
+            vec![
+                (
+                    TEST_LIBRARY,
+                    library("", vec![], vec![("dependency", dependency)]),
+                ),
+                (dependency, library("", vec![], vec![("app", TEST_LIBRARY)])),
+                (TEST_CORE, library(TEST_CORE_SOURCE, vec![], vec![])),
+            ],
+        ))
+        .expect_err("ordinary graph cycles precede direct-core checks");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::LibraryDependencyCycle { .. }
+        ));
+
+        let diagnostic = resolve_project(&raw_graph(
+            TEST_LIBRARY,
+            TEST_CORE,
+            vec![
+                (TEST_LIBRARY, library("@source_is_later", vec![], vec![])),
+                (TEST_CORE, library(TEST_CORE_SOURCE, vec![], vec![])),
+            ],
+        ))
+        .expect_err("a reachable non-core library needs one direct core edge");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::MissingDirectCoreDependency {
+                owner: TEST_LIBRARY,
+                core: TEST_CORE,
+            }
+        );
+        assert!(diagnostic.primary.is_none());
+
+        resolve_project(&raw_graph(
+            TEST_CORE,
+            TEST_CORE,
+            vec![
+                (TEST_CORE, library(TEST_CORE_SOURCE, vec![], vec![])),
+                (TEST_LIBRARY, library("@unreachable", vec![], vec![])),
+            ],
+        ))
+        .expect(
+            "unreachable libraries need structural validity but no direct core edge or source scan",
+        );
+    }
+
+    #[test]
+    fn core_frontend_errors_use_the_real_core_source_origin() {
+        let diagnostic = resolve_project(&project_with_core_source("@invalid_core".to_owned()))
+            .expect_err("the selected core is parsed as ordinary source");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::Frontend(_)
+        ));
+        let primary = diagnostic
+            .primary
+            .expect("frontend error has a source origin");
+        assert_eq!(primary.library, TEST_CORE);
+        assert_eq!(primary.source, SourceRef::Root);
+    }
+
+    #[test]
+    fn protected_core_type_names_cannot_be_rebound_outside_the_core_root() {
+        for source in [
+            "struct Option {}",
+            "enum Ordering {}",
+            "trait PartialEq {}",
+            "type Copy = Int;",
+            "fn bad<Display>() {}",
+            "trait Bad { type Iterable; }",
+        ] {
+            let diagnostic = resolve_project(&project(source, vec![]))
+                .expect_err("a protected core Type binding cannot be replaced");
+            assert!(
+                matches!(
+                    diagnostic.kind,
+                    ProjectDiagnosticKind::ReservedLanguageBinding {
+                        namespace: NameNamespace::Type,
+                        ..
+                    }
+                ),
+                "{source}: {diagnostic:?}"
+            );
+        }
+        resolve_project(&project(
+            "fn Option() -> Int { 1 } effect Display {} fn keep() -> Int { Option() }",
+            vec![],
+        ))
+        .expect("the protected spellings remain independent in Value and Effect namespaces");
+    }
+
+    #[test]
+    fn missing_core_role_has_no_fabricated_source_span() {
+        let source = replaced_core_source(
+            "pub trait Display {\n    fn to_str(self: &Self) -> Str;\n}\n\n",
+            "",
+        );
+        let diagnostic = resolve_project(&project_with_core_source(source))
+            .expect_err("a required role cannot be synthesized");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::MissingCoreRole {
+                core: TEST_CORE,
+                role: "Display".to_owned(),
+            }
+        );
+        assert!(diagnostic.primary.is_none());
+        assert!(diagnostic.related.is_empty());
+    }
+
+    #[test]
+    fn rejects_wrong_core_declaration_category() {
+        assert_invalid_core(
+            replaced_core_source(
+                "pub trait Display {\n    fn to_str(self: &Self) -> Str;\n}",
+                "pub type Display = Str;",
+            ),
+            "Display",
+            None,
+            CoreRoleIssue::DeclarationKind,
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_core_generic_arity_before_resolving_its_body() {
+        assert_invalid_core(
+            replaced_core_source("pub enum Option<T>", "pub enum Option"),
+            "Option",
+            None,
+            CoreRoleIssue::GenericArity {
+                expected: 1,
+                actual: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_wrong_core_members() {
+        assert_invalid_core(
+            replaced_core_source("    fn debug(self: &Self) -> Str;\n", ""),
+            "Debug",
+            None,
+            CoreRoleIssue::MemberSet,
+        );
+        assert_invalid_core(
+            replaced_core_source("    fn hash(self: &Self) -> Int;", "    type hash;"),
+            "Hash",
+            Some("hash"),
+            CoreRoleIssue::MemberKind,
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_core_receiver_and_result_profiles() {
+        assert_invalid_core(
+            replaced_core_source(
+                "fn clone(self: &Self) -> Self;",
+                "fn clone(value: &Self) -> Self;",
+            ),
+            "Clone",
+            Some("clone"),
+            CoreRoleIssue::Receiver,
+        );
+        assert_invalid_core(
+            replaced_core_source(
+                "fn drop(self: &mut Self) -> Unit;",
+                "fn drop(self: &Self) -> Unit;",
+            ),
+            "Drop",
+            Some("drop"),
+            CoreRoleIssue::ParameterMode {
+                index: 0,
+                expected: ParameterMode::MutBorrow,
+                actual: Some(ParameterMode::Borrow),
+            },
+        );
+        assert_invalid_core(
+            replaced_core_source(
+                "fn clone(self: &Self) -> Self;",
+                "fn clone(self: &Self) -> Bool;",
+            ),
+            "Clone",
+            Some("clone"),
+            CoreRoleIssue::ReturnType,
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_core_effect_profile() {
+        assert_invalid_core(
+            replaced_core_source(
+                "fn eq(self: &Self, other: &Self) -> Bool with {};",
+                "fn eq(self: &Self, other: &Self) -> Bool;",
+            ),
+            "PartialEq",
+            Some("eq"),
+            CoreRoleIssue::EffectProfile,
+        );
+        assert_invalid_core(
+            replaced_core_source(
+                "fn clone(self: &Self) -> Self;",
+                "fn clone(self: &Self) -> Self with {};",
+            ),
+            "Clone",
+            Some("clone"),
+            CoreRoleIssue::EffectProfile,
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_core_enum_supertrait_and_associated_profiles() {
+        assert_invalid_core(
+            replaced_core_source("    Some(T),", "    Some(Int),"),
+            "Option",
+            Some("Some"),
+            CoreRoleIssue::VariantPayload,
+        );
+        assert_invalid_core(
+            replaced_core_source("    Less,\n    Equal,", "    Equal,\n    Less,"),
+            "Ordering",
+            None,
+            CoreRoleIssue::VariantSet,
+        );
+        assert_invalid_core(
+            replaced_core_source("pub trait Copy: Clone {}", "pub trait Copy {}"),
+            "Copy",
+            None,
+            CoreRoleIssue::Supertraits,
+        );
+        assert_invalid_core(
+            replaced_core_source("type Iter: Iterator<Item = Self::Item>;", "type Iter;"),
+            "Iterable",
+            Some("Iter"),
+            CoreRoleIssue::AssociatedTypeBounds,
+        );
+    }
+
+    #[test]
     fn resolves_a_dependency_diamond_with_one_shared_source_identity() {
         let app = LibraryId(10);
         let left = LibraryId(20);
@@ -5419,7 +7100,7 @@ mod tests {
             .expect("library insertion order does not change the result");
         assert_eq!(resolved, reordered);
         assert_eq!(resolved.entry, app);
-        assert_eq!(resolved.dependencies.len(), 5);
+        assert_eq!(resolved.dependencies.len(), 6);
         assert_eq!(resolved.dependencies[&left]["shared"], shared);
         assert_eq!(resolved.dependencies[&right]["shared"], shared);
 
@@ -6387,7 +8068,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_owned_language_generic_and_sequential_bindings() {
+    fn resolves_owned_core_language_generic_and_sequential_bindings() {
         let mut sources = project(
             r#"
 fn choose<T: Eq>(value: T) -> Option<T> {
@@ -6439,7 +8120,11 @@ fn choose<T: Eq>(value: T) -> Option<T> {
         };
         assert_eq!(
             exact(path_expression(callee)).kind,
-            EntityKind::LanguageConstructor
+            EntityKind::EnumConstructor
+        );
+        assert_eq!(
+            exact(path_expression(callee)).module.source_library(),
+            Some(TEST_CORE)
         );
         let ResolvedCallArgument::Expression(argument) = &arguments[0] else {
             panic!("ordinary argument");
@@ -6750,21 +8435,31 @@ pub fn read() -> Int { self::local() + helper() + plus() }
     }
 
     #[test]
-    fn language_constructors_require_explicit_import_and_keep_option_owner() {
+    fn core_constructors_require_explicit_import_and_keep_source_owners() {
         let resolved = resolve_project(&project(
             r#"
-use Option::{Some, None};
-fn make(value: Int) -> Option<Int> {
+use test_core::Option as Maybe;
+use Maybe::{Some, None};
+use Ordering::Less;
+fn make(value: Int) -> Maybe<Int> {
     match None { None => Some(value), _ => Some(value), }
 }
+fn first() -> Ordering { Less }
 "#,
             vec![],
         ))
-        .expect("explicit language constructor imports resolve");
+        .expect("explicit core constructor imports resolve");
         let constructors = resolved
             .entities
             .iter()
-            .filter(|(identity, _)| identity.kind == EntityKind::LanguageConstructor)
+            .filter(|(identity, entity)| {
+                identity.kind == EntityKind::EnumConstructor
+                    && identity.module.source_library() == Some(TEST_CORE)
+                    && entity
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.name == "Option")
+            })
             .collect::<Vec<_>>();
         assert_eq!(constructors.len(), 2);
         assert!(constructors.iter().all(|(_, constructor)| {
@@ -6773,6 +8468,24 @@ fn make(value: Int) -> Option<Int> {
                 .as_ref()
                 .is_some_and(|owner| owner.name == "Option")
         }));
+        let make = function(module_body(&resolved, &[]), "make");
+        assert_eq!(
+            exact(named_type_reference(actual_return_type(
+                make.return_type.as_deref().expect("aliased Option return")
+            ))),
+            &resolved.core_roles.option.declaration
+        );
+        let first = function(module_body(&resolved, &[]), "first");
+        assert_eq!(
+            exact(path_expression(
+                first
+                    .body
+                    .tail
+                    .as_deref()
+                    .expect("Ordering constructor tail")
+            )),
+            &resolved.core_roles.ordering.less
+        );
 
         let diagnostic = resolve_project(&project(
             "fn make(value: Int) -> Option<Int> { Some(value) }",
@@ -6996,7 +8709,7 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
                 "trait T { fn method(self: Self); } fn f(value: T::method) {}",
                 "method",
             ),
-            ("fn f(value: Eq::eq) {}", "eq"),
+            ("fn f(value: PartialEq::eq) {}", "eq"),
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
                 .expect_err("a known Value method is not a Type selection");
@@ -7059,7 +8772,11 @@ trait Identity<T> { fn identity(self: Self) -> T; }
         let self_bindings = resolved
             .entities
             .keys()
-            .filter(|entity| entity.name == "self" && entity.namespace == Namespace::Value)
+            .filter(|entity| {
+                entity.module.source_library() == Some(TEST_LIBRARY)
+                    && entity.name == "self"
+                    && entity.namespace == Namespace::Value
+            })
             .collect::<Vec<_>>();
         assert_eq!(self_bindings.len(), 2, "method and trait parameters");
         assert!(
@@ -7372,28 +9089,28 @@ fn language(value: Iterable::Item) {}
         assert_eq!(members[0].name, "Item");
         assert!(members[0].declaration.is_none());
 
-        let language = function(root, "language");
-        let ResolvedTypeKind::Named(language_selection) = &parameter_type(
-            language.parameters[0]
+        let core = function(root, "language");
+        let ResolvedTypeKind::Named(core_selection) = &parameter_type(
+            core.parameters[0]
                 .annotation
                 .as_ref()
-                .expect("language associated type"),
+                .expect("core associated type"),
         )
         .kind
         else {
-            panic!("language associated selection is named");
+            panic!("core associated selection is named");
         };
-        let ResolvedReference::Selection { base, members, .. } = &language_selection.reference
-        else {
-            panic!("language associated type remains a selection");
+        let ResolvedReference::Selection { base, members, .. } = &core_selection.reference else {
+            panic!("core associated type remains a selection");
         };
-        assert_eq!(base.kind, EntityKind::LanguageTrait);
+        assert_eq!(base.kind, EntityKind::Trait);
+        assert_eq!(base.module.source_library(), Some(TEST_CORE));
         assert_eq!(base.name, "Iterable");
         assert_eq!(
             members[0]
                 .declaration
                 .as_ref()
-                .expect("specified Language member is exact")
+                .expect("specified core member is exact")
                 .kind,
             EntityKind::AssociatedType
         );
@@ -7522,8 +9239,8 @@ trait Outer {
             } if name == "V"
         ));
 
-        let diagnostic = resolve_project(&project("fn bad(value: Eq::Missing) {}", vec![]))
-            .expect_err("the closed Eq member contract cannot invent an associated item");
+        let diagnostic = resolve_project(&project("fn bad(value: PartialEq::Missing) {}", vec![]))
+            .expect_err("a closed core trait cannot invent an associated item");
         assert!(matches!(
             diagnostic.kind,
             ProjectDiagnosticKind::UnresolvedName { ref name, .. } if name == "Missing"
@@ -8008,7 +9725,7 @@ fn ambiguous() -> Int { Source.read() }
     }
 
     #[test]
-    fn language_bindings_are_reserved_only_in_their_namespace() {
+    fn protected_bindings_are_reserved_only_in_their_namespace() {
         let diagnostic = resolve_project(&project("struct Int {}", vec![]))
             .expect_err("language type cannot be redeclared");
         assert!(matches!(
@@ -8033,8 +9750,9 @@ fn ambiguous() -> Int { Source.read() }
             ("fn bad() { eq }", NameNamespace::Value, "eq"),
             ("fn bad() { raise }", NameNamespace::Value, "raise"),
         ] {
-            let diagnostic = resolve_project(&project(source, vec![]))
-                .expect_err("owner-scoped Language members are not implicit root bindings");
+            let diagnostic = resolve_project(&project(source, vec![])).expect_err(
+                "owner-scoped core and Language members are not implicit root bindings",
+            );
             assert!(matches!(
                 diagnostic.kind,
                 ProjectDiagnosticKind::UnresolvedName {
@@ -8048,9 +9766,9 @@ fn ambiguous() -> Int { Source.read() }
             "type Item = Int; fn eq() -> Int { 1 } fn raise(value: Int) -> Int { value } fn call(value: Item) -> Int { eq() + raise(value) }",
             vec![],
         ))
-        .expect("source root bindings do not conflict with owner-scoped Language members");
+        .expect("source root bindings do not conflict with owner-scoped core or Language members");
         resolve_project(&project(
-            "use Eq::eq; use Iterable::Item; use fail::raise; fn call(value: Item) { eq; raise(value); }",
+            "use PartialEq::eq; use Iterable::Item; use fail::raise; fn call(value: Item) { eq; raise(value); }",
             vec![],
         ))
         .expect("explicit owner-member imports still bind their exact Language entities");
@@ -8077,7 +9795,7 @@ fn ambiguous() -> Int { Source.read() }
             "trait Named { fn bad<Int>(); }",
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
-                .expect_err("every generic declaration entry reserves Language Type names");
+                .expect_err("every generic declaration entry reserves protected Type names");
             assert!(
                 matches!(
                     diagnostic.kind,

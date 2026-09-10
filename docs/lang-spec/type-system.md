@@ -120,20 +120,21 @@ Tuple 是结构类型：不同上下文中的 `(Int, Str)` 是同一类型。不
 Option<T> = Some(T) | None
 ```
 
-语言内置 enum，且 `Option<T>` 是唯一类型拼写。Constructor 的精确拼写是 `Some` 与 `None`；默认使用 `Option::Some` / `Option::None`，只有显式 constructor import 才产生 bare binding。类型位置不接受 `T?`；表达式位置的 postfix `expr?` 是独立的传播语法。
+`Option<T>` 是指定官方 core root 的公开 source enum，也是唯一类型拼写。Constructor 的精确拼写是 `Some` 与 `None`；默认使用 `Option::Some` / `Option::None`，只有显式 constructor import 才产生 bare binding。类型位置不接受 `T?`；表达式位置的 postfix `expr?` 是独立的传播语法。
 
 ### Ordering 类型
 
-`Ordering` 是 Language origin 的预声明 enum，只有 `Less`、`Equal`、`Greater` 三个 variant。Constructor 默认写作 `Ordering::Less`、`Ordering::Equal`、`Ordering::Greater`；只有显式 constructor import 才产生 bare binding。它承载比较 trait 的结果，不隐式提供额外数值方法或 source declaration。
+`Ordering` 是指定官方 core root 的公开 source enum，按顺序只有 `Less`、`Equal`、`Greater` 三个无 payload variant。Constructor 默认写作 `Ordering::Less`、`Ordering::Equal`、`Ordering::Greater`；只有显式 constructor import 才产生 bare binding。它承载比较 trait 的结果，不隐式提供额外数值方法。
 
-### Language origin 的预声明 type 与 trait
+### Language intrinsic 与官方 core 角色
 
-下列 binding 由语言以独立 `Language` origin 提供，不是隐藏 source file、虚构 module 或 source prelude：
+下列 primitive/container identity 由语言以独立 `Language` origin 提供，不是隐藏 source file、虚构 module 或 source prelude：
 
-- Type：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`Option<T>`、`Ordering`、`List<T>`、`Range<T>`、`Ptr<T>`；
-- Trait（同属 Type namespace）：`PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Clone`、`Debug`、`Drop`、`Iterable`、`Iterator`、`Fn`、`FnMut`、`FnOnce`。
+- Type：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`List<T>`、`Range<T>`、`Ptr<T>`。
 
-List literal 产生 `List<T>`，range expression 产生 `Range<Int>`，raw address 使用 `Ptr<T>`。本规范不为这些 type 声明普通方法，也不把 `Weak`、`Show`、`Json`、`Result`、`Cell`、`Map`、`Set` 或 `StringBuilder` 等普通 source/library 名称隐式加入 Language origin。
+`Option<T>`、`Ordering` 以及 `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Clone`、`Copy`、`Drop`、`Display`、`Debug`、`Hash`、`FnOnce`、`FnMut`、`Fn`、`Iterator`、`Iterable` 由宿主指定的唯一官方 core root 直接公开声明。Resolver 保存这些 declaration/member 的真实 source identity，并在成功前核对当前名称层可判定的固定轮廓；它不嵌入第二份源码或签名表，也不把该检查称为完整类型或运行语义。
+
+List literal 产生 `List<T>`，range expression 产生 `Range<Int>`，raw address 使用 `Ptr<T>`。本规范不为这些 intrinsic type 声明普通方法，也不把 `Weak`、`Show`、`Json`、`Result`、`Cell`、`Map`、`Set` 或 `StringBuilder` 等普通 source/library 名称隐式加入 Language origin 或 core 角色集合。
 
 ### 0.1 raw payload 的 generic aggregate 边界
 
@@ -141,7 +142,7 @@ Vorton 0.1 不允许 `Ptr` 或 non-RC `extern type` 递归出现在 generic aggr
 
 该限制使 shared generic aggregate 不需要按 payload 名称或布局猜测资源策略。若 generic function 不形成这类 aggregate storage，本条不额外禁止 direct type actual；其 ownership 仍由类型与 ResourcePlanner contract 决定。
 
-Language type/trait 在 Type namespace 中不可被 file/inline module、source declaration、import、re-export、任一 generic parameter list 或 owner-scoped associated Type declaration 覆盖。Trait、inherent impl 与 trait impl 的 associated Type 不是保留名检查的例外。它们不是词法关键字，不限制 Value 或 Effect namespace 的同名 binding。
+Language intrinsic type 与上述 core enum/trait 的短名在 Type namespace 中不可被 file/inline module、其他 source declaration、import/re-export 到不同 identity、任一 generic parameter list 或 owner-scoped associated Type declaration 覆盖。只有指定 core root 的对应真实 declaration 可以定义 core 短名；指向同一 exact identity 的普通 alias/re-export 仍按 module 规则处理。Trait、inherent impl 与 trait impl 的 associated Type 不是保留名检查的例外。这些名字不是词法关键字，不限制 Value 或 Effect namespace 的同名 binding。
 
 ### Private nominal representation
 
@@ -543,7 +544,7 @@ apply(subst, τ):
 - If-let pattern 只在成功分支可见；loop/branch/closure 各保持自己的 lexical scope。
 - 显式 closure capture entry 在 closure 创建点的外层 Value scope 解析，不创建新 source binder；capture 完整性、mode/type assertion 与 escape/ownership 由后续检查完成。
 
-Generic parameter 在所属 declaration 的 bounds、signature 与 body 全部可见；trait/impl 外层 generic 也对 member 与内部 closure 可见。所有声明 family 和 member generic list 使用同一规则：同一 table 不得重复，内层 generic 不得遮蔽仍可见的外层 generic。Generic 可以遮蔽普通 module Type binding，但不能遮蔽 Language Type/Trait；筛选 qualified-path candidate 时不能绕过这项同 namespace shadowing。
+Generic parameter 在所属 declaration 的 bounds、signature 与 body 全部可见；trait/impl 外层 generic 也对 member 与内部 closure 可见。所有声明 family 和 member generic list 使用同一规则：同一 table 不得重复，内层 generic 不得遮蔽仍可见的外层 generic。Generic 可以遮蔽普通 module Type binding，但不能遮蔽 Language intrinsic 或受保护 core Type/Trait；筛选 qualified-path candidate 时不能绕过这项同 namespace shadowing。
 
 显式 effect parameter 属于 Effect namespace，并以所属 callable scheme 为 owner；它在该 callable 的参数、返回、外层 effect row 与 body（包括内部 closure）中可见，不进入 Type namespace。一个 callable 的 effect parameter table 不得重复，也不能遮蔽仍可见的外层 effect formal；Language effect spelling 不能被 formal 覆盖。普通 Type parameter 与 effect parameter 的 kind 由各自 namespace 固定，不能在使用处互换。
 
