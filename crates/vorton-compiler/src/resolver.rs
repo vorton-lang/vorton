@@ -6447,6 +6447,16 @@ mod tests {
         )
     }
 
+    fn replaced_core_source(needle: &str, replacement: &str) -> String {
+        let source = TEST_CORE_SOURCE.replace("\r\n", "\n");
+        assert_eq!(
+            source.matches(needle).count(),
+            1,
+            "the core mutation must replace exactly one normalized source fragment"
+        );
+        source.replacen(needle, replacement, 1)
+    }
+
     fn assert_invalid_core(
         core_source: String,
         expected_role: &str,
@@ -6907,10 +6917,9 @@ mod tests {
 
     #[test]
     fn missing_core_role_has_no_fabricated_source_span() {
-        let source = TEST_CORE_SOURCE.replacen(
+        let source = replaced_core_source(
             "pub trait Display {\n    fn to_str(self: &Self) -> Str;\n}\n\n",
             "",
-            1,
         );
         let diagnostic = resolve_project(&project_with_core_source(source))
             .expect_err("a required role cannot be synthesized");
@@ -6928,10 +6937,9 @@ mod tests {
     #[test]
     fn rejects_wrong_core_declaration_category() {
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen(
+            replaced_core_source(
                 "pub trait Display {\n    fn to_str(self: &Self) -> Str;\n}",
                 "pub type Display = Str;",
-                1,
             ),
             "Display",
             None,
@@ -6942,7 +6950,7 @@ mod tests {
     #[test]
     fn rejects_wrong_core_generic_arity_before_resolving_its_body() {
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen("pub enum Option<T>", "pub enum Option", 1),
+            replaced_core_source("pub enum Option<T>", "pub enum Option"),
             "Option",
             None,
             CoreRoleIssue::GenericArity {
@@ -6955,13 +6963,13 @@ mod tests {
     #[test]
     fn rejects_missing_or_wrong_core_members() {
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen("    fn debug(self: &Self) -> Str;\n", "", 1),
+            replaced_core_source("    fn debug(self: &Self) -> Str;\n", ""),
             "Debug",
             None,
             CoreRoleIssue::MemberSet,
         );
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen("    fn hash(self: &Self) -> Int;", "    type hash;", 1),
+            replaced_core_source("    fn hash(self: &Self) -> Int;", "    type hash;"),
             "Hash",
             Some("hash"),
             CoreRoleIssue::MemberKind,
@@ -6971,20 +6979,18 @@ mod tests {
     #[test]
     fn rejects_wrong_core_receiver_and_result_profiles() {
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen(
+            replaced_core_source(
                 "fn clone(self: &Self) -> Self;",
                 "fn clone(value: &Self) -> Self;",
-                1,
             ),
             "Clone",
             Some("clone"),
             CoreRoleIssue::Receiver,
         );
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen(
+            replaced_core_source(
                 "fn drop(self: &mut Self) -> Unit;",
                 "fn drop(self: &Self) -> Unit;",
-                1,
             ),
             "Drop",
             Some("drop"),
@@ -6995,10 +7001,9 @@ mod tests {
             },
         );
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen(
+            replaced_core_source(
                 "fn clone(self: &Self) -> Self;",
                 "fn clone(self: &Self) -> Bool;",
-                1,
             ),
             "Clone",
             Some("clone"),
@@ -7009,20 +7014,18 @@ mod tests {
     #[test]
     fn rejects_wrong_core_effect_profile() {
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen(
+            replaced_core_source(
                 "fn eq(self: &Self, other: &Self) -> Bool with {};",
                 "fn eq(self: &Self, other: &Self) -> Bool;",
-                1,
             ),
             "PartialEq",
             Some("eq"),
             CoreRoleIssue::EffectProfile,
         );
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen(
+            replaced_core_source(
                 "fn clone(self: &Self) -> Self;",
                 "fn clone(self: &Self) -> Self with {};",
-                1,
             ),
             "Clone",
             Some("clone"),
@@ -7033,25 +7036,25 @@ mod tests {
     #[test]
     fn rejects_wrong_core_enum_supertrait_and_associated_profiles() {
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen("    Some(T),", "    Some(Int),", 1),
+            replaced_core_source("    Some(T),", "    Some(Int),"),
             "Option",
             Some("Some"),
             CoreRoleIssue::VariantPayload,
         );
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen("    Less,\n    Equal,", "    Equal,\n    Less,", 1),
+            replaced_core_source("    Less,\n    Equal,", "    Equal,\n    Less,"),
             "Ordering",
             None,
             CoreRoleIssue::VariantSet,
         );
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen("pub trait Copy: Clone {}", "pub trait Copy {}", 1),
+            replaced_core_source("pub trait Copy: Clone {}", "pub trait Copy {}"),
             "Copy",
             None,
             CoreRoleIssue::Supertraits,
         );
         assert_invalid_core(
-            TEST_CORE_SOURCE.replacen("type Iter: Iterator<Item = Self::Item>;", "type Iter;", 1),
+            replaced_core_source("type Iter: Iterator<Item = Self::Item>;", "type Iter;"),
             "Iterable",
             Some("Iter"),
             CoreRoleIssue::AssociatedTypeBounds,
