@@ -481,19 +481,9 @@ impl<T> Use for Target where (T, T): Pair + Debug, T::Item: Eq, {
         direct.effects,
         Some(EffectSet { ref effects, .. }) if effects.is_empty()
     ));
-    for index in 6..=9 {
-        assert!(
-            parameters[index]
-                .annotation
-                .as_ref()
-                .unwrap()
-                .mode
-                .is_none()
-        );
-        assert!(matches!(
-            parameter_type(&parameters[index]).kind,
-            TypeKind::Named(_)
-        ));
+    for parameter in &parameters[6..=9] {
+        assert!(parameter.annotation.as_ref().unwrap().mode.is_none());
+        assert!(matches!(parameter_type(parameter).kind, TypeKind::Named(_)));
     }
     assert!(parameters[6].annotation.as_ref().unwrap().escape.is_none());
 
