@@ -13,12 +13,12 @@ Effect row 中的 atom 共享组合与推断机制，但拥有不同的执行与
 | System effect | `console`、`fs`、`process` | 不可 `handle`，不进入 evidence；由目标 host provider 执行 |
 | Handled effect | 用户 `effect` 声明 | 进入 typed evidence，由显式 `handle...with` 消除 |
 | Failure | `fail<E>` | 由 `catch` 或显式 failure handler 消除 |
-| Mutation marker | `mut<T>` | 只由局部性与状态作用域规则消除 |
+| Mutation marker | `mut` | 只由局部性与状态作用域规则消除 |
 | Unsafe obligation | `unsafe` | 只由词法 `unsafe { ... }` discharge |
 
 Effect class 在 typed contract 冻结前固定。System effect 绝不能获得 handler evidence；handled effect 绝不能直接变成 host operation。`main` 可以保留 system effect，由目标环境执行；未消除的用户 handled effect 不得逃出 `main`。
 
-`console`、`fs`、`process`、`fail<T>`、`mut<T>` 与 `unsafe` 使用独立 `Language` origin，不由隐藏 source 或自动 prelude 声明。它们在 Effect namespace 中不可被 source effect/alias、import 或 re-export 重定义；相同 spelling 在其他 namespace 仍按各自规则处理。`mut` 与 `unsafe` 保持已有特殊 surface，其他 language effect 使用普通 resolved path。
+`console`、`fs`、`process`、`fail<T>`、`mut` 与 `unsafe` 使用独立 `Language` origin，不由隐藏 source 或自动 prelude 声明。它们在 Effect namespace 中不可被 source effect/alias、import 或 re-export 重定义；相同 spelling 在其他 namespace 仍按各自规则处理。`mut` 与 `unsafe` 保持特殊 surface，其他 language effect 使用普通 resolved path。
 
 Effect 与 effect alias 只在 Effect context 中作为 exact identity；它们不是 Type/Value 的 type-relative `::` selection base。Failure 的 `fail.raise` 是下文明确的 Language operation；system effect 本规范不声明静态 operation member。Resolver 不能因内部 member table 未命中而发明或延期 `console::Item`、`console::operation` 一类选择。
 
@@ -38,9 +38,9 @@ EffectRow = { e₁, e₂, ..., eₙ, ..α }     // 开放 row
 具名 callable 可以在普通 type parameters 后声明 effect-row parameter：
 
 ```vorton
-fn apply<T, effect E>(
+fn apply<T, F: Fn + fn(T) -> Unit with {E}, effect E>(
     value: T,
-    callback: fn(T) -> Unit with {E}
+    callback: call F
 ) -> Unit with {E} {
     callback(value)
 }
@@ -48,7 +48,7 @@ fn apply<T, effect E>(
 
 在 source row 中，已绑定的 `E` 表示整条 row，不是一个 effect atom；`with {E, fs}` 表示将 `E` 的内容与 `fs` 合并。多个 formal 可以同时出现，例如 `{E1, E2}`。Binder 与 method scheme actual 的唯一语法见[语法](syntax.md#path类型与-effect)；canonical 0.1 没有差集、补集、条件 effect 或任意 effect-level 函数。
 
-规范中的函数类型可写成 `(T₁, ..., Tₙ) -> R / ε`。源码函数类型用 `fn(T₁, ..., Tₙ) -> R with { ... }` 表示显式 row；省略 `with` 时可保留开放尾以支持 effect 多态。该函数类型直接出现在返回箭头后时须按[统一返回类型语法](syntax.md#path类型与-effect)写入透明分组，组内 `with` 仍属于返回的函数类型。
+规范中的实际 callable 类型可写成 `(T₁, ..., Tₙ) -> R / ε`。Source `CallableShape` 用 `fn(T₁, ..., Tₙ) -> R with { ... }` 约束显式 row；省略 `with` 时可保留开放尾以支持 effect 多态。Shape 只出现在[语法规定的直接约束位置](syntax.md#path类型与-effect)，不成为一般存储类型；factory 返回 shape 必须整体分组，组内 `with` 仍属于该 shape。
 
 普通推断 metavariable 必须在 TypedHIR 前求解。只有由 callable scheme 正式量化的开放尾可以保留，并获得稳定的 owner 与 ordinal；无法归属 formal scheme 的 raw tail 是编译错误。Effect alias 在此之前递归展开。
 
@@ -62,12 +62,12 @@ fn apply<T, effect E>(
 2. `unsafe` 与 `unsafe` 是同一实例；
 3. `fail<T>` 与 `fail<U>` 匹配时统一 payload type；
 4. 同一 exact handled effect 只对应一份 evidence，其 type arguments 必须统一；
-5. `mut<T>` 按完整 state type 区分，可在同一 row 保留多个实例；
+5. `mut` 是一个去重的 marker atom；具体状态来源由内部语义事实另行追踪；
 6. 未匹配 effect 只能进入开放尾，封闭侧不接受额外 effect。
 
 不同开放尾都带未匹配项时，row unification 创建共享 fresh tail，并分别保留对侧未匹配项。Effect class 不因 row 合并、alias 展开或 module import 而改变。
 
-Generic custom effect 可以参数化，closed concrete instance 保持不同 typed identity，例如 `Reader<Int>` 与 `Reader<Str>`。任何实际用于 operation lookup、handler install 或 callable contract 的 handled-effect instance，其 type arguments 都必须完全闭合；不能依赖 runtime name lookup、type erasure 或 specialization 补救。`fail<T>`、`mut<T>` 与正式 effect-row parameter 不属于这项 runtime identity 限制。
+Generic custom effect 可以参数化，closed concrete instance 保持不同 typed identity，例如 `Reader<Int>` 与 `Reader<Str>`。任何实际用于 operation lookup、handler install 或 callable contract 的 handled-effect instance，其 type arguments 都必须完全闭合；不能依赖 runtime name lookup、type erasure 或 specialization 补救。`fail<T>`、单一 `mut` marker 与正式 effect-row parameter 不属于这项 runtime identity 限制。
 
 ## Callable 的 may-effect contract
 
@@ -87,14 +87,14 @@ fn read_config(path: Str) -> Config with {fs, fail<FsError>} {
 
 即使当前 `read_and_parse` 的 body 只产生 `fs`，`read_config` 的公开 row 仍是 `{fs, fail<FsError>}`。若 body 后来产生不在该上界内的 effect，Checker 必须报错。
 
-函数值只允许将该函数值自身的 row 从较小 row 适配到期望上界。参数数量、经普通 substitution 后的参数类型、返回类型和 parameter mode 必须结构匹配；这条规则不引入参数/返回 variance、递归函数子类型、隐式 wrapper，也不放宽 `borrow`/`mut`/`move`。
+函数值只允许将该函数值自身的 row 从较小 row 适配到期望上界。参数数量、经普通 substitution 后的参数类型、返回类型和最终固定 parameter mode 必须结构匹配；这条规则不引入参数/返回 variance、递归函数子类型或隐式 wrapper，也不让 Borrow／Mut／Move 互换。Source `call F` 必须先从同一实例化的 callable evidence 选出其中一个固定 mode。
 
 Call site 对 effect formal 求唯一合法的最小正规解。Pure callback 对 `E` 的单个下界使 `E = {}`；多个 callback 约束同一 `E` 时，取它们公开 rows 的最小合法合并，并继续满足其它显式关系和上界。不存在唯一合法最小解时产生诊断，不能任意扩大，也不能从当前所有 impl 猜测：
 
 ```vorton
-fn sequence<effect E>(
-    first: fn() -> Unit with {E},
-    second: fn() -> Unit with {E}
+fn sequence<F: Fn + fn() -> Unit with {E}, G: Fn + fn() -> Unit with {E}, effect E>(
+    first: call F,
+    second: call G
 ) -> Unit with {E} {
     first();
     second();
@@ -122,9 +122,9 @@ Effect alias 可以沿用自己的既有 type parameters 并引用参数已给�
 Generic scheme 可以携带由现有 row 合并规则产生的有限合法性义务。例如：
 
 ```vorton
-fn attempt<T, effect E>(
+fn attempt<T, F: Fn + fn() -> Unit with {E}, effect E>(
     error: T,
-    callback: fn() -> Unit with {E}
+    callback: call F
 ) -> Unit with {E, fail<T>} {
     callback();
     fail.raise(error)
@@ -136,9 +136,9 @@ fn attempt<T, effect E>(
 普通 callable body 的合法递归继续使用 callable SCC 闭合规则：
 
 ```vorton
-fn repeat<effect E>(
+fn repeat<F: Fn + fn() -> Unit with {E}, effect E>(
     done: Bool,
-    callback: fn() -> Unit with {E}
+    callback: call F
 ) -> Unit with {E} {
     if done { callback() } else { repeat(true, callback) }
 }
@@ -205,16 +205,16 @@ effect alias Fallible<E> = {fail<E>};
 
 Alias 可泛型化、可 `pub` 导出，并在类型检查前递归展开；循环 alias 被拒绝。展开后的 exact atom 才参与 identity、capability 与 ABI，alias 本身不制造 evidence 或新的 runtime effect。
 
-## `mut<T>` Marker Effect
+## `mut` Marker Effect
 
-`mut<T>` 记录计算触及的外部可变 state type。
+`mut` 记录计算可能触及外部可变 state。它没有 source type payload；Checker 在内部保留具体 state origin/type，供局部性、权限和资源检查使用。
 
 - 修改函数自己的局部 `let mut` binding 不让 `mut` 逃逸到函数签名；
-- 通过 `mut` parameter 修改 caller state，或修改 closure 捕获的外部可变 state，会注入相应的 `mut<T>`；
+- 通过 `&mut T` parameter 修改 caller state，或修改 closure 捕获的外部可变 state，会注入 `mut`；
 - 调用 mutable receiver 仍要求可变 binding；effect 不替代这项检查；
-- Module `requires { ... }` 检查逃逸的 `mut<T>`，因此 `requires {}` 的 pure module 不能修改外部 state。
+- Module `requires { ... }` 检查逃逸的 `mut`，因此 `requires {}` 的 pure module 不能修改外部 state。
 
-`mut<T>` 是多实例 marker。同一 row 可以同时包含 `mut<Int>` 与 `mut<Str>`，它们不能因为都叫 `mut` 而合并。裸标注 `with {mut}` 每次实例化时引入 fresh state type。
+同一 row 的多个 mutation 来源合并为一个 `mut` atom。`mut<Int>`、`mut<Str>` 等旧 typed surface 均非法；单一 marker 不抹掉内部来源，也不授予写权限。
 
 ## `unsafe` Effect
 
@@ -241,13 +241,13 @@ Effect 按实际求值组合：
 | 函数调用 | callee row 与 argument-evaluation row 合并 |
 | 方法调用 | receiver、method 与 argument row 合并 |
 | `if` / `match` | condition 或 scrutinee 与所有 branch row 合并 |
-| Closure | body row 存入函数类型；创建 closure 本身为 pure |
+| Closure | body row 存入实际 callable 类型；创建 closure 本身为 pure |
 
 有 body callable 没有外层 `with` 时，以 body 推断出的 row 为公开 contract；有显式上界时检查 body row 是其子集，并保留该上界作为公开 contract。
 
 ### Effectful function value
 
-普通 closure 不捕获定义点当前安装的 handled-effect evidence。Body row 冻结在函数类型中，每次调用从调用点当前 dynamic handler environment 取得 typed evidence。没有对应 handler 时，effect 继续传播，不能因为 closure 在某个 `handle` 内创建而提前消除。
+普通 closure 不捕获定义点当前安装的 handled-effect evidence。Body row 冻结在实际 callable 类型中，每次调用从调用点当前 dynamic handler environment 取得 typed evidence。没有对应 handler 时，effect 继续传播，不能因为 closure 在某个 `handle` 内创建而提前消除。
 
 因此 pure factory 可以返回 effectful closure：调用 factory 不产生该 body effect，调用返回值时才产生。Closure 在 handler 内创建后逃逸，不会延长已经结束的 handler dynamic scope；在新 handler 内调用时使用新的 evidence。
 
@@ -279,7 +279,7 @@ let result = handle {
 };
 ```
 
-Handler 在 body 的 dynamic call scope 内提供 handled-effect operations。被完整处理的 exact handled effect 从 body row 中消除；open tail 的未知 effect 与 arm 新产生的 effect 继续传播。若 row 是 `{Logger, R}`，处理 exact `Logger` 后保留 `R`；若 callback row 只有未知 formal `E`，handler 不能假定其 head 是 `Logger`，可以保守地原样传播 `E`。System effect、`mut<T>` 与 `unsafe` 不能由 `handle` 删除，也不要求为未知 row 引入 effect 差集。
+Handler 在 body 的 dynamic call scope 内提供 handled-effect operations。被完整处理的 exact handled effect 从 body row 中消除；open tail 的未知 effect 与 arm 新产生的 effect 继续传播。若 row 是 `{Logger, R}`，处理 exact `Logger` 后保留 `R`；若 callback row 只有未知 formal `E`，handler 不能假定其 head 是 `Logger`，可以保守地原样传播 `E`。System effect、`mut` 与 `unsafe` 不能由 `handle` 删除，也不要求为未知 row 引入 effect 差集。
 
 Canonical 0.1 使用 whole-effect complete handler：同一个 `handle...with` 只要为某个 exact effect 写出一个 operation arm，就必须覆盖该 effect 声明的全部 operations，各恰好一次。Source arm 顺序任意；missing、duplicate、unknown 或 cross-owner arm 都是编译错误。需要只拦截部分 operation 时，必须拆分 effect 或为其余 operation 写显式 forwarding arm。
 
@@ -294,9 +294,9 @@ Canonical 0.1 使用 whole-effect complete handler：同一个 `handle...with` �
 具名 callable 优先用显式 effect parameter 表达 callback 与外层 row 的关系：
 
 ```vorton
-fn transform<T, U, effect E>(
+fn transform<T, U, F: Fn + fn(T) -> U with {E}, effect E>(
     value: T,
-    callback: fn(T) -> U with {E}
+    callback: call F
 ) -> U with {E} {
     callback(value)
 }
@@ -304,25 +304,30 @@ fn transform<T, U, effect E>(
 
 Callback 的 system、handled、failure、mutation 或 unsafe effect 都能通过 `E` 传播。高阶 callable 不能假装 callback 为 pure，也不能把 system effect 转成 handler evidence。
 
-Trait signature 中每个省略 `with` 的 `FnType` 都是一个独立隐式 effect formal 来源。不同 callback 不因相同拼写、相同结构或某个 impl 的 body 巧合共享 formal。Method scheme 的 effect formal 顺序先是 header 中显式声明的 formals，再按 signature 结构顺序加入隐式 formals：普通参数从左到右，每个类型由外到内、子项从左到右，最后遍历返回类型。身份由 method owner 与 ordinal 建立，不依赖 impl 集合或 table 遍历。
+Trait signature 的 generic bound 中，每个省略 `with` 的 `CallableShape` 都是一个独立隐式 effect formal 来源。不同实际 callback 类型不因相同拼写、相同结构或某个 impl 的 body 巧合共享 formal。Method scheme 的 effect formal 顺序先是 header 中显式声明的 formals，再按 generic bound 的 source order 加入隐式 formals；身份由 method owner 与 ordinal 建立，不依赖 impl 集合或 table 遍历。
 
 ```vorton
 trait Pipeline {
-    fn run(
+    fn run<
+        F: Fn + fn(Int) -> Unit,
+        G: Fn + fn(Str) -> Unit,
+        H: Fn + fn(Bool) -> Unit,
+    >(
         self,
-        first: fn(Int) -> Unit,
-        nested: fn(fn(Str) -> Unit) -> (fn(Bool) -> Unit)
+        first: call F,
+        second: call G,
+        third: call H,
     );
 }
 ```
 
-这里依次产生 `first` 的 row、`nested` 外层 row、其参数 row、其返回 row，四者相互独立。对应 trait impl 可以省略这些 binder；Checker 按相同 signature 位置映射到 trait contract。Impl 重复声明 binder 只提供本地名称并接受一致性核对，不能改变 trait scheme arity；trait binder 拼写不进入 impl lexical scope，各 source declaration 保留自己的 origin。
+这里三个 shape bound 依次产生三个相互独立的 row。需要表达高阶关系时继续显式声明实际 `F`／`G`／`H`，不在 shape 参数或结果中递归制造匿名 binder。对应 trait impl 可以省略 effect binder；Checker 按相同 contract 位置映射。Impl 重复声明 binder 只提供本地名称并接受一致性核对，不能改变 trait scheme arity；trait binder 拼写不进入 impl lexical scope，各 source declaration 保留自己的 origin。
 
-普通具名函数中的未标注 `FnType` 仍保留可由 body 约束和泛化的开放尾，不能仅因出现于 signature 就全部提前刚性量化。`extern fn` 没有 body 可供反推，必须使用显式 `effect E` 与 row 引用写出高阶传播关系。Type/effect alias 依既有透明展开参与使用处检查，但不成为隐式 formal owner；effect operation 和独立 `FnType` 也不获得量化能力。最终不能归属合法 callable scheme 的 raw tail 必须在 TypedHIR 前拒绝。
+普通具名函数中未标注 row 的 `CallableShape` 仍保留可由 body 约束和泛化的开放尾，不能仅因出现在 source header 就全部提前刚性量化。`extern fn` 没有 body 可供反推，必须使用显式 `F`、`effect E` 与 shape bound 写出高阶传播关系。Type/effect alias 依既有透明展开参与使用处检查，但不成为隐式 formal owner；effect operation 和独立 shape 也不获得量化能力。最终不能归属合法 callable scheme 的 raw tail 必须在 TypedHIR 前拒绝。
 
 ## Drop 边界
 
-用户 `Drop::drop` 的最终推断 effect row 必须为空；`fail`、system effect、handled effect 与逃逸的 `mut<T>` 均禁止。编译器生成的字段递归释放、RC deallocation 与已验证 intrinsic cleanup 不属于用户 effect body。
+用户 `Drop::drop` 的最终推断 effect row 必须为空；`fail`、system effect、handled effect 与逃逸的 `mut` 均禁止。编译器生成的字段递归释放、RC deallocation 与已验证 intrinsic cleanup 不属于用户 effect body。
 
 ## Canonical 边界
 

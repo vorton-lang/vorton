@@ -2,9 +2,9 @@
 
 审阅版 · 2026-09-10
 
-本文按主题整合当前设计，供先通读、再讨论语言哲学。它反映已确认的选择和本轮暂定的泛型收紧，不表示这些能力已经实现，也不是另一份执行合同。决定记录在 [Issue #45](https://github.com/vorton-lang/vorton/issues/45)，协议和工程细节在 [Discussion #46](https://github.com/vorton-lang/vorton/discussions/46)。
+本文按主题整合当前设计，供通读和审阅。它反映已确认的选择，不表示这些能力都已经实现，也不是语言规范或另一份执行合同；可观察规则仍以 [`lang-spec/`](lang-spec/README.md) 为准。设计来源记录在 [Issue #45](https://github.com/vorton-lang/vorton/issues/45) 与 [Discussion #46](https://github.com/vorton-lang/vorton/discussions/46)。
 
-泛型规则目前暂定；源码标注差异的默认诊断、编译期执行的默认额度需要真实流程与计数器实测。语言哲学的新问题留到阅读后提出，本文不替它预设结论。
+Q84 的具名 callable 泛型显式规则及 Q85–Q87 已确认；源码标注差异的默认诊断与编译期执行的默认额度仍需要真实流程和计数器实测。本文在末尾单独标出 source frontend 已覆盖的部分和仍属于 Checker／generation／native 的设计差距。
 
 ## 1. 语言要解决什么问题
 
@@ -23,7 +23,9 @@ Vorton 面向无人回路的开发与演化：程序由人或 LLM 修改时，�
 
 契约被修改本身不是语言错误。用新契约检查新实现、用旧契约检查新实现，是两次输入不同的技术检查。是否允许那次契约变更，由 harness 判断。
 
-“低标注”保留为设计偏好：能从实现与明确输入确定的普通类型、mode、effect尽量推断；作者要固定未来承诺时，应有明确表达方式。它不等于所有边界都可以省略信息。泛型的暂定例外见第4节。
+“低标注”保留为设计偏好：能从实现与明确输入确定的普通类型、mode、effect尽量推断；作者要固定未来承诺时，应有明确表达方式。它不等于所有边界都可以省略信息。具名 callable 自身泛型的显式规则见第4节。
+
+Agent 体工学是明确的设计优先级：在安全、一致、可终止、确定资源和 native 等硬约束内，降低 agent 理解、生成、修改、检查与修复的总成本，同时保留人类对关键变更的审阅能力。低标注只是可调整的局部策略；在没有 agent 性能实测时，不预设更多或更少标注普遍更优。
 
 优化只能在保持可观察语义的前提下进行，包括 Move、别名、修改顺序、failure 前已发生的动作和 Drop。类型与资源规则不因为获得用户授权而被豁免。
 
@@ -60,7 +62,7 @@ Vorton 面向无人回路的开发与演化：程序由人或 LLM 修改时，�
 
 版本比较同时保留事实变化与逐条结果：满足、违反、无法判定。确定的违约不能抹掉其他未决项，无法判定也不能当通过。非法源码没有完整接口时，报告实际诊断，不伪造可比较结果。
 
-## 4. 推断与泛型（当前暂定）
+## 4. 推断与泛型（Q84 已确认）
 
 函数／方法定义在合法边界内保留未来调用的多态性；普通已经求值的数据或factory结果，是本次创建的一个类型实例。后续用途可以帮助推断这个实例，却不能把同一个结果当成多次初始化、不同类型或不同evidence的模板。let mut不泛化。返回的closure即使实际无状态，也不因来自factory而重新泛化。
 
@@ -87,6 +89,8 @@ fn identity(x) { x }
 
 源码与契约都要显式声明泛型，并按目标、所属层级和参数身份一一对应。允许A／T这种纯改名；数量和泛型使用关系须一致。只写一边、合并或拆分变量、把泛型特化为具体类型，都直接报结构不匹配。
 
+对应关系按 target／owner／kind／ordinal 与实际使用关系建立，不按 binder spelling 猜测。`const fn` 与生成目标也遵守同一规则；无 contract 的 generic helper 仍须显式 binder。Concrete actual 可继续推断，outer impl／trait／`Self`、anonymous closure 和一次求值实例边界不因此变成 method 自身的新泛型。
+
 ```vorton
 fn identity<T>(x: T) -> T { x }
 ```
@@ -95,7 +99,7 @@ fn identity<T>(x: T) -> T { x }
 
 普通参数和返回类型标注仍可省略，只要它们能在已显式声明的泛型与所选契约位置中确定。外层impl／trait参数和Self保留原owner，不重复变成method自身参数。多个partial记录先合组，共用同一变量身份。
 
-FnShape如果需要额外量化实际类型F，也按这条规则写出F；它不获得匿名泛型例外。普通effect、mode和既定trait effect scheme规则不因本次类型泛型收紧而整体改变。
+CallableShape 如果需要额外量化实际类型 F，也按 Q84 显式写出 F；它不获得匿名泛型例外。普通 effect、mode 和既定 trait effect scheme 规则不因本次类型泛型收紧而整体改变。
 
 ### 泛型的适用范围
 
@@ -109,7 +113,7 @@ FnShape如果需要额外量化实际类型F，也按这条规则写出F；它�
 
 空要求不删除外层类型形成、trait或impl条件。已有trait蕴含可使用，例如Copy包含Clone。检查返回trait能力不能为了过关收窄原有输入域。
 
-这条暂定方案的代价是：给隐式泛型函数建立契约时，也要补源码声明。契约候选必须明确指出这个需要，不能自动修改源码或宣称未配套输入已可回放。
+这条规则的代价是：给隐式泛型函数建立契约时，也要补源码声明。契约候选必须明确指出这个需要，不能自动修改源码或宣称未配套输入已可回放。
 
 ## 5. 所有权、参数与有限借用
 
@@ -121,10 +125,13 @@ FnShape如果需要额外量化实际类型F，也按这条规则写出F；它�
 | x: &T | 固定只读借入 |
 | x: &mut T | 固定独占可变借入 |
 | x: move T | 固定拥有移交；Copy类型仍提供副本并保留原值 |
+| x: call F | 按同一 F 的 Fn／FnMut／FnOnce evidence 选择固定 Borrow／Mut／Move |
 
 这里的&只表达参数mode，不是一般引用类型或任意位置的借用表达式。0.1不提供能自由返回、放入普通字段或长期保存的通用借用值。
 
 有body的函数按真实用途推断入口需求。无body signature的普通参数必须给出实际类型，省略mode表示固定Borrow；其效果与外部调用责任遵守对应声明规则。
+
+Q85 固定公开输入边界：实际公开的具名函数／method 输入 type 与 mode 必须由 source 或所属 contract 逐位置明确，两者可以分担。无 body signature 保持上述实际 type、固定默认 mode 与 receiver `Self` 规则，trait impl 沿用 owner signature。Private／local／anonymous closure，以及 return／effect／Noescape，不因本条一律强制标注；普通 source/contract 差异仍按既定优先级处理，Q11 的默认诊断策略继续等待实测。
 
 可变借用可以交出拥有值：take、pop、replace等操作允许交出成员，同时给调用方留下完整合法状态。不能挖走必需字段并留下未初始化存储。正常返回和可恢复failure都要保持这种完整性；已经发生的合法修改不自动回滚。
 
@@ -141,11 +148,11 @@ Copy不调用用户Clone。Clone是显式且由类型定义的操作，不普遍
 fn(P) -> R with E是一种调用形状约束，不是可容纳任意closure的统一存储类型。直接有body参数、factory返回assertion和generic bound可使用它；复杂嵌套与普通存储使用实际F／G。相同F可以出现在多个位置来表达类型相等。
 
 ```vorton
-fn apply<F: fn(Int) -> Int>(f: F, x: Int) -> Int {
+fn apply<F: Fn + fn(Int) -> Int>(f: call F, x: Int) -> Int {
     f(x)
 }
 
-struct Holder<F: fn(Int) -> Int> {
+struct Holder<F: Fn + fn(Int) -> Int> {
     callback: F
 }
 ```
@@ -160,7 +167,7 @@ struct Holder<F: fn(Int) -> Int> {
 
 能力包含关系为Fn ⇒ FnMut ⇒ FnOnce。Move捕获不自动意味着只能FnOnce，共享调用也不自动意味着pure。
 
-没有固定mode、且没有其他拥有用途时，调用优先保留输入：Fn选Borrow，只有FnMut则选Mut，只有FnOnce才选Move。泛型定义导出这份受限关系，调用方实例化同一个type、evidence、mode和effect映射；不重查依赖body、不在权限失败后换语义重试，也不隐式Clone。
+Q87 用 `call F` 把有限关系写入 source，同时保持同一个实际 `F`：可见 `Fn` 时选 Borrow；没有 `Fn` 而有 `FnMut` 时选 Mut；只有 `FnOnce` 时选 Move。选择按 type/evidence 许可完成，不为 body 或 caller 权限失败改 mode。调用方实例化同一个 type、evidence、mode 和 effect mapping；不重查依赖 body、不隐式 Clone、不包装或抹去 `F`，也不承诺调用次数。`scoped` 可与 `call` 组合。
 
 省略capture列表时，按真实用途推导Borrow、Mut或Move，并精确到静态struct／tuple字段的不重叠路径。动态索引、List、raw间接访问和动态enum payload不创造独立capture槽。重叠路径合并到所需共同前缀；整体Drop禁令保持。
 
@@ -194,7 +201,7 @@ Ptr<T>可以进入普通泛型容器，保存或复制地址不隐式拥有、�
 
 ## 8. 模式、控制流与遍历
 
-match、catch、if-let的分支绑定按实际用途推断访问，优先保留源值：只读Borrow，修改Mut，真实拥有用途才要求non-Copy Move。普通let与let解构仍建立拥有绑定，不能把两类规则混用。
+Q86 固定 `match`、`catch`、`if let` 的 binding mode：未限定 `name` 默认 Borrow，`mut name` 明示 Mut，`move name` 明示 Move，不按分支 body 用途升级。限定可递归用于 tuple／constructor 子模式和 `field: mut name`／`field: move name`；不扩展普通 `let` 解构、`for`、field punning 或整个 pattern。对应 or-binding 必须 mode 一致。普通 `let` 与 `let` 解构仍建立拥有 binding，不能把两类规则混用。
 
 有guard时，模式检查及guard阶段对匹配对象只读；guard成功才提交payload移交。false时原对象完整，后续分支照常检查。其他不冲突的effects可以发生，false不回滚；failure按当时的拥有状态清理并传播。
 
@@ -315,25 +322,26 @@ M2交付纯内存契约读取／绑定／应用、候选筛选、完整接口及
 
 ## 13. 与当前仓库的距离
 
-本初稿核对实现所用的基线是[9bb8b5f7](https://github.com/vorton-lang/vorton/commit/9bb8b5f78c25bc227820664ea726f0cbfd1577c5)，该基线已有Rust frontend／Resolver。上述语义复核还没有整体落入规范与实现。
+当前 Rust compiler 的 source frontend 已承载 `&T`／`&mut T`／`move T`／`call F`、`scoped`、`const fn`、`generate` module item、CallableShape／generic bound、trait impl `where`、branch binding qualifier 与单一 `mut` effect，并保留相应 source order 和 span。Resolver 机械运输当前可处理的 carrier；纯内存项目入口在 frontend 与 module graph 成功后，对可达 `generate` 返回 generation-stage unsupported 诊断。
 
-需要统一替换的旧概括包括：非Drop值自动share、Clone普遍递归独立、pure-only Drop、typed mut、Language-owned部分core声明、默认自动派生、对raw泛型存储的统一禁令、普通factory值再次泛化，以及部分旧函数类型／参数表面。不能同时保留旧规则作为第二种解释。
+这只闭合 source→AST 与当前 Resolver 的责任。Q84–Q87 的 contract 对应、公开输入约束、call evidence/mode、Noescape、pattern 权限／guard／resource 检查仍属于 Checker 及后续阶段；`generate` block 尚不执行，也没有 GenContext API、结构提交、预算或生成后语义闭合。Core、resource、ABI 与 native 的其余设计同样不能由 frontend 成功推断为已实现。
 
-先前Rust／C机制见证和JSON结构检查只能说明各自观测范围，不证明Vorton Checker、资源或native已经通过。初稿例子是目标设计说明，尚未作为现有compiler成功用例运行。
+Rust／C 机制见证、静态结构检查和 frontend 测试只能说明各自观测范围，不证明 Vorton Checker、资源或 native 已经通过。本审阅稿用于解释已确认的整体设计，不能替代语言规范、Issue contract 或阶段验收证据。
 
-## 14. 阅读后需要做的决定
+## 14. 已确认项与仍需证据的决定
 
-现有规则可以先组成这一版初稿，不需要在阅读前继续逐字段提问。
+现有规则组成这一版审阅稿；下表区分已确认设计和仍需实测的策略。
 
 | 事项 | 状态与取得结论的方式 |
 |---|---|
-| 有契约泛型双边显式且对应 | 本轮暂定，按本文使用；阅读后仍可复核 |
+| Agent 体工学优先 | 已确认；服从安全、一致、终止、资源和 native 硬约束 |
+| Q84 有契约泛型双边显式且对应 | 已确认；按 target／owner／kind／ordinal 与使用关系核对 |
+| Q85 公开具名输入由 source／contract 逐位置明确 | 已确认；不把同一要求扩到 private／local／closure 的全部位置 |
+| Q86 branch binding 默认 Borrow，`mut`／`move` 明示 | 已确认；权限、guard 提交和资源检查由 Checker 完成 |
+| Q87 `call F` 的有限 mode 关系 | 已确认；消费同一 F/evidence/instantiation，不是 runtime 第四 mode |
 | 源码普通标注与契约不同的默认诊断 | 待真实诊断／候选修正流程，比较error加修正与warning加严格策略 |
 | 编译期执行默认额度 | 待真实work／allocation计数器与代表派生测量；当前不填任意数字 |
-| 用户的语言哲学问题 | 按用户安排在阅读初稿后讨论，未预设内容或答案 |
 
 结构不匹配、实际函数体违约及语言硬规则错误始终报错；诊断默认待定不改变这些结论。生命周期追踪是否另立哲学公理也没有被本文默认决定。
 
-阅读与哲学讨论之后，再把同意的整体设计落为具体规范和工作合同。已准备的首个候选是统一前端表面与公开AST：参数mode、scoped、const fn、generate、shape／where和单一mut，以及必要的项目阶段诊断。它涉及公开Rust AST／ProjectDiagnosticKind变更；M1目前仍关闭，重开、新建工作Issue与实施尚未授权。
-
-[完整决定与前端工作合同候选](https://github.com/vorton-lang/vorton/issues/45) · [契约格式、冻结协议与生成API草案](https://github.com/vorton-lang/vorton/discussions/46)
+[设计来源](https://github.com/vorton-lang/vorton/issues/45) · [契约格式、冻结协议与生成API草案](https://github.com/vorton-lang/vorton/discussions/46)

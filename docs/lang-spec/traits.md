@@ -2,7 +2,7 @@
 
 Vorton 的 trait 系统提供有界多态性（bounded polymorphism）。具体 receiver 在类型检查时解析到唯一 impl；受 trait bound 的类型变量通过隐式 dictionary evidence 调用。Evidence 的目标表示不是语言规范的一部分。
 
-语言以 `Language` origin 预声明的 trait 只有 `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Clone`、`Debug`、`Drop`、`Iterable` 与 `Iterator`。下文 `Show`、`Describable` 等均是示例中显式声明的普通 source trait，不构成额外 builtin。
+语言以 `Language` origin 预声明的 trait 只有 `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Clone`、`Debug`、`Drop`、`Iterable`、`Iterator`、`Fn`、`FnMut` 与 `FnOnce`。下文 `Show`、`Describable` 等均是示例中显式声明的普通 source trait，不构成额外 builtin。
 
 本规范明确使用的 Language member identity 是 `PartialEq::eq`、`PartialOrd::partial_cmp`、`Ord::cmp`、`Drop::drop`、`Iterable::{Item, Iter, iter}` 与 `Iterator::next`。Resolver 可冻结这些 owner/member identity，但不由命名习惯为 `Hash`、`Clone`、`Debug` 或其他 builtin 发明 source-visible member、signature 或 runtime operation；其余 trait/impl selection 在 Checker 信息完备后决定。
 
@@ -34,6 +34,10 @@ Trait 是完整的行为 contract，不为method或associated type提供独立vi
 
 Vorton 0.1 的 inherent impl 与 trait impl 都不接受 `extern fn` member；这与 visibility 无关，写在 impl 中的 `extern fn` 一律 hard-fail。用户 FFI 只由 top-level `extern fn` 声明；需要 method 形态时以普通 inherent wrapper 调用该 top-level extern。
 
+Trait impl header 可以在 target 后写非空 `where` 合取，例如 `impl<T> Show for Box<T> where T: Debug, T::Item: Eq { ... }`。Predicate subject 是实际类型，bound 只接受 named trait；tuple subject 与 associated projection 均可用。该条件决定 impl 的适用域，不能从 body 反推更强条件；其它 declaration family 不获得同名 header。
+
+`Fn`、`FnMut` 与 `FnOnce` 表示同一实际 callable 类型可提供的调用能力，包含关系为 `Fn ⇒ FnMut ⇒ FnOnce`。Source `call F` 按当前实例化可见的最强保留能力选择固定入口 mode：有 `Fn` 取 Borrow，没有 `Fn` 而有 `FnMut` 取 Mut，只有 `FnOnce` 时取 Move。选择消费同一份 `F`、trait evidence、type/effect instantiation；权限或 body 失败后不得改选另一行。`call` 不提供额外方法、Clone、调用次数或动态包装。
+
 ### Public interface、private impl 与 opaque return
 
 Public item的参数、返回类型、pub field、public enum payload、generic bound及effect/trait contract不得引用更private的declaration；违反时hard-fail。Public struct的private field可以包含private nominal，因为该representation只经compiler metadata运输，不进入source interface。`impl PublicTrait for PrivateType`可在module内部合法存在并参与project coherence，但不会成为外部callable surface。Trait impl只有target与trait均对调用方可见时才随module export，public inherent type也只导出其`pub`methods。
@@ -50,16 +54,16 @@ Vorton 0.1 的 source trait member 只有方法签名，不允许函数体。Tra
 
 ```text
 PartialEq:
-  eq(self: Self, other: Self) -> Bool with {}
+  eq(self: &Self, other: &Self) -> Bool with {}
 
 Eq: PartialEq
   无新增方法
 
 PartialOrd: PartialEq
-  partial_cmp(self: Self, other: Self) -> Option<Ordering> with {}
+  partial_cmp(self: &Self, other: &Self) -> Option<Ordering> with {}
 
 Ord: Eq + PartialOrd
-  cmp(self: Self, other: Self) -> Ordering with {}
+  cmp(self: &Self, other: &Self) -> Ordering with {}
 ```
 
 `self` 与 `other` 都按 `borrow` 传递，比较方法本身是 closed pure；operand 在调用前的求值 effects 仍按普通从左到右规则传播。`Ordering` 的三个 variant 是 `Ordering::Less`、`Ordering::Equal`、`Ordering::Greater`，完整类型身份见[类型系统](type-system.md#ordering-类型)。
@@ -103,18 +107,18 @@ Trait method 省略外层 `with` 时，声明该 exact method 拥有按选定 im
 
 ```vorton
 trait Fetch {
-    fn fetch<effect E>(
+    fn fetch<F: Fn + fn(Str) -> Unit with {E}, effect E>(
         self,
-        callback: fn(Str) -> Unit with {E}
+        callback: call F
     ) -> Unit;
 }
 
 struct Memory {}
 
 impl Fetch for Memory {
-    fn fetch(
+    fn fetch<F: Fn + fn(Str) -> Unit with {E}, effect E>(
         self,
-        callback: fn(Str) -> Unit
+        callback: call F
     ) -> Unit {
         callback("cached")
     }
@@ -123,9 +127,9 @@ impl Fetch for Memory {
 struct Disk {}
 
 impl Fetch for Disk {
-    fn fetch(
+    fn fetch<F: Fn + fn(Str) -> Unit with {E}, effect E>(
         self,
-        callback: fn(Str) -> Unit
+        callback: call F
     ) -> Unit {
         callback(read_file("data.txt"))
     }

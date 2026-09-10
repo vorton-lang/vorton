@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ast::{
-    AssignmentOperator, BinaryOperator, ParameterMode, RawStringDelimiter, Span,
-    StatementTerminator, UnaryOperator,
+    AssignmentOperator, BinaryOperator, BindingMode, CallAssertionMode, CaptureMode, ParameterMode,
+    RawStringDelimiter, Span, StatementTerminator, UnaryOperator,
 };
 use crate::diagnostic::FrontendDiagnosticKind;
 
@@ -122,6 +122,8 @@ pub struct ProjectDiagnostic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectDiagnosticKind {
     Frontend(FrontendDiagnosticKind),
+    /// A reachable `generate` item requires the later generation stage.
+    GenerateUnsupported,
     InvalidModuleName {
         name: String,
     },
@@ -372,6 +374,7 @@ pub(crate) enum ResolvedDeclarationKind {
     TraitImpl {
         implementation: Box<ResolvedImpl>,
         trait_type: ResolvedNamedType,
+        where_clause: Option<ResolvedWhereClause>,
     },
     Trait {
         type_parameters: Vec<ResolvedTypeParameter>,
@@ -403,10 +406,11 @@ pub(crate) enum ResolvedDeclarationKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedFunction {
+    pub(crate) const_span: Option<Span>,
     pub(crate) type_parameters: Vec<ResolvedTypeParameter>,
     pub(crate) effect_parameters: Vec<ResolvedEffectParameter>,
     pub(crate) parameters: Vec<ResolvedParameter>,
-    pub(crate) return_type: Option<ResolvedType>,
+    pub(crate) return_type: Option<Box<ResolvedReturnAnnotation>>,
     pub(crate) effects: Option<ResolvedEffectSet>,
     pub(crate) body: ResolvedBlock,
 }
@@ -425,15 +429,34 @@ pub(crate) struct ResolvedFunctionSignature {
 pub(crate) struct ResolvedParameter {
     pub(crate) span: Span,
     pub(crate) binding: ResolvedBinding,
+    pub(crate) escape: Option<Span>,
     pub(crate) mode: Option<(Span, ParameterMode)>,
-    pub(crate) annotation: Option<ResolvedType>,
+    pub(crate) annotation: Option<ResolvedParameterAnnotation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedParameterAnnotation {
+    Type(ResolvedType),
+    Shape(ResolvedShape),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedReturnAnnotation {
+    Type(ResolvedType),
+    Shape(ResolvedShape),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedTypeParameter {
     pub(crate) span: Span,
     pub(crate) binding: ResolvedBinding,
-    pub(crate) bounds: Vec<ResolvedNamedType>,
+    pub(crate) bounds: Vec<ResolvedGenericBound>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedGenericBound {
+    Named(Box<ResolvedNamedType>),
+    Shape(ResolvedShape),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,6 +496,20 @@ pub(crate) struct ResolvedImpl {
     pub(crate) type_parameters: Vec<ResolvedTypeParameter>,
     pub(crate) target: ResolvedNamedType,
     pub(crate) members: Vec<ResolvedImplMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedWhereClause {
+    pub(crate) span: Span,
+    pub(crate) keyword_span: Span,
+    pub(crate) predicates: Vec<ResolvedWherePredicate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedWherePredicate {
+    pub(crate) span: Span,
+    pub(crate) subject: ResolvedType,
+    pub(crate) bounds: Vec<ResolvedNamedType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,17 +608,30 @@ pub(crate) struct ResolvedType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResolvedTypeKind {
     Named(Box<ResolvedNamedType>),
-    Function {
-        parameters: Vec<ResolvedFunctionTypeParameter>,
-        return_type: Box<ResolvedType>,
-        effects: Option<ResolvedEffectSet>,
-    },
+    Grouped(Box<ResolvedType>),
     Tuple(Vec<ResolvedType>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedFunctionTypeParameter {
+pub(crate) struct ResolvedShape {
     pub(crate) span: Span,
+    pub(crate) kind: ResolvedShapeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedShapeKind {
+    Callable {
+        parameters: Vec<ResolvedShapeParameter>,
+        return_type: Box<ResolvedType>,
+        effects: Option<ResolvedEffectSet>,
+    },
+    Grouped(Box<ResolvedShape>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedShapeParameter {
+    pub(crate) span: Span,
+    pub(crate) escape: Option<Span>,
     pub(crate) mode: Option<(Span, ParameterMode)>,
     pub(crate) ty: ResolvedType,
 }
@@ -762,7 +812,7 @@ pub(crate) enum ResolvedCallArgument {
     Expression(ResolvedExpr),
     Mode {
         span: Span,
-        mode: (Span, ParameterMode),
+        mode: (Span, CallAssertionMode),
         place: ResolvedPlace,
     },
 }
@@ -788,13 +838,19 @@ pub(crate) enum ResolvedPatternKind {
     Float(String),
     String(String),
     Boolean(bool),
-    Binding(ResolvedBinding),
+    Binding(ResolvedPatternBinding),
     Constructor {
         target: ResolvedReference,
         fields: Option<ResolvedPatternFields>,
     },
     Tuple(Vec<ResolvedPattern>),
     Or(Vec<ResolvedPattern>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedPatternBinding {
+    pub(crate) binding: ResolvedBinding,
+    pub(crate) qualifier: Option<(Span, BindingMode)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -825,7 +881,7 @@ pub(crate) struct ResolvedHandler {
 pub(crate) struct ResolvedClosure {
     pub(crate) captures: Vec<ResolvedCapture>,
     pub(crate) parameters: Vec<ResolvedParameter>,
-    pub(crate) return_type: Option<ResolvedType>,
+    pub(crate) return_type: Option<Box<ResolvedReturnAnnotation>>,
     pub(crate) effects: Option<ResolvedEffectSet>,
     pub(crate) body: ResolvedBlock,
 }
@@ -833,7 +889,7 @@ pub(crate) struct ResolvedClosure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedCapture {
     pub(crate) span: Span,
-    pub(crate) mode: Option<(Span, ParameterMode)>,
+    pub(crate) mode: Option<(Span, CaptureMode)>,
     pub(crate) reference: ResolvedReference,
     pub(crate) annotation: Option<ResolvedType>,
 }

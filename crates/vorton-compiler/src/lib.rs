@@ -26,6 +26,10 @@ pub fn parse(source: &str) -> Result<Program, FrontendDiagnostic> {
 }
 
 /// Parses and resolves a platform-independent, in-memory Vorton project.
+///
+/// Reachable `generate` items currently return
+/// [`ProjectDiagnosticKind::GenerateUnsupported`] after frontend and module
+/// graph checks, before declaration or body-name resolution.
 pub fn resolve_project(sources: &ProjectSources) -> Result<ResolvedProject, ProjectDiagnostic> {
     resolver::resolve_project(sources)
 }

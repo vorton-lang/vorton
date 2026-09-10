@@ -15,10 +15,11 @@ struct Parser {
 }
 
 #[derive(Clone, Copy)]
-enum ParameterAnnotations {
-    Inferred,
+enum ParameterContext {
+    Body,
+    Handler,
     TraitSignature,
-    Required,
+    FixedSignature,
 }
 
 impl Parser {
@@ -32,16 +33,16 @@ impl Parser {
         while self.at_use_declaration() {
             uses.push(self.parse_use_declaration()?);
         }
-        let mut declarations = Vec::new();
+        let mut items = Vec::new();
         while !self.at(Tag::Eof) {
-            declarations.push(self.parse_declaration(Tag::Eof)?);
+            items.push(self.parse_module_item(Tag::Eof)?);
         }
         self.expect(Tag::Eof)?;
         Ok(Program {
             span: Span::new(0, source_length),
             requires,
             uses,
-            declarations,
+            items,
         })
     }
 
@@ -107,6 +108,28 @@ impl Parser {
         })
     }
 
+    fn parse_module_item(&mut self, enclosing_end: Tag) -> Result<ModuleItem, FrontendDiagnostic> {
+        if self.at_contextual("generate") {
+            return Ok(ModuleItem::Generate(self.parse_generate_item()?));
+        }
+        Ok(ModuleItem::Declaration(Box::new(
+            self.parse_declaration(enclosing_end)?,
+        )))
+    }
+
+    fn parse_generate_item(&mut self) -> Result<GenerateItem, FrontendDiagnostic> {
+        let keyword = self.bump();
+        debug_assert!(matches!(&keyword.kind, TokenKind::Ident(text) if text == "generate"));
+        let context = self.expect_identifier()?;
+        let body = self.parse_block()?;
+        Ok(GenerateItem {
+            span: Span::new(keyword.span.start, body.span.end),
+            keyword_span: keyword.span,
+            context,
+            body,
+        })
+    }
+
     fn parse_declaration(&mut self, enclosing_end: Tag) -> Result<Declaration, FrontendDiagnostic> {
         let start = self.current().span.start;
         if self.eat(Tag::Impl).is_some() {
@@ -121,7 +144,7 @@ impl Parser {
                 self.bump();
                 DeclarationKind::Function(Declared {
                     visibility,
-                    item: self.parse_function_declaration()?,
+                    item: self.parse_function_declaration(None)?,
                 })
             }
             Tag::Struct => {
@@ -168,11 +191,18 @@ impl Parser {
                 })
             }
             Tag::Const => {
-                self.bump();
-                DeclarationKind::Const(Declared {
-                    visibility,
-                    item: self.parse_const_declaration()?,
-                })
+                let const_token = self.bump();
+                if self.eat(Tag::Fn).is_some() {
+                    DeclarationKind::Function(Declared {
+                        visibility,
+                        item: self.parse_function_declaration(Some(const_token.span))?,
+                    })
+                } else {
+                    DeclarationKind::Const(Declared {
+                        visibility,
+                        item: self.parse_const_declaration()?,
+                    })
+                }
             }
             Tag::Mod => {
                 self.bump();
@@ -203,28 +233,40 @@ impl Parser {
             .map(|token| Visibility { span: token.span })
     }
 
-    fn parse_function_declaration(&mut self) -> Result<FunctionDeclaration, FrontendDiagnostic> {
-        let signature = self.parse_function_signature(ParameterAnnotations::Inferred)?;
+    fn parse_function_declaration(
+        &mut self,
+        const_span: Option<Span>,
+    ) -> Result<FunctionDeclaration, FrontendDiagnostic> {
+        let name = self.expect_identifier()?;
+        let (type_parameters, effect_parameters) = self.parse_callable_parameters()?;
+        let parameters = self.parse_named_parameters(ParameterContext::Body)?;
+        let return_type = self.parse_optional_body_return_type()?;
+        let effects = if self.eat(Tag::With).is_some() {
+            Some(self.parse_effect_set()?)
+        } else {
+            None
+        };
         let body = self.parse_block()?;
         Ok(FunctionDeclaration {
-            name: signature.name,
-            type_parameters: signature.type_parameters,
-            effect_parameters: signature.effect_parameters,
-            parameters: signature.parameters,
-            return_type: signature.return_type,
-            effects: signature.effects,
+            const_span,
+            name,
+            type_parameters,
+            effect_parameters,
+            parameters,
+            return_type,
+            effects,
             body,
         })
     }
 
     fn parse_function_signature(
         &mut self,
-        annotations: ParameterAnnotations,
+        context: ParameterContext,
     ) -> Result<FunctionSignature, FrontendDiagnostic> {
         let name = self.expect_identifier()?;
         let (type_parameters, effect_parameters) = self.parse_callable_parameters()?;
-        let parameters = self.parse_named_parameters(annotations)?;
-        let return_type = self.parse_optional_return_type()?;
+        let parameters = self.parse_named_parameters(context)?;
+        let return_type = self.parse_optional_signature_return_type()?;
         let effects = if self.eat(Tag::With).is_some() {
             Some(self.parse_effect_set()?)
         } else {
@@ -242,7 +284,7 @@ impl Parser {
 
     fn parse_named_parameters(
         &mut self,
-        annotations: ParameterAnnotations,
+        context: ParameterContext,
     ) -> Result<Vec<NamedParameter>, FrontendDiagnostic> {
         self.expect(Tag::LParen)?;
         let mut parameters = Vec::new();
@@ -252,16 +294,33 @@ impl Parser {
                 let name = self.expect_identifier()?;
                 let annotation = if self.eat(Tag::Colon).is_some() {
                     let annotation_start = self.previous_span().start;
-                    let mode = self.parse_parameter_mode();
-                    let ty = self.parse_type_expr()?;
+                    let receiver = name.text == "self";
+                    let allow_call = !receiver
+                        && matches!(
+                            context,
+                            ParameterContext::Body | ParameterContext::TraitSignature
+                        );
+                    let allow_shape = !receiver && matches!(context, ParameterContext::Body);
+                    let escape = if self.at_contextual("scoped")
+                        && self.nth_starts_parameter_tail(1, allow_shape)
+                    {
+                        Some(EscapeQualifier {
+                            span: self.bump().span,
+                        })
+                    } else {
+                        None
+                    };
+                    let mode = self.parse_parameter_mode(allow_call, allow_shape);
+                    let kind = self.parse_parameter_type_kind(allow_shape)?;
+                    let end = parameter_type_kind_span(&kind).end;
                     Some(ParameterType {
-                        span: Span::new(annotation_start, ty.span.end),
+                        span: Span::new(annotation_start, end),
+                        escape,
                         mode,
-                        ty,
+                        kind,
                     })
-                } else if matches!(annotations, ParameterAnnotations::Inferred)
-                    || matches!(annotations, ParameterAnnotations::TraitSignature)
-                        && name.text == "self"
+                } else if matches!(context, ParameterContext::Body | ParameterContext::Handler)
+                    || matches!(context, ParameterContext::TraitSignature) && name.text == "self"
                 {
                     None
                 } else {
@@ -284,14 +343,66 @@ impl Parser {
         Ok(parameters)
     }
 
-    fn parse_parameter_mode(&mut self) -> Option<Spanned<ParameterMode>> {
-        let (kind, token) = if self.at(Tag::Mut) {
-            (ParameterMode::Mut, self.bump())
+    fn parse_parameter_mode(
+        &mut self,
+        allow_call: bool,
+        allow_shape: bool,
+    ) -> Option<Spanned<ParameterMode>> {
+        let (kind, span) = if self.at(Tag::Amp) {
+            let amp = self.bump();
+            if let Some(mutable) = self.eat(Tag::Mut) {
+                (
+                    ParameterMode::MutBorrow,
+                    Span::new(amp.span.start, mutable.span.end),
+                )
+            } else {
+                (ParameterMode::Borrow, amp.span)
+            }
         } else if self.at(Tag::Move) {
-            (ParameterMode::Move, self.bump())
+            let token = self.bump();
+            (ParameterMode::Move, token.span)
+        } else if allow_call
+            && self.at_contextual("call")
+            && self.nth_starts_annotation(1, allow_shape)
+        {
+            let token = self.bump();
+            (ParameterMode::Call, token.span)
         } else {
             return None;
         };
+        Some(Spanned::new(kind, span))
+    }
+
+    fn parse_parameter_type_kind(
+        &mut self,
+        allow_shape: bool,
+    ) -> Result<ParameterTypeKind, FrontendDiagnostic> {
+        if allow_shape && self.looks_like_shape_expr() {
+            Ok(ParameterTypeKind::Shape(self.parse_shape_expr()?))
+        } else {
+            Ok(ParameterTypeKind::Type(self.parse_type_expr()?))
+        }
+    }
+
+    fn parse_call_assertion_mode(&mut self) -> Option<Spanned<CallAssertionMode>> {
+        let token = self.current().clone();
+        let kind = match token.kind.tag() {
+            Tag::Mut => CallAssertionMode::Mut,
+            Tag::Move => CallAssertionMode::Move,
+            _ => return None,
+        };
+        self.bump();
+        Some(Spanned::new(kind, token.span))
+    }
+
+    fn parse_capture_mode(&mut self) -> Option<Spanned<CaptureMode>> {
+        let token = self.current().clone();
+        let kind = match token.kind.tag() {
+            Tag::Mut => CaptureMode::Mut,
+            Tag::Move => CaptureMode::Move,
+            _ => return None,
+        };
+        self.bump();
         Some(Spanned::new(kind, token.span))
     }
 
@@ -392,6 +503,11 @@ impl Parser {
         let first_type = self.parse_named_type()?;
         if self.eat(Tag::For).is_some() {
             let target = self.parse_named_type()?;
+            let where_clause = if self.at(Tag::Where) {
+                Some(self.parse_where_clause()?)
+            } else {
+                None
+            };
             self.expect(Tag::LBrace)?;
             let mut members = Vec::new();
             while !self.at(Tag::RBrace) {
@@ -402,6 +518,7 @@ impl Parser {
                 type_parameters,
                 trait_type: first_type,
                 target,
+                where_clause,
                 members,
             }))
         } else {
@@ -419,6 +536,37 @@ impl Parser {
         }
     }
 
+    fn parse_where_clause(&mut self) -> Result<WhereClause, FrontendDiagnostic> {
+        let keyword = self.expect(Tag::Where)?;
+        let mut predicates = Vec::new();
+        loop {
+            let start = self.current().span.start;
+            let subject = self.parse_type_expr()?;
+            self.expect(Tag::Colon)?;
+            let mut bounds = vec![self.parse_named_type()?];
+            while self.eat(Tag::Plus).is_some() {
+                bounds.push(self.parse_named_type()?);
+            }
+            let end = bounds.last().expect("where predicate has a bound").span.end;
+            predicates.push(WherePredicate {
+                span: Span::new(start, end),
+                subject,
+                bounds,
+            });
+            if self.eat(Tag::Comma).is_none() {
+                break;
+            }
+            if self.at(Tag::LBrace) {
+                break;
+            }
+        }
+        Ok(WhereClause {
+            span: Span::new(keyword.span.start, self.previous_end()),
+            keyword_span: keyword.span,
+            predicates,
+        })
+    }
+
     fn parse_impl_member(&mut self, inherent: bool) -> Result<ImplMember, FrontendDiagnostic> {
         let start = self.current().span.start;
         let visibility = if inherent {
@@ -426,13 +574,17 @@ impl Parser {
         } else {
             None
         };
+        let const_span = self.eat(Tag::Const).map(|token| token.span);
         let kind = if self.eat(Tag::Fn).is_some() {
-            ImplMemberKind::Function(self.parse_function_declaration()?)
+            ImplMemberKind::Function(self.parse_function_declaration(const_span)?)
+        } else if const_span.is_some() {
+            return Err(self.unexpected(vec![Tag::Fn.expected()]));
         } else if self.at_contextual("type") {
             self.bump();
             ImplMemberKind::AssociatedType(self.parse_associated_type_value()?)
         } else {
             return Err(self.unexpected(vec![
+                Tag::Const.expected(),
                 Tag::Fn.expected(),
                 ExpectedToken::Fixed("type".to_owned()),
             ]));
@@ -467,8 +619,7 @@ impl Parser {
         while !self.at(Tag::RBrace) {
             let start = self.current().span.start;
             let kind = if self.eat(Tag::Fn).is_some() {
-                let signature =
-                    self.parse_function_signature(ParameterAnnotations::TraitSignature)?;
+                let signature = self.parse_function_signature(ParameterContext::TraitSignature)?;
                 self.expect(Tag::Semicolon)?;
                 TraitMemberKind::Method(signature)
             } else if self.at_contextual("type") {
@@ -522,7 +673,7 @@ impl Parser {
         while !self.at(Tag::RBrace) {
             let start = self.expect(Tag::Fn)?.span.start;
             let operation_name = self.expect_identifier()?;
-            let parameters = self.parse_named_parameters(ParameterAnnotations::Required)?;
+            let parameters = self.parse_named_parameters(ParameterContext::FixedSignature)?;
             self.expect(Tag::Arrow)?;
             let return_type = self.parse_return_type_expr()?;
             let end = self.expect(Tag::Semicolon)?.span.end;
@@ -558,7 +709,7 @@ impl Parser {
 
     fn parse_extern_declaration(&mut self) -> Result<ExternDeclaration, FrontendDiagnostic> {
         if self.eat(Tag::Fn).is_some() {
-            let signature = self.parse_function_signature(ParameterAnnotations::Required)?;
+            let signature = self.parse_function_signature(ParameterContext::FixedSignature)?;
             if signature.effects.is_none() {
                 return Err(self.unexpected(vec![Tag::With.expected()]));
             }
@@ -623,16 +774,16 @@ impl Parser {
         while self.at_use_declaration() {
             uses.push(self.parse_use_declaration()?);
         }
-        let mut declarations = Vec::new();
+        let mut items = Vec::new();
         while !self.at(Tag::RBrace) {
-            declarations.push(self.parse_declaration(Tag::RBrace)?);
+            items.push(self.parse_module_item(Tag::RBrace)?);
         }
         self.expect(Tag::RBrace)?;
         Ok(ModuleDeclaration {
             name,
             requires,
             uses,
-            declarations,
+            items,
         })
     }
 
@@ -687,12 +838,14 @@ impl Parser {
         let name = self.expect_identifier()?;
         let mut bounds = Vec::new();
         if self.eat(Tag::Colon).is_some() {
-            bounds.push(self.parse_named_type()?);
+            bounds.push(self.parse_generic_bound()?);
             while self.eat(Tag::Plus).is_some() {
-                bounds.push(self.parse_named_type()?);
+                bounds.push(self.parse_generic_bound()?);
             }
         }
-        let end = bounds.last().map_or(name.span.end, |bound| bound.span.end);
+        let end = bounds
+            .last()
+            .map_or(name.span.end, |bound| generic_bound_span(bound).end);
         Ok(TypeParameter {
             span: Span::new(start, end),
             name,
@@ -700,9 +853,16 @@ impl Parser {
         })
     }
 
+    fn parse_generic_bound(&mut self) -> Result<GenericBound, FrontendDiagnostic> {
+        if self.looks_like_shape_expr() {
+            Ok(GenericBound::Shape(self.parse_shape_expr()?))
+        } else {
+            Ok(GenericBound::Named(self.parse_named_type()?))
+        }
+    }
+
     fn parse_type_expr(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
         match self.current_tag() {
-            Tag::Fn => self.parse_function_type(),
             Tag::LParen => self.parse_parenthesized_type(),
             Tag::Ident | Tag::Super => {
                 let named = self.parse_named_type()?;
@@ -712,11 +872,30 @@ impl Parser {
         }
     }
 
-    fn parse_optional_return_type(&mut self) -> Result<Option<TypeExpr>, FrontendDiagnostic> {
+    fn parse_optional_signature_return_type(
+        &mut self,
+    ) -> Result<Option<TypeExpr>, FrontendDiagnostic> {
         if self.eat(Tag::Arrow).is_some() {
             Ok(Some(self.parse_return_type_expr()?))
         } else {
             Ok(None)
+        }
+    }
+
+    fn parse_optional_body_return_type(
+        &mut self,
+    ) -> Result<Option<Box<ReturnAnnotation>>, FrontendDiagnostic> {
+        if self.eat(Tag::Arrow).is_none() {
+            return Ok(None);
+        }
+        if self.at(Tag::LParen) && self.looks_like_shape_expr() {
+            Ok(Some(Box::new(ReturnAnnotation::Shape(
+                self.parse_shape_expr()?,
+            ))))
+        } else {
+            Ok(Some(Box::new(ReturnAnnotation::Type(
+                self.parse_return_type_expr()?,
+            ))))
         }
     }
 
@@ -770,17 +949,39 @@ impl Parser {
         Ok(arguments)
     }
 
-    fn parse_function_type(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
+    fn parse_shape_expr(&mut self) -> Result<ShapeExpr, FrontendDiagnostic> {
+        if self.at(Tag::Fn) {
+            return self.parse_callable_shape();
+        }
+        let start = self.expect(Tag::LParen)?.span.start;
+        let inner = self.parse_shape_expr()?;
+        let end = self.expect(Tag::RParen)?.span.end;
+        Ok(Spanned::new(
+            ShapeKind::Grouped(Box::new(inner)),
+            Span::new(start, end),
+        ))
+    }
+
+    fn parse_callable_shape(&mut self) -> Result<ShapeExpr, FrontendDiagnostic> {
         let start = self.expect(Tag::Fn)?.span.start;
         self.expect(Tag::LParen)?;
         let mut parameters = Vec::new();
         if !self.at(Tag::RParen) {
             loop {
                 let parameter_start = self.current().span.start;
-                let mode = self.parse_parameter_mode();
+                let escape =
+                    if self.at_contextual("scoped") && self.nth_starts_parameter_tail(1, false) {
+                        Some(EscapeQualifier {
+                            span: self.bump().span,
+                        })
+                    } else {
+                        None
+                    };
+                let mode = self.parse_parameter_mode(true, false);
                 let ty = self.parse_type_expr()?;
-                parameters.push(FunctionTypeParameter {
+                parameters.push(ShapeParameter {
                     span: Span::new(parameter_start, ty.span.end),
+                    escape,
                     mode,
                     ty,
                 });
@@ -791,7 +992,7 @@ impl Parser {
         }
         self.expect(Tag::RParen)?;
         self.expect(Tag::Arrow)?;
-        let return_type = Box::new(self.parse_return_type_expr()?);
+        let return_type = self.parse_return_type_expr()?;
         let effects = if self.eat(Tag::With).is_some() {
             Some(self.parse_effect_set()?)
         } else {
@@ -801,7 +1002,7 @@ impl Parser {
             .as_ref()
             .map_or(return_type.span.end, |effects| effects.span.end);
         Ok(Spanned::new(
-            TypeKind::Function(FunctionType {
+            ShapeKind::Callable(CallableShape {
                 parameters,
                 return_type,
                 effects,
@@ -812,11 +1013,13 @@ impl Parser {
 
     fn parse_parenthesized_type(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
         let start = self.expect(Tag::LParen)?.span.start;
-        let mut first = self.parse_type_expr()?;
+        let first = self.parse_type_expr()?;
         if self.eat(Tag::Comma).is_none() {
             let end = self.expect(Tag::RParen)?.span.end;
-            first.span = Span::new(start, end);
-            return Ok(first);
+            return Ok(Spanned::new(
+                TypeKind::Grouped(Box::new(first)),
+                Span::new(start, end),
+            ));
         }
         let second = self.parse_type_expr()?;
         let mut elements = vec![first, second];
@@ -851,9 +1054,7 @@ impl Parser {
     fn parse_effect_expr(&mut self) -> Result<EffectExpr, FrontendDiagnostic> {
         let start = self.current().span.start;
         let kind = if self.eat(Tag::Mut).is_some() {
-            EffectKind::Mutation {
-                arguments: self.parse_effect_type_arguments()?,
-            }
+            EffectKind::Mutation
         } else if self.eat(Tag::Unsafe).is_some() {
             EffectKind::Unsafe
         } else if self.at(Tag::Ident) || self.at(Tag::Super) {
@@ -873,18 +1074,6 @@ impl Parser {
             ]));
         };
         Ok(Spanned::new(kind, Span::new(start, self.previous_end())))
-    }
-
-    fn parse_effect_type_arguments(&mut self) -> Result<Vec<TypeExpr>, FrontendDiagnostic> {
-        if self.eat(Tag::Less).is_none() {
-            return Ok(Vec::new());
-        }
-        let mut arguments = vec![self.parse_type_expr()?];
-        while self.eat(Tag::Comma).is_some() && !self.at(Tag::Greater) {
-            arguments.push(self.parse_type_expr()?);
-        }
-        self.expect(Tag::Greater)?;
-        Ok(arguments)
     }
 
     fn parse_effect_application_arguments(
@@ -1173,7 +1362,7 @@ impl Parser {
                 if self.at(Tag::Mut) || self.at(Tag::Move) {
                     let start = self.current().span.start;
                     let mode = self
-                        .parse_parameter_mode()
+                        .parse_call_assertion_mode()
                         .expect("mode tag was checked before parsing");
                     let place = self.parse_place_expr()?;
                     arguments.push(CallArgument::Mode {
@@ -1476,7 +1665,7 @@ impl Parser {
             let effect = self.parse_path(false)?;
             self.expect(Tag::Dot)?;
             let operation = self.expect_identifier()?;
-            let parameters = self.parse_named_parameters(ParameterAnnotations::Inferred)?;
+            let parameters = self.parse_named_parameters(ParameterContext::Handler)?;
             self.expect(Tag::FatArrow)?;
             let body = self.parse_expr()?;
             let mut end = body.span.end;
@@ -1502,8 +1691,8 @@ impl Parser {
         } else {
             None
         };
-        let parameters = self.parse_named_parameters(ParameterAnnotations::Inferred)?;
-        let return_type = self.parse_optional_return_type()?;
+        let parameters = self.parse_named_parameters(ParameterContext::Body)?;
+        let return_type = self.parse_optional_body_return_type()?;
         let effects = if self.eat(Tag::With).is_some() {
             Some(self.parse_effect_set()?)
         } else {
@@ -1529,7 +1718,7 @@ impl Parser {
         if !self.at(Tag::RBracket) {
             loop {
                 let capture_start = self.current().span.start;
-                let mode = self.parse_parameter_mode();
+                let mode = self.parse_capture_mode();
                 let name = self.expect_identifier()?;
                 let annotation = if self.eat(Tag::Colon).is_some() {
                     Some(self.parse_type_expr()?)
@@ -1653,7 +1842,7 @@ impl Parser {
                 annotation,
             }
         } else if self.at(Tag::LParen) {
-            LetBinding::Tuple(self.parse_pattern()?)
+            LetBinding::Tuple(self.parse_pattern(false)?)
         } else {
             let name = self.expect_identifier()?;
             let annotation = if self.eat(Tag::Colon).is_some() {
@@ -1709,7 +1898,7 @@ impl Parser {
     fn parse_if_let_statement(&mut self) -> Result<Statement, FrontendDiagnostic> {
         let start = self.expect(Tag::If)?.span.start;
         self.expect(Tag::Let)?;
-        let pattern = self.parse_pattern()?;
+        let pattern = self.parse_pattern(true)?;
         self.expect(Tag::Equal)?;
         let value = self.parse_control_head()?;
         let then_branch = self.parse_block()?;
@@ -1846,11 +2035,11 @@ impl Parser {
     }
 
     fn parse_or_pattern(&mut self) -> Result<OrPattern, FrontendDiagnostic> {
-        let first = self.parse_pattern()?;
+        let first = self.parse_pattern(true)?;
         let start = first.span.start;
         let mut alternatives = vec![first];
         while self.eat(Tag::Pipe).is_some() {
-            alternatives.push(self.parse_pattern()?);
+            alternatives.push(self.parse_pattern(true)?);
         }
         let end = alternatives.last().expect("pattern is nonempty").span.end;
         Ok(OrPattern {
@@ -1859,7 +2048,10 @@ impl Parser {
         })
     }
 
-    fn parse_pattern(&mut self) -> Result<Pattern, FrontendDiagnostic> {
+    fn parse_pattern(
+        &mut self,
+        allow_qualified_binding: bool,
+    ) -> Result<Pattern, FrontendDiagnostic> {
         let token = self.current().clone();
         match token.kind {
             TokenKind::Ident(ref text)
@@ -1888,19 +2080,43 @@ impl Parser {
                     token.span,
                 ))
             }
-            TokenKind::Ident(_) | TokenKind::Super => self.parse_path_pattern(),
-            TokenKind::LParen => self.parse_tuple_pattern(),
-            _ => Err(self.unexpected(pattern_expectations())),
+            TokenKind::Mut | TokenKind::Move if allow_qualified_binding => {
+                let mode_token = self.bump();
+                let mode = match mode_token.kind.tag() {
+                    Tag::Mut => BindingMode::Mut,
+                    Tag::Move => BindingMode::Move,
+                    _ => unreachable!(),
+                };
+                if self.at_contextual("_") {
+                    return Err(self.unexpected(vec![Tag::Ident.expected()]));
+                }
+                let name = self.expect_identifier()?;
+                Ok(Spanned::new(
+                    PatternKind::QualifiedBinding(QualifiedBinding {
+                        name: name.clone(),
+                        mode: Spanned::new(mode, mode_token.span),
+                    }),
+                    Span::new(mode_token.span.start, name.span.end),
+                ))
+            }
+            TokenKind::Ident(_) | TokenKind::Super => {
+                self.parse_path_pattern(allow_qualified_binding)
+            }
+            TokenKind::LParen => self.parse_tuple_pattern(allow_qualified_binding),
+            _ => Err(self.unexpected(pattern_expectations(allow_qualified_binding))),
         }
     }
 
-    fn parse_path_pattern(&mut self) -> Result<Pattern, FrontendDiagnostic> {
+    fn parse_path_pattern(
+        &mut self,
+        allow_qualified_binding: bool,
+    ) -> Result<Pattern, FrontendDiagnostic> {
         let path = self.parse_path(false)?;
         let start = path.span.start;
         let fields = if self.eat(Tag::LParen).is_some() {
-            let mut patterns = vec![self.parse_pattern()?];
+            let mut patterns = vec![self.parse_pattern(allow_qualified_binding)?];
             while self.eat(Tag::Comma).is_some() && !self.at(Tag::RParen) {
-                patterns.push(self.parse_pattern()?);
+                patterns.push(self.parse_pattern(allow_qualified_binding)?);
             }
             self.expect(Tag::RParen)?;
             Some(PatternFields::Positional(patterns))
@@ -1915,7 +2131,7 @@ impl Parser {
                     let field_start = self.current().span.start;
                     let name = self.expect_identifier()?;
                     let pattern = if self.eat(Tag::Colon).is_some() {
-                        Some(self.parse_pattern()?)
+                        Some(self.parse_pattern(allow_qualified_binding)?)
                     } else {
                         None
                     };
@@ -1952,14 +2168,17 @@ impl Parser {
         ))
     }
 
-    fn parse_tuple_pattern(&mut self) -> Result<Pattern, FrontendDiagnostic> {
+    fn parse_tuple_pattern(
+        &mut self,
+        allow_qualified_binding: bool,
+    ) -> Result<Pattern, FrontendDiagnostic> {
         let start = self.expect(Tag::LParen)?.span.start;
-        let first = self.parse_pattern()?;
+        let first = self.parse_pattern(allow_qualified_binding)?;
         self.expect(Tag::Comma)?;
-        let second = self.parse_pattern()?;
+        let second = self.parse_pattern(allow_qualified_binding)?;
         let mut patterns = vec![first, second];
         while self.eat(Tag::Comma).is_some() && !self.at(Tag::RParen) {
-            patterns.push(self.parse_pattern()?);
+            patterns.push(self.parse_pattern(allow_qualified_binding)?);
         }
         let end = self.expect(Tag::RParen)?.span.end;
         Ok(Spanned::new(
@@ -1981,6 +2200,26 @@ impl Parser {
 
     fn at_contextual(&self, spelling: &str) -> bool {
         matches!(&self.current().kind, TokenKind::Ident(text) if text == spelling)
+    }
+
+    fn nth_starts_annotation(&self, distance: usize, allow_shape: bool) -> bool {
+        matches!(
+            self.nth_tag(distance),
+            Tag::Ident | Tag::Super | Tag::LParen
+        ) || allow_shape && self.nth_tag(distance) == Tag::Fn
+    }
+
+    fn nth_starts_parameter_tail(&self, distance: usize, allow_shape: bool) -> bool {
+        matches!(self.nth_tag(distance), Tag::Amp | Tag::Move)
+            || self.nth_starts_annotation(distance, allow_shape)
+    }
+
+    fn looks_like_shape_expr(&self) -> bool {
+        let mut distance = 0;
+        while self.nth_tag(distance) == Tag::LParen {
+            distance += 1;
+        }
+        self.nth_tag(distance) == Tag::Fn
     }
 
     fn at(&self, tag: Tag) -> bool {
@@ -2052,6 +2291,7 @@ fn declaration_expectations(
     ];
     if allow_visibility {
         expected.push(Tag::Pub.expected());
+        expected.push(ExpectedToken::Fixed("generate".to_owned()));
     } else {
         expected.retain(|item| item != &Tag::Impl.expected());
     }
@@ -2065,7 +2305,6 @@ fn type_expectations() -> Vec<ExpectedToken> {
     vec![
         Tag::Ident.expected(),
         Tag::Super.expected(),
-        Tag::Fn.expected(),
         Tag::LParen.expected(),
     ]
 }
@@ -2102,8 +2341,8 @@ fn expression_expectations() -> Vec<ExpectedToken> {
     ]
 }
 
-fn pattern_expectations() -> Vec<ExpectedToken> {
-    vec![
+fn pattern_expectations(allow_qualified_binding: bool) -> Vec<ExpectedToken> {
+    let mut expected = vec![
         Tag::Integer.expected(),
         Tag::Float.expected(),
         Tag::String.expected(),
@@ -2112,7 +2351,26 @@ fn pattern_expectations() -> Vec<ExpectedToken> {
         Tag::Ident.expected(),
         Tag::Super.expected(),
         Tag::LParen.expected(),
-    ]
+    ];
+    if allow_qualified_binding {
+        expected.push(Tag::Mut.expected());
+        expected.push(Tag::Move.expected());
+    }
+    expected
+}
+
+fn parameter_type_kind_span(kind: &ParameterTypeKind) -> Span {
+    match kind {
+        ParameterTypeKind::Type(ty) => ty.span,
+        ParameterTypeKind::Shape(shape) => shape.span,
+    }
+}
+
+fn generic_bound_span(bound: &GenericBound) -> Span {
+    match bound {
+        GenericBound::Named(named) => named.span,
+        GenericBound::Shape(shape) => shape.span,
+    }
 }
 
 fn make_binary(left: Expr, operator_span: Span, operator: BinaryOperator, right: Expr) -> Expr {

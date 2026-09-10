@@ -65,6 +65,7 @@ pub(crate) enum TokenKind {
     Greater,
     LessEqual,
     GreaterEqual,
+    Amp,
     AndAnd,
     OrOr,
     Bang,
@@ -150,6 +151,7 @@ pub(crate) enum Tag {
     Greater,
     LessEqual,
     GreaterEqual,
+    Amp,
     AndAnd,
     OrOr,
     Bang,
@@ -236,6 +238,7 @@ impl TokenKind {
             Self::Greater => Tag::Greater,
             Self::LessEqual => Tag::LessEqual,
             Self::GreaterEqual => Tag::GreaterEqual,
+            Self::Amp => Tag::Amp,
             Self::AndAnd => Tag::AndAnd,
             Self::OrOr => Tag::OrOr,
             Self::Bang => Tag::Bang,
@@ -331,6 +334,7 @@ impl Tag {
             Self::Greater => ">",
             Self::LessEqual => "<=",
             Self::GreaterEqual => ">=",
+            Self::Amp => "&",
             Self::AndAnd => "&&",
             Self::OrOr => "||",
             Self::Bang => "!",
@@ -496,6 +500,7 @@ impl Lexer<'_> {
             b'<' => TokenKind::Less,
             b'>' => TokenKind::Greater,
             b'!' => TokenKind::Bang,
+            b'&' => TokenKind::Amp,
             b'|' => TokenKind::Pipe,
             b'=' => TokenKind::Equal,
             b'.' => TokenKind::Dot,
@@ -816,7 +821,7 @@ mod tests {
         let source = "fn let mut move const struct enum match impl effect handle with if else \
             catch return for in pub where true false trait try while break continue loop \
             use as extern mod super requires unsafe \
-            + - * / % == != < > <= >= && || ! | = += -= *= /= %= .. ..= . :: ? -> => \
+            + - * / % == != < > <= >= & && || ! | = += -= *= /= %= .. ..= . :: ? -> => \
             ( ) { } [ ] , : ;";
         assert_eq!(
             tags(source),
@@ -867,6 +872,7 @@ mod tests {
                 Tag::Greater,
                 Tag::LessEqual,
                 Tag::GreaterEqual,
+                Tag::Amp,
                 Tag::AndAnd,
                 Tag::OrOr,
                 Tag::Bang,
