@@ -7,18 +7,40 @@ use vorton_compiler::{
 
 const APP: LibraryId = LibraryId(0);
 const DEPENDENCY: LibraryId = LibraryId(1);
+const CORE: LibraryId = LibraryId(u32::MAX);
+const CORE_SOURCE: &str = include_str!("../../../core/root.vorton");
+
+fn with_core(
+    mut libraries: BTreeMap<LibraryId, LibrarySources>,
+) -> BTreeMap<LibraryId, LibrarySources> {
+    for (library_id, library) in &mut libraries {
+        if *library_id != CORE {
+            library.dependencies.insert("vorton_core".to_owned(), CORE);
+        }
+    }
+    libraries.insert(
+        CORE,
+        LibrarySources {
+            root: CORE_SOURCE.to_owned(),
+            modules: BTreeMap::new(),
+            dependencies: BTreeMap::new(),
+        },
+    );
+    libraries
+}
 
 fn project(root: &str, modules: BTreeMap<FileModulePath, String>) -> ProjectSources {
     ProjectSources {
         entry: APP,
-        libraries: BTreeMap::from([(
+        core: CORE,
+        libraries: with_core(BTreeMap::from([(
             APP,
             LibrarySources {
                 root: root.to_owned(),
                 modules,
                 dependencies: BTreeMap::new(),
             },
-        )]),
+        )])),
     }
 }
 
@@ -27,7 +49,8 @@ fn public_project_api_resolves_owned_sources_and_preserves_frontend_origin() {
     let api = FileModulePath::new(["api"]).expect("abstract module key");
     let mut sources = ProjectSources {
         entry: APP,
-        libraries: BTreeMap::from([
+        core: CORE,
+        libraries: with_core(BTreeMap::from([
             (
                 APP,
                 LibrarySources {
@@ -47,7 +70,7 @@ fn public_project_api_resolves_owned_sources_and_preserves_frontend_origin() {
                     dependencies: BTreeMap::new(),
                 },
             ),
-        ]),
+        ])),
     };
     let resolved = resolve_project(&sources).expect("public project entry resolves");
     sources.libraries.clear();
@@ -55,7 +78,8 @@ fn public_project_api_resolves_owned_sources_and_preserves_frontend_origin() {
 
     let diagnostic = resolve_project(&ProjectSources {
         entry: APP,
-        libraries: BTreeMap::from([
+        core: CORE,
+        libraries: with_core(BTreeMap::from([
             (
                 APP,
                 LibrarySources {
@@ -72,7 +96,7 @@ fn public_project_api_resolves_owned_sources_and_preserves_frontend_origin() {
                     dependencies: BTreeMap::new(),
                 },
             ),
-        ]),
+        ])),
     })
     .expect_err("reachable frontend failure remains structured");
     assert!(matches!(
@@ -89,14 +113,15 @@ fn library_graph_diagnostics_expose_real_input_identities_without_source_spans()
     let missing = LibraryId(99);
     let diagnostic = resolve_project(&ProjectSources {
         entry: APP,
-        libraries: BTreeMap::from([(
+        core: CORE,
+        libraries: with_core(BTreeMap::from([(
             APP,
             LibrarySources {
                 root: "@frontend_would_be_later".to_owned(),
                 modules: BTreeMap::new(),
                 dependencies: BTreeMap::from([("model".to_owned(), missing)]),
             },
-        )]),
+        )])),
     })
     .expect_err("missing dependency target is an input diagnostic");
     assert_eq!(
@@ -115,7 +140,8 @@ fn library_graph_diagnostics_expose_real_input_identities_without_source_spans()
 fn diagnostic_origins_distinguish_consumer_and_dependency_sources() {
     let diagnostic = resolve_project(&ProjectSources {
         entry: APP,
-        libraries: BTreeMap::from([
+        core: CORE,
+        libraries: with_core(BTreeMap::from([
             (
                 APP,
                 LibrarySources {
@@ -132,7 +158,7 @@ fn diagnostic_origins_distinguish_consumer_and_dependency_sources() {
                     dependencies: BTreeMap::new(),
                 },
             ),
-        ]),
+        ])),
     })
     .expect_err("a cross-namespace dependency import is ambiguous");
     assert!(matches!(

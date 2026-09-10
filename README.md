@@ -44,7 +44,7 @@ fn message() -> Str {
 
 ## 当前构建与 CI
 
-根 workspace 固定使用 Rust `1.98.0`。Compiler library 提供保持独立的两个入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 验证并解析显式纯内存库 DAG，返回统一的 owned opaque `ResolvedProject`，或带 `LibraryId`、库内 source key 与 UTF-8 byte span 的结构化 `ProjectDiagnostic`。`parse` 的签名与单 source 行为不依赖项目输入。
+根 workspace 固定使用 Rust `1.98.0`。Compiler library 提供保持独立的两个入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 验证并解析显式纯内存库 DAG 及宿主指定的唯一官方 core，返回统一的 owned opaque `ResolvedProject`，或带 `LibraryId`、库内 source key 与 UTF-8 byte span 的结构化 `ProjectDiagnostic`。`parse` 的签名与单 source 行为不依赖项目输入。
 
 ```rust
 use std::collections::BTreeMap;
@@ -52,21 +52,35 @@ use vorton_compiler::{LibraryId, LibrarySources, ProjectSources, resolve_project
 
 let app = LibraryId(0);
 let model = LibraryId(1);
+let core = LibraryId(2);
+let core_source = std::fs::read_to_string("core/root.vorton").expect("bundled core source");
 let sources = ProjectSources {
     entry: app,
+    core,
     libraries: BTreeMap::from([
         (
             app,
             LibrarySources {
                 root: "use model::Config; fn run(config: Config) {}".to_owned(),
                 modules: BTreeMap::new(),
-                dependencies: BTreeMap::from([("model".to_owned(), model)]),
+                dependencies: BTreeMap::from([
+                    ("model".to_owned(), model),
+                    ("foundation".to_owned(), core),
+                ]),
             },
         ),
         (
             model,
             LibrarySources {
                 root: "pub struct Config {}".to_owned(),
+                modules: BTreeMap::new(),
+                dependencies: BTreeMap::from([("runtime".to_owned(), core)]),
+            },
+        ),
+        (
+            core,
+            LibrarySources {
+                root: core_source,
                 modules: BTreeMap::new(),
                 dependencies: BTreeMap::new(),
             },
@@ -76,7 +90,7 @@ let sources = ProjectSources {
 let resolved = resolve_project(&sources).expect("project resolves");
 ```
 
-`LibraryId` 只区分本次输入中的库实例；依赖别名由每个 `LibrarySources` 明确给出。名称层结果不表示 Checker、完整接口或生成语义已经完成。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
+`LibraryId` 只区分本次输入中的库实例；依赖别名由每个 `LibrarySources` 明确给出。宿主读取仓库唯一的 [`core/root.vorton`](core/root.vorton)，把它作为 `core` 对应库的真实 root source 传入；每个可达非 core 库都必须以自己选择的别名直接依赖该 ID。Resolver 不读取磁盘，也不按别名或 ID 数值猜测 core。名称层结果只证明这些源码声明的身份与固定协议轮廓，不表示 Checker、完整接口或生成语义已经完成。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
 
 ```powershell
 python .agents/scripts/validate_current_tree.py

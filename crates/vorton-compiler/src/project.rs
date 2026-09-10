@@ -116,6 +116,11 @@ pub struct LibrarySources {
 pub struct ProjectSources {
     /// The library whose dependency closure forms this resolution input.
     pub entry: LibraryId,
+    /// The host-selected official core library for this resolution input.
+    ///
+    /// This must name a real `libraries` key. Every reachable non-core library
+    /// must directly depend on the same identity.
+    pub core: LibraryId,
     /// Every library referenced by the explicit input graph, reachable or not.
     pub libraries: BTreeMap<LibraryId, LibrarySources>,
 }
@@ -158,6 +163,10 @@ pub enum ProjectDiagnosticKind {
     MissingEntryLibrary {
         entry: LibraryId,
     },
+    /// `core` is not a key in the supplied library graph.
+    MissingCoreLibrary {
+        core: LibraryId,
+    },
     /// A direct dependency alias is not one legal source identifier.
     InvalidDependencyAlias {
         owner: LibraryId,
@@ -172,6 +181,11 @@ pub enum ProjectDiagnosticKind {
     /// The repeated first/last element closes an actual dependency cycle.
     LibraryDependencyCycle {
         cycle: Vec<LibraryId>,
+    },
+    /// A reachable non-core library does not directly depend on `core`.
+    MissingDirectCoreDependency {
+        owner: LibraryId,
+        core: LibraryId,
     },
     Frontend(FrontendDiagnosticKind),
     /// A reachable `generate` item requires the later generation stage.
@@ -232,6 +246,65 @@ pub enum ProjectDiagnosticKind {
     InvalidSelf {
         library: LibraryId,
     },
+    /// The official core root does not declare one required semantic role.
+    MissingCoreRole {
+        core: LibraryId,
+        role: String,
+    },
+    /// A declared core role does not match the required bootstrap profile.
+    InvalidCoreRole(Box<CoreRoleDiagnostic>),
+}
+
+/// Source-backed detail for an invalid official core role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreRoleDiagnostic {
+    pub core: LibraryId,
+    pub role: String,
+    pub member: Option<String>,
+    pub issue: CoreRoleIssue,
+}
+
+/// The finite declaration-profile mismatch detected for one official core role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreRoleIssue {
+    DeclarationKind,
+    Visibility,
+    GenericArity {
+        expected: usize,
+        actual: usize,
+    },
+    GenericBounds,
+    VariantSet,
+    VariantPayload,
+    Supertraits,
+    MemberSet,
+    MemberKind,
+    MethodGenericArity {
+        expected_types: usize,
+        actual_types: usize,
+        expected_effects: usize,
+        actual_effects: usize,
+    },
+    ParameterCount {
+        expected: usize,
+        actual: usize,
+    },
+    Receiver,
+    ParameterMode {
+        index: usize,
+        expected: ParameterMode,
+        actual: Option<ParameterMode>,
+    },
+    ParameterEscape {
+        index: usize,
+    },
+    ParameterType {
+        index: usize,
+    },
+    ReturnType,
+    EffectProfile,
+    AssociatedTypeBounds,
+    AssociatedTypeDefault,
 }
 
 /// An owned project whose lexical and nominal names have been resolved.
@@ -240,9 +313,11 @@ pub enum ProjectDiagnosticKind {
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedProject {
     pub(crate) entry: LibraryId,
+    pub(crate) core: LibraryId,
     pub(crate) dependencies: BTreeMap<LibraryId, BTreeMap<String, LibraryId>>,
     pub(crate) modules: BTreeMap<ModuleRef, ResolvedModule>,
     pub(crate) entities: BTreeMap<EntityId, Entity>,
+    pub(crate) core_roles: CoreRoles,
 }
 
 impl fmt::Debug for ResolvedProject {
@@ -250,6 +325,7 @@ impl fmt::Debug for ResolvedProject {
         formatter
             .debug_struct("ResolvedProject")
             .field("entry", &self.entry)
+            .field("core", &self.core)
             .field("library_count", &self.dependencies.len())
             .field("module_count", &self.modules.len())
             .field("entity_count", &self.entities.len())
@@ -389,9 +465,7 @@ pub(crate) enum EntityKind {
     AssociatedType,
     EffectOperation,
     LanguageType,
-    LanguageTrait,
     LanguageEffect,
-    LanguageConstructor,
     InherentImpl,
     TraitImpl,
     Closure,
@@ -431,6 +505,63 @@ pub(crate) struct Entity {
     pub(crate) owner: Option<EntityId>,
     pub(crate) members: BTreeMap<String, Vec<EntityId>>,
     pub(crate) shape: EntityShape,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreRoles {
+    pub(crate) option: CoreOptionRole,
+    pub(crate) ordering: CoreOrderingRole,
+    pub(crate) partial_eq: CoreMethodRole,
+    pub(crate) eq: EntityId,
+    pub(crate) partial_ord: CoreMethodRole,
+    pub(crate) ord: CoreMethodRole,
+    pub(crate) clone: CoreMethodRole,
+    pub(crate) copy: EntityId,
+    pub(crate) drop: CoreMethodRole,
+    pub(crate) display: CoreMethodRole,
+    pub(crate) debug: CoreMethodRole,
+    pub(crate) hash: CoreMethodRole,
+    pub(crate) fn_once: EntityId,
+    pub(crate) fn_mut: EntityId,
+    pub(crate) function: EntityId,
+    pub(crate) iterator: CoreIteratorRole,
+    pub(crate) iterable: CoreIterableRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreOptionRole {
+    pub(crate) declaration: EntityId,
+    pub(crate) some: EntityId,
+    pub(crate) none: EntityId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreOrderingRole {
+    pub(crate) declaration: EntityId,
+    pub(crate) less: EntityId,
+    pub(crate) equal: EntityId,
+    pub(crate) greater: EntityId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreMethodRole {
+    pub(crate) declaration: EntityId,
+    pub(crate) method: EntityId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreIteratorRole {
+    pub(crate) declaration: EntityId,
+    pub(crate) item: EntityId,
+    pub(crate) next: EntityId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreIterableRole {
+    pub(crate) declaration: EntityId,
+    pub(crate) item: EntityId,
+    pub(crate) iter_type: EntityId,
+    pub(crate) iter: EntityId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,11 +2,11 @@
 
 Vorton 的 trait 系统提供有界多态性（bounded polymorphism）。具体 receiver 在类型检查时解析到唯一 impl；受 trait bound 的类型变量通过隐式 dictionary evidence 调用。Evidence 的目标表示不是语言规范的一部分。
 
-语言以 `Language` origin 预声明的 trait 只有 `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Clone`、`Debug`、`Drop`、`Iterable`、`Iterator`、`Fn`、`FnMut` 与 `FnOnce`。下文 `Show`、`Describable` 等均是示例中显式声明的普通 source trait，不构成额外 builtin。
+宿主指定的唯一官方 core root 以普通 source declaration 公开 `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Clone`、`Copy`、`Drop`、`Display`、`Debug`、`Hash`、`FnOnce`、`FnMut`、`Fn`、`Iterator` 与 `Iterable`。这些 trait 及其 member、Self、generic、reference 都保留该 core 的 `LibraryId`、source 与 span；它们不再拥有平行的 `Language` declaration。下文 `Show`、`Describable` 等均是示例中显式声明的普通 source trait，不构成额外 core 协议。
 
-本规范明确使用的 Language member identity 是 `PartialEq::eq`、`PartialOrd::partial_cmp`、`Ord::cmp`、`Drop::drop`、`Iterable::{Item, Iter, iter}` 与 `Iterator::next`。Resolver 可冻结这些 owner/member identity，但不由命名习惯为 `Hash`、`Clone`、`Debug` 或其他 builtin 发明 source-visible member、signature 或 runtime operation；其余 trait/impl selection 在 Checker 信息完备后决定。
+官方 core 的 source member identity 包括 `PartialEq::eq`、`PartialOrd::partial_cmp`、`Ord::cmp`、`Clone::clone`、`Drop::drop`、`Display::to_str`、`Debug::debug`、`Hash::hash`、`Iterable::{Item, Iter, iter}` 与 `Iterator::{Item, next}`。`Eq`、`Copy`、`FnOnce`、`FnMut` 与 `Fn` 没有新增 member。Resolver 在成功前冻结并核对这些 owner/member identity，但不由命名习惯发明额外 member、signature、impl 或 runtime operation；trait/impl selection 在 Checker 信息完备后决定。
 
-`PartialEq`、`PartialOrd`、`Ordering` 及其成员是后续 Resolver/Checker 必须共同消费的 exact Language identity。本规范冻结其目标语义，不表示当前只有 frontend/Resolver 入口的 compiler 已实现这些 identity、数值检查或比较执行。
+`PartialEq`、`PartialOrd`、`Ordering` 及其成员是后续 Resolver/Checker 共同消费的指定 core source identity。Resolver 对 core profile 的成功只证明声明 identity 与下文固定轮廓，不表示已经完成任意 impl 的类型/effect conformance、数值检查、比较执行、Copy/Drop 资格、dispatch 或 derive。
 
 ## Trait 声明
 
@@ -48,9 +48,49 @@ Vorton 0.1 不支持 return-position `impl Trait`、opaque type 或由推断产�
 
 Vorton 0.1 的 source trait member 只有方法签名，不允许函数体。Trait declaration 中出现 `{ ... }` 方法体必须稳定报错，并建议把实现写入每个 `impl Trait for Type`；每个 impl 必须显式提供 trait 的全部方法。该限制不删除 associated type default，也不影响编译器内建或 auto-derived 的 exact impl body。
 
+## 官方 core 协议轮廓
+
+仓库随 compiler 配套的 [`core/root.vorton`](../../core/root.vorton) 是下列 declaration 的 source authority。除下一节的四个比较 trait 外，固定轮廓如下；所有 method 都没有 default body，省略 `with` 的位置保留按选定 impl 关联的 effect scheme：
+
+```vorton
+pub trait Clone {
+    fn clone(self: &Self) -> Self;
+}
+pub trait Copy: Clone {}
+pub trait Drop {
+    fn drop(self: &mut Self) -> Unit;
+}
+
+pub trait Display {
+    fn to_str(self: &Self) -> Str;
+}
+pub trait Debug {
+    fn debug(self: &Self) -> Str;
+}
+pub trait Hash {
+    fn hash(self: &Self) -> Int;
+}
+
+pub trait FnOnce {}
+pub trait FnMut: FnOnce {}
+pub trait Fn: FnMut {}
+
+pub trait Iterator {
+    type Item;
+    fn next(self: &mut Self) -> Option<Self::Item>;
+}
+pub trait Iterable {
+    type Item;
+    type Iter: Iterator<Item = Self::Item>;
+    fn iter(self: move Self) -> Self::Iter;
+}
+```
+
+`Copy` 只在声明层表达 `Clone` supertrait 且没有新增 member；具体类型是否具备 Copy 资格留给 Checker 与资源阶段。`Display` 与 `Debug` 使用不同 exact method identity。`Fn`／`FnMut`／`FnOnce` 是封闭调用能力标记，不声明 variadic call member 或自定义调用运算符。`Iterator`／`Iterable` 的 associated type 与 method reference 必须保持上述 exact owner 关系。
+
 ## 比较 trait
 
-比较能力由四个 Language trait 与一个 Language enum 封闭。下列是概念签名，不要求或允许程序在 source 中重新声明这些 builtin：
+比较能力由指定官方 core 的四个 source trait 与一个 source enum 封闭。Core root 必须按下列轮廓直接公开声明；其他库不能用同名 source declaration、import 或 re-export 替换这些角色：
 
 ```text
 PartialEq:
@@ -227,7 +267,7 @@ impl Processor for Greeter {    // 覆盖为 Str
 }
 ```
 
-Associated Type 仍属于 Type namespace 的 owner-scoped declaration，因此不能命名为 `Self`，也不能使用 `Int`、`Option`、`Eq` 等 Language Type/Trait spelling；该规则同样覆盖 trait declaration、inherent impl 与 trait impl。普通 Value method 或其他 namespace 的同名 declaration 不受此条影响。
+Associated Type 仍属于 Type namespace 的 owner-scoped declaration，因此不能命名为 `Self`，也不能使用 `Int` 等 Language intrinsic spelling 或 `Option`、`Eq` 等受保护 core spelling；该规则同样覆盖 trait declaration、inherent impl 与 trait impl。普通 Value method 或其他 namespace 的同名 declaration 不受此条影响。
 
 ## Impl 块
 

@@ -17,6 +17,7 @@ pub struct LibrarySources {
 
 pub struct ProjectSources {
     pub entry: LibraryId,
+    pub core: LibraryId,
     pub libraries: BTreeMap<LibraryId, LibrarySources>,
 }
 ```
@@ -25,7 +26,9 @@ pub struct ProjectSources {
 
 `dependencies` 的 key 是所属库选择的直接依赖别名，value 必须是 `libraries` 中的真实库。别名是单个 ASCII `Ident`，不能是保留关键字或 `self`、`super`、`root`；contextual `type`、`alias`、`generate`、`scoped`、`call` 与 `_` 的既有规则保持。别名不是 OS 地址或联网定位信息，之后仍按 root Type namespace 的保留名与冲突规则检查。
 
-Resolver 在读取 source 前验证整个显式图：`entry` 必须存在，所有别名必须合法，所有 target 必须存在，依赖图必须无环；自依赖同样拒绝。结构化 input diagnostic 记录实际 entry，或 owner／alias／target，或首个稳定的实际循环链，不虚构 source span。缺 entry 最先；其余别名与缺失引用先于库环，同类按 `LibraryId` 与别名的确定顺序选择。
+`core` 是宿主在本次输入中指定的唯一官方 core identity，必须是 `libraries` 的真实 key。宿主读取并传入与 compiler 配套的真实 core root source；Resolver 不提供缺省 ID，不按库名或 dependency alias 猜测，不读取磁盘，也不注入源码副本。允许 `entry == core`，用于单独检查 core。
+
+Resolver 在读取 source 前验证整个显式图：`entry` 必须存在，随后 `core` 必须存在；所有别名必须合法，所有 target 必须存在，依赖图必须无环；自依赖同样拒绝。普通图结构合法并确定 entry closure 后，每个可达且不是 core 的库都必须以任意合法别名直接指向该 core ID；传递依赖不代替直接边，多个 alias 指向同一 core 仍是同一库。结构化 input diagnostic 记录实际 entry、core，或 owner／alias／target，或首个稳定的实际循环链，不虚构 source span。不可达库仍完成原有全图结构检查，但不新增 direct-core 要求或 source 扫描。
 
 只有从 `entry` 沿显式依赖边可达的库进入解析结果，但不可达库的依赖图仍必须结构合法。每个可达库的 root 都会解析，即使所属 dependency alias 没有在 source 中使用。字符串碰巧等于某个 ID 或其它库的别名不会增加边。
 
@@ -42,7 +45,7 @@ LibraryId(7) root source
 └── tools                  inline body
 ```
 
-每个库的 root 本身是 exact module entity。Source module、具名 declaration、owner、generic/local binding 与引用的 identity 包含所属 `LibraryId` 和完整逻辑 module path；不同库中 path、source、span 与 leaf spelling 都相同也不能合并。Language declaration 保持独立 `Language` origin，不伪装成某个 source library。Target symbol encoding 不是 module identity。
+每个库的 root 本身是 exact module entity。Source module、具名 declaration、owner、generic/local binding 与引用的 identity 包含所属 `LibraryId` 和完整逻辑 module path；不同库中 path、source、span 与 leaf spelling 都相同也不能合并。Primitive type 与 effect 等 intrinsic declaration 保持独立 `Language` origin；Option、Ordering 与 core trait 则保留指定 core 的普通 source identity。Target symbol encoding 不是 module identity。
 
 ## 可达 source
 
@@ -79,6 +82,8 @@ mod feature {
     use root::model::Config;
 }
 ```
+
+指定 core root 中受保护的 Option、Ordering 与 core trait 短名在 Type namespace 直接绑定到对应 source declaration；绑定不依赖 core 的数值 ID 或各库选择的 dependency alias，也不产生额外依赖边。只有该 core root 的对应真实 declaration 可占用这些短名；其他 module、source declaration、import alias、generic 或 associated Type 不能遮蔽它们。普通非保留 alias 与合法 re-export 仍只转发同一 exact source identity。Constructor 保持 owner-qualified，只有显式 constructor import 才产生 bare binding。
 
 限定 path 可跨 file/inline 边界。Resolver 对每个适用 namespace 先取得词法上最内层的 binding，再按 root、每个 `::` container 与 terminal category 筛选并合并候选。同 namespace 不回退被 generic/local 遮蔽的外层 declaration；另一个 namespace 中不符合该语法的 candidate 也不能抢占合法 module、type 或 value。
 
@@ -131,7 +136,7 @@ use Option::{Some, None};
 
 普通 module scope 有三个 namespace：
 
-- Type：module、struct、enum、type alias、extern type、trait、generic type parameter 与语言预声明 type/trait；
+- Type：module、struct、enum、type alias、extern type、trait、generic type parameter、Language intrinsic type，以及指定 core 的受保护 enum/trait；
 - Value：function、const、extern function、enum constructor，以及 parameter、local/pattern binding；
 - Effect：effect declaration、effect alias 与语言 effect binding。
 
@@ -187,13 +192,15 @@ File body 的第一项 `requires {effects};` 与 inline `mod name requires {effe
 
 ## Module graph 与 ResolvedAST
 
-Resolver 在一个 owned 结果中保留 entry 与可达的直接依赖图，统一闭合这些库的 module graph、declaration index 和 import/export fixed point，再执行 body-name 检查。可以按依赖顺序消费已经闭合的名称 export，但不各跑一次单库 Resolver 后拼接结果。一个库内部的普通 module 可以相互引用，包括父 module 令 child source 可达、child 引用父 declaration；库依赖必须是 DAG 不会禁止这些库内回边。只要每条 import 最终唯一到达真实 source 或 Language entity，module 回边本身不是错误。
+Resolver 在一个 owned 结果中保留 entry、指定 core、可达的直接依赖图，以及已核对 core declaration/member 的 exact 角色引用；它统一闭合这些库的 module graph、declaration index 和 import/export fixed point，再执行 body-name 检查和有限 core profile 检查。可以按依赖顺序消费已经闭合的名称 export，但不各跑一次单库 Resolver 后拼接结果。一个库内部的普通 module 可以相互引用，包括父 module 令 child source 可达、child 引用父 declaration；库依赖必须是 DAG 不会禁止这些库内回边。只要每条 import 最终唯一到达真实 source 或 Language intrinsic entity，module 回边本身不是错误。
 
 当前 generation 阶段尚未接入 `resolve_project`。全部可达库的全部可达 source 通过 frontend 且 module graph 已检查后，只要 inventory 含 `GenerateItem`，入口就在 declaration index／import／body-name 之前返回 generation-stage unsupported 诊断，绝不返回伪完整 `ResolvedProject`。依赖库 root 中的请求即使未被 consumer `use` 也会拒绝；未达 file source 与不可达库不扫描。多个请求按 `LibraryId`、logical module path、`generate` keyword 的 UTF-8 span 与稳定错误规则选首个。该临时拒绝只描述当前 stage 边界，generation 实现接入时由对应合同移除。
 
 仅由 import/re-export 相互转发、没有任何真实 declaration origin 的无解环仍报错。该规则不放宽 effect alias 循环、trait 继承循环或 Checker 中其他非法递归。
 
-ResolvedAST 为每个 source module、lexical/nominal declaration、owner、generic/local binding、import 与引用保存含 `LibraryId` 的 exact identity。Re-export 转发原 identity；同一声明经 dependency diamond 多次送达仍幂等，不同库的声明即使文本相同也不合并。Language entity 使用独立 Language origin，不伪装成隐藏 source library。依赖类型的 member/associated selection 保存 occurrence、已知 exact base/owner、选择 spelling 及其正确库来源，留给 Checker 冻结最终 target。ResolvedAST 之后不得重新 parse 或执行第二套 lexical resolver。
+ResolvedAST 为每个 source module、lexical/nominal declaration、owner、generic/local binding、import 与引用保存含 `LibraryId` 的 exact identity。Re-export 转发原 identity；同一声明经 dependency diamond 多次送达仍幂等，不同库的声明即使文本相同也不合并。Language intrinsic entity 使用独立 Language origin；core enum/trait、member、Self、generic 与引用保持指定 core 的真实 source origin。依赖类型的 member/associated selection 保存 occurrence、已知 exact base/owner、选择 spelling 及其正确库来源，留给 Checker 冻结最终 target。ResolvedAST 之后不得重新 parse 或执行第二套 lexical resolver。
+
+Core profile 检查只覆盖当前 Resolver 可从 ResolvedAST 直接判定的固定声明轮廓：公开 source kind、泛型 arity、variant/member、supertrait、parameter mode、exact type/effect reference 与 associated-type relation。缺失角色不制造 span；不合格声明或 member 指向真实 core source origin。该结果不证明 impl conformance、type/effect 推断、Copy/Drop 资格、dispatch、derive 或执行语义。
 
 项目每次只返回一个结构化首错，不暴露 partial ResolvedAST。阶段优先级依次为库图输入、全部可达 source frontend、module graph、当前 generation-stage support、declaration/index、import/export 与 body-name；source 阶段同类错误按 `LibraryId`、logical module path、primary UTF-8 byte span 与稳定错误类别排序。普通 primary/related origin 均为 `LibraryId + SourceRef + UTF-8 byte span`。物理 source key、名称 spelling、map 插入顺序、拓扑遍历、table/subpass 或全局计数器不能改变结果；related origins 同样保持稳定顺序。
 
