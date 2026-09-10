@@ -44,7 +44,39 @@ fn message() -> Str {
 
 ## 当前构建与 CI
 
-根 workspace 固定使用 Rust `1.98.0`。Compiler library 提供保持独立的两个入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 对纯内存逻辑模块树返回 owned opaque `ResolvedProject` 或带 source key 与 UTF-8 byte span 的结构化 `ProjectDiagnostic`。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
+根 workspace 固定使用 Rust `1.98.0`。Compiler library 提供保持独立的两个入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 验证并解析显式纯内存库 DAG，返回统一的 owned opaque `ResolvedProject`，或带 `LibraryId`、库内 source key 与 UTF-8 byte span 的结构化 `ProjectDiagnostic`。`parse` 的签名与单 source 行为不依赖项目输入。
+
+```rust
+use std::collections::BTreeMap;
+use vorton_compiler::{LibraryId, LibrarySources, ProjectSources, resolve_project};
+
+let app = LibraryId(0);
+let model = LibraryId(1);
+let sources = ProjectSources {
+    entry: app,
+    libraries: BTreeMap::from([
+        (
+            app,
+            LibrarySources {
+                root: "use model::Config; fn run(config: Config) {}".to_owned(),
+                modules: BTreeMap::new(),
+                dependencies: BTreeMap::from([("model".to_owned(), model)]),
+            },
+        ),
+        (
+            model,
+            LibrarySources {
+                root: "pub struct Config {}".to_owned(),
+                modules: BTreeMap::new(),
+                dependencies: BTreeMap::new(),
+            },
+        ),
+    ]),
+};
+let resolved = resolve_project(&sources).expect("project resolves");
+```
+
+`LibraryId` 只区分本次输入中的库实例；依赖别名由每个 `LibrarySources` 明确给出。名称层结果不表示 Checker、完整接口或生成语义已经完成。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
 
 ```powershell
 python .agents/scripts/validate_current_tree.py
