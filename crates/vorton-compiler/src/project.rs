@@ -56,15 +56,7 @@ fn validate_file_module_segments(segments: &[String]) -> Result<(), FileModulePa
     }
 
     for (index, segment) in segments.iter().enumerate() {
-        let valid_identifier = segment
-            .as_bytes()
-            .first()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
-            && segment
-                .as_bytes()
-                .iter()
-                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
-        let kind = if !valid_identifier {
+        let kind = if !is_module_identifier(segment) {
             Some(FileModulePathErrorKind::InvalidIdentifier)
         } else if is_reserved_module_segment(segment) {
             Some(FileModulePathErrorKind::ReservedSegment)
@@ -86,22 +78,63 @@ pub(crate) fn is_reserved_module_segment(segment: &str) -> bool {
     crate::lexer::is_keyword(segment) || matches!(segment, "self" | "root")
 }
 
-/// All source text supplied to [`crate::resolve_project`].
+pub(crate) fn is_valid_dependency_alias(alias: &str) -> bool {
+    is_module_identifier(alias) && !is_reserved_module_segment(alias)
+}
+
+fn is_module_identifier(value: &str) -> bool {
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+/// The host-assigned identity of one library instance in a project input.
+///
+/// The value is local to that input. It is not a package name, version, path,
+/// dependency alias, or compiler-assigned traversal ordinal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LibraryId(pub u32);
+
+/// All source text and direct dependency aliases for one library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibrarySources {
+    /// The library's always-reachable root source.
+    pub root: String,
+    /// File sources addressed by library-local logical module paths.
+    pub modules: BTreeMap<FileModulePath, String>,
+    /// Root-scoped source aliases pointing to direct library identities.
+    pub dependencies: BTreeMap<String, LibraryId>,
+}
+
+/// A closed, pure in-memory library graph supplied to [`crate::resolve_project`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSources {
-    pub root: String,
-    pub modules: BTreeMap<FileModulePath, String>,
+    /// The library whose dependency closure forms this resolution input.
+    pub entry: LibraryId,
+    /// Every library referenced by the explicit input graph, reachable or not.
+    pub libraries: BTreeMap<LibraryId, LibrarySources>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SourceRef {
+    /// The root source of the library carried by the surrounding origin.
     Root,
+    /// A file source addressed within the library carried by the origin.
     File(FileModulePath),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OriginRef {
+    /// The source's owning library in the current project input.
+    pub library: LibraryId,
+    /// The address of the source within `library`.
     pub source: SourceRef,
+    /// The half-open UTF-8 byte range within `source`.
     pub span: Span,
 }
 
@@ -121,6 +154,25 @@ pub struct ProjectDiagnostic {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectDiagnosticKind {
+    /// `entry` is not a key in the supplied library graph.
+    MissingEntryLibrary {
+        entry: LibraryId,
+    },
+    /// A direct dependency alias is not one legal source identifier.
+    InvalidDependencyAlias {
+        owner: LibraryId,
+        alias: String,
+    },
+    /// A direct dependency edge names a library absent from the graph.
+    MissingDependencyTarget {
+        owner: LibraryId,
+        alias: String,
+        target: LibraryId,
+    },
+    /// The repeated first/last element closes an actual dependency cycle.
+    LibraryDependencyCycle {
+        cycle: Vec<LibraryId>,
+    },
     Frontend(FrontendDiagnosticKind),
     /// A reachable `generate` item requires the later generation stage.
     GenerateUnsupported,
@@ -133,6 +185,7 @@ pub enum ProjectDiagnosticKind {
     PathEscapesRoot,
     InvalidPath,
     NameConflict {
+        library: LibraryId,
         namespace: NameNamespace,
         name: String,
     },
@@ -140,6 +193,7 @@ pub enum ProjectDiagnosticKind {
         name: String,
     },
     ReservedLanguageBinding {
+        library: LibraryId,
         namespace: NameNamespace,
         name: String,
     },
@@ -175,7 +229,9 @@ pub enum ProjectDiagnosticKind {
         name: String,
     },
     PatternBindingMismatch,
-    InvalidSelf,
+    InvalidSelf {
+        library: LibraryId,
+    },
 }
 
 /// An owned project whose lexical and nominal names have been resolved.
@@ -183,6 +239,8 @@ pub enum ProjectDiagnosticKind {
 /// Its carrier is intentionally opaque until the Checker API is introduced.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedProject {
+    pub(crate) entry: LibraryId,
+    pub(crate) dependencies: BTreeMap<LibraryId, BTreeMap<String, LibraryId>>,
     pub(crate) modules: BTreeMap<ModuleRef, ResolvedModule>,
     pub(crate) entities: BTreeMap<EntityId, Entity>,
 }
@@ -191,6 +249,8 @@ impl fmt::Debug for ResolvedProject {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ResolvedProject")
+            .field("entry", &self.entry)
+            .field("library_count", &self.dependencies.len())
             .field("module_count", &self.modules.len())
             .field("entity_count", &self.entities.len())
             .finish_non_exhaustive()
@@ -198,31 +258,90 @@ impl fmt::Debug for ResolvedProject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct ModuleRef(pub(crate) Vec<String>);
+pub(crate) enum ModuleRef {
+    Language,
+    Source {
+        library: LibraryId,
+        path: Vec<String>,
+    },
+}
 
 impl ModuleRef {
-    pub(crate) fn root() -> Self {
-        Self(Vec::new())
+    pub(crate) fn root(library: LibraryId) -> Self {
+        Self::Source {
+            library,
+            path: Vec::new(),
+        }
+    }
+
+    pub(crate) fn language_root() -> Self {
+        Self::Language
+    }
+
+    pub(crate) fn library(&self) -> LibraryId {
+        match self {
+            Self::Source { library, .. } => *library,
+            Self::Language => panic!("Language origin has no source library"),
+        }
+    }
+
+    pub(crate) fn source_library(&self) -> Option<LibraryId> {
+        match self {
+            Self::Source { library, .. } => Some(*library),
+            Self::Language => None,
+        }
+    }
+
+    pub(crate) fn is_language(&self) -> bool {
+        matches!(self, Self::Language)
+    }
+
+    pub(crate) fn path(&self) -> &[String] {
+        match self {
+            Self::Source { path, .. } => path,
+            Self::Language => &[],
+        }
+    }
+
+    pub(crate) fn is_root(&self) -> bool {
+        matches!(self, Self::Source { path, .. } if path.is_empty())
     }
 
     pub(crate) fn child(&self, name: &str) -> Self {
-        let mut segments = self.0.clone();
-        segments.push(name.to_owned());
-        Self(segments)
+        let mut path = self.path().to_vec();
+        path.push(name.to_owned());
+        Self::Source {
+            library: self.library(),
+            path,
+        }
     }
 
     pub(crate) fn parent(&self) -> Option<Self> {
-        (!self.0.is_empty()).then(|| Self(self.0[..self.0.len() - 1].to_vec()))
+        let path = self.path();
+        (!path.is_empty()).then(|| Self::Source {
+            library: self.library(),
+            path: path[..path.len() - 1].to_vec(),
+        })
     }
 
     pub(crate) fn is_descendant_of(&self, ancestor: &Self) -> bool {
-        self.0.starts_with(&ancestor.0)
+        match (self, ancestor) {
+            (
+                Self::Source { library, path },
+                Self::Source {
+                    library: ancestor_library,
+                    path: ancestor_path,
+                },
+            ) => library == ancestor_library && path.starts_with(ancestor_path),
+            _ => false,
+        }
     }
-}
 
-impl From<&FileModulePath> for ModuleRef {
-    fn from(path: &FileModulePath) -> Self {
-        Self(path.0.clone())
+    pub(crate) fn from_file(library: LibraryId, path: &FileModulePath) -> Self {
+        Self::Source {
+            library,
+            path: path.0.clone(),
+        }
     }
 }
 
@@ -280,12 +399,6 @@ pub(crate) enum EntityKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum DeclarationOrigin {
-    Language,
-    Source(ModuleRef),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum EntitySite {
     Language,
     Module(ModuleRef),
@@ -303,7 +416,6 @@ pub(crate) struct OwnerKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct EntityId {
-    pub(crate) origin: DeclarationOrigin,
     pub(crate) module: ModuleRef,
     pub(crate) namespace: Namespace,
     pub(crate) kind: EntityKind,
@@ -336,8 +448,7 @@ pub(crate) struct ResolvedModule {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedModuleBody {
-    pub(crate) origin: SourceRef,
-    pub(crate) span: Span,
+    pub(crate) origin: OriginRef,
     pub(crate) requires: Option<ResolvedEffectSet>,
     pub(crate) imports: Vec<ResolvedImport>,
     pub(crate) declarations: Vec<ResolvedDeclaration>,

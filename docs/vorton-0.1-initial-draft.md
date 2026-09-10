@@ -322,9 +322,9 @@ M2交付纯内存契约读取／绑定／应用、候选筛选、完整接口及
 
 ## 13. 与当前仓库的距离
 
-当前 Rust compiler 的 source frontend 已承载 `&T`／`&mut T`／`move T`／`call F`、`scoped`、`const fn`、`generate` module item、CallableShape／generic bound、trait impl `where`、branch binding qualifier 与单一 `mut` effect，并保留相应 source order 和 span。Resolver 机械运输当前可处理的 carrier；纯内存项目入口在 frontend 与 module graph 成功后，对可达 `generate` 返回 generation-stage unsupported 诊断。
+当前 Rust compiler 的 source frontend 已承载 `&T`／`&mut T`／`move T`／`call F`、`scoped`、`const fn`、`generate` module item、CallableShape／generic bound、trait impl `where`、branch binding qualifier 与单一 `mut` effect，并保留相应 source order 和 span。Resolver 消费宿主给定的显式纯内存库 DAG，在一个名称层结果中保留 source、module、declaration、owner 与引用的真实库归属，并按每库闭包、直接依赖别名和显式 facade 执行现有 import/export 与 visibility 规则；frontend 与 module graph 成功后，可达 `generate` 仍返回 generation-stage unsupported 诊断。
 
-这只闭合 source→AST 与当前 Resolver 的责任。Q84–Q87 的 contract 对应、公开输入约束、call evidence/mode、Noescape、pattern 权限／guard／resource 检查仍属于 Checker 及后续阶段；`generate` block 尚不执行，也没有 GenContext API、结构提交、预算或生成后语义闭合。Core、resource、ABI 与 native 的其余设计同样不能由 frontend 成功推断为已实现。
+这只闭合 source→AST 与多库名称解析的当前责任，不产生 Checked、完整有效接口 S 或 TypedHIR。Q84–Q87 的 contract 对应、公开输入约束、call evidence/mode、Noescape、pattern 权限／guard／resource 检查仍属于 Checker 及后续阶段；`generate` block 尚不执行，也没有 GenContext API、结构提交、预算或生成后语义闭合。Core、resource、ABI 与 native 的其余设计同样不能由 frontend 或 Resolver 成功推断为已实现。
 
 Rust／C 机制见证、静态结构检查和 frontend 测试只能说明各自观测范围，不证明 Vorton Checker、资源或 native 已经通过。本审阅稿用于解释已确认的整体设计，不能替代语言规范、Issue contract 或阶段验收证据。
 

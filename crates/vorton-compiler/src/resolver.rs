@@ -14,15 +14,171 @@ const LANGUAGE_EFFECTS: &[&str] = &["console", "fs", "process", "fail", "mut", "
 pub(crate) fn resolve_project(
     sources: &ProjectSources,
 ) -> Result<ResolvedProject, ProjectDiagnostic> {
-    let parsed = parse_reachable_sources(sources)?;
-    let modules = build_module_graph(sources, &parsed)?;
+    let reachable_libraries = validate_library_graph(sources)?;
+    let parsed = parse_reachable_sources(sources, &reachable_libraries)?;
+    let modules = build_module_graph(sources, &reachable_libraries, &parsed)?;
     if let Some(diagnostic) = first_generate_diagnostic(&modules) {
         return Err(diagnostic);
     }
-    let mut state = ResolverState::new(modules);
+    let dependencies = reachable_libraries
+        .iter()
+        .map(|library| {
+            (
+                *library,
+                sources
+                    .libraries
+                    .get(library)
+                    .expect("reachable libraries were validated")
+                    .dependencies
+                    .clone(),
+            )
+        })
+        .collect();
+    let mut state = ResolverState::new(modules, sources.entry, dependencies);
     state.index_entities()?;
     state.resolve_imports()?;
     state.resolve_bodies()
+}
+
+fn validate_library_graph(
+    sources: &ProjectSources,
+) -> Result<BTreeSet<LibraryId>, ProjectDiagnostic> {
+    if !sources.libraries.contains_key(&sources.entry) {
+        return Err(input_diagnostic(
+            ProjectDiagnosticKind::MissingEntryLibrary {
+                entry: sources.entry,
+            },
+        ));
+    }
+
+    for (owner, library) in &sources.libraries {
+        for alias in library.dependencies.keys() {
+            if !is_valid_dependency_alias(alias) {
+                return Err(input_diagnostic(
+                    ProjectDiagnosticKind::InvalidDependencyAlias {
+                        owner: *owner,
+                        alias: alias.clone(),
+                    },
+                ));
+            }
+        }
+    }
+
+    for (owner, library) in &sources.libraries {
+        for (alias, target) in &library.dependencies {
+            if !sources.libraries.contains_key(target) {
+                return Err(input_diagnostic(
+                    ProjectDiagnosticKind::MissingDependencyTarget {
+                        owner: *owner,
+                        alias: alias.clone(),
+                        target: *target,
+                    },
+                ));
+            }
+        }
+    }
+
+    if let Some(cycle) = first_library_dependency_cycle(&sources.libraries) {
+        return Err(input_diagnostic(
+            ProjectDiagnosticKind::LibraryDependencyCycle { cycle },
+        ));
+    }
+
+    let mut reachable = BTreeSet::new();
+    let mut pending = BTreeSet::from([sources.entry]);
+    while let Some(library) = pending.pop_first() {
+        if !reachable.insert(library) {
+            continue;
+        }
+        pending.extend(
+            sources
+                .libraries
+                .get(&library)
+                .expect("dependency targets were validated")
+                .dependencies
+                .values()
+                .copied(),
+        );
+    }
+    Ok(reachable)
+}
+
+fn input_diagnostic(kind: ProjectDiagnosticKind) -> ProjectDiagnostic {
+    ProjectDiagnostic {
+        kind,
+        primary: None,
+        related: Vec::new(),
+    }
+}
+
+fn first_library_dependency_cycle(
+    libraries: &BTreeMap<LibraryId, LibrarySources>,
+) -> Option<Vec<LibraryId>> {
+    let mut complete = BTreeSet::new();
+    let mut active = BTreeMap::new();
+    let mut path = Vec::new();
+    for library in libraries.keys().copied() {
+        if let Some(cycle) =
+            visit_library_dependency(library, libraries, &mut complete, &mut active, &mut path)
+        {
+            return Some(canonicalize_library_cycle(cycle));
+        }
+    }
+    None
+}
+
+fn visit_library_dependency(
+    library: LibraryId,
+    libraries: &BTreeMap<LibraryId, LibrarySources>,
+    complete: &mut BTreeSet<LibraryId>,
+    active: &mut BTreeMap<LibraryId, usize>,
+    path: &mut Vec<LibraryId>,
+) -> Option<Vec<LibraryId>> {
+    if complete.contains(&library) {
+        return None;
+    }
+    if let Some(start) = active.get(&library).copied() {
+        let mut cycle = path[start..].to_vec();
+        cycle.push(library);
+        return Some(cycle);
+    }
+
+    active.insert(library, path.len());
+    path.push(library);
+    for dependency in libraries
+        .get(&library)
+        .expect("dependency targets were validated")
+        .dependencies
+        .values()
+        .copied()
+    {
+        if let Some(cycle) = visit_library_dependency(dependency, libraries, complete, active, path)
+        {
+            return Some(cycle);
+        }
+    }
+    path.pop();
+    active.remove(&library);
+    complete.insert(library);
+    None
+}
+
+fn canonicalize_library_cycle(cycle: Vec<LibraryId>) -> Vec<LibraryId> {
+    debug_assert!(cycle.len() >= 2 && cycle.first() == cycle.last());
+    let nodes = &cycle[..cycle.len() - 1];
+    let start = nodes
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, library)| **library)
+        .map(|(index, _)| index)
+        .expect("a cycle contains at least one node");
+    let mut canonical = nodes[start..]
+        .iter()
+        .chain(nodes[..start].iter())
+        .copied()
+        .collect::<Vec<_>>();
+    canonical.push(canonical[0]);
+    canonical
 }
 
 #[derive(Clone)]
@@ -33,25 +189,45 @@ struct ParsedSource {
 
 fn parse_reachable_sources(
     sources: &ProjectSources,
+    reachable_libraries: &BTreeSet<LibraryId>,
 ) -> Result<BTreeMap<ModuleRef, ParsedSource>, ProjectDiagnostic> {
-    let inventory = inventory_modules(sources);
+    let inventory = inventory_modules(sources, reachable_libraries);
     let file_sources = sources
-        .modules
+        .libraries
         .iter()
-        .map(|(path, source)| (ModuleRef::from(path), (path, source)))
+        .filter(|(library, _)| reachable_libraries.contains(library))
+        .flat_map(|(library, sources)| {
+            sources
+                .modules
+                .iter()
+                .map(|(path, source)| (ModuleRef::from_file(*library, path), (path, source)))
+        })
         .collect::<BTreeMap<_, _>>();
     let mut attempted = BTreeSet::new();
     let mut parsed = BTreeMap::new();
     let mut failures = BTreeMap::<ModuleRef, ProjectDiagnostic>::new();
-    let mut pending = BTreeSet::from([ModuleRef::root()]);
+    let mut pending = reachable_libraries
+        .iter()
+        .copied()
+        .map(ModuleRef::root)
+        .collect::<BTreeSet<_>>();
 
     loop {
         while let Some(module) = pending.pop_first() {
             if !attempted.insert(module.clone()) {
                 continue;
             }
-            let (origin, source) = if module.0.is_empty() {
-                (SourceRef::Root, sources.root.as_str())
+            let library = module.library();
+            let (origin, source) = if module.is_root() {
+                (
+                    SourceRef::Root,
+                    sources
+                        .libraries
+                        .get(&library)
+                        .expect("reachable library exists")
+                        .root
+                        .as_str(),
+                )
             } else {
                 let Some((path, source)) = file_sources.get(&module) else {
                     continue;
@@ -68,6 +244,7 @@ fn parse_reachable_sources(
                         ProjectDiagnostic {
                             kind: ProjectDiagnosticKind::Frontend(diagnostic.kind),
                             primary: Some(OriginRef {
+                                library,
                                 source: origin,
                                 span: diagnostic.span,
                             }),
@@ -103,11 +280,26 @@ fn parse_reachable_sources(
     Ok(parsed)
 }
 
-fn inventory_modules(sources: &ProjectSources) -> BTreeSet<ModuleRef> {
-    let mut modules = BTreeSet::from([ModuleRef::root()]);
-    for path in sources.modules.keys() {
-        for length in 1..=path.segments().len() {
-            modules.insert(ModuleRef(path.segments()[..length].to_vec()));
+fn inventory_modules(
+    sources: &ProjectSources,
+    reachable_libraries: &BTreeSet<LibraryId>,
+) -> BTreeSet<ModuleRef> {
+    let mut modules = BTreeSet::new();
+    for library in reachable_libraries {
+        modules.insert(ModuleRef::root(*library));
+        for path in sources
+            .libraries
+            .get(library)
+            .expect("reachable library exists")
+            .modules
+            .keys()
+        {
+            for length in 1..=path.segments().len() {
+                modules.insert(ModuleRef::Source {
+                    library: *library,
+                    path: path.segments()[..length].to_vec(),
+                });
+            }
         }
     }
     modules
@@ -290,7 +482,7 @@ fn module_path_start(
         PathSegment::Identifier(identifier)
             if path.segments.len() > 1 && identifier.text == "root" =>
         {
-            Some((BTreeSet::from([ModuleRef::root()]), 1))
+            Some((BTreeSet::from([ModuleRef::root(current.library())]), 1))
         }
         PathSegment::Identifier(identifier)
             if path.segments.len() > 1 && identifier.text == "self" =>
@@ -360,30 +552,43 @@ fn split_module_items(items: &[ModuleItem]) -> (Vec<Declaration>, Vec<GenerateIt
 
 fn build_module_graph(
     sources: &ProjectSources,
+    reachable_libraries: &BTreeSet<LibraryId>,
     parsed: &BTreeMap<ModuleRef, ParsedSource>,
 ) -> Result<BTreeMap<ModuleRef, ModuleInfo>, ProjectDiagnostic> {
-    let mut modules = BTreeMap::from([(
-        ModuleRef::root(),
-        ModuleInfo {
-            body: None,
-            file_body_present: false,
-            declared_at: None,
-            public: true,
-        },
-    )]);
-    for path in sources.modules.keys() {
-        for length in 1..=path.segments().len() {
-            let module = ModuleRef(path.segments()[..length].to_vec());
-            let exact = length == path.segments().len();
-            modules
-                .entry(module)
-                .and_modify(|info| info.file_body_present |= exact)
-                .or_insert(ModuleInfo {
-                    body: None,
-                    file_body_present: exact,
-                    declared_at: None,
-                    public: true,
-                });
+    let mut modules = BTreeMap::new();
+    for library in reachable_libraries {
+        modules.insert(
+            ModuleRef::root(*library),
+            ModuleInfo {
+                body: None,
+                file_body_present: false,
+                declared_at: None,
+                public: true,
+            },
+        );
+        for path in sources
+            .libraries
+            .get(library)
+            .expect("reachable library exists")
+            .modules
+            .keys()
+        {
+            for length in 1..=path.segments().len() {
+                let module = ModuleRef::Source {
+                    library: *library,
+                    path: path.segments()[..length].to_vec(),
+                };
+                let exact = length == path.segments().len();
+                modules
+                    .entry(module)
+                    .and_modify(|info| info.file_body_present |= exact)
+                    .or_insert(ModuleInfo {
+                        body: None,
+                        file_body_present: exact,
+                        declared_at: None,
+                        public: true,
+                    });
+            }
         }
     }
 
@@ -405,7 +610,7 @@ fn build_module_graph(
             .entry(module.clone())
             .or_insert(ModuleInfo {
                 body: None,
-                file_body_present: !module.0.is_empty(),
+                file_body_present: !module.is_root(),
                 declared_at: None,
                 public: true,
             })
@@ -451,6 +656,7 @@ fn register_inline_modules(
                         name: name.text.clone(),
                     },
                     primary: Some(OriginRef {
+                        library: parent.library(),
                         source: source.clone(),
                         span: name.span,
                     }),
@@ -460,6 +666,7 @@ fn register_inline_modules(
             continue;
         }
         let origin = OriginRef {
+            library: parent.library(),
             source: source.clone(),
             span: name.span,
         };
@@ -475,7 +682,7 @@ fn register_inline_modules(
                 module.clone(),
                 ProjectDiagnostic {
                     kind: ProjectDiagnosticKind::ModuleBodyConflict {
-                        module: module.0.clone(),
+                        module: module.path().to_vec(),
                     },
                     primary: Some(origin),
                     related,
@@ -517,6 +724,7 @@ fn first_generate_diagnostic(
                         ProjectDiagnostic {
                             kind: ProjectDiagnosticKind::GenerateUnsupported,
                             primary: Some(OriginRef {
+                                library: module.library(),
                                 source: body.origin.clone(),
                                 span: generate.keyword_span,
                             }),
@@ -554,6 +762,8 @@ struct ImportDirective {
 
 struct ResolverState {
     modules: BTreeMap<ModuleRef, ModuleInfo>,
+    entry: LibraryId,
+    dependencies: BTreeMap<LibraryId, BTreeMap<String, LibraryId>>,
     entities: BTreeMap<EntityId, Entity>,
     closed_member_owners: BTreeSet<EntityId>,
     own_bindings: BTreeMap<ModuleRef, BindingTable>,
@@ -562,9 +772,15 @@ struct ResolverState {
 }
 
 impl ResolverState {
-    fn new(modules: BTreeMap<ModuleRef, ModuleInfo>) -> Self {
+    fn new(
+        modules: BTreeMap<ModuleRef, ModuleInfo>,
+        entry: LibraryId,
+        dependencies: BTreeMap<LibraryId, BTreeMap<String, LibraryId>>,
+    ) -> Self {
         Self {
             modules,
+            entry,
+            dependencies,
             entities: BTreeMap::new(),
             closed_member_owners: BTreeSet::new(),
             own_bindings: BTreeMap::new(),
@@ -592,7 +808,7 @@ impl ResolverState {
                 .extend(flatten_imports(&module, &body.origin, &body.uses));
         }
         for (module, table) in &self.own_bindings {
-            if let Some(diagnostic) = first_binding_diagnostic(table) {
+            if let Some(diagnostic) = first_binding_diagnostic(module, table) {
                 diagnostics.push((module.clone(), diagnostic));
             }
         }
@@ -626,7 +842,7 @@ impl ResolverState {
             ("None", EntityShape::ConstructorUnit),
         ] {
             let owner = OwnerKey {
-                module: ModuleRef::root(),
+                module: ModuleRef::language_root(),
                 source: SourceRef::Root,
                 span: Span::new(0, 0),
                 kind: EntityKind::LanguageType,
@@ -739,9 +955,6 @@ impl ResolverState {
         let modules = self.modules.clone();
         for (module, info) in modules {
             self.own_bindings.entry(module.clone()).or_default();
-            if module.0.is_empty() {
-                continue;
-            }
             let id = module_id(&module);
             self.entities.insert(
                 id.clone(),
@@ -753,8 +966,15 @@ impl ResolverState {
                     shape: EntityShape::Plain,
                 },
             );
+            if module.is_root() {
+                continue;
+            }
             let parent = module.parent().expect("non-root module has a parent");
-            let name = module.0.last().expect("non-root module has a name").clone();
+            let name = module
+                .path()
+                .last()
+                .expect("non-root module has a name")
+                .clone();
             add_delivery(
                 self.own_bindings.entry(parent.clone()).or_default(),
                 Delivery {
@@ -766,6 +986,27 @@ impl ResolverState {
                 Namespace::Type,
                 name,
             );
+        }
+
+        for (owner, dependencies) in &self.dependencies {
+            let root = ModuleRef::root(*owner);
+            let table = self
+                .own_bindings
+                .get_mut(&root)
+                .expect("every reachable library has a root module");
+            for (alias, target) in dependencies {
+                add_delivery(
+                    table,
+                    Delivery {
+                        target: module_id(&ModuleRef::root(*target)),
+                        public: false,
+                        owner_module: root.clone(),
+                        origin: None,
+                    },
+                    Namespace::Type,
+                    alias.clone(),
+                );
+            }
         }
     }
 
@@ -1006,6 +1247,7 @@ impl ResolverState {
                 ),
             };
             let origin = OriginRef {
+                library: module.library(),
                 source: source.clone(),
                 span: name.span,
             };
@@ -1209,7 +1451,7 @@ impl ResolverState {
 
         let mut diagnostics = self.import_directive_diagnostics();
         for (module, table) in &self.bindings {
-            if let Some(diagnostic) = first_binding_diagnostic(table) {
+            if let Some(diagnostic) = first_binding_diagnostic(module, table) {
                 diagnostics.push((module.clone(), diagnostic));
             }
         }
@@ -1304,7 +1546,11 @@ impl ResolverState {
             PathSegment::Identifier(identifier)
                 if path.segments.len() > 1 && identifier.text == "root" =>
             {
-                Some((ContainerOutcome::module(ModuleRef::root()), 1, true))
+                Some((
+                    ContainerOutcome::module(ModuleRef::root(current.library())),
+                    1,
+                    true,
+                ))
             }
             PathSegment::Identifier(identifier)
                 if path.segments.len() > 1 && identifier.text == "self" =>
@@ -1378,10 +1624,7 @@ impl ResolverState {
         }
         if include_language {
             for entity in self.entities.keys() {
-                if entity.origin == DeclarationOrigin::Language
-                    && entity.owner.is_none()
-                    && entity.name == name
-                {
+                if entity.module.is_language() && entity.owner.is_none() && entity.name == name {
                     result
                         .accessible
                         .insert(LookupContainer::Entity(entity.clone()));
@@ -1662,8 +1905,11 @@ impl ResolverState {
                     }
                 }
                 (!failed).then_some(ResolvedModuleBody {
-                    origin: body.origin,
-                    span: body.span,
+                    origin: OriginRef {
+                        library: module.library(),
+                        source: body.origin,
+                        span: body.span,
+                    },
                     requires,
                     imports,
                     declarations,
@@ -1682,6 +1928,8 @@ impl ResolverState {
             return Err(diagnostic);
         }
         Ok(ResolvedProject {
+            entry: self.entry,
+            dependencies: self.dependencies,
             modules: resolved_modules.into_iter().collect(),
             entities: self.entities,
         })
@@ -1708,7 +1956,7 @@ impl<'state> BodyResolver<'state> {
             span: Span::new(0, 0),
             kind: EntityKind::Module,
             name: module
-                .0
+                .path()
                 .last()
                 .cloned()
                 .unwrap_or_else(|| "<root>".to_owned()),
@@ -2005,6 +2253,7 @@ impl<'state> BodyResolver<'state> {
         };
         Ok(ResolvedDeclaration {
             origin: OriginRef {
+                library: self.module.library(),
                 source: self.source.clone(),
                 span: declaration.span,
             },
@@ -2305,10 +2554,16 @@ impl<'state> BodyResolver<'state> {
         for parameter in parameters {
             let origin = self.origin(parameter.name.span);
             let invalid = if parameter.name.text == "Self" {
-                Some(self.diagnostic(ProjectDiagnosticKind::InvalidSelf, origin.clone()))
+                Some(self.diagnostic(
+                    ProjectDiagnosticKind::InvalidSelf {
+                        library: self.module.library(),
+                    },
+                    origin.clone(),
+                ))
             } else if is_language_name(Namespace::Type, &parameter.name.text) {
                 Some(self.diagnostic(
                     ProjectDiagnosticKind::ReservedLanguageBinding {
+                        library: self.module.library(),
                         namespace: NameNamespace::Type,
                         name: parameter.name.text.clone(),
                     },
@@ -2413,6 +2668,7 @@ impl<'state> BodyResolver<'state> {
             let invalid = if is_language_name(Namespace::Effect, &parameter.name.text) {
                 Some(self.diagnostic(
                     ProjectDiagnosticKind::ReservedLanguageBinding {
+                        library: self.module.library(),
                         namespace: NameNamespace::Effect,
                         name: parameter.name.text.clone(),
                     },
@@ -2569,6 +2825,7 @@ impl<'state> BodyResolver<'state> {
 
     fn origin(&self, span: Span) -> OriginRef {
         OriginRef {
+            library: self.module.library(),
             source: self.source.clone(),
             span,
         }
@@ -2991,7 +3248,9 @@ impl BodyResolver<'_> {
             let kind = if !outcome.inaccessible.is_empty() {
                 ProjectDiagnosticKind::InaccessibleName { name }
             } else if outcome.missing_self_type {
-                ProjectDiagnosticKind::InvalidSelf
+                ProjectDiagnosticKind::InvalidSelf {
+                    library: self.module.library(),
+                }
             } else {
                 ProjectDiagnosticKind::UnresolvedName {
                     namespace: expected.namespace(),
@@ -3083,7 +3342,9 @@ impl BodyResolver<'_> {
                 candidates = vec![PathCandidate::Module(base)];
             }
             PathSegment::Identifier(identifier) if qualified && identifier.text == "root" => {
-                candidates = vec![PathCandidate::Module(ModuleRef::root())];
+                candidates = vec![PathCandidate::Module(ModuleRef::root(
+                    self.module.library(),
+                ))];
                 index = 1;
             }
             PathSegment::Identifier(identifier) if qualified && identifier.text == "self" => {
@@ -4519,6 +4780,7 @@ fn flatten_imports(
                     directives.push(ImportDirective {
                         module: module.clone(),
                         origin: OriginRef {
+                            library: module.library(),
                             source: source.clone(),
                             span: item.span,
                         },
@@ -4534,6 +4796,7 @@ fn flatten_imports(
             Some(UseSuffix::Alias(alias)) => directives.push(ImportDirective {
                 module: module.clone(),
                 origin: OriginRef {
+                    library: module.library(),
                     source: source.clone(),
                     span: declaration.span,
                 },
@@ -4549,6 +4812,7 @@ fn flatten_imports(
                     directives.push(ImportDirective {
                         module: module.clone(),
                         origin: OriginRef {
+                            library: module.library(),
                             source: source.clone(),
                             span: declaration.span,
                         },
@@ -4563,6 +4827,7 @@ fn flatten_imports(
                     directives.push(ImportDirective {
                         module: module.clone(),
                         origin: OriginRef {
+                            library: module.library(),
                             source: source.clone(),
                             span: declaration.span,
                         },
@@ -4673,12 +4938,11 @@ fn add_delivery(table: &mut BindingTable, delivery: Delivery, namespace: Namespa
 
 fn module_id(module: &ModuleRef) -> EntityId {
     EntityId {
-        origin: DeclarationOrigin::Source(module.clone()),
         module: module.clone(),
         namespace: Namespace::Type,
         kind: EntityKind::Module,
         name: module
-            .0
+            .path()
             .last()
             .cloned()
             .unwrap_or_else(|| "<root>".to_owned()),
@@ -4688,7 +4952,7 @@ fn module_id(module: &ModuleRef) -> EntityId {
 }
 
 fn module_entity(module: &ModuleRef) -> Option<EntityId> {
-    (!module.0.is_empty()).then(|| module_id(module))
+    module.source_library().map(|_| module_id(module))
 }
 
 fn language_id(
@@ -4698,8 +4962,7 @@ fn language_id(
     owner: Option<OwnerKey>,
 ) -> EntityId {
     EntityId {
-        origin: DeclarationOrigin::Language,
-        module: ModuleRef::root(),
+        module: ModuleRef::language_root(),
         namespace,
         kind,
         name: name.to_owned(),
@@ -4718,12 +4981,12 @@ fn source_id(
     owner: Option<OwnerKey>,
 ) -> EntityId {
     EntityId {
-        origin: DeclarationOrigin::Source(module.clone()),
         module: module.clone(),
         namespace,
         kind,
         name: name.to_owned(),
         site: EntitySite::Source(OriginRef {
+            library: module.library(),
             source: source.clone(),
             span,
         }),
@@ -4735,7 +4998,10 @@ fn owner_key_from_entity(entity: &EntityId) -> OwnerKey {
     let (source, span) = match &entity.site {
         EntitySite::Source(origin) => (origin.source.clone(), origin.span),
         EntitySite::Language => (SourceRef::Root, Span::new(0, 0)),
-        EntitySite::Module(module) => (SourceRef::Root, Span::new(module.0.len(), module.0.len())),
+        EntitySite::Module(module) => (
+            SourceRef::Root,
+            Span::new(module.path().len(), module.path().len()),
+        ),
     };
     OwnerKey {
         module: entity.module.clone(),
@@ -4769,13 +5035,16 @@ fn is_language_name(namespace: Namespace, name: &str) -> bool {
 }
 
 fn type_declaration_name_diagnostic(entity: &EntityId) -> Option<ProjectDiagnostic> {
-    if entity.origin == DeclarationOrigin::Language || entity.namespace != Namespace::Type {
+    if entity.module.is_language() || entity.namespace != Namespace::Type {
         return None;
     }
     let kind = if entity.name == "Self" {
-        ProjectDiagnosticKind::InvalidSelf
+        ProjectDiagnosticKind::InvalidSelf {
+            library: entity.module.library(),
+        }
     } else if is_language_name(Namespace::Type, &entity.name) {
         ProjectDiagnosticKind::ReservedLanguageBinding {
+            library: entity.module.library(),
             namespace: NameNamespace::Type,
             name: entity.name.clone(),
         }
@@ -4830,7 +5099,7 @@ fn sorted_delivery_origins(deliveries: &BTreeMap<EntityId, Delivery>) -> Vec<Ori
     origins
 }
 
-fn first_binding_diagnostic(table: &BindingTable) -> Option<ProjectDiagnostic> {
+fn first_binding_diagnostic(module: &ModuleRef, table: &BindingTable) -> Option<ProjectDiagnostic> {
     let mut diagnostics = Vec::new();
     for ((namespace, name), deliveries) in table {
         let Some(public_namespace) = namespace.public() else {
@@ -4850,13 +5119,13 @@ fn first_binding_diagnostic(table: &BindingTable) -> Option<ProjectDiagnostic> {
             ));
         };
         if is_language_name(*namespace, name)
-            && !deliveries.keys().all(|target| {
-                target.origin == DeclarationOrigin::Language
-                    && target.name.as_str() == name.as_str()
-            })
+            && !deliveries
+                .keys()
+                .all(|target| target.module.is_language() && target.name.as_str() == name.as_str())
         {
             record(ProjectDiagnostic {
                 kind: ProjectDiagnosticKind::ReservedLanguageBinding {
+                    library: module.library(),
                     namespace: public_namespace,
                     name: name.clone(),
                 },
@@ -4867,6 +5136,7 @@ fn first_binding_diagnostic(table: &BindingTable) -> Option<ProjectDiagnostic> {
         if deliveries.len() > 1 {
             record(ProjectDiagnostic {
                 kind: ProjectDiagnosticKind::NameConflict {
+                    library: module.library(),
                     namespace: public_namespace,
                     name: name.clone(),
                 },
@@ -4876,7 +5146,9 @@ fn first_binding_diagnostic(table: &BindingTable) -> Option<ProjectDiagnostic> {
         }
         if *namespace == Namespace::Type && name == "Self" {
             record(ProjectDiagnostic {
-                kind: ProjectDiagnosticKind::InvalidSelf,
+                kind: ProjectDiagnosticKind::InvalidSelf {
+                    library: module.library(),
+                },
                 primary: primary.clone(),
                 related: Vec::new(),
             });
@@ -4911,27 +5183,31 @@ fn first_stage_diagnostic(
 
 fn diagnostic_kind_rank(kind: &ProjectDiagnosticKind) -> u8 {
     match kind {
-        ProjectDiagnosticKind::Frontend(_) => 0,
-        ProjectDiagnosticKind::InvalidModuleName { .. } => 1,
-        ProjectDiagnosticKind::ModuleBodyConflict { .. } => 2,
-        ProjectDiagnosticKind::GenerateUnsupported => 3,
-        ProjectDiagnosticKind::PathEscapesRoot => 4,
-        ProjectDiagnosticKind::InvalidPath => 5,
-        ProjectDiagnosticKind::NameConflict { .. } => 6,
-        ProjectDiagnosticKind::MemberConflict { .. } => 7,
-        ProjectDiagnosticKind::ReservedLanguageBinding { .. } => 8,
-        ProjectDiagnosticKind::UnresolvedImport { .. } => 9,
-        ProjectDiagnosticKind::AmbiguousImport { .. } => 10,
-        ProjectDiagnosticKind::InaccessibleImport { .. } => 11,
-        ProjectDiagnosticKind::ImportCycle { .. } => 12,
-        ProjectDiagnosticKind::PrivateReExport { .. } => 13,
-        ProjectDiagnosticKind::MissingConstructorOwner { .. } => 14,
-        ProjectDiagnosticKind::UnresolvedName { .. } => 15,
-        ProjectDiagnosticKind::AmbiguousName { .. } => 16,
-        ProjectDiagnosticKind::InaccessibleName { .. } => 17,
-        ProjectDiagnosticKind::DuplicateBinding { .. } => 18,
-        ProjectDiagnosticKind::PatternBindingMismatch => 19,
-        ProjectDiagnosticKind::InvalidSelf => 20,
+        ProjectDiagnosticKind::MissingEntryLibrary { .. } => 0,
+        ProjectDiagnosticKind::InvalidDependencyAlias { .. } => 1,
+        ProjectDiagnosticKind::MissingDependencyTarget { .. } => 2,
+        ProjectDiagnosticKind::LibraryDependencyCycle { .. } => 3,
+        ProjectDiagnosticKind::Frontend(_) => 4,
+        ProjectDiagnosticKind::InvalidModuleName { .. } => 5,
+        ProjectDiagnosticKind::ModuleBodyConflict { .. } => 6,
+        ProjectDiagnosticKind::GenerateUnsupported => 7,
+        ProjectDiagnosticKind::PathEscapesRoot => 8,
+        ProjectDiagnosticKind::InvalidPath => 9,
+        ProjectDiagnosticKind::NameConflict { .. } => 10,
+        ProjectDiagnosticKind::MemberConflict { .. } => 11,
+        ProjectDiagnosticKind::ReservedLanguageBinding { .. } => 12,
+        ProjectDiagnosticKind::UnresolvedImport { .. } => 13,
+        ProjectDiagnosticKind::AmbiguousImport { .. } => 14,
+        ProjectDiagnosticKind::InaccessibleImport { .. } => 15,
+        ProjectDiagnosticKind::ImportCycle { .. } => 16,
+        ProjectDiagnosticKind::PrivateReExport { .. } => 17,
+        ProjectDiagnosticKind::MissingConstructorOwner { .. } => 18,
+        ProjectDiagnosticKind::UnresolvedName { .. } => 19,
+        ProjectDiagnosticKind::AmbiguousName { .. } => 20,
+        ProjectDiagnosticKind::InaccessibleName { .. } => 21,
+        ProjectDiagnosticKind::DuplicateBinding { .. } => 22,
+        ProjectDiagnosticKind::PatternBindingMismatch => 23,
+        ProjectDiagnosticKind::InvalidSelf { .. } => 24,
     }
 }
 
@@ -4939,8 +5215,21 @@ fn diagnostic_kind_rank(kind: &ProjectDiagnosticKind) -> u8 {
 mod tests {
     use super::*;
 
+    const TEST_LIBRARY: LibraryId = LibraryId(0);
+
     fn project(root: &str, modules: Vec<(Vec<&str>, &str)>) -> ProjectSources {
-        ProjectSources {
+        graph(
+            TEST_LIBRARY,
+            vec![(TEST_LIBRARY, library(root, modules, vec![]))],
+        )
+    }
+
+    fn library(
+        root: &str,
+        modules: Vec<(Vec<&str>, &str)>,
+        dependencies: Vec<(&str, LibraryId)>,
+    ) -> LibrarySources {
+        LibrarySources {
             root: root.to_owned(),
             modules: modules
                 .into_iter()
@@ -4951,15 +5240,75 @@ mod tests {
                     )
                 })
                 .collect(),
+            dependencies: dependencies
+                .into_iter()
+                .map(|(alias, target)| (alias.to_owned(), target))
+                .collect(),
+        }
+    }
+
+    fn graph(entry: LibraryId, libraries: Vec<(LibraryId, LibrarySources)>) -> ProjectSources {
+        ProjectSources {
+            entry,
+            libraries: libraries.into_iter().collect(),
+        }
+    }
+
+    fn project_with_reachable_libraries(
+        libraries: Vec<(LibraryId, LibrarySources)>,
+    ) -> ProjectSources {
+        let dependencies = libraries
+            .iter()
+            .map(|(library, _)| (format!("library_{}", library.0), *library))
+            .collect();
+        let mut all = vec![(
+            TEST_LIBRARY,
+            LibrarySources {
+                root: String::new(),
+                modules: BTreeMap::new(),
+                dependencies,
+            },
+        )];
+        all.extend(libraries);
+        graph(TEST_LIBRARY, all)
+    }
+
+    fn single_library_project(
+        root: String,
+        modules: BTreeMap<FileModulePath, String>,
+    ) -> ProjectSources {
+        ProjectSources {
+            entry: TEST_LIBRARY,
+            libraries: BTreeMap::from([(
+                TEST_LIBRARY,
+                LibrarySources {
+                    root,
+                    modules,
+                    dependencies: BTreeMap::new(),
+                },
+            )]),
+        }
+    }
+
+    fn module_ref(library: LibraryId, path: &[&str]) -> ModuleRef {
+        ModuleRef::Source {
+            library,
+            path: path.iter().map(|segment| (*segment).to_owned()).collect(),
         }
     }
 
     fn module_body<'a>(resolved: &'a ResolvedProject, path: &[&str]) -> &'a ResolvedModuleBody {
+        module_body_in(resolved, TEST_LIBRARY, path)
+    }
+
+    fn module_body_in<'a>(
+        resolved: &'a ResolvedProject,
+        library: LibraryId,
+        path: &[&str],
+    ) -> &'a ResolvedModuleBody {
         resolved
             .modules
-            .get(&ModuleRef(
-                path.iter().map(|segment| (*segment).to_owned()).collect(),
-            ))
+            .get(&module_ref(library, path))
             .and_then(|module| module.body.as_ref())
             .expect("resolved module body exists")
     }
@@ -5032,6 +5381,1012 @@ mod tests {
     }
 
     #[test]
+    fn resolves_a_dependency_diamond_with_one_shared_source_identity() {
+        let app = LibraryId(10);
+        let left = LibraryId(20);
+        let right = LibraryId(30);
+        let shared = LibraryId(40);
+        let unused = LibraryId(50);
+        let libraries = vec![
+            (
+                unused,
+                library("pub fn available() -> Int { 1 }", vec![], vec![]),
+            ),
+            (
+                shared,
+                library("pub struct Shared { pub value: Int }", vec![], vec![]),
+            ),
+            (
+                right,
+                library("pub use shared::Shared;", vec![], vec![("shared", shared)]),
+            ),
+            (
+                left,
+                library("pub use shared::Shared;", vec![], vec![("shared", shared)]),
+            ),
+            (
+                app,
+                library(
+                    "use left::Shared; use right::Shared; fn keep(value: Shared) -> Shared { value }",
+                    vec![],
+                    vec![("left", left), ("right", right), ("unused", unused)],
+                ),
+            ),
+        ];
+        let resolved = resolve_project(&graph(app, libraries.clone()))
+            .expect("the dependency diamond resolves as one project");
+        let reordered = resolve_project(&graph(app, libraries.into_iter().rev().collect()))
+            .expect("library insertion order does not change the result");
+        assert_eq!(resolved, reordered);
+        assert_eq!(resolved.entry, app);
+        assert_eq!(resolved.dependencies.len(), 5);
+        assert_eq!(resolved.dependencies[&left]["shared"], shared);
+        assert_eq!(resolved.dependencies[&right]["shared"], shared);
+
+        let keep = function(module_body_in(&resolved, app, &[]), "keep");
+        let parameter = exact(named_type_reference(parameter_type(
+            keep.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("parameter type"),
+        )));
+        let returned = exact(named_type_reference(actual_return_type(
+            keep.return_type.as_ref().expect("return type"),
+        )));
+        assert_eq!(parameter, returned);
+        assert_eq!(parameter.module.source_library(), Some(shared));
+        assert_eq!(
+            resolved
+                .entities
+                .keys()
+                .filter(|entity| entity.kind == EntityKind::Struct && entity.name == "Shared")
+                .count(),
+            1
+        );
+        assert!(
+            resolved
+                .entities
+                .contains_key(&module_id(&ModuleRef::root(shared)))
+        );
+        assert!(
+            module_body_in(&resolved, unused, &[])
+                .declarations
+                .iter()
+                .any(|declaration| declaration
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.name == "available"))
+        );
+    }
+
+    #[test]
+    fn validates_the_complete_library_graph_before_source_frontend() {
+        let entry = LibraryId(1);
+        let second = LibraryId(2);
+        let third = LibraryId(3);
+        let missing = LibraryId(99);
+
+        let diagnostic =
+            resolve_project(&graph(entry, vec![])).expect_err("the entry library must be present");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::MissingEntryLibrary { entry }
+        );
+        assert!(diagnostic.primary.is_none() && diagnostic.related.is_empty());
+
+        let diagnostic = resolve_project(&graph(
+            entry,
+            vec![(entry, library("@bad", vec![], vec![("not-valid", missing)]))],
+        ))
+        .expect_err("alias validation precedes missing targets and frontend");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::InvalidDependencyAlias {
+                owner: entry,
+                alias: "not-valid".to_owned(),
+            }
+        );
+        assert!(diagnostic.primary.is_none() && diagnostic.related.is_empty());
+
+        let diagnostic = resolve_project(&graph(
+            entry,
+            vec![(
+                entry,
+                library("fn ok() {}", vec![], vec![("dependency", missing)]),
+            )],
+        ))
+        .expect_err("every dependency target must exist");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::MissingDependencyTarget {
+                owner: entry,
+                alias: "dependency".to_owned(),
+                target: missing,
+            }
+        );
+
+        let self_cycle = resolve_project(&graph(
+            entry,
+            vec![(
+                entry,
+                library("fn ok() {}", vec![], vec![("self_dep", entry)]),
+            )],
+        ))
+        .expect_err("self-dependencies are cycles");
+        assert_eq!(
+            self_cycle.kind,
+            ProjectDiagnosticKind::LibraryDependencyCycle {
+                cycle: vec![entry, entry],
+            }
+        );
+
+        let cyclic = vec![
+            (
+                third,
+                library("fn third() {}", vec![], vec![("first", entry)]),
+            ),
+            (
+                entry,
+                library("fn first() {}", vec![], vec![("second", second)]),
+            ),
+            (
+                second,
+                library("fn second() {}", vec![], vec![("third", third)]),
+            ),
+        ];
+        let forward = resolve_project(&graph(entry, cyclic.clone()))
+            .expect_err("a multi-library cycle is rejected");
+        let reverse = resolve_project(&graph(entry, cyclic.into_iter().rev().collect()))
+            .expect_err("map construction order does not change the cycle");
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward.kind,
+            ProjectDiagnosticKind::LibraryDependencyCycle {
+                cycle: vec![entry, second, third, entry],
+            }
+        );
+
+        let unreachable = LibraryId(10);
+        resolve_project(&graph(
+            entry,
+            vec![
+                (entry, library("fn ok() {}", vec![], vec![])),
+                (unreachable, library("@bad", vec![], vec![])),
+            ],
+        ))
+        .expect("unreachable source text is not parsed");
+        let diagnostic = resolve_project(&graph(
+            entry,
+            vec![
+                (entry, library("fn ok() {}", vec![], vec![])),
+                (
+                    unreachable,
+                    library("fn unused() {}", vec![], vec![("lost", missing)]),
+                ),
+            ],
+        ))
+        .expect_err("unreachable library edges still belong to the input graph");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::MissingDependencyTarget {
+                owner,
+                ref alias,
+                target,
+            } if owner == unreachable && alias == "lost" && target == missing
+        ));
+
+        resolve_project(&graph(
+            entry,
+            vec![
+                (
+                    entry,
+                    library(
+                        "fn ok() {}",
+                        vec![],
+                        vec![("_", second), ("generate", third)],
+                    ),
+                ),
+                (second, library("fn second() {}", vec![], vec![])),
+                (third, library("fn third() {}", vec![], vec![])),
+            ],
+        ))
+        .expect("contextual identifiers and underscore remain valid aliases");
+
+        for alias in ["self", "super", "root", "not-valid"] {
+            let diagnostic = resolve_project(&graph(
+                entry,
+                vec![
+                    (entry, library("fn ok() {}", vec![], vec![(alias, second)])),
+                    (second, library("fn second() {}", vec![], vec![])),
+                ],
+            ))
+            .expect_err("reserved or malformed dependency alias is rejected");
+            assert!(matches!(
+                diagnostic.kind,
+                ProjectDiagnosticKind::InvalidDependencyAlias {
+                    owner,
+                    alias: ref actual,
+                } if owner == entry && actual == alias
+            ));
+        }
+
+        let reserved = resolve_project(&graph(
+            entry,
+            vec![
+                (entry, library("fn ok() {}", vec![], vec![("Int", second)])),
+                (second, library("fn second() {}", vec![], vec![])),
+            ],
+        ))
+        .expect_err("dependency aliases retain Type namespace reservations");
+        assert!(matches!(
+            reserved.kind,
+            ProjectDiagnosticKind::ReservedLanguageBinding {
+                library,
+                namespace: NameNamespace::Type,
+                ref name,
+            } if library == entry && name == "Int"
+        ));
+        assert!(reserved.primary.is_none());
+
+        let invalid_self = resolve_project(&graph(
+            entry,
+            vec![
+                (entry, library("fn ok() {}", vec![], vec![("Self", second)])),
+                (second, library("fn second() {}", vec![], vec![])),
+            ],
+        ))
+        .expect_err("Self remains unavailable as a root Type binding");
+        assert_eq!(
+            invalid_self.kind,
+            ProjectDiagnosticKind::InvalidSelf { library: entry }
+        );
+        assert!(invalid_self.primary.is_none());
+
+        let file_alias_conflict = resolve_project(&graph(
+            entry,
+            vec![
+                (
+                    entry,
+                    library("fn ok() {}", vec![(vec!["dep"], "")], vec![("dep", second)]),
+                ),
+                (second, library("fn second() {}", vec![], vec![])),
+            ],
+        ))
+        .expect_err("a file module and dependency alias cannot share a Type binding");
+        assert!(matches!(
+            file_alias_conflict.kind,
+            ProjectDiagnosticKind::NameConflict {
+                library,
+                namespace: NameNamespace::Type,
+                ref name,
+            } if library == entry && name == "dep"
+        ));
+        assert!(file_alias_conflict.primary.is_none());
+    }
+
+    #[test]
+    fn each_library_closes_its_own_file_sources_before_consumers_resolve() {
+        let app = LibraryId(1);
+        let dependency = LibraryId(2);
+        let unopened = FileModulePath::new(["secret"]).expect("module key");
+        let diagnostic = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use dep::secret::hidden; fn main() {}",
+                        vec![],
+                        vec![("dep", dependency)],
+                    ),
+                ),
+                (
+                    dependency,
+                    LibrarySources {
+                        root: String::new(),
+                        modules: BTreeMap::from([(
+                            unopened.clone(),
+                            "pub fn hidden() -> Int { 1 }".to_owned(),
+                        )]),
+                        dependencies: BTreeMap::new(),
+                    },
+                ),
+            ],
+        ))
+        .expect_err("a consumer import cannot open a dependency file body");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::UnresolvedImport { ref path }
+                if path == "dep::secret::hidden"
+        ));
+        assert_eq!(
+            diagnostic.primary.expect("consumer use origin").library,
+            app
+        );
+
+        let diagnostic = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use dep::secret::hidden; fn main() {}",
+                        vec![],
+                        vec![("dep", dependency)],
+                    ),
+                ),
+                (
+                    dependency,
+                    LibrarySources {
+                        root: String::new(),
+                        modules: BTreeMap::from([(unopened, "@bad".to_owned())]),
+                        dependencies: BTreeMap::new(),
+                    },
+                ),
+            ],
+        ))
+        .expect_err("an unopened dependency file never reaches frontend");
+        assert!(matches!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::UnresolvedImport { .. }
+        ));
+
+        let resolved = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use local::Local; use dep::Remote; fn use_both(left: Local, right: Remote) {}",
+                        vec![(vec!["local"], "pub struct Local {}")],
+                        vec![("dep", dependency)],
+                    ),
+                ),
+                (
+                    dependency,
+                    library(
+                        "pub use local::Remote;",
+                        vec![(vec!["local"], "pub struct Remote {}")],
+                        vec![],
+                    ),
+                ),
+            ],
+        ))
+        .expect("each library opens only its own same-key file source");
+        let use_both = function(module_body_in(&resolved, app, &[]), "use_both");
+        let left = exact(named_type_reference(parameter_type(
+            use_both.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("local parameter type"),
+        )));
+        let right = exact(named_type_reference(parameter_type(
+            use_both.parameters[1]
+                .annotation
+                .as_ref()
+                .expect("dependency parameter type"),
+        )));
+        assert_eq!(left.module.source_library(), Some(app));
+        assert_eq!(right.module.source_library(), Some(dependency));
+        assert_eq!(left.module.path(), ["local"]);
+        assert_eq!(right.module.path(), ["local"]);
+
+        let escaped = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library("fn main() {}", vec![], vec![("dep", dependency)]),
+                ),
+                (dependency, library("use super::missing;", vec![], vec![])),
+            ],
+        ))
+        .expect_err("super cannot cross a dependency root");
+        assert_eq!(escaped.kind, ProjectDiagnosticKind::PathEscapesRoot);
+        assert_eq!(
+            escaped.primary.expect("dependency root origin").library,
+            dependency
+        );
+    }
+
+    #[test]
+    fn dependency_visibility_and_facades_preserve_original_targets() {
+        let app = LibraryId(1);
+        let facade = LibraryId(2);
+        let origin = LibraryId(3);
+        let resolved = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use api::Public; use api::facade::Public as ViaFacade; use api::Choice; use api::One; fn make(left: Public, right: ViaFacade) -> Choice { One(1) } mod feature { use root::api::Public; fn nested(value: Public) {} }",
+                        vec![],
+                        vec![("api", facade)],
+                    ),
+                ),
+                (
+                    facade,
+                    library(
+                        "pub use actual::Public; pub use actual as facade; pub use actual::Choice; pub use actual::Choice::{One};",
+                        vec![],
+                        vec![("actual", origin)],
+                    ),
+                ),
+                (
+                    origin,
+                    library(
+                        "pub struct Public {} struct Private {} pub enum Choice { One(Int) }",
+                        vec![],
+                        vec![],
+                    ),
+                ),
+            ],
+        ))
+        .expect("explicit entity, module, and constructor facades resolve");
+        let root_facade = module_body_in(&resolved, facade, &[])
+            .imports
+            .iter()
+            .find(|import| import.local_name == "facade")
+            .expect("dependency root facade import");
+        assert_eq!(root_facade.target, module_id(&ModuleRef::root(origin)));
+        let make = function(module_body_in(&resolved, app, &[]), "make");
+        let left = exact(named_type_reference(parameter_type(
+            make.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("direct facade type"),
+        )));
+        let right = exact(named_type_reference(parameter_type(
+            make.parameters[1]
+                .annotation
+                .as_ref()
+                .expect("module facade type"),
+        )));
+        assert_eq!(left, right);
+        assert_eq!(left.module.source_library(), Some(origin));
+        let ResolvedExprKind::Call { callee, .. } =
+            &make.body.tail.as_deref().expect("constructor tail").kind
+        else {
+            panic!("constructor call remains explicit");
+        };
+        let constructor = exact(path_expression(callee));
+        assert_eq!(constructor.module.source_library(), Some(origin));
+        assert_eq!(
+            resolved
+                .entities
+                .get(constructor)
+                .and_then(|entity| entity.owner.as_ref())
+                .map(|owner| owner.module.source_library()),
+            Some(Some(origin))
+        );
+
+        let no_injection = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library("fn bad(value: Public) {}", vec![], vec![("actual", origin)]),
+                ),
+                (origin, library("pub struct Public {}", vec![], vec![])),
+            ],
+        ))
+        .expect_err("a dependency alias does not inject the dependency namespace");
+        assert!(matches!(
+            no_injection.kind,
+            ProjectDiagnosticKind::UnresolvedName {
+                namespace: NameNamespace::Type,
+                ref name,
+            } if name == "Public"
+        ));
+
+        let child_alias = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "mod feature { use actual::Public; }",
+                        vec![],
+                        vec![("actual", origin)],
+                    ),
+                ),
+                (origin, library("pub struct Public {}", vec![], vec![])),
+            ],
+        ))
+        .expect_err("dependency aliases are not copied into child modules");
+        assert!(matches!(
+            child_alias.kind,
+            ProjectDiagnosticKind::UnresolvedImport { ref path }
+                if path == "actual::Public"
+        ));
+
+        for source in ["use api::actual::Public;", "use actual::Public;"] {
+            let diagnostic = resolve_project(&graph(
+                app,
+                vec![
+                    (app, library(source, vec![], vec![("api", facade)])),
+                    (
+                        facade,
+                        library("fn facade() {}", vec![], vec![("actual", origin)]),
+                    ),
+                    (origin, library("pub struct Public {}", vec![], vec![])),
+                ],
+            ))
+            .expect_err("private or absent transitive dependency aliases stay hidden");
+            assert!(matches!(
+                diagnostic.kind,
+                ProjectDiagnosticKind::InaccessibleImport { .. }
+                    | ProjectDiagnosticKind::UnresolvedImport { .. }
+            ));
+        }
+
+        let private = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library("use actual::Private;", vec![], vec![("actual", origin)]),
+                ),
+                (origin, library("struct Private {}", vec![], vec![])),
+            ],
+        ))
+        .expect_err("a direct edge does not expose a private declaration");
+        assert!(matches!(
+            private.kind,
+            ProjectDiagnosticKind::InaccessibleImport { .. }
+        ));
+
+        let owner_gap = resolve_project(&graph(
+            facade,
+            vec![
+                (
+                    facade,
+                    library(
+                        "pub use actual::Choice::{One};",
+                        vec![],
+                        vec![("actual", origin)],
+                    ),
+                ),
+                (
+                    origin,
+                    library("pub enum Choice { One(Int) }", vec![], vec![]),
+                ),
+            ],
+        ))
+        .expect_err("a constructor facade must also export its exact owner");
+        assert!(matches!(
+            owner_gap.kind,
+            ProjectDiagnosticKind::MissingConstructorOwner { ref constructor }
+                if constructor == "One"
+        ));
+
+        let alias_conflict = resolve_project(&graph(
+            facade,
+            vec![
+                (
+                    facade,
+                    library("struct actual {}", vec![], vec![("actual", origin)]),
+                ),
+                (origin, library("fn origin() {}", vec![], vec![])),
+            ],
+        ))
+        .expect_err("a dependency alias does not override a local Type binding");
+        assert!(matches!(
+            alias_conflict.kind,
+            ProjectDiagnosticKind::NameConflict {
+                namespace: NameNamespace::Type,
+                ref name,
+                ..
+            } if name == "actual"
+        ));
+        assert_eq!(
+            alias_conflict
+                .primary
+                .expect("the source side of the conflict is locatable")
+                .library,
+            facade
+        );
+    }
+
+    #[test]
+    fn equal_source_sites_in_different_libraries_never_share_identity_or_privacy() {
+        let app = LibraryId(1);
+        let first = LibraryId(2);
+        let second = LibraryId(3);
+        let same_source = "pub mod same { pub struct Item {} }";
+        let resolved = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use first::same::Item as FirstItem; use second::same::Item as SecondItem; fn pair(left: FirstItem, right: SecondItem) {}",
+                        vec![],
+                        vec![("first", first), ("second", second)],
+                    ),
+                ),
+                (first, library(same_source, vec![], vec![])),
+                (second, library(same_source, vec![], vec![])),
+            ],
+        ))
+        .expect("equal text and spans in two libraries remain distinct");
+        let pair = function(module_body_in(&resolved, app, &[]), "pair");
+        let first_item = exact(named_type_reference(parameter_type(
+            pair.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("first item type"),
+        )));
+        let second_item = exact(named_type_reference(parameter_type(
+            pair.parameters[1]
+                .annotation
+                .as_ref()
+                .expect("second item type"),
+        )));
+        assert_ne!(first_item, second_item);
+        assert_eq!(first_item.module, module_ref(first, &["same"]));
+        assert_eq!(second_item.module, module_ref(second, &["same"]));
+        assert_eq!(
+            resolved
+                .entities
+                .get(first_item)
+                .and_then(|entity| entity.declared_at.as_ref())
+                .map(|origin| origin.library),
+            Some(first)
+        );
+        assert_eq!(
+            resolved
+                .entities
+                .get(second_item)
+                .and_then(|entity| entity.declared_at.as_ref())
+                .map(|origin| origin.library),
+            Some(second)
+        );
+
+        let conflict = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use first::same::Item; use second::same::Item;",
+                        vec![],
+                        vec![("first", first), ("second", second)],
+                    ),
+                ),
+                (first, library(same_source, vec![], vec![])),
+                (second, library(same_source, vec![], vec![])),
+            ],
+        ))
+        .expect_err("different source identities do not become a diamond delivery");
+        assert!(matches!(
+            conflict.kind,
+            ProjectDiagnosticKind::NameConflict {
+                namespace: NameNamespace::Type,
+                ref name,
+                ..
+            } if name == "Item"
+        ));
+
+        let private = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use secret::deeper;",
+                        vec![(
+                            vec!["secret", "deeper"],
+                            "use root::first::secret::hidden; fn local() { hidden() }",
+                        )],
+                        vec![("first", first)],
+                    ),
+                ),
+                (
+                    first,
+                    library(
+                        "use secret;",
+                        vec![(vec!["secret"], "fn hidden() {}")],
+                        vec![],
+                    ),
+                ),
+            ],
+        ))
+        .expect_err("matching deeper paths in another library grant no private access");
+        assert!(matches!(
+            private.kind,
+            ProjectDiagnosticKind::InaccessibleImport { ref path }
+                if path == "root::first::secret::hidden"
+        ));
+        let primary = private.primary.expect("consumer import origin");
+        assert_eq!(primary.library, app);
+        assert_eq!(
+            primary.source,
+            SourceRef::File(FileModulePath::new(["secret", "deeper"]).unwrap())
+        );
+    }
+
+    #[test]
+    fn cross_library_references_keep_source_owners_and_checker_obligations_exact() {
+        let app = LibraryId(1);
+        let dependency = LibraryId(2);
+        let resolved = resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use dep::original; fn wrapper(value: Int) -> Int { original(value) } fn deferred(value: dep::Packet::Item) {}",
+                        vec![],
+                        vec![("dep", dependency)],
+                    ),
+                ),
+                (
+                    dependency,
+                    library(
+                        "pub struct Packet { pub value: Int } impl Packet { pub fn keep(self: Self) -> Self { self } } pub fn choose<T>(value: T::Item) -> T::Item { value } pub fn original(value: Int) -> Int { value }",
+                        vec![],
+                        vec![],
+                    ),
+                ),
+            ],
+        ))
+        .expect("source owners and deferred selections cross the library boundary");
+
+        let dependency_root = module_body_in(&resolved, dependency, &[]);
+        let choose = function(dependency_root, "choose");
+        assert_eq!(
+            choose.parameters[0]
+                .binding
+                .identity
+                .module
+                .source_library(),
+            Some(dependency)
+        );
+        let ResolvedReference::Selection {
+            occurrence,
+            base,
+            members,
+            ..
+        } = named_type_reference(parameter_type(
+            choose.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("selected parameter type"),
+        ))
+        else {
+            panic!("type-dependent member remains a Checker selection");
+        };
+        assert_eq!(occurrence.library, dependency);
+        assert_eq!(base.kind, EntityKind::TypeParameter);
+        assert_eq!(base.module.source_library(), Some(dependency));
+        assert_eq!(
+            base.owner
+                .as_ref()
+                .map(|owner| owner.module.source_library()),
+            Some(Some(dependency))
+        );
+        assert_eq!(members[0].origin.library, dependency);
+        assert!(members[0].declaration.is_none());
+
+        let implementation = dependency_root
+            .declarations
+            .iter()
+            .find_map(|declaration| match &declaration.kind {
+                ResolvedDeclarationKind::InherentImpl(implementation) => Some(implementation),
+                _ => None,
+            })
+            .expect("Packet implementation");
+        let packet = exact(&implementation.target.reference);
+        assert_eq!(packet.module.source_library(), Some(dependency));
+        let ResolvedImplMemberKind::Function(keep) = &implementation.members[0].kind else {
+            panic!("keep is a resolved method");
+        };
+        let ResolvedReference::Exact {
+            target: self_identity,
+            self_reference: Some(self_reference),
+            ..
+        } = named_type_reference(actual_return_type(
+            keep.return_type.as_ref().expect("Self return type"),
+        ))
+        else {
+            panic!("Self keeps both its binder and exact impl target");
+        };
+        assert_eq!(self_identity.module.source_library(), Some(dependency));
+        assert_eq!(
+            self_reference.identity.module.source_library(),
+            Some(dependency)
+        );
+        assert_eq!(
+            exact(
+                &self_reference
+                    .target
+                    .as_deref()
+                    .expect("Self target")
+                    .reference
+            ),
+            packet
+        );
+
+        let app_root = module_body_in(&resolved, app, &[]);
+        let wrapper_declaration = app_root
+            .declarations
+            .iter()
+            .find(|declaration| {
+                declaration
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.name == "wrapper")
+            })
+            .expect("wrapper declaration");
+        let wrapper_identity = wrapper_declaration
+            .identity
+            .as_ref()
+            .expect("wrapper identity");
+        let wrapper = function(app_root, "wrapper");
+        let ResolvedExprKind::Call { callee, .. } =
+            &wrapper.body.tail.as_deref().expect("wrapper call").kind
+        else {
+            panic!("wrapper tail is a call");
+        };
+        let original = exact(path_expression(callee));
+        assert_eq!(wrapper_identity.module.source_library(), Some(app));
+        assert_eq!(original.module.source_library(), Some(dependency));
+        assert_ne!(wrapper_identity, original);
+        let language_int = exact(named_type_reference(parameter_type(
+            wrapper.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("wrapper parameter type"),
+        )));
+        assert!(language_int.module.is_language());
+
+        let deferred = function(app_root, "deferred");
+        let ResolvedReference::Selection {
+            occurrence,
+            base,
+            members,
+            ..
+        } = named_type_reference(parameter_type(
+            deferred.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("cross-library selected type"),
+        ))
+        else {
+            panic!("cross-library associated item remains a Checker selection");
+        };
+        assert_eq!(occurrence.library, app);
+        assert_eq!(base.module.source_library(), Some(dependency));
+        assert_eq!(base.name, "Packet");
+        assert_eq!(members[0].origin.library, app);
+        assert!(members[0].declaration.is_none());
+    }
+
+    #[test]
+    fn source_failures_follow_global_stage_and_library_order() {
+        let first = LibraryId(1);
+        let second = LibraryId(2);
+
+        let frontend = resolve_project(&project_with_reachable_libraries(vec![
+            (
+                first,
+                library(
+                    "generate pending {} mod clash {}",
+                    vec![(vec!["clash"], "")],
+                    vec![],
+                ),
+            ),
+            (second, library("@bad", vec![], vec![])),
+        ]))
+        .expect_err("frontend runs for every reachable root before later stages");
+        assert!(matches!(frontend.kind, ProjectDiagnosticKind::Frontend(_)));
+        assert_eq!(frontend.primary.expect("frontend origin").library, second);
+
+        let module_graph = resolve_project(&project_with_reachable_libraries(vec![
+            (
+                first,
+                library("mod clash {}", vec![(vec!["clash"], "")], vec![]),
+            ),
+            (second, library("generate pending {}", vec![], vec![])),
+        ]))
+        .expect_err("module graph runs globally before generation support");
+        assert!(matches!(
+            module_graph.kind,
+            ProjectDiagnosticKind::ModuleBodyConflict { .. }
+        ));
+        assert_eq!(module_graph.primary.expect("module origin").library, first);
+
+        let generation = resolve_project(&project_with_reachable_libraries(vec![
+            (first, library("fn bad() { missing }", vec![], vec![])),
+            (second, library("generate pending {}", vec![], vec![])),
+        ]))
+        .expect_err("generation support is checked before declaration and body names");
+        assert_eq!(generation.kind, ProjectDiagnosticKind::GenerateUnsupported);
+        assert_eq!(generation.primary.expect("generate origin").library, second);
+
+        let declaration = resolve_project(&project_with_reachable_libraries(vec![
+            (
+                first,
+                library("fn duplicate() {} fn duplicate() {}", vec![], vec![]),
+            ),
+            (second, library("use missing;", vec![], vec![])),
+        ]))
+        .expect_err("declaration indexing precedes imports in every library");
+        assert!(matches!(
+            declaration.kind,
+            ProjectDiagnosticKind::NameConflict { ref name, .. }
+                if name == "duplicate"
+        ));
+        assert_eq!(
+            declaration.primary.expect("declaration origin").library,
+            first
+        );
+
+        let import = resolve_project(&project_with_reachable_libraries(vec![
+            (first, library("fn bad() { missing }", vec![], vec![])),
+            (second, library("use absent;", vec![], vec![])),
+        ]))
+        .expect_err("import/export precedes body-name resolution globally");
+        assert!(matches!(
+            import.kind,
+            ProjectDiagnosticKind::ImportCycle { ref path }
+                if path == "absent"
+        ));
+        assert_eq!(import.primary.expect("import origin").library, second);
+
+        let low_source = "// λ\nfn low() { missing_low }";
+        let inputs = vec![
+            (
+                second,
+                library("fn high() { missing_high }", vec![], vec![]),
+            ),
+            (first, library(low_source, vec![], vec![])),
+        ];
+        let forward = resolve_project(&project_with_reachable_libraries(inputs.clone()))
+            .expect_err("the lower LibraryId owns the first body-name failure");
+        let reverse = resolve_project(&project_with_reachable_libraries(
+            inputs.into_iter().rev().collect(),
+        ))
+        .expect_err("library map construction order is irrelevant");
+        assert_eq!(forward, reverse);
+        let primary = forward.primary.expect("body-name origin");
+        assert_eq!(primary.library, first);
+        assert_eq!(primary.source, SourceRef::Root);
+        assert_eq!(
+            primary.span.start,
+            low_source
+                .find("missing_low")
+                .expect("missing name byte offset")
+        );
+
+        let reachable_generate = resolve_project(&graph(
+            TEST_LIBRARY,
+            vec![
+                (
+                    TEST_LIBRARY,
+                    library("fn main() {}", vec![], vec![("dep", second)]),
+                ),
+                (first, library("generate unreachable {}", vec![], vec![])),
+                (second, library("generate reachable {}", vec![], vec![])),
+            ],
+        ))
+        .expect_err("a reachable dependency root is scanned even when its alias is unused");
+        assert_eq!(
+            reachable_generate.kind,
+            ProjectDiagnosticKind::GenerateUnsupported
+        );
+        assert_eq!(
+            reachable_generate
+                .primary
+                .expect("reachable generate origin")
+                .library,
+            second
+        );
+    }
+
+    #[test]
     fn resolves_owned_language_generic_and_sequential_bindings() {
         let mut sources = project(
             r#"
@@ -5044,7 +6399,12 @@ fn choose<T: Eq>(value: T) -> Option<T> {
             vec![],
         );
         let resolved = resolve_project(&sources).expect("project resolves");
-        sources.root.clear();
+        sources
+            .libraries
+            .get_mut(&TEST_LIBRARY)
+            .expect("test library")
+            .root
+            .clear();
         assert_eq!(resolved, resolved.clone());
 
         let function = function(module_body(&resolved, &[]), "choose");
@@ -5104,7 +6464,7 @@ fn choose<T: Eq>(value: T) -> Option<T> {
         assert!(
             resolved
                 .modules
-                .get(&ModuleRef(vec!["unused".to_owned()]))
+                .get(&module_ref(TEST_LIBRARY, &["unused"]))
                 .is_some_and(|module| module.body.is_none())
         );
 
@@ -5211,7 +6571,7 @@ pub fn read() -> Int { self::local() + helper() + plus() }
         };
         assert_eq!(
             exact(path_expression(callee)).module,
-            ModuleRef(vec!["tools".to_owned()])
+            module_ref(TEST_LIBRARY, &["tools"])
         );
 
         resolve_project(&project(
@@ -5285,7 +6645,8 @@ pub fn read() -> Int { self::local() + helper() + plus() }
             diagnostic.kind,
             ProjectDiagnosticKind::NameConflict {
                 namespace: NameNamespace::Value,
-                ref name
+                ref name,
+                ..
             } if name == "item"
         ));
     }
@@ -6521,6 +7882,7 @@ where (T, T): Eq + Debug, T::Item: Eq, {
             ProjectDiagnosticKind::ReservedLanguageBinding {
                 namespace: NameNamespace::Effect,
                 ref name,
+                ..
             } if name == "fs"
         ));
     }
@@ -6577,7 +7939,7 @@ fn write() -> Unit with {Logger} { Logger.log(1) }
             .declaration
             .as_ref()
             .expect("fail.raise is an exact Language member");
-        assert_eq!(raise.origin, DeclarationOrigin::Language);
+        assert!(raise.module.is_language());
         assert_eq!(raise.kind, EntityKind::EffectOperation);
 
         let diagnostic = resolve_project(&project(
@@ -6653,7 +8015,8 @@ fn ambiguous() -> Int { Source.read() }
             diagnostic.kind,
             ProjectDiagnosticKind::ReservedLanguageBinding {
                 namespace: NameNamespace::Type,
-                ref name
+                ref name,
+                ..
             } if name == "Int"
         ));
 
@@ -6721,6 +8084,7 @@ fn ambiguous() -> Int { Source.read() }
                     ProjectDiagnosticKind::ReservedLanguageBinding {
                         namespace: NameNamespace::Type,
                         ref name,
+                        ..
                     } if name == "Int"
                 ),
                 "{source}: {diagnostic:?}"
@@ -6756,7 +8120,12 @@ fn ambiguous() -> Int { Source.read() }
             vec![(vec!["types"], "pub struct Thing {}")],
         ))
         .expect_err("import cannot occupy owner-scoped Self in the Type namespace");
-        assert_eq!(diagnostic.kind, ProjectDiagnosticKind::InvalidSelf);
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::InvalidSelf {
+                library: TEST_LIBRARY,
+            }
+        );
 
         for source in [
             "trait Bad { type Self; }",
@@ -6765,7 +8134,12 @@ fn ambiguous() -> Int { Source.read() }
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
                 .expect_err("owner-scoped Type declaration cannot occupy Self");
-            assert_eq!(diagnostic.kind, ProjectDiagnosticKind::InvalidSelf);
+            assert_eq!(
+                diagnostic.kind,
+                ProjectDiagnosticKind::InvalidSelf {
+                    library: TEST_LIBRARY,
+                }
+            );
         }
         for source in [
             "trait Bad { type Int; }",
@@ -6779,6 +8153,7 @@ fn ambiguous() -> Int { Source.read() }
                 ProjectDiagnosticKind::ReservedLanguageBinding {
                     namespace: NameNamespace::Type,
                     ref name,
+                    ..
                 } if name == "Int"
             ));
         }
@@ -6799,29 +8174,20 @@ fn ambiguous() -> Int { Source.read() }
             "pub fn item() -> Int { 1 }".to_owned(),
         );
         let root = "use a::item; fn main() -> Int { item() }".to_owned();
-        let left = resolve_project(&ProjectSources {
-            root: root.clone(),
-            modules: first,
-        })
-        .expect("project resolves");
-        let right = resolve_project(&ProjectSources {
-            root,
-            modules: second,
-        })
-        .expect("project resolves independently of insertion order");
+        let left = resolve_project(&single_library_project(root.clone(), first))
+            .expect("project resolves");
+        let right = resolve_project(&single_library_project(root, second))
+            .expect("project resolves independently of insertion order");
         assert_eq!(left, right);
 
         let bad_root = "use z;".to_owned();
-        let left_error = resolve_project(&ProjectSources {
-            root: bad_root.clone(),
-            modules: left_source_maps(),
-        })
+        let left_error = resolve_project(&single_library_project(
+            bad_root.clone(),
+            left_source_maps(),
+        ))
         .expect_err("reachable bad module fails");
-        let right_error = resolve_project(&ProjectSources {
-            root: bad_root,
-            modules: right_source_maps(),
-        })
-        .expect_err("same error with reverse construction");
+        let right_error = resolve_project(&single_library_project(bad_root, right_source_maps()))
+            .expect_err("same error with reverse construction");
         assert_eq!(left_error, right_error);
     }
 
@@ -6837,6 +8203,7 @@ fn ambiguous() -> Int { Source.read() }
             ProjectDiagnosticKind::NameConflict {
                 namespace: NameNamespace::Value,
                 ref name,
+                ..
             } if name == "z"
         ));
         assert_eq!(
@@ -6849,6 +8216,7 @@ fn ambiguous() -> Int { Source.read() }
         assert_eq!(
             diagnostic.related,
             vec![OriginRef {
+                library: TEST_LIBRARY,
                 source: SourceRef::Root,
                 span: Span::new(13, 14),
             }]

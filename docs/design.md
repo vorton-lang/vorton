@@ -39,7 +39,7 @@ Source
 |---|---|
 | `Token` | Lexer 按唯一词法规范产生 token、原始字面量拼写与 span；空白和注释不改变语法角色。 |
 | `AST` | Parser 忠实保存 canonical surface、数值字面量拼写、结构与 span；不承载名称、数值解释、类型、effect 或后端结论。 |
-| `ResolvedAST` | 每个 lexical/nominal 声明、binding、constructor、import/re-export 与根引用获得 exact identity；已闭合 owner 集合中由当前语法直接选择的 member 同样 exact。显式 effect binder/ref 与 `TraitPath::method<...>` 取得 exact trait/method identity，并保留 actual type、callable shape、parameter qualifier/mode、where predicate 与 effect tree；省略 `with` 的 shape 保留其结构 occurrence。只有依赖 receiver/base type、适用 impl 或 associated selection 的 obligation 才保留 occurrence、已知 base/owner 与源码选择信息，最终 target 留给 Checker。 |
+| `ResolvedAST` | 每个 source library/module、lexical/nominal 声明、binding、constructor、import/re-export 与根引用获得含库归属的 exact identity；已闭合 owner 集合中由当前语法直接选择的 member 同样 exact。显式 effect binder/ref 与 `TraitPath::method<...>` 取得 exact trait/method identity，并保留 actual type、callable shape、parameter qualifier/mode、where predicate 与 effect tree；省略 `with` 的 shape 保留其结构 occurrence。只有依赖 receiver/base type、适用 impl 或 associated selection 的 obligation 才保留 occurrence、已知 base/owner、库来源与源码选择信息，最终 target 留给 Checker。 |
 | `TypedHIR` | HM metavariable 已求解；类型、effect row、已解释数值字面量、完整 callable scheme、callee、impl、associated type、call-site instantiation 与公开模块接口冻结。合法 type/effect 多态变量转为带 owner 与 ordinal 的 formal；有限 row 合并义务显式附着于 scheme/instantiation，其它 raw 变量被拒绝。 |
 | `CoreHIR` | 所有语言级隐式行为已 elaborated 为 explicit typed construct、callable body、edge 或 intrinsic contract，包括 checked integer panic 与比较 dispatch。此层是最后的 Vorton semantic representation，不含资源操作。 |
 | `FlowIR` | Structured control 降为 ownership-neutral CFG/ANF；pattern projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 建立；project-wide binder、call、alias 与 capture graph 冻结。 |
@@ -47,21 +47,23 @@ Source
 | `AbiIR` | 已验证语义被投影为 type/tag/field layout、symbol、prototype、closure/dictionary/evidence layout、drop glue、HostImport、extern 与 failure ABI。 |
 | `C11` | 对 AbiIR 做确定性、机械的标准 C11 serialization；不再选择方法、推断 effect、解释 pattern 或创建 semantic identity。 |
 
-每个跨层节点保留 `OriginRef`，让诊断回到 source span，而不迫使低层保留整份表面语法。
+每个 source `OriginRef` 保留 `LibraryId`、库内 source key 与 UTF-8 byte span，让诊断回到唯一输入位置，而不迫使低层保留整份表面语法。
 
 ## Identity 与项目闭包
 
-具名声明和引用使用包含 origin module、namespace、declaration 与 owner 的 exact reference。Re-export 原样转发同一 identity；same-origin diamond 是幂等 delivery，不创建新声明。不同 origin 的相同叶名称永不合并。
+具名声明和引用使用包含 source `LibraryId`、origin module、namespace、declaration 与 owner 的 exact reference。Re-export 原样转发同一 identity；same-library/same-origin diamond 是幂等 delivery，不创建新声明。不同库或不同 origin 的相同叶名称永不合并。每个 source library root 也是 exact module entity；Language identity 继续使用独立 origin，没有 source `LibraryId`。
 
-Compiler library 的 Resolver 入口只消费匿名根 source 与抽象 file-module key 到 UTF-8 source 的纯内存映射，不读取文件系统、cwd 或 OS path。File 与 inline module 构成同一逻辑树；key 前缀可形成无 body 的 synthetic node。只有根 source、实际 import/re-export 可达的 file body，以及这些 source 内的 inline body进入当前解析闭包。未达 source 不执行 frontend 或语义检查，普通 expression/type path 也不能隐式扩大闭包。
+Compiler library 的 Resolver 入口消费宿主指定 `LibraryId` 的显式纯内存依赖 DAG；每个库包含 root source、抽象 file-module key 到 UTF-8 source 的映射，以及指向真实库 ID 的直接依赖别名。它不读取文件系统、cwd、OS path、package registry 或网络。先验证整个输入图，随后只解析 entry 可达库；每个可达库 root 必定进入闭包，各库 file/inline/synthetic tree 仍只由本库已解析 source 的实际 import/re-export 扩展。Consumer 不能打开依赖库未达 file body，也不能通过碰巧相同的 key、ID 数字或别名形成边。
 
-Language declaration 使用独立 `Language` origin，不通过隐藏 source、虚构 module 或自动 source prelude 注入。Source declaration、generic 与 local binding 的 identity 从冻结的 module、owner、declaration site 与语法角色构造；不得依赖共享全局计数器或偶然遍历顺序。
+Language declaration 使用独立 `Language` origin，不通过隐藏 source、虚构 module 或自动 source prelude 注入。Source declaration、generic 与 local binding 的 identity 从冻结的 library、module、owner、declaration site 与语法角色构造；不得依赖共享全局计数器或偶然遍历顺序。依赖别名只在所属库 root 建立 private Type binding，指向目标库的真实 root；跨库 import、explicit re-export 与 facade 继续消费同一套 binding 和 exact identity。
+
+`ResolvedProject` 仍是一个 owned、opaque 的名称层结果，统一保留 entry、可达的直接依赖图、各库原声明归属与引用。它不增加可编辑接口摘要、序列化契约或查询框架，也不表示 Checked、TypedHIR 或完整有效接口已经成立。
 
 名称选择先在每个适用 namespace 内应用词法 shadowing，再按 path 的 root、每个中间 container 与 terminal category 过滤并合并候选。不能用不合法的跨 namespace candidate 抢占合法结果，也不能为得到结果而回退到同 namespace 已被遮蔽的 declaration。Enum constructor、custom-effect operation 与已知 named construction/pattern field 的 owner 集合已经闭合，缺失或类别错误必须在 Resolver 拒绝；普通 field/method receiver 与 type-relative impl/associated selection 仍是 Checker obligation。Effect 与 effect alias 不是 Type/Value 的 type-relative `::` base。
 
 局部 binder 使用 owner-scoped identity；sequential shadowing 创建新 identity，or-pattern 各分支的同名 binder 则共享一个 arm-scoped logical identity。Normalization 创建的 block、temporary、projection 与 result slot 使用由冻结树位置导出的稳定 path identity。Identity 只由对应阶段建立，不能由共享计数器、遍历顺序或生成符号反推。
 
-项目诊断按 project input、reachable-source frontend、module graph、declaration/index、import/export 与 body-name 的阶段顺序选择。一个阶段内统一按 logical module path、primary UTF-8 span 与稳定错误类别选首错；只在源码有序遍历已经证明后继位置不可能产生更小候选时短路，不能让 spelling、物理 source key、table/subpass 或偶然 traversal 抢先。
+项目诊断按 library-graph input、全部 reachable-source frontend、module graph、当前 generation support、declaration/index、import/export 与 body-name 的阶段顺序选择。Source 阶段内统一按 `LibraryId`、logical module path、primary UTF-8 span 与稳定错误类别选首错；只在源码有序遍历已经证明后继位置不可能产生更小候选时短路，不能让 spelling、物理 source key、map 插入顺序、table/subpass 或偶然 traversal 抢先。没有 source span 的依赖图诊断直接携带实际 owner／alias／target 或 cycle chain。
 
 所有可执行 body 汇入同一 project-wide `ExecutableInventory`，包括具名函数、method、closure、handler、compiler-defined glue 与 exact intrinsic body。Enum constructor 是 typed construction operation，不冒充 callable。FlowIR freeze 前 inventory 与 call graph 必须闭合；之后新增 executable、binder、edge 或 reachability 都是 internal error。
 
