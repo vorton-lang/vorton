@@ -53,7 +53,7 @@ pub struct Program {
     pub span: Span,
     pub requires: Option<FileRequires>,
     pub uses: Vec<UseDeclaration>,
-    pub declarations: Vec<Declaration>,
+    pub items: Vec<ModuleItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +85,21 @@ pub struct UseItem {
 
 pub type Declaration = Spanned<DeclarationKind>;
 
+/// A root or inline-module item in original source order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModuleItem {
+    Declaration(Declaration),
+    Generate(GenerateItem),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerateItem {
+    pub span: Span,
+    pub keyword_span: Span,
+    pub context: Identifier,
+    pub body: Block,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declared<T> {
     pub visibility: Option<Visibility>,
@@ -109,11 +124,12 @@ pub enum DeclarationKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDeclaration {
+    pub const_span: Option<Span>,
     pub name: Identifier,
     pub type_parameters: Vec<TypeParameter>,
     pub effect_parameters: Vec<EffectParameter>,
     pub parameters: Vec<NamedParameter>,
-    pub return_type: Option<TypeExpr>,
+    pub return_type: Option<ReturnAnnotation>,
     pub effects: Option<EffectSet>,
     pub body: Block,
 }
@@ -138,14 +154,38 @@ pub struct NamedParameter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterType {
     pub span: Span,
+    pub escape: Option<EscapeQualifier>,
     pub mode: Option<Spanned<ParameterMode>>,
-    pub ty: TypeExpr,
+    pub kind: ParameterTypeKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParameterMode {
-    Mut,
+    /// A fixed `&T` parameter mode.
+    Borrow,
+    /// A fixed `&mut T` parameter mode.
+    MutBorrow,
+    /// A fixed `move T` parameter mode.
     Move,
+    /// A `call F` source selection resolved to a fixed mode by the checker.
+    Call,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EscapeQualifier {
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParameterTypeKind {
+    Type(TypeExpr),
+    Shape(ShapeExpr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReturnAnnotation {
+    Type(TypeExpr),
+    Shape(ShapeExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +243,22 @@ pub struct TraitImplDeclaration {
     pub type_parameters: Vec<TypeParameter>,
     pub trait_type: NamedType,
     pub target: NamedType,
+    pub where_clause: Option<WhereClause>,
     pub members: Vec<ImplMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhereClause {
+    pub span: Span,
+    pub keyword_span: Span,
+    pub predicates: Vec<WherePredicate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WherePredicate {
+    pub span: Span,
+    pub subject: TypeExpr,
+    pub bounds: Vec<NamedType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,14 +353,20 @@ pub struct ModuleDeclaration {
     pub name: Identifier,
     pub requires: Option<EffectSet>,
     pub uses: Vec<UseDeclaration>,
-    pub declarations: Vec<Declaration>,
+    pub items: Vec<ModuleItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParameter {
     pub span: Span,
     pub name: Identifier,
-    pub bounds: Vec<NamedType>,
+    pub bounds: Vec<GenericBound>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenericBound {
+    Named(NamedType),
+    Shape(ShapeExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,22 +398,32 @@ pub type TypeExpr = Spanned<TypeKind>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeKind {
     Named(NamedTypeKind),
-    Function(FunctionType),
+    Grouped(Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
 }
 
+/// A direct constraint on an actual callable type, not a storage type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionType {
-    pub parameters: Vec<FunctionTypeParameter>,
-    pub return_type: Box<TypeExpr>,
+pub struct CallableShape {
+    pub parameters: Vec<ShapeParameter>,
+    pub return_type: TypeExpr,
     pub effects: Option<EffectSet>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionTypeParameter {
+pub struct ShapeParameter {
     pub span: Span,
+    pub escape: Option<EscapeQualifier>,
     pub mode: Option<Spanned<ParameterMode>>,
     pub ty: TypeExpr,
+}
+
+pub type ShapeExpr = Spanned<ShapeKind>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShapeKind {
+    Callable(CallableShape),
+    Grouped(Box<ShapeExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,9 +441,7 @@ pub enum EffectKind {
         arguments: Vec<TypeExpr>,
         effect_arguments: Vec<EffectRowArgument>,
     },
-    Mutation {
-        arguments: Vec<TypeExpr>,
-    },
+    Mutation,
     Unsafe,
 }
 
@@ -581,9 +650,15 @@ pub enum CallArgument {
     Expression(Expr),
     Mode {
         span: Span,
-        mode: Spanned<ParameterMode>,
+        mode: Spanned<CallAssertionMode>,
         place: PlaceExpr,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallAssertionMode {
+    Mut,
+    Move,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -638,7 +713,20 @@ pub enum PatternKind {
         path: Path,
         fields: Option<PatternFields>,
     },
+    QualifiedBinding(QualifiedBinding),
     Tuple(Vec<Pattern>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualifiedBinding {
+    pub name: Identifier,
+    pub mode: Spanned<BindingMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingMode {
+    Mut,
+    Move,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -670,7 +758,7 @@ pub struct Handler {
 pub struct ClosureExpression {
     pub captures: Option<CaptureList>,
     pub parameters: Vec<NamedParameter>,
-    pub return_type: Option<TypeExpr>,
+    pub return_type: Option<ReturnAnnotation>,
     pub effects: Option<EffectSet>,
     pub body: Block,
 }
@@ -684,7 +772,13 @@ pub struct CaptureList {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureParameter {
     pub span: Span,
-    pub mode: Option<Spanned<ParameterMode>>,
+    pub mode: Option<Spanned<CaptureMode>>,
     pub name: Identifier,
     pub annotation: Option<TypeExpr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    Mut,
+    Move,
 }

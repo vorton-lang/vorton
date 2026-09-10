@@ -6,7 +6,7 @@ Vorton 的 file source 与 inline `mod` 共同组成一棵逻辑模块树。`req
 
 Compiler library 接受一个纯内存项目：匿名根 source，以及以非空 identifier segment 序列为 key 的 file sources。Key 是大小写敏感的抽象地址，不是文件名、扩展名、工作目录或操作系统路径。宿主负责把实际文件投影为这个输入；目录遍历、cwd、symlink、扩展名补全和 OS 错误不属于语言或 Resolver。
 
-File source key 的每个 segment 必须符合 ASCII `Ident` 字符规则，且不能是保留关键字或 `self`、`super`、`root`。Contextual `type`、`alias` 与 `_` 仍可作 segment。平台文件名冲突由宿主 adapter 处理。
+File source key 的每个 segment 必须符合 ASCII `Ident` 字符规则，且不能是保留关键字或 `self`、`super`、`root`。Contextual `type`、`alias`、`generate`、`scoped`、`call` 与 `_` 仍可作 segment。平台文件名冲突由宿主 adapter 处理。
 
 Key 的目录前缀形成没有 source body 的 synthetic module。例如仅提供 `parser::lexer` source 时，`parser` 仍是可寻址 module。一个路径可以同时拥有 body 和 child：`parser` 与 `parser::lexer` 可以都是 file source。一个逻辑路径至多拥有一个 body；file body 与 inline body 撞到同一路径、或两个 inline body 重复声明同一路径时拒绝，不支持 partial module 或静默合并。
 
@@ -130,7 +130,7 @@ Public struct 的 private field 可以包含 private nominal type；外部 sourc
 
 ## Inline `mod` 与 capability
 
-Inline module 可嵌套，并可包含全部普通 declaration family：
+Inline module 可嵌套，并可在开头的全部 `use` 之后包含普通 declaration 与 `generate` module item：
 
 ```vorton
 mod math requires {} {
@@ -142,17 +142,19 @@ mod math requires {} {
 }
 ```
 
-File body 的第一项 `requires {effects};` 与 inline `mod name requires {effects}` 都给 module 设置 effect ceiling。省略 ceiling 时普通 system/handled/fail/mut 不增加额外限制，但 `unsafe` 许可从不隐式获得。`requires {}` 只允许纯 computation；`mut<T>` 对 caller/capture state 的修改参与 ceiling，局部 `let mut` rebind 仍保持局部。Extern declaration 与 unsafe primitive 还必须满足 [Effect 规范](effects.md)中的专用规则。
+File body 的第一项 `requires {effects};` 与 inline `mod name requires {effects}` 都给 module 设置 effect ceiling。省略 ceiling 时普通 system/handled/fail/mut 不增加额外限制，但 `unsafe` 许可从不隐式获得。`requires {}` 只允许 pure computation；单一 `mut` marker 对 caller/capture state 的修改参与 ceiling，局部 `let mut` rebind 仍保持局部。Extern declaration 与 unsafe primitive 还必须满足 [Effect 规范](effects.md)中的专用规则。
 
 ## Module graph 与 ResolvedAST
 
 Resolver 在 body-name 检查前闭合当前可达 module graph、declaration index 和 import/export fixed point。普通 module 可以相互引用，包括父 module 令 child source 可达、child 引用父 declaration；只要每条 import 最终唯一到达真实 source 或 Language entity，回边本身不是错误。
 
+当前 generation 阶段尚未接入 `resolve_project`。全部可达 source 通过 frontend 且 module graph 已检查后，只要可达 inventory 含 `GenerateItem`，入口就在 declaration index／import／body-name 之前返回 generation-stage unsupported 诊断，绝不返回伪完整 `ResolvedProject`。多个请求按 logical module path、`generate` keyword 的 UTF-8 span 与稳定错误规则选首个；未达 source 不扫描。该临时拒绝只描述当前 stage 边界，generation 实现接入时由对应合同移除。
+
 仅由 import/re-export 相互转发、没有任何真实 declaration origin 的无解环仍报错。该规则不放宽 effect alias 循环、trait 继承循环或 Checker 中其他非法递归。
 
 ResolvedAST 为每个 lexical/nominal declaration、binding、import 与引用保存 exact identity。Re-export 转发原 identity；Language entity 使用独立 Language origin，不伪装成隐藏 source。依赖类型的 member/associated selection 保存 occurrence、已知 base/owner 与选择 spelling，留给 Checker 冻结最终 target。ResolvedAST 之后不得重新 parse 或执行第二套 lexical resolver。
 
-项目每次只返回一个结构化首错，不暴露 partial ResolvedAST。阶段优先级依次为项目输入、可达 source frontend、module graph、declaration/index、import/export 与 body-name；同阶段按错误所属 logical module path、primary UTF-8 byte span 与稳定错误类别排序。物理 source key、名称 spelling、table/subpass 或遍历偶然性不能改变结果；related origins 同样保持稳定顺序。
+项目每次只返回一个结构化首错，不暴露 partial ResolvedAST。阶段优先级依次为项目输入、可达 source frontend、module graph、当前 generation-stage support、declaration/index、import/export 与 body-name；同阶段按错误所属 logical module path、primary UTF-8 byte span 与稳定错误类别排序。物理 source key、名称 spelling、table/subpass 或遍历偶然性不能改变结果；related origins 同样保持稳定顺序。
 
 ## 0.1 限制
 

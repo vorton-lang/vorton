@@ -72,19 +72,23 @@ let overflow = -min;                 // 运行时 panic：这是普通取负
 
 `+=`、`-=`、`*=`、`/=`、`%=` 使用对应的普通数值运算，目标和 RHS 必须是同型 `Int` 或同型 `Float`。每次复合赋值依次完整求值 RHS 一次、取得目标当前值、执行运算并写回；不得复制 place 或 RHS 求值。RHS failure 不执行本次写回，RHS 已经发生的其他 mutation、IO 或资源移交不自动回滚。具体 lowering 在后续实现阶段决定。
 
-### 函数类型
+### Callable 类型与 source shape
 
 ```
-FnType = (T₁, T₂, ..., Tₙ) -> R / ε
+CallableType = (T₁, T₂, ..., Tₙ) -> R / ε
 ```
 
 - `T₁..Tₙ`：参数类型
 - `R`：返回类型
 - `ε`：effect row（见 [Effect 系统](effects.md)）
 
-有 body **函数声明**省略 effect 标注时，编译器推断公开 effect row（可能为空 `{}` 或非空）；显式 row 是允许上界，完整规则见 [Callable may-effect contract](effects.md#callable-的-may-effect-contract)。**函数类型表达式**（如 `fn(Int) -> Str`）省略 `with` 时保留开放 row，显式 `with {}` 则是 closed pure row；两种 source 信息不能合并。
+每个函数或 closure 值都有一个实际 callable 类型。Source 的 `fn(Int) -> Str` 是直接约束该实际类型的 `CallableShape`，不是可放入字段、type argument 或 alias 的匿名存储类型。Shape 只出现在有 body 的直接参数、具名／closure factory 的带括号返回 assertion和 generic bound；其它位置显式使用实际 `F`／`G`。Shape 的参数与结果也都是实际类型，复杂高阶关系必须给每层实际类型显式命名。
 
-函数值适配只允许把该函数值自身的 effect row 从较小 row 扩大到期望上界。参数数量、经普通 substitution 后的参数类型、返回类型与 parameter mode 必须结构匹配；参数和返回类型没有额外 variance，`borrow`/`mut`/`move` 也不能因 effect 可扩大而互换。FnType 不声明自己的 generic/effect binder，canonical 0.1 不支持 rank-N effect。
+有 body **函数声明**省略 effect 标注时，编译器推断公开 effect row（可能为空 `{}` 或非空）；显式 row 是允许上界，完整规则见 [Callable may-effect contract](effects.md#callable-的-may-effect-contract)。`CallableShape` 省略 `with` 时保留开放 row，显式 `with {}` 则是 closed pure row；两种 source 信息不能合并。
+
+函数值适配只允许把该函数值自身的 effect row 从较小 row 扩大到期望上界。参数数量、经普通 substitution 后的参数类型、返回类型与最终固定 mode 必须结构匹配；参数和返回类型没有额外 variance，Borrow／Mut／Move 也不能因 effect 可扩大而互换。Source `call F` 先依据同一实例化中的 Fn／FnMut／FnOnce evidence 选择其中一个固定 mode，不增加第四种 runtime mode。Callable shape 不声明自己的 generic/effect binder，canonical 0.1 不支持 rank-N effect。
+
+固定 parameter mode 的 source assertion 分别是 `&T`、`&mut T` 与 `move T`；省略 mode 保留对应 callable family 的既定推断或固定 Borrow 规则。`&` 不构造引用类型。`scoped` 是 parameter 的不逃逸限定，和 type identity、mode 分别检查；它可与固定 mode 或 `call F` 组合。具名函数／method 需要量化新的实际 callable 类型时显式声明 `F` 并写 shape bound，例如 `F: Fn + fn(Int) -> Int`；匿名 shape 不能绕过这一 binder。
 
 ### Struct 类型
 
@@ -108,7 +112,7 @@ EnumType = Name<T₁, ..., Tₙ> { V₁(S₁, ...) | V₂ { f: S, ... } | V₃ }
 TupleType = (T₁, T₂, ..., Tₙ)    其中 n ≥ 2
 ```
 
-Tuple 是结构类型：不同上下文中的 `(Int, Str)` 是同一类型。不支持单元素 tuple；source 中的 `(T)` 是透明类型分组，仍表示 `T`。分组及返回函数类型的括号要求见[语法](syntax.md#path类型与-effect)。
+Tuple 是结构类型：不同上下文中的 `(Int, Str)` 是同一类型。不支持单元素 tuple；source 中的 `(T)` 是透明类型分组，仍表示 `T`。AST 保留分组与 span，类型检查时仍按透明分组处理。Factory 返回 shape 的括号要求见[语法](syntax.md#path类型与-effect)。
 
 ### Option 类型
 
@@ -127,7 +131,7 @@ Option<T> = Some(T) | None
 下列 binding 由语言以独立 `Language` origin 提供，不是隐藏 source file、虚构 module 或 source prelude：
 
 - Type：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`Option<T>`、`Ordering`、`List<T>`、`Range<T>`、`Ptr<T>`；
-- Trait（同属 Type namespace）：`PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Clone`、`Debug`、`Drop`、`Iterable`、`Iterator`。
+- Trait（同属 Type namespace）：`PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Clone`、`Debug`、`Drop`、`Iterable`、`Iterator`、`Fn`、`FnMut`、`FnOnce`。
 
 List literal 产生 `List<T>`，range expression 产生 `Range<Int>`，raw address 使用 `Ptr<T>`。本规范不为这些 type 声明普通方法，也不把 `Weak`、`Show`、`Json`、`Result`、`Cell`、`Map`、`Set` 或 `StringBuilder` 等普通 source/library 名称隐式加入 Language origin。
 
@@ -155,7 +159,7 @@ TypeVar = α, β, γ, ...
 
 ```
 TypeScheme     = ∀α₁, ..., αₙ. T
-CallableScheme = ∀α₁, ..., αₙ; E₁, ..., Eₘ. FnType
+CallableScheme = ∀α₁, ..., αₙ; E₁, ..., Eₘ. CallableType
                  [trait bounds, finite row-merge obligations]
 ```
 
@@ -424,7 +428,7 @@ apply(subst, τ):
   Γ ⊢ match scrutinee { arms } : τ₀ / (ε_s ∪ ε₁ ∪ ... ∪ εₙ)
 
   支持 arm-level Or-Pattern：p₁ | p₂ | ... | pₖ => body
-  所有子模式必须绑定相同的变量名集合，且对应变量类型兼容。
+  所有子模式必须绑定相同的变量名集合和 mode，且对应变量类型兼容。
   穷尽性检查将 or-pattern 展开为独立行处理。
 
 ── Lambda ──
@@ -432,7 +436,7 @@ apply(subst, τ):
   ──────────────────────────────────────────────
   Γ ⊢ fn(x₁:T₁, ..., xₙ:Tₙ) { body } : (T₁..Tₙ) → R / ε_body  /  {}
 
-  Lambda 本身不产生 effect。其 body 的 effect 被捕获在函数类型中。
+  Lambda 本身不产生 effect。其 body 的 effect 被捕获在实际 callable 类型中。
 
 ── 字符串插值 ──
   Γ ⊢ eᵢ : τᵢ / εᵢ
@@ -511,7 +515,7 @@ apply(subst, τ):
   Range<Int> 保留特殊快速路径（直接编译为计数循环）。
 ```
 
-字段赋值要求其root binding可变，并保持同一字段类型。0.1中`IndexExpr`只产生读取值，不是lvalue；index assignment在进入类型/ownership lowering前稳定拒绝。容器更新通过物化签名为`self: mut Self`的具名方法参与普通调用与mutation推断。
+字段赋值要求其root binding可变，并保持同一字段类型。0.1中`IndexExpr`只产生读取值，不是lvalue；index assignment在进入类型/ownership lowering前稳定拒绝。容器更新通过物化签名为`self: &mut Self`的具名方法参与普通调用与mutation推断。
 
 数值复合赋值遵守[同一数值运算和确定求值顺序](#数值复合赋值)：RHS 只求值一次，随后读取目标当前值并完成一次写回。运算 panic 前已经发生的 RHS effects 不回滚；RHS failure 则不执行该次写回。
 

@@ -39,7 +39,7 @@ Source
 |---|---|
 | `Token` | Lexer 按唯一词法规范产生 token、原始字面量拼写与 span；空白和注释不改变语法角色。 |
 | `AST` | Parser 忠实保存 canonical surface、数值字面量拼写、结构与 span；不承载名称、数值解释、类型、effect 或后端结论。 |
-| `ResolvedAST` | 每个 lexical/nominal 声明、binding、constructor、import/re-export 与根引用获得 exact identity；已闭合 owner 集合中由当前语法直接选择的 member 同样 exact。显式 effect binder/ref 与 `TraitPath::method<...>` 取得 exact trait/method identity，并保留 type/effect actual tree；省略 `with` 的 FnType 保留其结构 occurrence。只有依赖 receiver/base type、适用 impl 或 associated selection 的 obligation 才保留 occurrence、已知 base/owner 与源码选择信息，最终 target 留给 Checker。 |
+| `ResolvedAST` | 每个 lexical/nominal 声明、binding、constructor、import/re-export 与根引用获得 exact identity；已闭合 owner 集合中由当前语法直接选择的 member 同样 exact。显式 effect binder/ref 与 `TraitPath::method<...>` 取得 exact trait/method identity，并保留 actual type、callable shape、parameter qualifier/mode、where predicate 与 effect tree；省略 `with` 的 shape 保留其结构 occurrence。只有依赖 receiver/base type、适用 impl 或 associated selection 的 obligation 才保留 occurrence、已知 base/owner 与源码选择信息，最终 target 留给 Checker。 |
 | `TypedHIR` | HM metavariable 已求解；类型、effect row、已解释数值字面量、完整 callable scheme、callee、impl、associated type、call-site instantiation 与公开模块接口冻结。合法 type/effect 多态变量转为带 owner 与 ordinal 的 formal；有限 row 合并义务显式附着于 scheme/instantiation，其它 raw 变量被拒绝。 |
 | `CoreHIR` | 所有语言级隐式行为已 elaborated 为 explicit typed construct、callable body、edge 或 intrinsic contract，包括 checked integer panic 与比较 dispatch。此层是最后的 Vorton semantic representation，不含资源操作。 |
 | `FlowIR` | Structured control 降为 ownership-neutral CFG/ANF；pattern projection、scope/control result、normal/failure edge 与全部 cleanup-visible slot 建立；project-wide binder、call、alias 与 capture graph 冻结。 |
@@ -69,7 +69,7 @@ Language declaration 使用独立 `Language` origin，不通过隐藏 source、�
 
 HM 类型推断、effect row unification、trait bound 与 associated type selection 在 TypedHIR 前完成。一次 scheme instantiation 只产生一份 mapping receipt；type actual、effect formal-to-actual、显式 method scheme application 与 dictionary/evidence 共同消费该 receipt，不能分别从结果类型重建映射。
 
-Resolver 只建立 source 显式 effect binder/ref、exact trait/method scheme 引用，保存 type/effect actual tree，并保留省略 `with` 的 FnType 结构位置。它不创建 per-impl effect mapping，不从 impl 集合汇总 row，不决定隐式 scheme arity、推断尾的求解/泛化，不实例化 actual，也不执行 impl selection、row union/subset 或 conformance。Checker 按 method owner 与稳定结构 ordinal 建立 trait signature 的隐式 effect formals；对应 impl signature 位置映射到同一 contract formal，不能制造第二份不相关 scheme。
+Resolver 只建立 source 显式 effect binder/ref、exact trait/method scheme 引用，保存 actual type、callable shape、parameter qualifier/mode、where predicate 与 effect tree，并保留省略 `with` 的 shape 结构位置。它不创建 per-impl effect mapping，不从 impl 集合汇总 row，不决定隐式 scheme arity、推断尾的求解/泛化，不实例化 actual，也不执行 impl selection、row union/subset 或 conformance。Checker 按 method owner 与稳定结构 ordinal 建立 trait signature 的隐式 effect formals；对应 impl signature 位置映射到同一 contract formal，不能制造第二份不相关 scheme。
 
 自递归和互递归 callable 以调用图的 strongly connected component 为绑定组。组内使用共享 monomorphic provisional variables，所有 body 约束闭合后才原子 final-zonk、generalize 和 publish。组内不支持 polymorphic recursion；组外使用已发布 scheme 正常实例化。
 
@@ -79,7 +79,7 @@ Effect atom 在 TypedHIR 前分为：
 SystemEffectRef   console / fs / process
 HandledEffectRef  用户 effect 声明
 FailEffect        fail<E>
-MutEffect         mut<T>
+MutEffect         mut
 UnsafeEffect      unsafe
 ```
 
@@ -87,9 +87,9 @@ System effect 只随 exact host call contract 向下传递，不进入 handler e
 
 有 body callable 的推断 row 为 `A`，显式 source 上界为 `B` 时，Checker 验证 `A ⊆ B` 并发布 `B`；省略时发布 `A`。Trait method 无显式 `B` 时，完整公开 scheme 按选定 impl 关联，而不是对 impl 集合取 union；trait 有 `B` 时普通调用与 scheme 引用都使用 `B`。Call site 为 effect actual 选择唯一合法的最小正规解，handler 只消除已知 exact head，未知 formal 原样保守传播。
 
-Generic row 合并只携带现有 atom identity、fail payload unification、handled-effect type argument 与 `mut<T>` 规则产生的有限义务；实例化后静态检查，不下沉 runtime，也不扩张为通用 constraint language。普通 callable recursion 仍按 SCC 原子闭合；显式公开上界的直接/间接自引用，以及必须猜测自身结果才能决定 type/evidence/effect selection 的循环在 TypedHIR 前拒绝。
+Generic row 合并只携带现有 atom identity、fail payload unification 与 handled-effect type argument 产生的有限义务；单一 `mut` marker 去重，具体 state origin 由独立内部事实追踪。实例化后静态检查，不下沉 runtime，也不扩张为通用 constraint language。普通 callable recursion 仍按 SCC 原子闭合；显式公开上界的直接/间接自引用，以及必须猜测自身结果才能决定 type/evidence/effect selection 的循环在 TypedHIR 前拒绝。
 
-First-class callable 的 body effect 冻结在函数类型中。普通 closure 不捕获创建点的动态 handler 环境；每次调用使用调用点的当前 typed context。该规则对 direct、method 与 indirect call 一致，后端不能建立 closed/open 或 pure/effectful 的平行函数语义。
+First-class callable 的 body effect 冻结在实际 callable 类型中。普通 closure 不捕获创建点的动态 handler 环境；每次调用使用调用点的当前 typed context。该规则对 direct、method 与 indirect call 一致，后端不能建立 closed/open 或 pure/effectful 的平行函数语义。
 
 Trait call 在 TypedHIR 固定为 exact inherent method、builtin intrinsic、concrete trait impl 或 formal dictionary selection。CoreHIR 之后没有 method lookup、impl search 或按名称 dispatch。
 
@@ -137,7 +137,7 @@ CoreHIR validator 拒绝 surface-only variant、未选择 callee/impl/evidence�
 
 Shareable assignment 建立 alias。对任一 alias 的 mutation 使其它仍存活 alias 失效；失效后的读取或写入是编译错误。Liveness 可以把 alias lifetime 缩短到最后使用点，但不能允许 mutation 与其它可观察 alias 并存。
 
-局部 `let mut` 只允许 binding rebind。修改 caller state 的参数、外部 capture 或 mutable receiver 产生相应 `mut<T>` marker，并参与 effect 与 module capability 检查。Call-site mode 和 capture list 是 assertion，不改变推断。
+局部 `let mut` 只允许 binding rebind。通过 `&mut T` 参数、外部 mutable capture 或 mutable receiver 修改 caller state 会产生单一 `mut` marker，并参与 effect 与 module capability 检查；具体 state origin/type 继续由内部事实保留。Call-site mode 和 capture list 是 assertion，不改变推断。
 
 普通 closure 的 read-only capture 共享已证明 non-owning 的值，mutable capture 共享同一 boxed binding。Ordinary function type 没有 consume-once call mode，因此可能唯一拥有资源的外部 binding 不能通过普通 borrow/mut/move capture 逃逸；这类资源必须保留在可证明的词法 ownership scope。Handler evidence 同样不能隐藏可能唯一拥有的 outer capture。
 

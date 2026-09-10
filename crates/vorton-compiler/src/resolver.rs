@@ -7,7 +7,7 @@ const LANGUAGE_TYPES: &[&str] = &[
     "Int", "Float", "Str", "Bool", "Unit", "Never", "Option", "List", "Range", "Ptr",
 ];
 const LANGUAGE_TRAITS: &[&str] = &[
-    "Eq", "Hash", "Clone", "Debug", "Ord", "Drop", "Iterable", "Iterator",
+    "Eq", "Hash", "Clone", "Debug", "Ord", "Drop", "Iterable", "Iterator", "Fn", "FnMut", "FnOnce",
 ];
 const LANGUAGE_EFFECTS: &[&str] = &["console", "fs", "process", "fail", "mut", "unsafe"];
 
@@ -16,6 +16,9 @@ pub(crate) fn resolve_project(
 ) -> Result<ResolvedProject, ProjectDiagnostic> {
     let parsed = parse_reachable_sources(sources)?;
     let modules = build_module_graph(sources, &parsed)?;
+    if let Some(diagnostic) = first_generate_diagnostic(&modules) {
+        return Err(diagnostic);
+    }
     let mut state = ResolverState::new(modules);
     state.index_entities()?;
     state.resolve_imports()?;
@@ -120,7 +123,7 @@ fn discovery_snapshot(
         collect_discovery_items(
             module,
             &source.program.uses,
-            &source.program.declarations,
+            &source.program.items,
             &mut modules,
             &mut uses,
         );
@@ -131,7 +134,7 @@ fn discovery_snapshot(
 fn collect_discovery_items(
     module: &ModuleRef,
     module_uses: &[UseDeclaration],
-    declarations: &[Declaration],
+    items: &[ModuleItem],
     modules: &mut BTreeSet<ModuleRef>,
     uses: &mut Vec<(ModuleRef, UseDeclaration)>,
 ) {
@@ -141,14 +144,17 @@ fn collect_discovery_items(
             .cloned()
             .map(|use_declaration| (module.clone(), use_declaration)),
     );
-    for declaration in declarations {
+    for item in items {
+        let ModuleItem::Declaration(declaration) = item else {
+            continue;
+        };
         if let DeclarationKind::Module(declared) = &declaration.kind {
             let child = module.child(&declared.item.name.text);
             modules.insert(child.clone());
             collect_discovery_items(
                 &child,
                 &declared.item.uses,
-                &declared.item.declarations,
+                &declared.item.items,
                 modules,
                 uses,
             );
@@ -329,6 +335,7 @@ struct ModuleBodyAst {
     requires: Option<EffectSet>,
     uses: Vec<UseDeclaration>,
     declarations: Vec<Declaration>,
+    generates: Vec<GenerateItem>,
 }
 
 #[derive(Clone)]
@@ -337,6 +344,18 @@ struct ModuleInfo {
     file_body_present: bool,
     declared_at: Option<OriginRef>,
     public: bool,
+}
+
+fn split_module_items(items: &[ModuleItem]) -> (Vec<Declaration>, Vec<GenerateItem>) {
+    let mut declarations = Vec::new();
+    let mut generates = Vec::new();
+    for item in items {
+        match item {
+            ModuleItem::Declaration(declaration) => declarations.push(declaration.clone()),
+            ModuleItem::Generate(generate) => generates.push(generate.clone()),
+        }
+    }
+    (declarations, generates)
 }
 
 fn build_module_graph(
@@ -369,6 +388,7 @@ fn build_module_graph(
     }
 
     for (module, parsed_source) in parsed {
+        let (declarations, generates) = split_module_items(&parsed_source.program.items);
         let body = ModuleBodyAst {
             origin: parsed_source.origin.clone(),
             span: parsed_source.program.span,
@@ -378,7 +398,8 @@ fn build_module_graph(
                 .as_ref()
                 .map(|requires| requires.effects.clone()),
             uses: parsed_source.program.uses.clone(),
-            declarations: parsed_source.program.declarations.clone(),
+            declarations,
+            generates,
         };
         modules
             .entry(module.clone())
@@ -396,7 +417,7 @@ fn build_module_graph(
         diagnostics.extend(register_inline_modules(
             module,
             &parsed_source.origin,
-            &parsed_source.program.declarations,
+            &parsed_source.program.items,
             &mut modules,
         ));
     }
@@ -409,11 +430,14 @@ fn build_module_graph(
 fn register_inline_modules(
     parent: &ModuleRef,
     source: &SourceRef,
-    declarations: &[Declaration],
+    items: &[ModuleItem],
     modules: &mut BTreeMap<ModuleRef, ModuleInfo>,
 ) -> Vec<(ModuleRef, ProjectDiagnostic)> {
     let mut diagnostics = Vec::new();
-    for declaration in declarations {
+    for item in items {
+        let ModuleItem::Declaration(declaration) = item else {
+            continue;
+        };
         let DeclarationKind::Module(declared) = &declaration.kind else {
             continue;
         };
@@ -461,21 +485,49 @@ fn register_inline_modules(
         }
         entry.declared_at = Some(origin);
         entry.public = declared.visibility.is_some();
+        let (declarations, generates) = split_module_items(&declared.item.items);
         entry.body = Some(ModuleBodyAst {
             origin: source.clone(),
             span: declaration.span,
             requires: declared.item.requires.clone(),
             uses: declared.item.uses.clone(),
-            declarations: declared.item.declarations.clone(),
+            declarations,
+            generates,
         });
         diagnostics.extend(register_inline_modules(
             &module,
             source,
-            &declared.item.declarations,
+            &declared.item.items,
             modules,
         ));
     }
     diagnostics
+}
+
+fn first_generate_diagnostic(
+    modules: &BTreeMap<ModuleRef, ModuleInfo>,
+) -> Option<ProjectDiagnostic> {
+    let diagnostics = modules
+        .iter()
+        .flat_map(|(module, info)| {
+            info.body.iter().flat_map(move |body| {
+                body.generates.iter().map(move |generate| {
+                    (
+                        module.clone(),
+                        ProjectDiagnostic {
+                            kind: ProjectDiagnosticKind::GenerateUnsupported,
+                            primary: Some(OriginRef {
+                                source: body.origin.clone(),
+                                span: generate.keyword_span,
+                            }),
+                            related: Vec::new(),
+                        },
+                    )
+                })
+            })
+        })
+        .collect();
+    first_stage_diagnostic(diagnostics)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1809,6 +1861,11 @@ impl<'state> BodyResolver<'state> {
                 let trait_type = self.resolve_named_type(&implementation.trait_type)?;
                 let target = self.resolve_named_type(&implementation.target)?;
                 self.self_target = Some(target.clone());
+                let where_clause = implementation
+                    .where_clause
+                    .as_ref()
+                    .map(|clause| self.resolve_where_clause(clause))
+                    .transpose()?;
                 let members = self.resolve_impl_members(&implementation.members, &owner)?;
                 self.self_entity = previous_self;
                 self.self_target = previous_self_target;
@@ -1822,6 +1879,7 @@ impl<'state> BodyResolver<'state> {
                         members,
                     }),
                     trait_type,
+                    where_clause,
                 }
             }
             DeclarationKind::Trait(declared) => {
@@ -2030,6 +2088,29 @@ impl<'state> BodyResolver<'state> {
         Ok(resolved)
     }
 
+    fn resolve_where_clause(
+        &mut self,
+        clause: &WhereClause,
+    ) -> Result<ResolvedWhereClause, ProjectDiagnostic> {
+        let mut predicates = Vec::new();
+        for predicate in &clause.predicates {
+            predicates.push(ResolvedWherePredicate {
+                span: predicate.span,
+                subject: self.resolve_type(&predicate.subject)?,
+                bounds: predicate
+                    .bounds
+                    .iter()
+                    .map(|bound| self.resolve_named_type(bound))
+                    .collect::<Result<Vec<_>, _>>()?,
+            });
+        }
+        Ok(ResolvedWhereClause {
+            span: clause.span,
+            keyword_span: clause.keyword_span,
+            predicates,
+        })
+    }
+
     fn impl_associated_type_scope(
         &self,
         members: &[ImplMember],
@@ -2146,15 +2227,15 @@ impl<'state> BodyResolver<'state> {
     ) -> Result<ResolvedFunction, ProjectDiagnostic> {
         let owner = owner_key_from_entity(identity);
         let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
-        let type_parameters =
-            self.push_type_parameters(&function.type_parameters, owner.clone())?;
         let effect_parameters =
             self.push_effect_parameters(&function.effect_parameters, owner.clone())?;
+        let type_parameters =
+            self.push_type_parameters(&function.type_parameters, owner.clone())?;
         let (parameters, value_scope) = self.resolve_parameters(&function.parameters, owner)?;
         let return_type = function
             .return_type
             .as_ref()
-            .map(|return_type| self.resolve_type(return_type))
+            .map(|return_type| self.resolve_return_annotation(return_type))
             .transpose()?;
         let effects = function
             .effects
@@ -2164,10 +2245,11 @@ impl<'state> BodyResolver<'state> {
         self.value_scopes.push(value_scope);
         let body = self.resolve_block(&function.body)?;
         self.value_scopes.pop();
-        self.effect_scopes.pop();
         self.type_scopes.pop();
+        self.effect_scopes.pop();
         self.owner = previous_owner;
         Ok(ResolvedFunction {
+            const_span: function.const_span,
             type_parameters,
             effect_parameters,
             parameters,
@@ -2184,10 +2266,10 @@ impl<'state> BodyResolver<'state> {
     ) -> Result<ResolvedFunctionSignature, ProjectDiagnostic> {
         let owner = owner_key_from_entity(identity);
         let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
-        let type_parameters =
-            self.push_type_parameters(&function.type_parameters, owner.clone())?;
         let effect_parameters =
             self.push_effect_parameters(&function.effect_parameters, owner.clone())?;
+        let type_parameters =
+            self.push_type_parameters(&function.type_parameters, owner.clone())?;
         let (parameters, _) = self.resolve_parameters(&function.parameters, owner)?;
         let return_type = function
             .return_type
@@ -2199,8 +2281,8 @@ impl<'state> BodyResolver<'state> {
             .as_ref()
             .map(|effects| self.resolve_effect_set(effects))
             .transpose()?;
-        self.effect_scopes.pop();
         self.type_scopes.pop();
+        self.effect_scopes.pop();
         self.owner = previous_owner;
         Ok(ResolvedFunctionSignature {
             identity: identity.clone(),
@@ -2279,7 +2361,15 @@ impl<'state> BodyResolver<'state> {
             let mut bounds = Vec::new();
             let mut failed = false;
             for bound in &parameter.bounds {
-                match self.resolve_named_type(bound) {
+                let result = match bound {
+                    GenericBound::Named(bound) => self
+                        .resolve_named_type(bound)
+                        .map(ResolvedGenericBound::Named),
+                    GenericBound::Shape(bound) => {
+                        self.resolve_shape(bound).map(ResolvedGenericBound::Shape)
+                    }
+                };
+                match result {
                     Ok(bound) => bounds.push(bound),
                     Err(diagnostic) => {
                         failed = true;
@@ -2399,16 +2489,28 @@ impl<'state> BodyResolver<'state> {
                 });
             }
             self.insert_scoped_entity(identity.clone());
-            let (mode, annotation) = match &parameter.annotation {
-                Some(annotation) => (
-                    annotation.mode.as_ref().map(|mode| (mode.span, mode.kind)),
-                    Some(self.resolve_type(&annotation.ty)?),
-                ),
-                None => (None, None),
+            let (escape, mode, annotation) = match &parameter.annotation {
+                Some(annotation) => {
+                    let resolved = match &annotation.kind {
+                        ParameterTypeKind::Type(ty) => {
+                            ResolvedParameterAnnotation::Type(self.resolve_type(ty)?)
+                        }
+                        ParameterTypeKind::Shape(shape) => {
+                            ResolvedParameterAnnotation::Shape(self.resolve_shape(shape)?)
+                        }
+                    };
+                    (
+                        annotation.escape.map(|escape| escape.span),
+                        annotation.mode.as_ref().map(|mode| (mode.span, mode.kind)),
+                        Some(resolved),
+                    )
+                }
+                None => (None, None, None),
             };
             resolved.push(ResolvedParameter {
                 span: parameter.span,
                 binding: ResolvedBinding { origin, identity },
+                escape,
                 mode,
                 annotation,
             });
@@ -2662,25 +2764,9 @@ impl BodyResolver<'_> {
             TypeKind::Named(named) => {
                 ResolvedTypeKind::Named(Box::new(self.resolve_named_type_parts(ty.span, named)?))
             }
-            TypeKind::Function(function) => ResolvedTypeKind::Function {
-                parameters: function
-                    .parameters
-                    .iter()
-                    .map(|parameter| {
-                        Ok(ResolvedFunctionTypeParameter {
-                            span: parameter.span,
-                            mode: parameter.mode.as_ref().map(|mode| (mode.span, mode.kind)),
-                            ty: self.resolve_type(&parameter.ty)?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
-                return_type: Box::new(self.resolve_type(&function.return_type)?),
-                effects: function
-                    .effects
-                    .as_ref()
-                    .map(|effects| self.resolve_effect_set(effects))
-                    .transpose()?,
-            },
+            TypeKind::Grouped(inner) => {
+                ResolvedTypeKind::Grouped(Box::new(self.resolve_type(inner)?))
+            }
             TypeKind::Tuple(elements) => ResolvedTypeKind::Tuple(
                 elements
                     .iter()
@@ -2692,6 +2778,50 @@ impl BodyResolver<'_> {
             span: ty.span,
             kind,
         })
+    }
+
+    fn resolve_shape(&mut self, shape: &ShapeExpr) -> Result<ResolvedShape, ProjectDiagnostic> {
+        let kind = match &shape.kind {
+            ShapeKind::Callable(callable) => ResolvedShapeKind::Callable {
+                parameters: callable
+                    .parameters
+                    .iter()
+                    .map(|parameter| {
+                        Ok(ResolvedShapeParameter {
+                            span: parameter.span,
+                            escape: parameter.escape.map(|escape| escape.span),
+                            mode: parameter.mode.as_ref().map(|mode| (mode.span, mode.kind)),
+                            ty: self.resolve_type(&parameter.ty)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
+                return_type: Box::new(self.resolve_type(&callable.return_type)?),
+                effects: callable
+                    .effects
+                    .as_ref()
+                    .map(|effects| self.resolve_effect_set(effects))
+                    .transpose()?,
+            },
+            ShapeKind::Grouped(inner) => {
+                ResolvedShapeKind::Grouped(Box::new(self.resolve_shape(inner)?))
+            }
+        };
+        Ok(ResolvedShape {
+            span: shape.span,
+            kind,
+        })
+    }
+
+    fn resolve_return_annotation(
+        &mut self,
+        annotation: &ReturnAnnotation,
+    ) -> Result<ResolvedReturnAnnotation, ProjectDiagnostic> {
+        match annotation {
+            ReturnAnnotation::Type(ty) => self.resolve_type(ty).map(ResolvedReturnAnnotation::Type),
+            ReturnAnnotation::Shape(shape) => self
+                .resolve_shape(shape)
+                .map(ResolvedReturnAnnotation::Shape),
+        }
     }
 
     fn resolve_named_type(
@@ -2788,16 +2918,13 @@ impl BodyResolver<'_> {
                         .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
                 )
             }
-            EffectKind::Mutation { arguments } => (
+            EffectKind::Mutation => (
                 ResolvedReference::Exact {
                     occurrence: self.origin(effect.span),
                     target: language_id(Namespace::Effect, EntityKind::LanguageEffect, "mut", None),
                     self_reference: None,
                 },
-                arguments
-                    .iter()
-                    .map(|argument| self.resolve_type(argument))
-                    .collect::<Result<Vec<_>, _>>()?,
+                Vec::new(),
                 Vec::new(),
             ),
             EffectKind::Unsafe => (
@@ -3943,7 +4070,7 @@ impl BodyResolver<'_> {
         let return_type = closure
             .return_type
             .as_ref()
-            .map(|return_type| self.resolve_type(return_type))
+            .map(|return_type| self.resolve_return_annotation(return_type))
             .transpose()?;
         let effects = closure
             .effects
@@ -4036,6 +4163,18 @@ impl BodyResolver<'_> {
                     .map(|element| self.resolve_pattern(element, anchor, expected, bindings, seen))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
+            PatternKind::QualifiedBinding(qualified) => {
+                ResolvedPatternKind::Binding(ResolvedPatternBinding {
+                    binding: self.pattern_binding(
+                        &qualified.name,
+                        anchor,
+                        expected,
+                        bindings,
+                        seen,
+                    )?,
+                    qualifier: Some((qualified.mode.span, qualified.mode.kind)),
+                })
+            }
             PatternKind::Path { path, fields }
                 if fields.is_none()
                     && path.segments.len() == 1
@@ -4055,9 +4194,11 @@ impl BodyResolver<'_> {
                         fields: None,
                     }
                 } else {
-                    ResolvedPatternKind::Binding(
-                        self.pattern_binding(identifier, anchor, expected, bindings, seen)?,
-                    )
+                    ResolvedPatternKind::Binding(ResolvedPatternBinding {
+                        binding: self
+                            .pattern_binding(identifier, anchor, expected, bindings, seen)?,
+                        qualifier: None,
+                    })
                 }
             }
             PatternKind::Path { path, fields } => {
@@ -4105,13 +4246,16 @@ impl BodyResolver<'_> {
                     } else {
                         ResolvedPattern {
                             span: field.name.span,
-                            kind: ResolvedPatternKind::Binding(self.pattern_binding(
-                                &field.name,
-                                anchor,
-                                expected,
-                                bindings,
-                                seen,
-                            )?),
+                            kind: ResolvedPatternKind::Binding(ResolvedPatternBinding {
+                                binding: self.pattern_binding(
+                                    &field.name,
+                                    anchor,
+                                    expected,
+                                    bindings,
+                                    seen,
+                                )?,
+                                qualifier: None,
+                            }),
                         }
                     };
                     resolved.push(ResolvedNamedPatternField { member, pattern });
@@ -4228,8 +4372,8 @@ fn single_identifier_path(identifier: &Identifier) -> Path {
 
 fn pattern_binding_origin(pattern: &ResolvedPattern, name: &str) -> Option<OriginRef> {
     match &pattern.kind {
-        ResolvedPatternKind::Binding(binding) if binding.identity.name == name => {
-            Some(binding.origin.clone())
+        ResolvedPatternKind::Binding(binding) if binding.binding.identity.name == name => {
+            Some(binding.binding.origin.clone())
         }
         ResolvedPatternKind::Tuple(patterns) | ResolvedPatternKind::Or(patterns) => patterns
             .iter()
@@ -4769,23 +4913,24 @@ fn diagnostic_kind_rank(kind: &ProjectDiagnosticKind) -> u8 {
         ProjectDiagnosticKind::Frontend(_) => 0,
         ProjectDiagnosticKind::InvalidModuleName { .. } => 1,
         ProjectDiagnosticKind::ModuleBodyConflict { .. } => 2,
-        ProjectDiagnosticKind::PathEscapesRoot => 3,
-        ProjectDiagnosticKind::InvalidPath => 4,
-        ProjectDiagnosticKind::NameConflict { .. } => 5,
-        ProjectDiagnosticKind::MemberConflict { .. } => 6,
-        ProjectDiagnosticKind::ReservedLanguageBinding { .. } => 7,
-        ProjectDiagnosticKind::UnresolvedImport { .. } => 8,
-        ProjectDiagnosticKind::AmbiguousImport { .. } => 9,
-        ProjectDiagnosticKind::InaccessibleImport { .. } => 10,
-        ProjectDiagnosticKind::ImportCycle { .. } => 11,
-        ProjectDiagnosticKind::PrivateReExport { .. } => 12,
-        ProjectDiagnosticKind::MissingConstructorOwner { .. } => 13,
-        ProjectDiagnosticKind::UnresolvedName { .. } => 14,
-        ProjectDiagnosticKind::AmbiguousName { .. } => 15,
-        ProjectDiagnosticKind::InaccessibleName { .. } => 16,
-        ProjectDiagnosticKind::DuplicateBinding { .. } => 17,
-        ProjectDiagnosticKind::PatternBindingMismatch => 18,
-        ProjectDiagnosticKind::InvalidSelf => 19,
+        ProjectDiagnosticKind::GenerateUnsupported => 3,
+        ProjectDiagnosticKind::PathEscapesRoot => 4,
+        ProjectDiagnosticKind::InvalidPath => 5,
+        ProjectDiagnosticKind::NameConflict { .. } => 6,
+        ProjectDiagnosticKind::MemberConflict { .. } => 7,
+        ProjectDiagnosticKind::ReservedLanguageBinding { .. } => 8,
+        ProjectDiagnosticKind::UnresolvedImport { .. } => 9,
+        ProjectDiagnosticKind::AmbiguousImport { .. } => 10,
+        ProjectDiagnosticKind::InaccessibleImport { .. } => 11,
+        ProjectDiagnosticKind::ImportCycle { .. } => 12,
+        ProjectDiagnosticKind::PrivateReExport { .. } => 13,
+        ProjectDiagnosticKind::MissingConstructorOwner { .. } => 14,
+        ProjectDiagnosticKind::UnresolvedName { .. } => 15,
+        ProjectDiagnosticKind::AmbiguousName { .. } => 16,
+        ProjectDiagnosticKind::InaccessibleName { .. } => 17,
+        ProjectDiagnosticKind::DuplicateBinding { .. } => 18,
+        ProjectDiagnosticKind::PatternBindingMismatch => 19,
+        ProjectDiagnosticKind::InvalidSelf => 20,
     }
 }
 
@@ -4853,6 +4998,20 @@ mod tests {
         match &ty.kind {
             ResolvedTypeKind::Named(named) => &named.reference,
             _ => panic!("expected a named type"),
+        }
+    }
+
+    fn parameter_type(annotation: &ResolvedParameterAnnotation) -> &ResolvedType {
+        match annotation {
+            ResolvedParameterAnnotation::Type(ty) => ty,
+            ResolvedParameterAnnotation::Shape(_) => panic!("expected an actual parameter type"),
+        }
+    }
+
+    fn actual_return_type(annotation: &ResolvedReturnAnnotation) -> &ResolvedType {
+        match annotation {
+            ResolvedReturnAnnotation::Type(ty) => ty,
+            ResolvedReturnAnnotation::Shape(_) => panic!("expected an actual return type"),
         }
     }
 
@@ -5319,7 +5478,7 @@ fn read(value: Choice) -> Int {
             let ResolvedPatternKind::Binding(binding) = &fields[0].kind else {
                 panic!("payload binding");
             };
-            binding.identity.clone()
+            binding.binding.identity.clone()
         };
         assert_eq!(binder(&alternatives[0]), binder(&alternatives[1]));
 
@@ -5687,7 +5846,7 @@ impl<T> Boxed<T> {
                     target: self_identity,
                     self_reference: Some(return_self),
                     ..
-                } = named_type_reference(return_type)
+                } = named_type_reference(actual_return_type(return_type))
                 else {
                     panic!("direct Self type retains its identity and target relation");
                 };
@@ -5723,7 +5882,7 @@ impl<T> Boxed<T> {
                     target: self_identity,
                     self_reference: Some(self_reference),
                     ..
-                } = named_type_reference(return_type)
+                } = named_type_reference(actual_return_type(return_type))
                 else {
                     panic!("generic Self retains its complete impl target");
                 };
@@ -5804,7 +5963,7 @@ fn language(value: Iterable::Item) {}
             .return_type
             .as_ref()
             .expect("return annotation");
-        let ResolvedTypeKind::Named(named) = &return_type.kind else {
+        let ResolvedTypeKind::Named(named) = &actual_return_type(return_type).kind else {
             panic!("named associated type");
         };
         let ResolvedReference::Selection { base, members, .. } = &named.reference else {
@@ -5833,11 +5992,13 @@ fn language(value: Iterable::Item) {}
         assert_eq!(base.kind, EntityKind::TypeParameter);
 
         let concrete = function(root, "concrete");
-        let ResolvedTypeKind::Named(concrete_selection) = &concrete.parameters[0]
-            .annotation
-            .as_ref()
-            .expect("concrete parameter type")
-            .kind
+        let ResolvedTypeKind::Named(concrete_selection) = &parameter_type(
+            concrete.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("concrete parameter type"),
+        )
+        .kind
         else {
             panic!("concrete associated selection is named");
         };
@@ -5850,11 +6011,13 @@ fn language(value: Iterable::Item) {}
         assert!(members[0].declaration.is_none());
 
         let language = function(root, "language");
-        let ResolvedTypeKind::Named(language_selection) = &language.parameters[0]
-            .annotation
-            .as_ref()
-            .expect("language associated type")
-            .kind
+        let ResolvedTypeKind::Named(language_selection) = &parameter_type(
+            language.parameters[0]
+                .annotation
+                .as_ref()
+                .expect("language associated type"),
+        )
+        .kind
         else {
             panic!("language associated selection is named");
         };
@@ -5909,7 +6072,7 @@ trait Outer {
                 members,
                 self_reference,
                 ..
-            } = named_type_reference(annotation)
+            } = named_type_reference(parameter_type(annotation))
             else {
                 panic!("categorized member remains an explicit selection");
             };
@@ -5947,7 +6110,7 @@ trait Outer {
                 members,
                 self_reference,
                 ..
-            } = named_type_reference(annotation)
+            } = named_type_reference(parameter_type(annotation))
             else {
                 panic!("nested associated path is a selection");
             };
@@ -6036,19 +6199,19 @@ trait Outer {
         let root = r#"
 use api::Query;
 
-fn run<T: Query, effect E, effect F>(
+fn run<T: Query, F: Fn + fn(Str) -> Unit with {E}, effect E, effect Tail>(
     source: T,
-    callback: fn(Str) -> Unit with {E}
-) -> Unit with {Query::fetch<T, Str, effect {E, fs}, effect {F}>} {
+    callback: call F
+) -> Unit with {Query::fetch<T, F, effect {E, fs}, effect {Tail}>} {
     source.fetch(callback)
 }
 "#;
         let defs = r#"
 pub trait Fetch {
-    fn fetch<U, effect Callback, effect Extra>(
+    fn fetch<U, F: Fn + fn(U) -> Unit with {Callback}, G: Fn + fn(Int) -> Unit, effect Callback, effect Extra>(
         self,
-        callback: fn(U) -> Unit with {Callback},
-        nested: fn(fn(Int) -> Unit) -> (fn(Str) -> Unit)
+        callback: call F,
+        nested: G
     ) -> Unit;
 }
 "#;
@@ -6084,45 +6247,52 @@ pub trait Fetch {
                 "fetch"
             );
         }
-        let callback = method.parameters[1]
-            .annotation
-            .as_ref()
-            .expect("callback type is present");
-        let ResolvedTypeKind::Function {
+        let ResolvedGenericBound::Named(callable_trait) = &method.type_parameters[1].bounds[0]
+        else {
+            panic!("F starts with its callable trait bound")
+        };
+        assert_eq!(exact(&callable_trait.reference).name, "Fn");
+        let ResolvedGenericBound::Shape(callback_shape) = &method.type_parameters[1].bounds[1]
+        else {
+            panic!("F retains its callable shape bound")
+        };
+        let ResolvedShapeKind::Callable {
             effects: Some(callback_effects),
             ..
-        } = &callback.kind
+        } = &callback_shape.kind
         else {
-            panic!("callback function type expected")
+            panic!("callback shape with an effect row expected")
         };
         assert_eq!(
             exact(&callback_effects.effects[0].reference),
             &method.effect_parameters[0].binding.identity
         );
 
+        let callback = method.parameters[1]
+            .annotation
+            .as_ref()
+            .expect("callback type is present");
+        let call_start =
+            defs.find("callback: call").expect("call mode source") + "callback: ".len();
+        assert_eq!(
+            method.parameters[1].mode,
+            Some((Span::new(call_start, call_start + 4), ParameterMode::Call))
+        );
+        assert_eq!(
+            exact(named_type_reference(parameter_type(callback))).name,
+            "F"
+        );
         let nested = method.parameters[2]
             .annotation
             .as_ref()
             .expect("nested callback type is present");
-        let ResolvedTypeKind::Function {
-            parameters,
-            return_type,
-            effects: None,
-        } = &nested.kind
-        else {
-            panic!("outer omitted function row remains structural")
-        };
-        assert!(matches!(
-            &parameters[0].ty.kind,
-            ResolvedTypeKind::Function { effects: None, .. }
-        ));
-        assert!(matches!(
-            &return_type.kind,
-            ResolvedTypeKind::Function { effects: None, .. }
-        ));
+        assert_eq!(
+            exact(named_type_reference(parameter_type(nested))).name,
+            "G"
+        );
 
         let run = function(module_body(&resolved, &[]), "run");
-        assert_eq!(run.type_parameters.len(), 1);
+        assert_eq!(run.type_parameters.len(), 2);
         assert_eq!(run.effect_parameters.len(), 2);
         let scheme = &run
             .effects
@@ -6159,6 +6329,131 @@ pub trait Fetch {
         assert_eq!(
             exact(&scheme.effect_arguments[1].effects.effects[0].reference),
             &run.effect_parameters[1].binding.identity
+        );
+    }
+
+    #[test]
+    fn transports_const_shapes_modes_where_and_qualified_bindings() {
+        let source = r#"
+trait Contract {}
+struct Target<T> { value: T }
+impl<T, G: Fn, F: Fn + fn(scoped &T, call G) -> T with {mut}> Contract for Target<T>
+where (T, T): Eq + Debug, T::Item: Eq, {
+    const fn run(
+        callback: scoped call F,
+        state: &mut T,
+        owned: move T,
+        direct: fn(&T) -> T,
+    ) -> (fn(call G) -> T with {mut}) with {mut} {
+        match state { mut value | move value => value }
+    }
+}
+"#;
+        let resolved = resolve_project(&project(source, vec![]))
+            .expect("new frontend carriers should resolve without semantic selection");
+        let root = module_body(&resolved, &[]);
+        let ResolvedDeclarationKind::TraitImpl {
+            implementation,
+            where_clause: Some(where_clause),
+            ..
+        } = &root.declarations[2].kind
+        else {
+            panic!("trait implementation expected")
+        };
+        assert_eq!(where_clause.predicates.len(), 2);
+        assert_eq!(
+            &source[where_clause.keyword_span.start..where_clause.keyword_span.end],
+            "where"
+        );
+        assert!(matches!(
+            where_clause.predicates[0].subject.kind,
+            ResolvedTypeKind::Tuple(ref elements) if elements.len() == 2
+        ));
+        assert_eq!(where_clause.predicates[0].bounds.len(), 2);
+
+        let ResolvedGenericBound::Shape(shape) = &implementation.type_parameters[2].bounds[1]
+        else {
+            panic!("F callable shape bound expected")
+        };
+        let ResolvedShapeKind::Callable {
+            parameters,
+            effects: Some(effects),
+            ..
+        } = &shape.kind
+        else {
+            panic!("callable shape carrier expected")
+        };
+        let scoped_start = source.find("scoped &T").expect("scoped shape parameter");
+        assert_eq!(
+            parameters[0].escape,
+            Some(Span::new(scoped_start, scoped_start + "scoped".len()))
+        );
+        assert_eq!(
+            parameters[0].mode.as_ref().unwrap().1,
+            ParameterMode::Borrow
+        );
+        assert_eq!(parameters[1].mode.as_ref().unwrap().1, ParameterMode::Call);
+        assert!(effects.effects[0].arguments.is_empty());
+        assert_eq!(exact(&effects.effects[0].reference).name, "mut");
+
+        let ResolvedImplMemberKind::Function(method) = &implementation.members[0].kind else {
+            panic!("const impl method expected")
+        };
+        let const_span = method.const_span.expect("const span");
+        assert_eq!(&source[const_span.start..const_span.end], "const");
+        assert!(method.parameters[0].escape.is_some());
+        assert_eq!(
+            method.parameters[0].mode.as_ref().unwrap().1,
+            ParameterMode::Call
+        );
+        assert_eq!(
+            method.parameters[1].mode.as_ref().unwrap().1,
+            ParameterMode::MutBorrow
+        );
+        assert_eq!(
+            method.parameters[2].mode.as_ref().unwrap().1,
+            ParameterMode::Move
+        );
+        assert!(matches!(
+            method.parameters[3].annotation,
+            Some(ResolvedParameterAnnotation::Shape(_))
+        ));
+        let Some(ResolvedReturnAnnotation::Shape(factory)) = &method.return_type else {
+            panic!("factory return shape expected")
+        };
+        let ResolvedShapeKind::Grouped(factory) = &factory.kind else {
+            panic!("factory grouping expected")
+        };
+        assert!(matches!(factory.kind, ResolvedShapeKind::Callable { .. }));
+
+        let match_tail = method.body.tail.as_deref().expect("match tail");
+        let ResolvedExprKind::Match { arms, .. } = &match_tail.kind else {
+            panic!("match expression expected")
+        };
+        let ResolvedPatternKind::Or(alternatives) = &arms[0].pattern.kind else {
+            panic!("or pattern expected")
+        };
+        let qualifiers = alternatives
+            .iter()
+            .map(|alternative| {
+                let ResolvedPatternKind::Binding(binding) = &alternative.kind else {
+                    panic!("qualified binding expected")
+                };
+                binding.qualifier.expect("qualifier").1
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(qualifiers, [BindingMode::Mut, BindingMode::Move]);
+        let first = match &alternatives[0].kind {
+            ResolvedPatternKind::Binding(binding) => &binding.binding.identity,
+            _ => unreachable!(),
+        };
+        let second = match &alternatives[1].kind {
+            ResolvedPatternKind::Binding(binding) => &binding.binding.identity,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            first, second,
+            "or alternatives keep one logical binding identity"
         );
     }
 

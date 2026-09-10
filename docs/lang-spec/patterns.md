@@ -7,7 +7,8 @@
 | 模式 | 语法 | 匹配条件 |
 |------|------|----------|
 | 通配符 | `_` | 任何值 |
-| 绑定 | `x` | 任何值，绑定到 `x` |
+| 默认绑定 | `x` | 任何值，以 Borrow mode 绑定到 `x` |
+| 限定绑定 | `mut x`、`move x` | 任何值，以显式 Mut／Move mode 绑定到 `x` |
 | 字面量 | `42`、`"hi"`、`true` | 值相等 |
 | 位置构造器 | `Option::Some(x)` | enum 变体 tag 匹配，递归匹配字段 |
 | 命名构造器 | `Shape::Point { x, y }` | enum 变体 tag 匹配，按名称匹配字段 |
@@ -20,6 +21,8 @@ Pattern path 使用统一 `Ident`/`Path` token；首字母大小写不参与分�
 
 Qualified 或 constructor-shaped pattern 必须在 Resolver 命中 exact enum constructor；已知 named constructor 的 field occurrence 同样必须命中该 owner 的 exact field。缺失 constructor、缺失 field 或错误 member category 不能作为 unresolved-name 占位或 type-dependent selection 下沉。Field 的类型兼容性与 pattern 穷尽性仍由 Checker 处理。
 
+`mut name`／`move name` 始终是 binding，不参与 Unit variant 消歧。限定词只跟一个 binding 名；它不能放在 `_`、literal、qualified path 或整个 tuple／constructor 前。递归 tuple／constructor field 可以各自限定；named field 写作 `field: mut name` 或 `field: move name`，原有 `{ field }` punning 仍表示未限定的 `{ field: field }`，没有 `mut field` 简写。
+
 ### 命名构造器模式的特殊语法
 
 **Field punning：** `{ x }` 等价于 `{ x: x }`——字段名同时作为绑定名。
@@ -28,6 +31,8 @@ Qualified 或 constructor-shaped pattern 必须在 Resolver 命中 exact enum co
 
 ## 模式绑定规则
 
+`match`、`catch` 与 `if let` 的未限定 binding 固定为 Borrow，不按分支 body 的后续用途自动升级。`mut name` 固定 Mut，`move name` 固定 Move；Copy、权限、对象完整性和资源合法性由后续 Checker 验证。普通 `let`／tuple 解构继续建立拥有 binding，`for` 仍只接受原有 binding 形式，二者不获得这些限定词。
+
 ```
 bind_pattern(pattern, τ_expected) → Γ'
 
@@ -35,7 +40,9 @@ bind_pattern(pattern, τ_expected) → Γ'
 bind_pattern(_, τ) = Γ     （无新绑定）
 
 ── 绑定 ──
-bind_pattern(x, τ) = Γ[x ↦ τ]
+bind_pattern(x, τ)      = Γ[x ↦ (τ, Borrow)]
+bind_pattern(mut x, τ)  = Γ[x ↦ (τ, Mut)]
+bind_pattern(move x, τ) = Γ[x ↦ (τ, Move)]
 
 ── 字面量 ──
 bind_pattern(42, Int) = Γ     （无新绑定，验证类型匹配）
@@ -69,7 +76,9 @@ bind_pattern(p₁ | p₂ | ..., τ):
   返回统一后的环境
 ```
 
-同一 pattern 内重复 binder 是错误。Or-pattern 每个 alternative 必须绑定同一 spelling 集合，arm 内对应 spelling 共享同一个 logical binding identity；不同 alternative 的 source occurrence 不会创建多个 arm binding。类型兼容性仍由 Checker 验证。
+同一 pattern 内重复 binder 是错误。Or-pattern 每个 alternative 必须绑定同一 spelling 集合和相同 mode，arm 内对应 spelling 共享同一个 logical binding identity；不同 alternative 的 source occurrence 不会创建多个 arm binding。类型与权限兼容性仍由 Checker 验证。
+
+有 guard 时，pattern 检查与 guard 求值期间的匹配对象保持只读。只有 guard 成功后才开放 Mut 或提交 Move；guard 为 false 时原对象保持完整并继续尝试后续 arm。Guard 中发生的其它 effect 不回滚，failure 仍按当时状态传播和清理。
 
 ### 数值模式与穷尽性边界
 
@@ -140,7 +149,7 @@ specialize_row(row, ctor):
   first = row[0]
   rest = row[1..]
 
-  first 为通配符/绑定 → [..ctor.fields 个通配符, ..rest]
+  first 为通配符/默认或限定绑定 → [..ctor.fields 个通配符, ..rest]
   first 为字面量 → 如果匹配 ctor 的值则展开，否则跳过
   first 为构造器 → 如果匹配 ctor 名称则展开字段，否则跳过
   first 为命名构造器 → 转为位置形式后展开
@@ -172,7 +181,7 @@ match color {
 
 支持的子模式类型：enum 变体、字面量、构造器模式、绑定变量。
 
-**变量绑定约束：** Or-Pattern 中的所有子模式必须绑定相同的变量集，且对应变量的类型必须兼容。例如：
+**变量绑定约束：** Or-Pattern 中的所有子模式必须绑定相同的变量集，对应变量的 mode 必须一致，且类型必须兼容。例如：
 
 ```vorton
 match val {

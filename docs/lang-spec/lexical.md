@@ -56,17 +56,17 @@ try      while    break    continue loop     use      as       extern
 mod      super    requires unsafe
 ```
 
-`type`、`self` 和 `alias` 是 contextual spelling：Lexer 仍把它们生成为 `Ident`，Parser 只在相应产生式中按精确拼写解释。`test`、`delegate` 和 `sig` 是普通 `Ident`，canonical 0.1 没有 native-test 声明产生式。`where` 与 `try` 保留但没有 canonical 0.1 语法产生式，因而不能作为标识符或静默占位。
+`type`、`self`、`alias`、`generate`、`scoped` 和 `call` 是 contextual spelling：Lexer 仍把它们生成为 `Ident`，Parser 只在相应产生式中按精确拼写解释。后三者在普通 identifier 与 module-path segment 位置仍是普通名称。`test`、`delegate` 和 `sig` 是普通 `Ident`，canonical 0.1 没有 native-test 声明产生式。`where` 用于 trait impl header；`try` 保留但没有 canonical 0.1 语法产生式，因而不能作为标识符或静默占位。
 
 ## 运算符与定界符
 
-下列每项各产生一个 token；同一行内按最长匹配扫描，例如 `..=` 不拆成 `..` 与 `=`，`&&` 不拆成两个非法的 `&`。
+下列每项各产生一个 token；同一行内按最长匹配扫描，例如 `..=` 不拆成 `..` 与 `=`，`&&` 不拆成两个 `&`。
 
 | 类别 | Token spelling |
 |------|----------------|
 | 算术 | `+` `-` `*` `/` `%` |
 | 比较 | `==` `!=` `<` `>` `<=` `>=` |
-| 逻辑与模式 | `&&` `\|\|` `!` `\|` |
+| 参数 mode、逻辑与模式 | `&` `&&` `\|\|` `!` `\|` |
 | 赋值 | `=` `+=` `-=` `*=` `/=` `%=` |
 | 范围 | `..` `..=` |
 | 访问与传播 | `.` `::` `?` |
@@ -74,6 +74,8 @@ mod      super    requires unsafe
 | 定界符 | `(` `)` `{` `}` `[` `]` `,` `:` `;` |
 
 `?` 只有一个 token。它可由语法用作 postfix expression；类型语法不消费它，因此 `T?` 不是类型拼写。
+
+`&` 也只有一个 token，并只由参数限定位置的固定 mode 消费；它不是普通 `TypeExpr` 的一部分，也不构成 unary borrow expression。
 
 ## 数值字面量
 
