@@ -5,9 +5,7 @@
     reason = "the opaque document must retain every decoded field without exposing a query API"
 )]
 
-use std::fmt;
-
-use serde::de::{self, Unexpected, Visitor};
+use serde::de;
 use serde::{Deserialize, Deserializer};
 
 /// An owned contract input whose complete format-1 structure has been decoded.
@@ -234,50 +232,10 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Deserialize)]
 struct WireU64(u64);
 
-impl<'de> Deserialize<'de> for WireU64 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct WireU64Visitor;
-
-        impl<'de> Visitor<'de> for WireU64Visitor {
-            type Value = WireU64;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an unsigned decimal JSON integer in the u64 range")
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(WireU64(value))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Err(E::invalid_type(Unexpected::Signed(value), &self))
-            }
-
-            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Err(E::invalid_type(Unexpected::Float(value), &self))
-            }
-        }
-
-        deserializer.deserialize_any(WireU64Visitor)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct NonEmptyVec<T>(Vec<T>);
 
 impl<'de, T> Deserialize<'de> for NonEmptyVec<T>
@@ -297,7 +255,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct TupleElements<T>(Vec<T>);
 
 impl<'de, T> Deserialize<'de> for TupleElements<T>
@@ -319,7 +277,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct Identifier(String);
 
 impl<'de> Deserialize<'de> for Identifier {
@@ -346,7 +304,7 @@ impl<'de> Deserialize<'de> for Identifier {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
     format: String,
@@ -358,7 +316,7 @@ struct Document {
     display: Option<DisplayFields>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DisplayFields {
     #[serde(default, deserialize_with = "deserialize_optional")]
@@ -367,17 +325,17 @@ struct DisplayFields {
     note: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum LibraryRef {
     #[serde(rename = "self")]
-    Current,
+    Current {},
     Dependency {
         alias: Identifier,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum DeclarationKind {
     Function,
@@ -392,7 +350,7 @@ enum DeclarationKind {
     ExternType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeclRef {
     library: LibraryRef,
@@ -400,13 +358,13 @@ struct DeclRef {
     kind: DeclarationKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TraitKind {
     Trait,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TraitRef {
     library: LibraryRef,
@@ -414,13 +372,13 @@ struct TraitRef {
     kind: TraitKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum FunctionKind {
     Function,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FunctionDeclRef {
     library: LibraryRef,
@@ -428,13 +386,13 @@ struct FunctionDeclRef {
     kind: FunctionKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum EffectKind {
     Effect,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EffectDeclRef {
     library: LibraryRef,
@@ -442,7 +400,7 @@ struct EffectDeclRef {
     kind: EffectKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SelfDeclarationKind {
     Struct,
@@ -450,7 +408,7 @@ enum SelfDeclarationKind {
     Trait,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelfDeclRef {
     library: LibraryRef,
@@ -458,20 +416,20 @@ struct SelfDeclRef {
     kind: SelfDeclarationKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MemberKind {
     Method,
     AssociatedType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MethodKind {
     Method,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatternTrait {
     #[serde(rename = "trait")]
@@ -480,7 +438,7 @@ struct PatternTrait {
     associated_bindings: Vec<PatternAssociatedBinding>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatternAssociatedBinding {
     name: Identifier,
@@ -488,7 +446,7 @@ struct PatternAssociatedBinding {
     value_type: TypePattern,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum TypePattern {
     Primitive {
@@ -521,7 +479,7 @@ enum TypePattern {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 enum PrimitiveType {
     Int,
@@ -532,7 +490,7 @@ enum PrimitiveType {
     Never,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImplRef {
     library: LibraryRef,
@@ -543,7 +501,7 @@ struct ImplRef {
     trait_ref: Option<PatternTrait>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum EntityRef {
     Declaration {
@@ -564,7 +522,7 @@ enum EntityRef {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum FunctionRef {
     Declaration {
@@ -582,7 +540,7 @@ enum FunctionRef {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Binder {
     Declaration,
@@ -590,13 +548,13 @@ enum Binder {
     Method,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TypeFormalKind {
     Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TypeFormalRef {
     owner: EntityRef,
@@ -605,13 +563,13 @@ struct TypeFormalRef {
     index: WireU64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum EffectFormalKind {
     Effect,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EffectFormalRef {
     owner: EntityRef,
@@ -620,7 +578,7 @@ struct EffectFormalRef {
     index: WireU64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TraitUse {
     #[serde(rename = "trait")]
@@ -629,7 +587,7 @@ struct TraitUse {
     associated_bindings: Vec<AssociatedBinding>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AssociatedBinding {
     name: Identifier,
@@ -637,7 +595,7 @@ struct AssociatedBinding {
     value_type: Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum Type {
     Primitive {
@@ -686,14 +644,14 @@ enum Type {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum SelfOwner {
     Declaration { declaration: SelfDeclRef },
     Impl { implementation: ImplRef },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Mode {
     Borrow,
@@ -701,14 +659,14 @@ enum Mode {
     Move,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum ModeRule {
     Fixed { mode: Mode },
     CallableUse { callable: Box<Type> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum EscapeRule {
     Noescape,
@@ -717,7 +675,7 @@ enum EscapeRule {
 
 type EffectRow = Vec<EffectTerm>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SystemEffect {
     Console,
@@ -725,7 +683,7 @@ enum SystemEffect {
     Process,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum EffectTerm {
     System {
@@ -738,8 +696,8 @@ enum EffectTerm {
     Fail {
         payload: Type,
     },
-    Mut,
-    Unsafe,
+    Mut {},
+    Unsafe {},
     Formal {
         formal: EffectFormalRef,
     },
@@ -760,7 +718,7 @@ enum EffectTerm {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TraitMethodRef {
     tag: TraitMemberTag,
@@ -769,27 +727,27 @@ struct TraitMethodRef {
     name: Identifier,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TraitMemberTag {
     TraitMember,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum ParameterRef {
-    Receiver,
+    Receiver {},
     Position { index: WireU64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatternPredicate {
     subject: TypePattern,
     requires: PatternTrait,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ParameterTypeSet {
     parameter: ParameterRef,
@@ -797,21 +755,21 @@ struct ParameterTypeSet {
     value_type: Type,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ParameterModeSet {
     parameter: ParameterRef,
     mode: ModeRule,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ParameterEscapeSet {
     parameter: ParameterRef,
     escape: EscapeRule,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SetClauses {
     #[serde(default, deserialize_with = "deserialize_optional")]
@@ -839,14 +797,14 @@ impl SetClauses {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Visibility {
     Public,
     Private,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FieldRequirement {
     name: Identifier,
@@ -857,7 +815,7 @@ struct FieldRequirement {
     visibility: Option<Visibility>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ParameterRequirement {
     parameter: ParameterRef,
@@ -866,17 +824,17 @@ struct ParameterRequirement {
     value_type: Option<Type>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MatchRule {
     Exact,
     Contains,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum VariantLayout {
-    Unit,
+    Unit {},
     Tuple {
         elements: Vec<Type>,
     },
@@ -888,7 +846,7 @@ enum VariantLayout {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VariantRequirement {
     name: Identifier,
@@ -896,14 +854,14 @@ struct VariantRequirement {
     layout: Option<VariantLayout>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MemberRequirement {
     name: Identifier,
     kind: MemberKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum StructureCheck {
     Parameters {
@@ -931,7 +889,7 @@ enum StructureCheck {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Namespace {
     Type,
@@ -939,14 +897,14 @@ enum Namespace {
     Effect,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExportName {
     path: NonEmptyVec<Identifier>,
     namespace: Namespace,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExportRequirement {
     name: ExportName,
@@ -954,7 +912,7 @@ struct ExportRequirement {
     target: Option<EntityRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExportsCheck {
     #[serde(rename = "match")]
@@ -962,21 +920,21 @@ struct ExportsCheck {
     items: Vec<ExportRequirement>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImplAllowance {
     implementation: ImplRef,
     predicates: Vec<PatternPredicate>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RejectNewCheck {
     allowed_exports: Vec<ExportName>,
     allowed_impls: Vec<ImplAllowance>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckClauses {
     #[serde(default, deserialize_with = "deserialize_optional")]
@@ -1001,7 +959,7 @@ impl CheckClauses {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
     target: EntityRef,
@@ -1015,7 +973,7 @@ struct Record {
     type_parameters: Option<Vec<Identifier>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShapeParameter {
     #[serde(rename = "type")]
@@ -1024,7 +982,7 @@ struct ShapeParameter {
     escape: EscapeRule,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CallableShapeConstraint {
     parameters: Vec<ShapeParameter>,
@@ -1033,7 +991,7 @@ struct CallableShapeConstraint {
     effect_upper: Option<EffectRow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
 enum GenericRequirement {
     Trait {
@@ -1144,8 +1102,8 @@ mod tests {
         assert!(matches!(effects[0], EffectTerm::System { .. }));
         assert!(matches!(effects[1], EffectTerm::Handled { .. }));
         assert!(matches!(effects[2], EffectTerm::Fail { .. }));
-        assert!(matches!(effects[3], EffectTerm::Mut));
-        assert!(matches!(effects[4], EffectTerm::Unsafe));
+        assert!(matches!(effects[3], EffectTerm::Mut {}));
+        assert!(matches!(effects[4], EffectTerm::Unsafe {}));
         assert!(matches!(effects[5], EffectTerm::Formal { .. }));
         assert!(matches!(effects[6], EffectTerm::MethodApplication { .. }));
         assert!(matches!(effects[7], EffectTerm::FullDestruction { .. }));
@@ -1334,6 +1292,53 @@ mod tests {
         for source in [ordinary, escaped, nested] {
             assert_eq!(error(source).kind, ContractDiagnosticKind::InvalidStructure);
         }
+    }
+
+    #[test]
+    fn tagged_unit_object_variants_reject_unknown_members() {
+        let library_self = minimal_document().replacen(
+            r#"{"tag":"self"}"#,
+            r#"{"tag":"self","alias":"extra"}"#,
+            1,
+        );
+        let effect_mut = document_with_record(&format!(
+            r#"{{"target":{},"set":{{"effect_upper":[{{"future":true,"tag":"mut"}}]}}}}"#,
+            declaration_target()
+        ));
+        let effect_unsafe = document_with_record(&format!(
+            r#"{{"target":{},"set":{{"effect_upper":[{{"tag":"unsafe","payload":0}}]}}}}"#,
+            declaration_target()
+        ));
+        let receiver = document_with_record(&format!(
+            r#"{{"target":{},"set":{{"parameter_types":[{{"parameter":{{"tag":"receiver","index":0}},"type":{{"tag":"primitive","name":"Int"}}}}]}}}}"#,
+            declaration_target()
+        ));
+        let unit_layout = document_with_record(&format!(
+            r#"{{"target":{},"check":{{"structure":[{{"tag":"variants","match":"exact","ordered":true,"items":[{{"name":"Only","layout":{{"tag":"unit","elements":[]}}}}]}}]}}}}"#,
+            declaration_target()
+        ));
+
+        let mut accepted = Vec::new();
+        for (label, source) in [
+            ("library self", library_self),
+            ("mut effect", effect_mut),
+            ("unsafe effect", effect_unsafe),
+            ("receiver", receiver),
+            ("unit variant layout", unit_layout),
+        ] {
+            match crate::decode_contract(source.as_bytes()) {
+                Ok(_) => accepted.push(label),
+                Err(diagnostic) => assert_eq!(
+                    diagnostic.kind,
+                    ContractDiagnosticKind::InvalidStructure,
+                    "{label} must reject an unknown object member as structure"
+                ),
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "unit object variants accepted unknown members: {accepted:?}"
+        );
     }
 
     #[test]
