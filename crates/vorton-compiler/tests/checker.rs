@@ -922,3 +922,20 @@ fn continuous_public_modules_and_reexports_enter_the_actual_external_surface() {
     )
     .expect("a real public alias export may appear in an actually public signature");
 }
+
+#[test]
+fn contract_can_use_supported_alias_not_referenced_by_source_types() {
+    let sources = project("type Alias = Int; fn value(input: &Int) -> Int { input }");
+    let alias = r#"{"tag":"nominal","declaration":{"library":{"tag":"self"},"path":["Alias"],"kind":"type_alias"},"arguments":[]}"#;
+    let record = format!(
+        r#"{{"target":{},"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{alias}}}]}}}}"#,
+        function_target("value")
+    );
+
+    check_project(
+        &sources,
+        &BTreeMap::from([("app".to_owned(), APP)]),
+        vec![contract(&document(&record))],
+    )
+    .expect("a checked standalone alias is available to contract normalization");
+}

@@ -997,10 +997,11 @@ fn collect_supported_headers(
                     type_parameters,
                     value,
                 } => {
-                    let public_export = declaration
+                    let identity = declaration
                         .identity
                         .as_ref()
-                        .is_some_and(|identity| public_exports.contains(identity));
+                        .expect("every resolved type alias has an exact identity");
+                    let public_export = public_exports.contains(identity);
                     if let Some(parameter) = type_parameters.first() {
                         push_header_diagnostic(
                             project,
@@ -1013,16 +1014,36 @@ fn collect_supported_headers(
                                 Vec::new(),
                             ),
                         );
-                    } else if let Err(diagnostic) = normalizer.normalize(value) {
-                        push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
-                    } else if public_export
-                        && let Err(diagnostic) = validate_public_type_visibility(
-                            &public_exports,
-                            value,
-                            &normalizer.aliases,
-                        )
-                    {
-                        push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
+                    } else {
+                        match normalizer.normalize(value) {
+                            Ok(normalized) => {
+                                normalizer
+                                    .normalized_aliases
+                                    .insert(identity.clone(), normalized);
+                                if public_export
+                                    && let Err(diagnostic) = validate_public_type_visibility(
+                                        &public_exports,
+                                        value,
+                                        &normalizer.aliases,
+                                    )
+                                {
+                                    push_header_diagnostic(
+                                        project,
+                                        module,
+                                        &mut diagnostics,
+                                        diagnostic,
+                                    );
+                                }
+                            }
+                            Err(diagnostic) => {
+                                push_header_diagnostic(
+                                    project,
+                                    module,
+                                    &mut diagnostics,
+                                    diagnostic,
+                                );
+                            }
+                        }
                     }
                 }
                 ResolvedDeclarationKind::Function(function) => {
@@ -3228,7 +3249,7 @@ mod checking_tests {
 
     #[test]
     fn opaque_result_retains_real_typed_literal_callee_mode_and_origin_facts() {
-        let source = "type Number = Int; \
+        let source = "type Number = Int; type Standalone = Bool; \
                       fn callee(value: move Number) -> Number { value } \
                       fn caller() -> Number { callee(-((9223372036854775808))) }";
         let checked = check_project(
@@ -3241,8 +3262,9 @@ mod checking_tests {
             checked.owners.is_empty(),
             "unused owner mappings are not selected"
         );
-        assert_eq!(checked.aliases.len(), 1);
-        assert!(checked.aliases.values().all(|ty| ty == &CheckedType::Int));
+        assert_eq!(checked.aliases.len(), 2);
+        assert!(checked.aliases.values().any(|ty| ty == &CheckedType::Int));
+        assert!(checked.aliases.values().any(|ty| ty == &CheckedType::Bool));
 
         let callee = checked
             .functions
