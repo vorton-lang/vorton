@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use vorton_compiler::{
     CheckDiagnostic, CheckDiagnosticKind, CheckOrigin, FileModulePath, LibraryId, LibrarySources,
@@ -848,4 +849,16 @@ fn public_signature_cannot_expose_a_private_type_alias() {
     ] {
         assert_eq!(error(source).kind, CheckDiagnosticKind::TypeMismatch);
     }
+}
+
+#[test]
+fn supported_deep_non_generic_alias_chain_uses_bounded_host_stack() {
+    let mut source = String::new();
+    for index in 0..4_096 {
+        writeln!(&mut source, "type A{index} = A{};", index + 1)
+            .expect("writing to a String cannot fail");
+    }
+    source.push_str("type A4096 = Int; fn value() -> A0 { 1 }");
+
+    check(&source).expect("a finite acyclic supported alias chain must terminate normally");
 }

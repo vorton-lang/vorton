@@ -677,7 +677,6 @@ struct FunctionHeader {
 
 #[derive(Clone)]
 struct AliasDefinition {
-    context: SourceContext,
     origin: OriginRef,
     type_parameter_count: usize,
     value: ResolvedType,
@@ -687,7 +686,12 @@ struct SourceTypeNormalizer {
     aliases: BTreeMap<EntityId, AliasDefinition>,
     arities: BTreeMap<EntityId, usize>,
     normalized_aliases: BTreeMap<EntityId, CheckedType>,
-    active_aliases: Vec<EntityId>,
+}
+
+enum NormalizeFrame {
+    Type(ResolvedType),
+    FinishTuple(usize),
+    FinishAlias(EntityId),
 }
 
 impl SourceTypeNormalizer {
@@ -709,7 +713,6 @@ impl SourceTypeNormalizer {
             let Some(body) = &resolved_module.body else {
                 continue;
             };
-            let context = SourceContext::from_origin(&body.origin);
             for declaration in &body.declarations {
                 let Some(identity) = &declaration.identity else {
                     continue;
@@ -740,7 +743,6 @@ impl SourceTypeNormalizer {
                         aliases.insert(
                             identity.clone(),
                             AliasDefinition {
-                                context: context.clone(),
                                 origin: declaration.origin.clone(),
                                 type_parameter_count: type_parameters.len(),
                                 value: value.clone(),
@@ -760,147 +762,166 @@ impl SourceTypeNormalizer {
             aliases,
             arities,
             normalized_aliases: BTreeMap::new(),
-            active_aliases: Vec::new(),
         }
     }
 
-    fn normalize(
-        &mut self,
-        ty: &ResolvedType,
-        context: &SourceContext,
-    ) -> Result<CheckedType, CheckDiagnostic> {
-        match &ty.kind {
-            ResolvedTypeKind::Grouped(inner) => self.normalize(inner, context),
-            ResolvedTypeKind::Tuple(elements) => {
-                let mut normalized = Vec::with_capacity(elements.len());
-                for element in elements {
-                    normalized.push(self.normalize(element, context)?);
+    fn normalize(&mut self, ty: &ResolvedType) -> Result<CheckedType, CheckDiagnostic> {
+        let mut frames = vec![NormalizeFrame::Type(ty.clone())];
+        let mut values = Vec::new();
+        let mut active_aliases = Vec::new();
+
+        while let Some(frame) = frames.pop() {
+            match frame {
+                NormalizeFrame::Type(ty) => match ty.kind {
+                    ResolvedTypeKind::Grouped(inner) => {
+                        frames.push(NormalizeFrame::Type(*inner));
+                    }
+                    ResolvedTypeKind::Tuple(elements) => {
+                        frames.push(NormalizeFrame::FinishTuple(elements.len()));
+                        frames.extend(elements.into_iter().rev().map(NormalizeFrame::Type));
+                    }
+                    ResolvedTypeKind::Named(named) => {
+                        let (occurrence, target) = match named.reference {
+                            ResolvedReference::Exact {
+                                occurrence, target, ..
+                            } => (occurrence, target),
+                            ResolvedReference::Selection { occurrence, .. } => {
+                                return Err(source_diagnostic(
+                                    CheckDiagnosticKind::Unsupported,
+                                    "type-dependent or associated type selection is outside the initial Checker subset",
+                                    occurrence,
+                                    Vec::new(),
+                                ));
+                            }
+                        };
+
+                        let mut positional_count = 0;
+                        for argument in &named.arguments {
+                            match argument {
+                                ResolvedTypeArgument::Type(_) => positional_count += 1,
+                                ResolvedTypeArgument::AssociatedType { member, .. } => {
+                                    return Err(source_diagnostic(
+                                        CheckDiagnosticKind::Unsupported,
+                                        "associated type bindings are outside the initial Checker subset",
+                                        member.origin.clone(),
+                                        Vec::new(),
+                                    ));
+                                }
+                            }
+                        }
+                        if let Some(expected) = self.arities.get(&target)
+                            && *expected != positional_count
+                        {
+                            return Err(source_diagnostic(
+                                CheckDiagnosticKind::TypeMismatch,
+                                format!(
+                                    "type constructor `{}` expects {expected} argument(s) but received {positional_count}",
+                                    target.name
+                                ),
+                                occurrence,
+                                entity_origin(&target).into_iter().collect(),
+                            ));
+                        }
+
+                        if target.kind == EntityKind::LanguageType {
+                            let normalized = match target.name.as_str() {
+                                "Int" => CheckedType::Int,
+                                "Float" => CheckedType::Float,
+                                "Bool" => CheckedType::Bool,
+                                "Unit" => CheckedType::Unit,
+                                "Never" => CheckedType::Never,
+                                _ => {
+                                    return Err(source_diagnostic(
+                                        CheckDiagnosticKind::Unsupported,
+                                        format!(
+                                            "language type `{}` is outside the initial Checker subset",
+                                            target.name
+                                        ),
+                                        occurrence,
+                                        Vec::new(),
+                                    ));
+                                }
+                            };
+                            values.push(normalized);
+                            continue;
+                        }
+
+                        if target.kind != EntityKind::TypeAlias {
+                            return Err(source_diagnostic(
+                                CheckDiagnosticKind::Unsupported,
+                                format!(
+                                    "nominal type `{}` is outside the initial Checker subset",
+                                    target.name
+                                ),
+                                occurrence,
+                                entity_origin(&target).into_iter().collect(),
+                            ));
+                        }
+
+                        let definition =
+                            self.aliases.get(&target).cloned().expect(
+                                "every reachable type-alias entity has a resolved declaration",
+                            );
+                        if definition.type_parameter_count != 0 {
+                            return Err(source_diagnostic(
+                                CheckDiagnosticKind::Unsupported,
+                                "generic type aliases are outside the initial Checker subset",
+                                occurrence,
+                                vec![definition.origin],
+                            ));
+                        }
+                        if let Some(normalized) = self.normalized_aliases.get(&target) {
+                            values.push(normalized.clone());
+                            continue;
+                        }
+                        if let Some(cycle_start) = active_aliases
+                            .iter()
+                            .position(|identity| identity == &target)
+                        {
+                            let related = active_aliases[cycle_start..]
+                                .iter()
+                                .filter_map(|identity| self.aliases.get(identity))
+                                .map(|alias| alias.origin.clone())
+                                .collect();
+                            return Err(source_diagnostic(
+                                CheckDiagnosticKind::TypeMismatch,
+                                "non-generic type aliases form a cycle",
+                                occurrence,
+                                related,
+                            ));
+                        }
+
+                        active_aliases.push(target.clone());
+                        frames.push(NormalizeFrame::FinishAlias(target));
+                        frames.push(NormalizeFrame::Type(definition.value));
+                    }
+                },
+                NormalizeFrame::FinishTuple(element_count) => {
+                    let first = values
+                        .len()
+                        .checked_sub(element_count)
+                        .expect("tuple elements each produce one normalized type");
+                    let elements = values.split_off(first);
+                    values.push(CheckedType::Tuple(elements));
                 }
-                Ok(CheckedType::Tuple(normalized))
+                NormalizeFrame::FinishAlias(identity) => {
+                    let normalized = values
+                        .last()
+                        .expect("an alias value produces one normalized type")
+                        .clone();
+                    let active = active_aliases
+                        .pop()
+                        .expect("a finishing alias remains active");
+                    debug_assert_eq!(active, identity);
+                    self.normalized_aliases.insert(identity, normalized);
+                }
             }
-            ResolvedTypeKind::Named(named) => self.normalize_named(named, context),
         }
-    }
 
-    fn normalize_named(
-        &mut self,
-        named: &ResolvedNamedType,
-        context: &SourceContext,
-    ) -> Result<CheckedType, CheckDiagnostic> {
-        let (occurrence, target) = match &named.reference {
-            ResolvedReference::Exact {
-                occurrence, target, ..
-            } => (occurrence, target),
-            ResolvedReference::Selection { occurrence, .. } => {
-                return Err(source_diagnostic(
-                    CheckDiagnosticKind::Unsupported,
-                    "type-dependent or associated type selection is outside the initial Checker subset",
-                    occurrence.clone(),
-                    Vec::new(),
-                ));
-            }
+        let [normalized] = values.as_slice() else {
+            unreachable!("one source type produces exactly one normalized type")
         };
-
-        let mut positional_count = 0;
-        for argument in &named.arguments {
-            match argument {
-                ResolvedTypeArgument::Type(_) => positional_count += 1,
-                ResolvedTypeArgument::AssociatedType { member, .. } => {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        "associated type bindings are outside the initial Checker subset",
-                        context.origin(member.origin.span),
-                        Vec::new(),
-                    ));
-                }
-            }
-        }
-        if let Some(expected) = self.arities.get(target)
-            && *expected != positional_count
-        {
-            return Err(source_diagnostic(
-                CheckDiagnosticKind::TypeMismatch,
-                format!(
-                    "type constructor `{}` expects {expected} argument(s) but received {positional_count}",
-                    target.name
-                ),
-                occurrence.clone(),
-                entity_origin(target).into_iter().collect(),
-            ));
-        }
-
-        if target.kind == EntityKind::LanguageType {
-            return match target.name.as_str() {
-                "Int" => Ok(CheckedType::Int),
-                "Float" => Ok(CheckedType::Float),
-                "Bool" => Ok(CheckedType::Bool),
-                "Unit" => Ok(CheckedType::Unit),
-                "Never" => Ok(CheckedType::Never),
-                _ => Err(source_diagnostic(
-                    CheckDiagnosticKind::Unsupported,
-                    format!(
-                        "language type `{}` is outside the initial Checker subset",
-                        target.name
-                    ),
-                    occurrence.clone(),
-                    Vec::new(),
-                )),
-            };
-        }
-
-        if target.kind != EntityKind::TypeAlias {
-            return Err(source_diagnostic(
-                CheckDiagnosticKind::Unsupported,
-                format!(
-                    "nominal type `{}` is outside the initial Checker subset",
-                    target.name
-                ),
-                occurrence.clone(),
-                entity_origin(target).into_iter().collect(),
-            ));
-        }
-
-        let definition = self
-            .aliases
-            .get(target)
-            .cloned()
-            .expect("every reachable type-alias entity has a resolved declaration");
-        if definition.type_parameter_count != 0 {
-            return Err(source_diagnostic(
-                CheckDiagnosticKind::Unsupported,
-                "generic type aliases are outside the initial Checker subset",
-                occurrence.clone(),
-                vec![definition.origin],
-            ));
-        }
-        if let Some(normalized) = self.normalized_aliases.get(target) {
-            return Ok(normalized.clone());
-        }
-        if let Some(cycle_start) = self
-            .active_aliases
-            .iter()
-            .position(|identity| identity == target)
-        {
-            let related = self.active_aliases[cycle_start..]
-                .iter()
-                .filter_map(|identity| self.aliases.get(identity))
-                .map(|alias| alias.origin.clone())
-                .collect();
-            return Err(source_diagnostic(
-                CheckDiagnosticKind::TypeMismatch,
-                "non-generic type aliases form a cycle",
-                occurrence.clone(),
-                related,
-            ));
-        }
-
-        self.active_aliases.push(target.clone());
-        let normalized = self.normalize(&definition.value, &definition.context);
-        self.active_aliases.pop();
-        let normalized = normalized?;
-        self.normalized_aliases
-            .insert(target.clone(), normalized.clone());
-        Ok(normalized)
+        Ok(normalized.clone())
     }
 }
 
@@ -960,7 +981,7 @@ fn collect_supported_headers(
                                 Vec::new(),
                             ),
                         );
-                    } else if let Err(diagnostic) = normalizer.normalize(value, &context) {
+                    } else if let Err(diagnostic) = normalizer.normalize(value) {
                         push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
                     } else if declaration.public
                         && let Err(diagnostic) =
@@ -1079,33 +1100,25 @@ fn validate_public_type_visibility(
     ty: &ResolvedType,
     aliases: &BTreeMap<EntityId, AliasDefinition>,
 ) -> Result<(), CheckDiagnostic> {
-    fn visit(
-        project: &ResolvedProject,
-        ty: &ResolvedType,
-        aliases: &BTreeMap<EntityId, AliasDefinition>,
-        visited_aliases: &mut BTreeSet<EntityId>,
-    ) -> Result<(), CheckDiagnostic> {
-        match &ty.kind {
-            ResolvedTypeKind::Grouped(inner) => visit(project, inner, aliases, visited_aliases),
-            ResolvedTypeKind::Tuple(elements) => {
-                for element in elements {
-                    visit(project, element, aliases, visited_aliases)?;
-                }
-                Ok(())
-            }
+    let mut pending = vec![ty.clone()];
+    let mut visited_aliases = BTreeSet::new();
+    while let Some(ty) = pending.pop() {
+        match ty.kind {
+            ResolvedTypeKind::Grouped(inner) => pending.push(*inner),
+            ResolvedTypeKind::Tuple(elements) => pending.extend(elements.into_iter().rev()),
             ResolvedTypeKind::Named(named) => {
                 let ResolvedReference::Exact {
                     occurrence, target, ..
-                } = &named.reference
+                } = named.reference
                 else {
-                    return Ok(());
+                    continue;
                 };
                 if target.kind != EntityKind::TypeAlias {
-                    return Ok(());
+                    continue;
                 }
                 let metadata = project
                     .entities
-                    .get(target)
+                    .get(&target)
                     .expect("every exact type alias has entity metadata");
                 if !metadata.public {
                     return Err(source_diagnostic(
@@ -1114,24 +1127,22 @@ fn validate_public_type_visibility(
                             "public type surface references private type alias `{}`",
                             target.name
                         ),
-                        occurrence.clone(),
-                        entity_origin(target).into_iter().collect(),
+                        occurrence,
+                        entity_origin(&target).into_iter().collect(),
                     ));
                 }
                 if visited_aliases.insert(target.clone()) {
                     let definition = aliases
-                        .get(target)
+                        .get(&target)
                         .expect("every exact type alias has a resolved definition");
                     if definition.type_parameter_count == 0 {
-                        visit(project, &definition.value, aliases, visited_aliases)?;
+                        pending.push(definition.value.clone());
                     }
                 }
-                Ok(())
             }
         }
     }
-
-    visit(project, ty, aliases, &mut BTreeSet::new())
+    Ok(())
 }
 
 fn collect_function_header(
@@ -1236,7 +1247,7 @@ fn collect_function_header(
             {
                 diagnostics.push(diagnostic);
             }
-            match normalizer.normalize(annotation, context) {
+            match normalizer.normalize(annotation) {
                 Ok(ty) => parameters.push(HeaderParameter {
                     binding: parameter.binding.identity.clone(),
                     span: parameter.span,
@@ -1288,7 +1299,7 @@ fn collect_function_header(
         {
             diagnostics.push(diagnostic);
         }
-        match normalizer.normalize(annotation, context) {
+        match normalizer.normalize(annotation) {
             Ok(ty) => Some((ty, context.origin(annotation.span))),
             Err(diagnostic) => {
                 diagnostics.push(diagnostic);
@@ -2440,9 +2451,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 }
                 let value = self.check_expr(value)?;
                 let ty = if let Some(annotation) = annotation {
-                    let annotated = self
-                        .normalizer
-                        .normalize(annotation, &self.function.context)?;
+                    let annotated = self.normalizer.normalize(annotation)?;
                     if !type_satisfies(&value.ty, &annotated) {
                         return Err(source_diagnostic(
                             CheckDiagnosticKind::TypeMismatch,
