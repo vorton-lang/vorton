@@ -246,6 +246,18 @@ pub enum ProjectDiagnosticKind {
     InvalidSelf {
         library: LibraryId,
     },
+    /// A trait inheritance edge does not resolve to an actual named trait.
+    /// `primary` is the reference occurrence; `related` contains the actual
+    /// declaration when that target has a source declaration.
+    InvalidSupertrait {
+        actual: SupertraitTargetKind,
+    },
+    /// The exact trait declaration graph contains a cycle. `primary` and
+    /// `related` identify the stable cycle references and declarations.
+    TraitInheritanceCycle,
+    /// The exact effect-alias declaration graph contains a cycle. `primary`
+    /// and `related` identify the stable cycle references and declarations.
+    EffectAliasCycle,
     /// The official core root does not declare one required semantic role.
     MissingCoreRole {
         core: LibraryId,
@@ -253,6 +265,20 @@ pub enum ProjectDiagnosticKind {
     },
     /// A declared core role does not match the required bootstrap profile.
     InvalidCoreRole(Box<CoreRoleDiagnostic>),
+}
+
+/// The resolved type category found where a named trait was required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupertraitTargetKind {
+    Struct,
+    Enum,
+    TypeAlias,
+    ExternType,
+    TypeParameter,
+    SelfType,
+    AssociatedType,
+    LanguageType,
+    TypeDependentSelection,
 }
 
 /// Source-backed detail for an invalid official core role.
