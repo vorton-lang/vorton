@@ -14,19 +14,7 @@ use serde::{Deserialize, Deserializer};
 ///
 /// The carrier is intentionally opaque. Decoding does not bind references to a
 /// project, apply clauses, or establish any source-language semantic fact.
-#[derive(Clone)]
 pub struct ContractDocument(Document);
-
-impl fmt::Debug for ContractDocument {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ContractDocument")
-            .field("format_version", &self.0.format_version.0)
-            .field("semantics_version", &self.0.semantics_version)
-            .field("record_count", &self.0.records.len())
-            .finish_non_exhaustive()
-    }
-}
 
 /// A stable category for one contract input failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1087,7 +1075,10 @@ mod tests {
     }
 
     fn error(source: impl AsRef<[u8]>) -> ContractDiagnostic {
-        decode_contract(source.as_ref()).expect_err("input should be rejected")
+        match decode_contract(source.as_ref()) {
+            Ok(_) => panic!("input should be rejected"),
+            Err(diagnostic) => diagnostic,
+        }
     }
 
     fn max_container_depth(source: &str) -> usize {
