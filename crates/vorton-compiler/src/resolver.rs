@@ -175,12 +175,8 @@ fn first_library_dependency_cycle(
     libraries: &BTreeMap<LibraryId, LibrarySources>,
 ) -> Option<Vec<LibraryId>> {
     let mut complete = BTreeSet::new();
-    let mut active = BTreeMap::new();
-    let mut path = Vec::new();
     for library in libraries.keys().copied() {
-        if let Some(cycle) =
-            visit_library_dependency(library, libraries, &mut complete, &mut active, &mut path)
-        {
+        if let Some(cycle) = visit_library_dependency(library, libraries, &mut complete) {
             return Some(canonicalize_library_cycle(cycle));
         }
     }
@@ -191,35 +187,49 @@ fn visit_library_dependency(
     library: LibraryId,
     libraries: &BTreeMap<LibraryId, LibrarySources>,
     complete: &mut BTreeSet<LibraryId>,
-    active: &mut BTreeMap<LibraryId, usize>,
-    path: &mut Vec<LibraryId>,
 ) -> Option<Vec<LibraryId>> {
     if complete.contains(&library) {
         return None;
     }
-    if let Some(start) = active.get(&library).copied() {
-        let mut cycle = path[start..].to_vec();
-        cycle.push(library);
-        return Some(cycle);
-    }
 
-    active.insert(library, path.len());
-    path.push(library);
-    for dependency in libraries
-        .get(&library)
-        .expect("dependency targets were validated")
-        .dependencies
-        .values()
-        .copied()
-    {
-        if let Some(cycle) = visit_library_dependency(dependency, libraries, complete, active, path)
-        {
-            return Some(cycle);
+    let mut active = BTreeMap::from([(library, 0)]);
+    let mut stack = vec![(
+        library,
+        libraries
+            .get(&library)
+            .expect("dependency targets were validated")
+            .dependencies
+            .values(),
+    )];
+    while let Some((_, dependencies)) = stack.last_mut() {
+        if let Some(dependency) = dependencies.next().copied() {
+            if complete.contains(&dependency) {
+                continue;
+            }
+            if let Some(start) = active.get(&dependency).copied() {
+                let mut cycle = stack[start..]
+                    .iter()
+                    .map(|(library, _)| *library)
+                    .collect::<Vec<_>>();
+                cycle.push(dependency);
+                return Some(cycle);
+            }
+
+            active.insert(dependency, stack.len());
+            stack.push((
+                dependency,
+                libraries
+                    .get(&dependency)
+                    .expect("dependency targets were validated")
+                    .dependencies
+                    .values(),
+            ));
+        } else {
+            let (completed, _) = stack.pop().expect("the visit stack is nonempty");
+            active.remove(&completed);
+            complete.insert(completed);
         }
     }
-    path.pop();
-    active.remove(&library);
-    complete.insert(library);
     None
 }
 
@@ -590,7 +600,6 @@ struct ModuleBodyAst {
     generates: Vec<GenerateItem>,
 }
 
-#[derive(Clone)]
 struct ModuleInfo {
     body: Option<ModuleBodyAst>,
     file_body_present: bool,
@@ -1280,10 +1289,9 @@ impl ResolverState {
     }
 
     fn index_modules(&mut self) {
-        let modules = self.modules.clone();
-        for (module, info) in modules {
+        for (module, info) in &self.modules {
             self.own_bindings.entry(module.clone()).or_default();
-            let id = module_id(&module);
+            let id = module_id(module);
             self.entities.insert(
                 id.clone(),
                 Entity {
@@ -1309,7 +1317,7 @@ impl ResolverState {
                     target: id,
                     public: info.public,
                     owner_module: parent,
-                    origin: info.declared_at,
+                    origin: info.declared_at.clone(),
                 },
                 Namespace::Type,
                 name,
@@ -1818,6 +1826,7 @@ impl ResolverState {
             return outcome;
         }
 
+        let mut inaccessible = BTreeSet::new();
         for (offset, segment) in path.segments[start..].iter().enumerate() {
             let PathSegment::Identifier(identifier) = segment else {
                 return LookupOutcome::invalid(ProjectDiagnosticKind::InvalidPath);
@@ -1831,8 +1840,17 @@ impl ResolverState {
                 include_language,
                 terminal,
             );
+            inaccessible.extend(containers.inaccessible.iter().filter_map(|container| {
+                match container {
+                    LookupContainer::Module(module) => module_entity(module),
+                    LookupContainer::Entity(entity) => Some(entity.clone()),
+                }
+            }));
             if containers.accessible.is_empty() && containers.inaccessible.is_empty() {
-                return LookupOutcome::default();
+                return LookupOutcome {
+                    inaccessible,
+                    ..LookupOutcome::default()
+                };
             }
             if terminal {
                 let mut outcome = LookupOutcome::default();
@@ -1841,11 +1859,7 @@ impl ResolverState {
                         outcome.accessible.insert(id);
                     }
                 }
-                for candidate in containers.inaccessible {
-                    if let LookupContainer::Entity(id) = candidate {
-                        outcome.inaccessible.insert(id);
-                    }
-                }
+                outcome.inaccessible = inaccessible;
                 return outcome;
             }
         }
@@ -2182,14 +2196,11 @@ impl ResolverState {
     }
 
     fn resolve_bodies(mut self) -> Result<ResolvedProject, ProjectDiagnostic> {
-        let module_inputs = self
-            .modules
-            .iter()
-            .map(|(module, info)| (module.clone(), info.body.clone()))
-            .collect::<Vec<_>>();
+        let module_inputs = std::mem::take(&mut self.modules);
         let mut resolved_modules = Vec::new();
         let mut diagnostics = Vec::new();
-        for (module, body) in module_inputs {
+        for (module, info) in module_inputs {
+            let body = info.body;
             let resolved_body = if let Some(body) = body {
                 let imports = self
                     .imports
@@ -2248,7 +2259,7 @@ impl ResolverState {
                 None
             };
             resolved_modules.push((
-                module.clone(),
+                module,
                 ResolvedModule {
                     body: resolved_body,
                 },
@@ -3578,10 +3589,11 @@ impl<'state> BodyResolver<'state> {
     ) -> Result<ResolvedFunction, ProjectDiagnostic> {
         let owner = owner_key_from_entity(identity);
         let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
-        let effect_parameters =
-            self.push_effect_parameters(&function.effect_parameters, owner.clone())?;
-        let type_parameters =
-            self.push_type_parameters(&function.type_parameters, owner.clone())?;
+        let (type_parameters, effect_parameters) = self.push_callable_parameters(
+            &function.type_parameters,
+            &function.effect_parameters,
+            owner.clone(),
+        )?;
         let (parameters, value_scope) = self.resolve_parameters(&function.parameters, owner)?;
         let return_type = function
             .return_type
@@ -3617,10 +3629,11 @@ impl<'state> BodyResolver<'state> {
     ) -> Result<ResolvedFunctionSignature, ProjectDiagnostic> {
         let owner = owner_key_from_entity(identity);
         let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
-        let effect_parameters =
-            self.push_effect_parameters(&function.effect_parameters, owner.clone())?;
-        let type_parameters =
-            self.push_type_parameters(&function.type_parameters, owner.clone())?;
+        let (type_parameters, effect_parameters) = self.push_callable_parameters(
+            &function.type_parameters,
+            &function.effect_parameters,
+            owner.clone(),
+        )?;
         let (parameters, _) = self.resolve_parameters(&function.parameters, owner)?;
         let return_type = function
             .return_type
@@ -3643,6 +3656,36 @@ impl<'state> BodyResolver<'state> {
             return_type,
             effects,
         })
+    }
+
+    fn push_callable_parameters(
+        &mut self,
+        type_parameters: &[TypeParameter],
+        effect_parameters: &[EffectParameter],
+        owner: OwnerKey,
+    ) -> Result<(Vec<ResolvedTypeParameter>, Vec<ResolvedEffectParameter>), ProjectDiagnostic> {
+        // Effect formals must exist before type bounds resolve, but a later
+        // binder error must not outrank an earlier bound diagnostic.
+        let (effect_parameters, mut diagnostics) =
+            self.push_effect_parameters(effect_parameters, owner.clone());
+        let type_parameters = match self.push_type_parameters(type_parameters, owner) {
+            Ok(parameters) => Some(parameters),
+            Err(diagnostic) => {
+                diagnostics.push((self.module.clone(), diagnostic));
+                None
+            }
+        };
+        if let Some(diagnostic) = first_stage_diagnostic(diagnostics) {
+            if type_parameters.is_some() {
+                self.type_scopes.pop();
+            }
+            self.effect_scopes.pop();
+            return Err(diagnostic);
+        }
+        Ok((
+            type_parameters.expect("type parameters are present without diagnostics"),
+            effect_parameters,
+        ))
     }
 
     fn push_type_parameters(
@@ -3762,9 +3805,13 @@ impl<'state> BodyResolver<'state> {
         &mut self,
         parameters: &[EffectParameter],
         owner: OwnerKey,
-    ) -> Result<Vec<ResolvedEffectParameter>, ProjectDiagnostic> {
+    ) -> (
+        Vec<ResolvedEffectParameter>,
+        Vec<(ModuleRef, ProjectDiagnostic)>,
+    ) {
         let mut scope = BTreeMap::new();
         let mut resolved = Vec::new();
+        let mut diagnostics = Vec::new();
         for parameter in parameters {
             let origin = self.origin(parameter.name.span);
             let invalid = if is_protected_name(Namespace::Effect, &parameter.name.text) {
@@ -3798,7 +3845,8 @@ impl<'state> BodyResolver<'state> {
                     })
             };
             if let Some(diagnostic) = invalid {
-                return Err(diagnostic);
+                diagnostics.push((self.module.clone(), diagnostic));
+                continue;
             }
             let identity = source_id(
                 &self.module,
@@ -3817,7 +3865,7 @@ impl<'state> BodyResolver<'state> {
             });
         }
         self.effect_scopes.push(scope);
-        Ok(resolved)
+        (resolved, diagnostics)
     }
 
     fn resolve_parameters(
@@ -7348,6 +7396,70 @@ mod tests {
         assert!(file_alias_conflict.primary.is_none());
     }
 
+    fn unreachable_library_chain(depth: u32) -> ProjectSources {
+        let core = LibraryId(0);
+        let mut libraries = BTreeMap::from([(core, library(TEST_CORE_SOURCE, vec![], vec![]))]);
+        for index in 1..=depth {
+            let dependencies = if index < depth {
+                BTreeMap::from([("next".to_owned(), LibraryId(index + 1))])
+            } else {
+                BTreeMap::new()
+            };
+            libraries.insert(
+                LibraryId(index),
+                LibrarySources {
+                    root: String::new(),
+                    modules: BTreeMap::new(),
+                    dependencies,
+                },
+            );
+        }
+        ProjectSources {
+            entry: core,
+            core,
+            libraries,
+        }
+    }
+
+    #[test]
+    fn validates_a_deep_unreachable_library_chain_without_recursing() {
+        let resolved = crate::resolve_project(&unreachable_library_chain(8192))
+            .expect("a legal unreachable chain does not consume the process call stack");
+        assert_eq!(resolved.entry, LibraryId(0));
+        assert_eq!(resolved.core, LibraryId(0));
+        assert_eq!(resolved.modules.len(), 1);
+        assert!(
+            resolved
+                .modules
+                .contains_key(&ModuleRef::root(LibraryId(0)))
+        );
+    }
+
+    #[test]
+    fn a_deep_dependency_back_edge_reports_only_the_closed_cycle() {
+        let depth = 8192;
+        let mut sources = unreachable_library_chain(depth);
+        sources
+            .libraries
+            .get_mut(&LibraryId(depth))
+            .expect("chain tail exists")
+            .dependencies
+            .insert("back".to_owned(), LibraryId(depth - 2));
+        let diagnostic =
+            crate::resolve_project(&sources).expect_err("the back edge closes a cycle");
+        assert_eq!(
+            diagnostic.kind,
+            ProjectDiagnosticKind::LibraryDependencyCycle {
+                cycle: vec![
+                    LibraryId(depth - 2),
+                    LibraryId(depth - 1),
+                    LibraryId(depth),
+                    LibraryId(depth - 2),
+                ],
+            }
+        );
+    }
+
     #[test]
     fn each_library_closes_its_own_file_sources_before_consumers_resolve() {
         let app = LibraryId(1);
@@ -7671,6 +7783,89 @@ mod tests {
                 .library,
             facade
         );
+    }
+
+    #[test]
+    fn private_intermediate_modules_remain_inaccessible_through_complete_import_paths() {
+        for source in [
+            "use outer::hidden::T; pub mod outer { mod hidden { pub struct T {} } }",
+            "use outer::hidden::T as PrivateT; pub mod outer { mod hidden { pub struct T {} } }",
+            "use outer::hidden::{T}; pub mod outer { mod hidden { pub struct T {} } }",
+            "pub use outer::hidden::T; pub mod outer { mod hidden { pub struct T {} } }",
+        ] {
+            let diagnostic = resolve_project(&project(source, vec![]))
+                .expect_err("a private intermediate module blocks the complete import path");
+            assert!(
+                matches!(
+                    diagnostic.kind,
+                    ProjectDiagnosticKind::InaccessibleImport { ref path }
+                        if path == "outer::hidden::T"
+                ),
+                "{source}: {diagnostic:?}"
+            );
+            let primary = diagnostic
+                .primary
+                .expect("the import has a real source origin");
+            assert_eq!(primary.library, TEST_LIBRARY);
+            assert_eq!(primary.source, SourceRef::Root);
+        }
+
+        let app = LibraryId(1);
+        let dependency = LibraryId(2);
+        for source in ["use dep::hidden::T;", "use dep::hidden::{T as PrivateT};"] {
+            let diagnostic = resolve_project(&graph(
+                app,
+                vec![
+                    (app, library(source, vec![], vec![("dep", dependency)])),
+                    (
+                        dependency,
+                        library("mod hidden { pub struct T {} }", vec![], vec![]),
+                    ),
+                ],
+            ))
+            .expect_err("a dependency's private intermediate module blocks imports");
+            assert!(matches!(
+                diagnostic.kind,
+                ProjectDiagnosticKind::InaccessibleImport { ref path }
+                    if path == "dep::hidden::T"
+            ));
+            let primary = diagnostic
+                .primary
+                .expect("the consumer import has an origin");
+            assert_eq!(primary.library, app);
+            assert_eq!(primary.source, SourceRef::Root);
+        }
+
+        let missing = resolve_project(&project("use outer::missing::T; pub mod outer {}", vec![]))
+            .expect_err("a genuinely missing path stays unresolved");
+        assert!(matches!(
+            missing.kind,
+            ProjectDiagnosticKind::UnresolvedImport { ref path }
+                if path == "outer::missing::T"
+        ));
+
+        resolve_project(&graph(
+            app,
+            vec![
+                (
+                    app,
+                    library(
+                        "use dep::T; fn accept(value: T) {}",
+                        vec![],
+                        vec![("dep", dependency)],
+                    ),
+                ),
+                (
+                    dependency,
+                    library(
+                        "pub use hidden::T; mod hidden { pub struct T {} }",
+                        vec![],
+                        vec![],
+                    ),
+                ),
+            ],
+        ))
+        .expect("a public facade over a private module remains accessible");
     }
 
     #[test]
@@ -9537,6 +9732,52 @@ where (T, T): Eq + Debug, T::Item: Eq, {
             first, second,
             "or alternatives keep one logical binding identity"
         );
+    }
+
+    #[test]
+    fn callable_generic_diagnostics_follow_source_order_after_effect_prescan() {
+        let body_source = "fn f<T: Missing, effect E, effect E>() {}";
+        let body_diagnostic = resolve_project(&project(body_source, vec![]))
+            .expect_err("the earlier missing type bound wins over a later effect duplicate");
+        assert!(matches!(
+            body_diagnostic.kind,
+            ProjectDiagnosticKind::UnresolvedName {
+                namespace: NameNamespace::Type,
+                ref name,
+            } if name == "Missing"
+        ));
+        assert_eq!(
+            body_diagnostic
+                .primary
+                .expect("the missing type bound has an origin")
+                .span,
+            Span::new(8, 15)
+        );
+
+        let signature_source = "trait Api { fn f<T: Missing, effect E, effect E>(); }";
+        let signature_diagnostic = resolve_project(&project(signature_source, vec![]))
+            .expect_err("signature generic diagnostics use the same source ordering");
+        assert!(matches!(
+            signature_diagnostic.kind,
+            ProjectDiagnosticKind::UnresolvedName {
+                namespace: NameNamespace::Type,
+                ref name,
+            } if name == "Missing"
+        ));
+        let missing_start = signature_source.find("Missing").expect("bound spelling");
+        assert_eq!(
+            signature_diagnostic
+                .primary
+                .expect("the signature bound has an origin")
+                .span,
+            Span::new(missing_start, missing_start + "Missing".len())
+        );
+
+        resolve_project(&project(
+            "fn f<T: Fn + fn() -> Unit with {E}, effect E>(callback: call T) {}",
+            vec![],
+        ))
+        .expect("type bounds can still reference a later effect formal");
     }
 
     #[test]

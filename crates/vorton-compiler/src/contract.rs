@@ -232,6 +232,196 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
+struct JsonObjectVisitor<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<'de, T> de::Visitor<'de> for JsonObjectVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = T;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object")
+    }
+
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::MapAccess<'de>,
+    {
+        T::deserialize(de::value::MapAccessDeserializer::new(map))
+    }
+}
+
+fn deserialize_json_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    deserializer.deserialize_map(JsonObjectVisitor(std::marker::PhantomData))
+}
+
+struct JsonStringVisitor<T>(std::marker::PhantomData<fn() -> T>);
+
+impl<'de, T> de::Visitor<'de> for JsonStringVisitor<T>
+where
+    T: de::DeserializeOwned,
+{
+    type Value = T;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON string")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        T::deserialize(de::value::StrDeserializer::<E>::new(value))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        T::deserialize(de::value::StringDeserializer::<E>::new(value))
+    }
+}
+
+fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: de::DeserializeOwned,
+{
+    deserializer.deserialize_str(JsonStringVisitor(std::marker::PhantomData))
+}
+
+// Serde's derived struct and unit-enum readers accept JSON representations that
+// are broader than the published schema. These macros keep each wire shape in
+// one declaration while requiring the schema's object and string containers.
+macro_rules! json_object {
+    (
+        struct $name:ident {
+            $(
+                $(#[$field_attribute:meta])*
+                $field:ident: $field_type:ty
+            ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, PartialEq)]
+        struct $name {
+            $($field: $field_type),*
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Wire {
+                    $(
+                        $(#[$field_attribute])*
+                        $field: $field_type
+                    ),*
+                }
+
+                let Wire { $($field),* } = deserialize_json_object(deserializer)?;
+                Ok(Self { $($field),* })
+            }
+        }
+    };
+}
+
+macro_rules! json_string_enum {
+    (
+        $rename_all:literal;
+        enum $name:ident {
+            $(
+                $(#[$variant_attribute:meta])*
+                $variant:ident
+            ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, PartialEq)]
+        enum $name {
+            $($variant),*
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(rename_all = $rename_all)]
+                enum Wire {
+                    $(
+                        $(#[$variant_attribute])*
+                        $variant
+                    ),*
+                }
+
+                Ok(match deserialize_json_string(deserializer)? {
+                    $(Wire::$variant => Self::$variant),*
+                })
+            }
+        }
+    };
+}
+
+macro_rules! json_tagged_object_enum {
+    (
+        enum $name:ident {
+            $(
+                $(#[$variant_attribute:meta])*
+                $variant:ident {
+                    $(
+                        $(#[$field_attribute:meta])*
+                        $field:ident: $field_type:ty
+                    ),* $(,)?
+                }
+            ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, PartialEq)]
+        enum $name {
+            $(
+                $variant {
+                    $($field: $field_type),*
+                }
+            ),*
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+                enum Wire {
+                    $(
+                        $(#[$variant_attribute])*
+                        $variant {
+                            $(
+                                $(#[$field_attribute])*
+                                $field: $field_type
+                            ),*
+                        }
+                    ),*
+                }
+
+                Ok(match deserialize_json_object(deserializer)? {
+                    $(
+                        Wire::$variant { $($field),* } => Self::$variant { $($field),* }
+                    ),*
+                })
+            }
+        }
+    };
+}
+
 #[derive(Debug, PartialEq, Deserialize)]
 struct WireU64(u64);
 
@@ -304,150 +494,156 @@ impl<'de> Deserialize<'de> for Identifier {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Document {
-    format: String,
-    format_version: WireU64,
-    semantics_version: String,
-    owner: String,
-    records: Vec<Record>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    display: Option<DisplayFields>,
+json_object! {
+    struct Document {
+        format: String,
+        format_version: WireU64,
+        semantics_version: String,
+        owner: String,
+        records: Vec<Record>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        display: Option<DisplayFields>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DisplayFields {
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    label: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    note: Option<String>,
+json_object! {
+    struct DisplayFields {
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        label: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        note: Option<String>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
-enum LibraryRef {
-    #[serde(rename = "self")]
-    Current {},
-    Dependency {
-        alias: Identifier,
-    },
+json_tagged_object_enum! {
+    enum LibraryRef {
+        #[serde(rename = "self")]
+        Current {},
+        Dependency {
+            alias: Identifier,
+        },
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum DeclarationKind {
-    Function,
-    Struct,
-    Enum,
-    Trait,
-    TypeAlias,
-    Const,
-    Effect,
-    EffectAlias,
-    Module,
-    ExternType,
+json_string_enum! {
+    "snake_case";
+    enum DeclarationKind {
+        Function,
+        Struct,
+        Enum,
+        Trait,
+        TypeAlias,
+        Const,
+        Effect,
+        EffectAlias,
+        Module,
+        ExternType,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeclRef {
-    library: LibraryRef,
-    path: Vec<Identifier>,
-    kind: DeclarationKind,
+json_object! {
+    struct DeclRef {
+        library: LibraryRef,
+        path: Vec<Identifier>,
+        kind: DeclarationKind,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TraitKind {
-    Trait,
+json_string_enum! {
+    "snake_case";
+    enum TraitKind {
+        Trait,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TraitRef {
-    library: LibraryRef,
-    path: Vec<Identifier>,
-    kind: TraitKind,
+json_object! {
+    struct TraitRef {
+        library: LibraryRef,
+        path: Vec<Identifier>,
+        kind: TraitKind,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum FunctionKind {
-    Function,
+json_string_enum! {
+    "snake_case";
+    enum FunctionKind {
+        Function,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FunctionDeclRef {
-    library: LibraryRef,
-    path: Vec<Identifier>,
-    kind: FunctionKind,
+json_object! {
+    struct FunctionDeclRef {
+        library: LibraryRef,
+        path: Vec<Identifier>,
+        kind: FunctionKind,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EffectKind {
-    Effect,
+json_string_enum! {
+    "snake_case";
+    enum EffectKind {
+        Effect,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EffectDeclRef {
-    library: LibraryRef,
-    path: Vec<Identifier>,
-    kind: EffectKind,
+json_object! {
+    struct EffectDeclRef {
+        library: LibraryRef,
+        path: Vec<Identifier>,
+        kind: EffectKind,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SelfDeclarationKind {
-    Struct,
-    Enum,
-    Trait,
+json_string_enum! {
+    "snake_case";
+    enum SelfDeclarationKind {
+        Struct,
+        Enum,
+        Trait,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SelfDeclRef {
-    library: LibraryRef,
-    path: Vec<Identifier>,
-    kind: SelfDeclarationKind,
+json_object! {
+    struct SelfDeclRef {
+        library: LibraryRef,
+        path: Vec<Identifier>,
+        kind: SelfDeclarationKind,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum MemberKind {
-    Method,
-    AssociatedType,
+json_string_enum! {
+    "snake_case";
+    enum MemberKind {
+        Method,
+        AssociatedType,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum MethodKind {
-    Method,
+json_string_enum! {
+    "snake_case";
+    enum MethodKind {
+        Method,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PatternTrait {
-    #[serde(rename = "trait")]
-    trait_ref: TraitRef,
-    arguments: Vec<TypePattern>,
-    associated_bindings: Vec<PatternAssociatedBinding>,
+json_object! {
+    struct PatternTrait {
+        #[serde(rename = "trait")]
+        trait_ref: TraitRef,
+        arguments: Vec<TypePattern>,
+        associated_bindings: Vec<PatternAssociatedBinding>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PatternAssociatedBinding {
-    name: Identifier,
-    #[serde(rename = "type")]
-    value_type: TypePattern,
+json_object! {
+    struct PatternAssociatedBinding {
+        name: Identifier,
+        #[serde(rename = "type")]
+        value_type: TypePattern,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_tagged_object_enum! {
 enum TypePattern {
     Primitive {
         name: PrimitiveType,
@@ -478,31 +674,32 @@ enum TypePattern {
         element: Box<TypePattern>,
     },
 }
-
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-enum PrimitiveType {
-    Int,
-    Float,
-    Str,
-    Bool,
-    Unit,
-    Never,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ImplRef {
-    library: LibraryRef,
-    type_parameter_count: WireU64,
-    target: TypePattern,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    #[serde(rename = "trait")]
-    trait_ref: Option<PatternTrait>,
+json_string_enum! {
+    "PascalCase";
+    enum PrimitiveType {
+        Int,
+        Float,
+        Str,
+        Bool,
+        Unit,
+        Never,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_object! {
+    struct ImplRef {
+        library: LibraryRef,
+        type_parameter_count: WireU64,
+        target: TypePattern,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        #[serde(rename = "trait")]
+        trait_ref: Option<PatternTrait>,
+    }
+}
+
+json_tagged_object_enum! {
 enum EntityRef {
     Declaration {
         declaration: DeclRef,
@@ -521,9 +718,9 @@ enum EntityRef {
         implementation: ImplRef,
     },
 }
+}
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_tagged_object_enum! {
 enum FunctionRef {
     Declaration {
         declaration: FunctionDeclRef,
@@ -539,64 +736,67 @@ enum FunctionRef {
         name: Identifier,
     },
 }
-
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Binder {
-    Declaration,
-    Impl,
-    Method,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TypeFormalKind {
-    Type,
+json_string_enum! {
+    "snake_case";
+    enum Binder {
+        Declaration,
+        Impl,
+        Method,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TypeFormalRef {
-    owner: EntityRef,
-    binder: Binder,
-    kind: TypeFormalKind,
-    index: WireU64,
+json_string_enum! {
+    "snake_case";
+    enum TypeFormalKind {
+        Type,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EffectFormalKind {
-    Effect,
+json_object! {
+    struct TypeFormalRef {
+        owner: EntityRef,
+        binder: Binder,
+        kind: TypeFormalKind,
+        index: WireU64,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EffectFormalRef {
-    owner: EntityRef,
-    binder: Binder,
-    kind: EffectFormalKind,
-    index: WireU64,
+json_string_enum! {
+    "snake_case";
+    enum EffectFormalKind {
+        Effect,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TraitUse {
-    #[serde(rename = "trait")]
-    trait_ref: TraitRef,
-    arguments: Vec<Type>,
-    associated_bindings: Vec<AssociatedBinding>,
+json_object! {
+    struct EffectFormalRef {
+        owner: EntityRef,
+        binder: Binder,
+        kind: EffectFormalKind,
+        index: WireU64,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AssociatedBinding {
-    name: Identifier,
-    #[serde(rename = "type")]
-    value_type: Type,
+json_object! {
+    struct TraitUse {
+        #[serde(rename = "trait")]
+        trait_ref: TraitRef,
+        arguments: Vec<Type>,
+        associated_bindings: Vec<AssociatedBinding>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_object! {
+    struct AssociatedBinding {
+        name: Identifier,
+        #[serde(rename = "type")]
+        value_type: Type,
+    }
+}
+
+json_tagged_object_enum! {
 enum Type {
     Primitive {
         name: PrimitiveType,
@@ -643,48 +843,51 @@ enum Type {
         owner: SelfOwner,
     },
 }
+}
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_tagged_object_enum! {
 enum SelfOwner {
     Declaration { declaration: SelfDeclRef },
     Impl { implementation: ImplRef },
 }
-
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Mode {
-    Borrow,
-    Mut,
-    Move,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_string_enum! {
+    "snake_case";
+    enum Mode {
+        Borrow,
+        Mut,
+        Move,
+    }
+}
+
+json_tagged_object_enum! {
 enum ModeRule {
     Fixed { mode: Mode },
     CallableUse { callable: Box<Type> },
 }
+}
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EscapeRule {
-    Noescape,
-    MayEscape,
+json_string_enum! {
+    "snake_case";
+    enum EscapeRule {
+        Noescape,
+        MayEscape,
+    }
 }
 
 type EffectRow = Vec<EffectTerm>;
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SystemEffect {
-    Console,
-    Fs,
-    Process,
+json_string_enum! {
+    "snake_case";
+    enum SystemEffect {
+        Console,
+        Fs,
+        Process,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_tagged_object_enum! {
 enum EffectTerm {
     System {
         name: SystemEffect,
@@ -717,73 +920,75 @@ enum EffectTerm {
         callable: Type,
     },
 }
-
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TraitMethodRef {
-    tag: TraitMemberTag,
-    owner: TraitRef,
-    kind: MethodKind,
-    name: Identifier,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TraitMemberTag {
-    TraitMember,
+json_object! {
+    struct TraitMethodRef {
+        tag: TraitMemberTag,
+        owner: TraitRef,
+        kind: MethodKind,
+        name: Identifier,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_string_enum! {
+    "snake_case";
+    enum TraitMemberTag {
+        TraitMember,
+    }
+}
+
+json_tagged_object_enum! {
 enum ParameterRef {
     Receiver {},
     Position { index: WireU64 },
 }
-
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PatternPredicate {
-    subject: TypePattern,
-    requires: PatternTrait,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ParameterTypeSet {
-    parameter: ParameterRef,
-    #[serde(rename = "type")]
-    value_type: Type,
+json_object! {
+    struct PatternPredicate {
+        subject: TypePattern,
+        requires: PatternTrait,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ParameterModeSet {
-    parameter: ParameterRef,
-    mode: ModeRule,
+json_object! {
+    struct ParameterTypeSet {
+        parameter: ParameterRef,
+        #[serde(rename = "type")]
+        value_type: Type,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ParameterEscapeSet {
-    parameter: ParameterRef,
-    escape: EscapeRule,
+json_object! {
+    struct ParameterModeSet {
+        parameter: ParameterRef,
+        mode: ModeRule,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SetClauses {
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    parameter_types: Option<NonEmptyVec<ParameterTypeSet>>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    return_type: Option<Type>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    parameter_modes: Option<NonEmptyVec<ParameterModeSet>>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    parameter_escape: Option<NonEmptyVec<ParameterEscapeSet>>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    effect_upper: Option<EffectRow>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    generic_requirements: Option<Vec<GenericRequirement>>,
+json_object! {
+    struct ParameterEscapeSet {
+        parameter: ParameterRef,
+        escape: EscapeRule,
+    }
+}
+
+json_object! {
+    struct SetClauses {
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        parameter_types: Option<NonEmptyVec<ParameterTypeSet>>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        return_type: Option<Type>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        parameter_modes: Option<NonEmptyVec<ParameterModeSet>>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        parameter_escape: Option<NonEmptyVec<ParameterEscapeSet>>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        effect_upper: Option<EffectRow>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        generic_requirements: Option<Vec<GenericRequirement>>,
+    }
 }
 
 impl SetClauses {
@@ -797,42 +1002,43 @@ impl SetClauses {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Visibility {
-    Public,
-    Private,
+json_string_enum! {
+    "snake_case";
+    enum Visibility {
+        Public,
+        Private,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FieldRequirement {
-    name: Identifier,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    #[serde(rename = "type")]
-    value_type: Option<Type>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    visibility: Option<Visibility>,
+json_object! {
+    struct FieldRequirement {
+        name: Identifier,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        #[serde(rename = "type")]
+        value_type: Option<Type>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        visibility: Option<Visibility>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ParameterRequirement {
-    parameter: ParameterRef,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    #[serde(rename = "type")]
-    value_type: Option<Type>,
+json_object! {
+    struct ParameterRequirement {
+        parameter: ParameterRef,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        #[serde(rename = "type")]
+        value_type: Option<Type>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum MatchRule {
-    Exact,
-    Contains,
+json_string_enum! {
+    "snake_case";
+    enum MatchRule {
+        Exact,
+        Contains,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_tagged_object_enum! {
 enum VariantLayout {
     Unit {},
     Tuple {
@@ -845,24 +1051,24 @@ enum VariantLayout {
         fields: Vec<FieldRequirement>,
     },
 }
-
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct VariantRequirement {
-    name: Identifier,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    layout: Option<VariantLayout>,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MemberRequirement {
-    name: Identifier,
-    kind: MemberKind,
+json_object! {
+    struct VariantRequirement {
+        name: Identifier,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        layout: Option<VariantLayout>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_object! {
+    struct MemberRequirement {
+        name: Identifier,
+        kind: MemberKind,
+    }
+}
+
+json_tagged_object_enum! {
 enum StructureCheck {
     Parameters {
         #[serde(rename = "match")]
@@ -888,65 +1094,67 @@ enum StructureCheck {
         ordered: bool,
     },
 }
-
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Namespace {
-    Type,
-    Value,
-    Effect,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExportName {
-    path: NonEmptyVec<Identifier>,
-    namespace: Namespace,
+json_string_enum! {
+    "snake_case";
+    enum Namespace {
+        Type,
+        Value,
+        Effect,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExportRequirement {
-    name: ExportName,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    target: Option<EntityRef>,
+json_object! {
+    struct ExportName {
+        path: NonEmptyVec<Identifier>,
+        namespace: Namespace,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExportsCheck {
-    #[serde(rename = "match")]
-    match_rule: MatchRule,
-    items: Vec<ExportRequirement>,
+json_object! {
+    struct ExportRequirement {
+        name: ExportName,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        target: Option<EntityRef>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ImplAllowance {
-    implementation: ImplRef,
-    predicates: Vec<PatternPredicate>,
+json_object! {
+    struct ExportsCheck {
+        #[serde(rename = "match")]
+        match_rule: MatchRule,
+        items: Vec<ExportRequirement>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RejectNewCheck {
-    allowed_exports: Vec<ExportName>,
-    allowed_impls: Vec<ImplAllowance>,
+json_object! {
+    struct ImplAllowance {
+        implementation: ImplRef,
+        predicates: Vec<PatternPredicate>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CheckClauses {
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    return_traits: Option<NonEmptyVec<TraitUse>>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    structure: Option<NonEmptyVec<StructureCheck>>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    visibility: Option<Visibility>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    exports: Option<ExportsCheck>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    reject_new: Option<RejectNewCheck>,
+json_object! {
+    struct RejectNewCheck {
+        allowed_exports: Vec<ExportName>,
+        allowed_impls: Vec<ImplAllowance>,
+    }
+}
+
+json_object! {
+    struct CheckClauses {
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        return_traits: Option<NonEmptyVec<TraitUse>>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        structure: Option<NonEmptyVec<StructureCheck>>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        visibility: Option<Visibility>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        exports: Option<ExportsCheck>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        reject_new: Option<RejectNewCheck>,
+    }
 }
 
 impl CheckClauses {
@@ -959,40 +1167,39 @@ impl CheckClauses {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Record {
-    target: EntityRef,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    set: Option<SetClauses>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    check: Option<CheckClauses>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    display: Option<DisplayFields>,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    type_parameters: Option<Vec<Identifier>>,
+json_object! {
+    struct Record {
+        target: EntityRef,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        set: Option<SetClauses>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        check: Option<CheckClauses>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        display: Option<DisplayFields>,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        type_parameters: Option<Vec<Identifier>>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ShapeParameter {
-    #[serde(rename = "type")]
-    value_type: Type,
-    mode: ModeRule,
-    escape: EscapeRule,
+json_object! {
+    struct ShapeParameter {
+        #[serde(rename = "type")]
+        value_type: Type,
+        mode: ModeRule,
+        escape: EscapeRule,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CallableShapeConstraint {
-    parameters: Vec<ShapeParameter>,
-    result: Type,
-    #[serde(default, deserialize_with = "deserialize_optional")]
-    effect_upper: Option<EffectRow>,
+json_object! {
+    struct CallableShapeConstraint {
+        parameters: Vec<ShapeParameter>,
+        result: Type,
+        #[serde(default, deserialize_with = "deserialize_optional")]
+        effect_upper: Option<EffectRow>,
+    }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
-#[serde(tag = "tag", rename_all = "snake_case", deny_unknown_fields)]
+json_tagged_object_enum! {
 enum GenericRequirement {
     Trait {
         subject: Type,
@@ -1002,6 +1209,7 @@ enum GenericRequirement {
         subject: Type,
         shape: Box<CallableShapeConstraint>,
     },
+}
 }
 
 #[cfg(test)]
@@ -1177,6 +1385,45 @@ mod tests {
         }
         decode_contract(COMPLETE_FIXTURE.as_bytes())
             .expect("the published representative fixture follows the reader profile");
+    }
+
+    #[test]
+    fn schema_objects_and_string_enums_reject_alternative_serde_representations() {
+        let root_sequence = r#"["vorton.contract",1,"0.1","app",[]]"#.to_owned();
+        let declaration_sequence = minimal_document().replace(
+            r#"{"library":{"tag":"self"},"path":["missing"],"kind":"function"}"#,
+            r#"[{"tag":"self"},["missing"],"function"]"#,
+        );
+        let display_sequence =
+            minimal_document().replace(r#""records":"#, r#""display":["label","note"],"records":"#);
+        let declaration_kind_object =
+            minimal_document().replace(r#""kind":"function""#, r#""kind":{"function":null}"#);
+        let visibility_object = document_with_record(&format!(
+            r#"{{"target":{},"check":{{"visibility":{{"public":null}}}}}}"#,
+            declaration_target()
+        ));
+        let primitive_name_object =
+            document_with_return_type(r#"{"tag":"primitive","name":{"Int":null}}"#);
+
+        let escaped_enum =
+            minimal_document().replace(r#""kind":"function""#, r#""kind":"funct\u0069on""#);
+        decode_contract(escaped_enum.as_bytes())
+            .expect("JSON escapes preserve the decoded string enum value");
+
+        for (label, source) in [
+            ("root document", root_sequence),
+            ("declaration reference", declaration_sequence),
+            ("display", display_sequence),
+            ("declaration kind", declaration_kind_object),
+            ("visibility", visibility_object),
+            ("primitive type name", primitive_name_object),
+        ] {
+            assert_eq!(
+                error(source).kind,
+                ContractDiagnosticKind::InvalidStructure,
+                "{label} must use the JSON representation published by the schema"
+            );
+        }
     }
 
     #[test]
