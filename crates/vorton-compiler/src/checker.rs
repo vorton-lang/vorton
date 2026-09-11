@@ -962,6 +962,11 @@ fn collect_supported_headers(
                         );
                     } else if let Err(diagnostic) = normalizer.normalize(value, &context) {
                         push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
+                    } else if declaration.public
+                        && let Err(diagnostic) =
+                            validate_public_type_visibility(project, value, &normalizer.aliases)
+                    {
+                        push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
                     }
                 }
                 ResolvedDeclarationKind::Function(function) => {
@@ -970,7 +975,13 @@ fn collect_supported_headers(
                         .as_ref()
                         .expect("every resolved function has an exact identity")
                         .clone();
-                    match collect_function_header(declaration, function, &context, normalizer) {
+                    match collect_function_header(
+                        project,
+                        declaration,
+                        function,
+                        &context,
+                        normalizer,
+                    ) {
                         Ok(header) => {
                             order.push(identity.clone());
                             headers.insert(identity, header);
@@ -1063,7 +1074,68 @@ fn check_diagnostic_rank(kind: &CheckDiagnosticKind) -> u8 {
     }
 }
 
+fn validate_public_type_visibility(
+    project: &ResolvedProject,
+    ty: &ResolvedType,
+    aliases: &BTreeMap<EntityId, AliasDefinition>,
+) -> Result<(), CheckDiagnostic> {
+    fn visit(
+        project: &ResolvedProject,
+        ty: &ResolvedType,
+        aliases: &BTreeMap<EntityId, AliasDefinition>,
+        visited_aliases: &mut BTreeSet<EntityId>,
+    ) -> Result<(), CheckDiagnostic> {
+        match &ty.kind {
+            ResolvedTypeKind::Grouped(inner) => visit(project, inner, aliases, visited_aliases),
+            ResolvedTypeKind::Tuple(elements) => {
+                for element in elements {
+                    visit(project, element, aliases, visited_aliases)?;
+                }
+                Ok(())
+            }
+            ResolvedTypeKind::Named(named) => {
+                let ResolvedReference::Exact {
+                    occurrence, target, ..
+                } = &named.reference
+                else {
+                    return Ok(());
+                };
+                if target.kind != EntityKind::TypeAlias {
+                    return Ok(());
+                }
+                let metadata = project
+                    .entities
+                    .get(target)
+                    .expect("every exact type alias has entity metadata");
+                if !metadata.public {
+                    return Err(source_diagnostic(
+                        CheckDiagnosticKind::TypeMismatch,
+                        format!(
+                            "public type surface references private type alias `{}`",
+                            target.name
+                        ),
+                        occurrence.clone(),
+                        entity_origin(target).into_iter().collect(),
+                    ));
+                }
+                if visited_aliases.insert(target.clone()) {
+                    let definition = aliases
+                        .get(target)
+                        .expect("every exact type alias has a resolved definition");
+                    if definition.type_parameter_count == 0 {
+                        visit(project, &definition.value, aliases, visited_aliases)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    visit(project, ty, aliases, &mut BTreeSet::new())
+}
+
 fn collect_function_header(
+    project: &ResolvedProject,
     declaration: &ResolvedDeclaration,
     function: &crate::project::ResolvedFunction,
     context: &SourceContext,
@@ -1100,6 +1172,14 @@ fn collect_function_header(
     let mut diagnostics = Vec::new();
     let mut parameters = Vec::with_capacity(function.parameters.len());
     for parameter in &function.parameters {
+        if parameter.binding.identity.name == "self" {
+            diagnostics.push(source_diagnostic(
+                CheckDiagnosticKind::Unsupported,
+                "module-level function receivers are outside the initial Checker subset",
+                parameter.binding.origin.clone(),
+                Vec::new(),
+            ));
+        }
         if let Some(span) = parameter.escape {
             diagnostics.push(source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
@@ -1150,6 +1230,12 @@ fn collect_function_header(
             }
         };
         if let Some(annotation) = annotation {
+            if declaration.public
+                && let Err(diagnostic) =
+                    validate_public_type_visibility(project, annotation, &normalizer.aliases)
+            {
+                diagnostics.push(diagnostic);
+            }
             match normalizer.normalize(annotation, context) {
                 Ok(ty) => parameters.push(HeaderParameter {
                     binding: parameter.binding.identity.clone(),
@@ -1195,16 +1281,21 @@ fn collect_function_header(
         ));
     }
 
-    let return_type =
-        return_annotation.and_then(
-            |annotation| match normalizer.normalize(annotation, context) {
-                Ok(ty) => Some((ty, context.origin(annotation.span))),
-                Err(diagnostic) => {
-                    diagnostics.push(diagnostic);
-                    None
-                }
-            },
-        );
+    let return_type = return_annotation.and_then(|annotation| {
+        if declaration.public
+            && let Err(diagnostic) =
+                validate_public_type_visibility(project, annotation, &normalizer.aliases)
+        {
+            diagnostics.push(diagnostic);
+        }
+        match normalizer.normalize(annotation, context) {
+            Ok(ty) => Some((ty, context.origin(annotation.span))),
+            Err(diagnostic) => {
+                diagnostics.push(diagnostic);
+                None
+            }
+        }
+    });
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
@@ -1298,7 +1389,18 @@ fn display_type(ty: &CheckedType) -> String {
 }
 
 fn type_satisfies(actual: &CheckedType, expected: &CheckedType) -> bool {
-    actual == &CheckedType::Never || actual == expected
+    match (actual, expected) {
+        (CheckedType::Never, _) => true,
+        (CheckedType::Tuple(actual), CheckedType::Tuple(expected))
+            if actual.len() == expected.len() =>
+        {
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| type_satisfies(actual, expected))
+        }
+        _ => actual == expected,
+    }
 }
 
 #[allow(dead_code)]
@@ -2718,7 +2820,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                     return Err(self.binary_type_diagnostic(operator.0, &left, &right));
                 }
                 (
-                    if diverges {
+                    if left.ty == CheckedType::Never {
                         CheckedType::Never
                     } else {
                         CheckedType::Bool
@@ -2993,19 +3095,23 @@ fn join_types(left: &CheckedType, right: &CheckedType) -> Result<CheckedType, ()
         Ok(right.clone())
     } else if right == &CheckedType::Never || left == right {
         Ok(left.clone())
+    } else if let (CheckedType::Tuple(left), CheckedType::Tuple(right)) = (left, right)
+        && left.len() == right.len()
+    {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| join_types(left, right))
+            .collect::<Result<Vec<_>, _>>()
+            .map(CheckedType::Tuple)
     } else {
         Err(())
     }
 }
 
 fn common_non_never_type(left: &CheckedType, right: &CheckedType) -> Option<CheckedType> {
-    match (left, right) {
-        (CheckedType::Never, CheckedType::Never) => None,
-        (CheckedType::Never, right) => Some(right.clone()),
-        (left, CheckedType::Never) => Some(left.clone()),
-        (left, right) if left == right => Some(left.clone()),
-        _ => None,
-    }
+    join_types(left, right)
+        .ok()
+        .filter(|ty| ty != &CheckedType::Never)
 }
 
 fn is_comparable_primitive(ty: &CheckedType) -> bool {

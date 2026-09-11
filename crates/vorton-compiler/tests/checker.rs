@@ -124,7 +124,8 @@ fn main() -> Int { forward(choose(even(2), 4, 5)) }
 
 #[test]
 fn supported_contract_fields_bind_before_the_body_and_merge_idempotently() {
-    let sources = project("type Pair = (Int, Bool); pub fn expose(value: Pair) -> Pair { value }");
+    let sources =
+        project("pub type Pair = (Int, Bool); pub fn expose(value: Pair) -> Pair { value }");
     let alias = r#"{"tag":"nominal","declaration":{"library":{"tag":"self"},"path":["Pair"],"kind":"type_alias"},"arguments":[]}"#;
     let first = format!(
         r#"{{"target":{},"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{alias}}}],"parameter_modes":[{{"parameter":{{"tag":"position","index":0}},"mode":{{"tag":"fixed","mode":"borrow"}}}}],"effect_upper":[],"generic_requirements":[]}}}}"#,
@@ -795,5 +796,56 @@ fn each_selected_contract_family_outside_the_subset_is_explicitly_unsupported() 
             CheckDiagnosticKind::Unsupported,
             "record: {record}"
         );
+    }
+}
+
+#[test]
+fn short_circuit_rhs_divergence_does_not_make_the_whole_boolean_expression_diverge() {
+    for operator in ["&&", "||"] {
+        let diagnostic = error(&format!(
+            "fn bottom() -> Never {{ bottom() }} \
+             fn bad(flag: Bool) -> Never {{ flag {operator} bottom() }}"
+        ));
+        assert_eq!(diagnostic.kind, CheckDiagnosticKind::ReturnMismatch);
+
+        check(&format!(
+            "fn bottom() -> Never {{ bottom() }} \
+             fn valid() -> Never {{ bottom() {operator} true }}"
+        ))
+        .expect("a divergent left operand still makes the short-circuit expression diverge");
+    }
+}
+
+#[test]
+fn nested_never_widens_inside_tuple_types() {
+    check(
+        "fn accept(value: (Bool, Int)) -> (Bool, Int) { value } \
+         fn widen(value: (Never, Int)) -> (Bool, Int) { \
+             let widened: (Bool, Int) = value; \
+             accept(value) \
+         } \
+         fn choose(flag: Bool, value: (Never, Int)) -> (Bool, Int) { \
+             if flag { value } else { (true, 1) } \
+         }",
+    )
+    .expect("Never widens recursively for returns, annotations, calls, and branch joins");
+}
+
+#[test]
+fn module_function_receiver_is_stably_unsupported() {
+    assert_eq!(
+        error("fn bad(self: &Int) -> Int { self }").kind,
+        CheckDiagnosticKind::Unsupported
+    );
+}
+
+#[test]
+fn public_signature_cannot_expose_a_private_type_alias() {
+    for source in [
+        "type Hidden = Int; pub fn expose(value: &Hidden) -> Hidden { value }",
+        "type Hidden = Int; pub type Surface = Hidden; \
+         pub fn expose(value: &Surface) -> Surface { value }",
+    ] {
+        assert_eq!(error(source).kind, CheckDiagnosticKind::TypeMismatch);
     }
 }
