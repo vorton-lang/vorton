@@ -862,3 +862,63 @@ fn supported_deep_non_generic_alias_chain_uses_bounded_host_stack() {
 
     check(&source).expect("a finite acyclic supported alias chain must terminate normally");
 }
+
+#[test]
+fn pub_function_inside_private_module_uses_private_mode_default() {
+    check(
+        "mod hidden { pub fn helper(value: Int) -> Int { value } } \
+         fn main() -> Int { 1 }",
+    )
+    .expect("a declaration pub bit behind a private module is not an external input surface");
+}
+
+#[test]
+fn unexported_internal_signature_can_use_its_private_alias() {
+    check(
+        "mod hidden { \
+             type Secret = Int; \
+             pub fn helper(value: &Secret) -> Secret { value } \
+         } \
+         fn main() -> Int { 1 }",
+    )
+    .expect("an unexported internal signature does not leak its private alias");
+}
+
+#[test]
+fn root_public_signature_rejects_alias_without_public_export_path() {
+    let diagnostic = error(
+        "use hidden::Secret; \
+         mod hidden { pub type Secret = Int; } \
+         pub fn expose(value: &Secret) -> Secret { value }",
+    );
+    assert_eq!(diagnostic.kind, CheckDiagnosticKind::TypeMismatch);
+}
+
+#[test]
+fn continuous_public_modules_and_reexports_enter_the_actual_external_surface() {
+    let diagnostic = error(
+        "pub mod visible { pub fn helper(value: Int) -> Int { value } } \
+         fn main() -> Int { 1 }",
+    );
+    assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
+
+    check(
+        "pub mod visible { pub type Secret = Int; } \
+         pub fn expose(value: &visible::Secret) -> visible::Secret { value }",
+    )
+    .expect("a continuous public module path exports the alias identity");
+
+    let diagnostic = error(
+        "pub use hidden::helper; \
+         mod hidden { pub fn helper(value: Int) -> Int { value } } \
+         fn main() -> Int { 1 }",
+    );
+    assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
+
+    check(
+        "pub use hidden::Secret; \
+         mod hidden { pub type Secret = Int; } \
+         pub fn expose(value: &Secret) -> Secret { value }",
+    )
+    .expect("a real public alias export may appear in an actually public signature");
+}

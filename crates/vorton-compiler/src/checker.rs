@@ -668,7 +668,7 @@ struct HeaderParameter {
 struct FunctionHeader {
     context: SourceContext,
     origin: OriginRef,
-    public: bool,
+    public_export: bool,
     parameters: Vec<HeaderParameter>,
     return_type: CheckedType,
     return_origin: OriginRef,
@@ -925,11 +925,39 @@ impl SourceTypeNormalizer {
     }
 }
 
+fn actual_public_exports(project: &ResolvedProject) -> BTreeSet<EntityId> {
+    let mut pending_modules = project
+        .dependencies
+        .keys()
+        .copied()
+        .map(ModuleRef::root)
+        .collect::<Vec<_>>();
+    let mut visited_modules = BTreeSet::new();
+    let mut exports = BTreeSet::new();
+
+    while let Some(module) = pending_modules.pop() {
+        if !visited_modules.insert(module.clone()) {
+            continue;
+        }
+        let Some(bindings) = project.name_bindings.get(&module) else {
+            continue;
+        };
+        for binding in bindings.values().flatten().filter(|binding| binding.public) {
+            exports.insert(binding.target.clone());
+            if binding.target.kind == EntityKind::Module {
+                pending_modules.push(binding.target.module.clone());
+            }
+        }
+    }
+    exports
+}
+
 fn collect_supported_headers(
     project: &ResolvedProject,
     normalizer: &mut SourceTypeNormalizer,
 ) -> Result<(Vec<EntityId>, BTreeMap<EntityId, FunctionHeader>), CheckDiagnostic> {
     let core_declarations = core_role_declarations(&project.core_roles);
+    let public_exports = actual_public_exports(project);
     let mut order = Vec::new();
     let mut headers = BTreeMap::new();
     let mut diagnostics = Vec::new();
@@ -969,6 +997,10 @@ fn collect_supported_headers(
                     type_parameters,
                     value,
                 } => {
+                    let public_export = declaration
+                        .identity
+                        .as_ref()
+                        .is_some_and(|identity| public_exports.contains(identity));
                     if let Some(parameter) = type_parameters.first() {
                         push_header_diagnostic(
                             project,
@@ -983,9 +1015,12 @@ fn collect_supported_headers(
                         );
                     } else if let Err(diagnostic) = normalizer.normalize(value) {
                         push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
-                    } else if declaration.public
-                        && let Err(diagnostic) =
-                            validate_public_type_visibility(project, value, &normalizer.aliases)
+                    } else if public_export
+                        && let Err(diagnostic) = validate_public_type_visibility(
+                            &public_exports,
+                            value,
+                            &normalizer.aliases,
+                        )
                     {
                         push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
                     }
@@ -996,12 +1031,14 @@ fn collect_supported_headers(
                         .as_ref()
                         .expect("every resolved function has an exact identity")
                         .clone();
+                    let public_export = public_exports.contains(&identity);
                     match collect_function_header(
-                        project,
                         declaration,
                         function,
                         &context,
                         normalizer,
+                        public_export,
+                        &public_exports,
                     ) {
                         Ok(header) => {
                             order.push(identity.clone());
@@ -1096,7 +1133,7 @@ fn check_diagnostic_rank(kind: &CheckDiagnosticKind) -> u8 {
 }
 
 fn validate_public_type_visibility(
-    project: &ResolvedProject,
+    public_exports: &BTreeSet<EntityId>,
     ty: &ResolvedType,
     aliases: &BTreeMap<EntityId, AliasDefinition>,
 ) -> Result<(), CheckDiagnostic> {
@@ -1116,11 +1153,7 @@ fn validate_public_type_visibility(
                 if target.kind != EntityKind::TypeAlias {
                     continue;
                 }
-                let metadata = project
-                    .entities
-                    .get(&target)
-                    .expect("every exact type alias has entity metadata");
-                if !metadata.public {
+                if !public_exports.contains(&target) {
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::TypeMismatch,
                         format!(
@@ -1146,11 +1179,12 @@ fn validate_public_type_visibility(
 }
 
 fn collect_function_header(
-    project: &ResolvedProject,
     declaration: &ResolvedDeclaration,
     function: &crate::project::ResolvedFunction,
     context: &SourceContext,
     normalizer: &mut SourceTypeNormalizer,
+    public_export: bool,
+    public_exports: &BTreeSet<EntityId>,
 ) -> Result<FunctionHeader, Vec<CheckDiagnostic>> {
     if let Some(span) = function.const_span {
         return Err(vec![source_diagnostic(
@@ -1241,9 +1275,9 @@ fn collect_function_header(
             }
         };
         if let Some(annotation) = annotation {
-            if declaration.public
+            if public_export
                 && let Err(diagnostic) =
-                    validate_public_type_visibility(project, annotation, &normalizer.aliases)
+                    validate_public_type_visibility(public_exports, annotation, &normalizer.aliases)
             {
                 diagnostics.push(diagnostic);
             }
@@ -1293,9 +1327,9 @@ fn collect_function_header(
     }
 
     let return_type = return_annotation.and_then(|annotation| {
-        if declaration.public
+        if public_export
             && let Err(diagnostic) =
-                validate_public_type_visibility(project, annotation, &normalizer.aliases)
+                validate_public_type_visibility(public_exports, annotation, &normalizer.aliases)
         {
             diagnostics.push(diagnostic);
         }
@@ -1316,7 +1350,7 @@ fn collect_function_header(
     Ok(FunctionHeader {
         context: context.clone(),
         origin: declaration.origin.clone(),
-        public: declaration.public,
+        public_export,
         parameters,
         return_type,
         return_origin,
@@ -2232,10 +2266,10 @@ fn finalize_parameter_modes(
             .expect("source-ordered function remains indexed");
         for parameter in &mut header.parameters {
             if parameter.mode.is_none() {
-                if header.public {
+                if header.public_export {
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::Unsupported,
-                        "every public input mode must be explicit in source or a supported contract",
+                        "every actually exported public input mode must be explicit in source or a supported contract",
                         header.context.origin(parameter.span),
                         Vec::new(),
                     ));
