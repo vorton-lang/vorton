@@ -203,7 +203,7 @@ effect alias HostIO = {console, fs, process};
 effect alias Fallible<E> = {fail<E>};
 ```
 
-Alias 可泛型化、可 `pub` 导出，并在类型检查前递归展开；循环 alias 被拒绝。展开后的 exact atom 才参与 identity、capability 与 ABI，alias 本身不制造 evidence 或新的 runtime effect。
+Alias 可泛型化、可 `pub` 导出，并在类型检查前递归展开；循环 alias 被拒绝。声明图的节点是 exact effect alias declaration，边来自 RHS 中显式出现的 alias，包括 method scheme application 的 nested effect-row actual。普通 effect、effect formal 与 method scheme reference 本身不形成 alias 边，也不触发对相应 declaration signature 或 body 的跟踪。Generic actual 不创建新节点；未被 callable 使用的 alias 同样参与循环检查。展开后的 exact atom 才参与 identity、capability 与 ABI，alias 本身不制造 evidence 或新的 runtime effect。
 
 ## `mut` Marker Effect
 

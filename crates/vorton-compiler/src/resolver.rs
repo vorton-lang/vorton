@@ -6358,6 +6358,9 @@ fn diagnostic_kind_rank(kind: &ProjectDiagnosticKind) -> u8 {
         ProjectDiagnosticKind::DuplicateBinding { .. } => 26,
         ProjectDiagnosticKind::PatternBindingMismatch => 27,
         ProjectDiagnosticKind::InvalidSelf { .. } => 28,
+        ProjectDiagnosticKind::InvalidSupertrait { .. } => 29,
+        ProjectDiagnosticKind::TraitInheritanceCycle => 30,
+        ProjectDiagnosticKind::EffectAliasCycle => 31,
     }
 }
 

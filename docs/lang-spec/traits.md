@@ -196,11 +196,13 @@ trait Printable: Describable {
 
 `trait B: A` 声明 B 的 supertrait 为 A。实现 B 的类型必须同时实现 A，否则报错。
 
+Supertrait 必须名称解析到真实 named trait declaration。Import 与 re-export alias 只转发该 declaration 的 exact identity；primitive、struct、enum、type parameter、associated selection 或其它非 trait Type 都不能占用这个位置。需要 Checker 才能闭合的 type-relative selection 也不能伪装成已经确认的 trait。
+
 **多级传递**：约束自动沿继承链传递——若 `T: Printable` 且 `Printable: Describable`，则 `T` 隐含 `Describable`，可直接调用 `describe()`。
 
 **Supertrait evidence**：具体 impl 方法可以调用 supertrait 方法；调用使用同一 exact dictionary evidence 链，不需要 source default body。
 
-**循环检测**：`trait A: B` 与 `trait B: A` 的循环在声明阶段被拒绝。
+**循环检测**：`trait A: B` 与 `trait B: A` 的循环在声明阶段被拒绝。节点是 exact trait declaration；generic actual 不会把同一 declaration 变成新节点。重复引用、合法继承链与共享 diamond 不构成循环。
 
 **impl 验证**：`impl Printable for Foo` 时若没有 `Describable for Foo`，报 supertrait 未满足错误。
 

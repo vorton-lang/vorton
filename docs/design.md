@@ -59,6 +59,8 @@ Language intrinsic declaration 使用独立 `Language` origin，不通过隐藏 
 
 `ResolvedProject` 仍是一个 owned、opaque 的名称层结果，统一保留 entry、指定 core、可达的直接依赖图、各库原声明归属与引用，以及已经核对的有限 core 角色引用。它不增加可编辑接口摘要、序列化契约或查询框架，也不表示 Checked、TypedHIR 或完整有效接口已经成立。
 
+`prepare_project` 直接消费 owned `ResolvedProject`，以 exact declaration identity 检查 supertrait 目标类别、trait inheritance graph 与 effect alias declaration graph，并返回 owned、opaque 的 `PreparedProject`。成功结果完整保留原项目，只额外承载这些声明不变量已经成立的状态；graph adjacency 与 traversal state 只是准备期间的临时视图。它不形成 effective signature、展开后的 alias、完整 Checker 结果、接口 S 或 TypedHIR，也不重新执行 Parser 或 Resolver。
+
 名称选择先在每个适用 namespace 内应用词法 shadowing，再按 path 的 root、每个中间 container 与 terminal category 过滤并合并候选。不能用不合法的跨 namespace candidate 抢占合法结果，也不能为得到结果而回退到同 namespace 已被遮蔽的 declaration。Enum constructor、custom-effect operation 与已知 named construction/pattern field 的 owner 集合已经闭合，缺失或类别错误必须在 Resolver 拒绝；普通 field/method receiver 与 type-relative impl/associated selection 仍是 Checker obligation。Effect 与 effect alias 不是 Type/Value 的 type-relative `::` base。
 
 局部 binder 使用 owner-scoped identity；sequential shadowing 创建新 identity，or-pattern 各分支的同名 binder 则共享一个 arm-scoped logical identity。Normalization 创建的 block、temporary、projection 与 result slot 使用由冻结树位置导出的稳定 path identity。Identity 只由对应阶段建立，不能由共享计数器、遍历顺序或生成符号反推。

@@ -1,5 +1,6 @@
-//! Canonical Vorton frontend and pure in-memory project resolver.
+//! Canonical Vorton frontend, pure in-memory project resolver, and declaration preparation.
 
+mod checker;
 mod lexer;
 mod parser;
 mod project;
@@ -9,11 +10,13 @@ pub mod ast;
 pub mod diagnostic;
 
 pub use ast::Program;
+pub use checker::PreparedProject;
 pub use diagnostic::FrontendDiagnostic;
 pub use project::{
     CoreRoleDiagnostic, CoreRoleIssue, FileModulePath, FileModulePathError,
     FileModulePathErrorKind, LibraryId, LibrarySources, NameNamespace, OriginRef,
     ProjectDiagnostic, ProjectDiagnosticKind, ProjectSources, ResolvedProject, SourceRef,
+    SupertraitTargetKind,
 };
 
 /// Parses one UTF-8 Vorton source into a complete surface AST.
@@ -36,4 +39,14 @@ pub fn parse(source: &str) -> Result<Program, FrontendDiagnostic> {
 /// graph checks, before declaration or body-name resolution.
 pub fn resolve_project(sources: &ProjectSources) -> Result<ResolvedProject, ProjectDiagnostic> {
     resolver::resolve_project(sources)
+}
+
+/// Checks the declaration graph invariants needed before type and effect checking.
+///
+/// This consumes an owned [`ResolvedProject`] without parsing or resolving it
+/// again. Success guarantees that every supertrait names an actual trait and
+/// that trait inheritance and effect-alias declaration graphs are acyclic. It
+/// does not check signatures or bodies, expand aliases, or produce typed HIR.
+pub fn prepare_project(project: ResolvedProject) -> Result<PreparedProject, ProjectDiagnostic> {
+    checker::prepare_project(project)
 }
