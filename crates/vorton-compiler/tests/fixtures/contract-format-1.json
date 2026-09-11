@@ -1,0 +1,569 @@
+{
+  "display": {
+    "note": "fixture keeps display text and input order",
+    "label": "Complete format-1 fixture"
+  },
+  "records": [
+    {
+      "display": {
+        "label": "function contract"
+      },
+      "target": {
+        "declaration": {
+          "kind": "function",
+          "path": ["api", "missing_function"],
+          "library": { "tag": "self" }
+        },
+        "tag": "declaration"
+      },
+      "type_parameters": ["Zed", "Alpha"],
+      "set": {
+        "parameter_types": [
+          {
+            "parameter": { "index": 18446744073709551615, "tag": "position" },
+            "type": {
+              "tag": "associated",
+              "base": {
+                "tag": "list",
+                "element": {
+                  "tag": "range",
+                  "element": { "tag": "primitive", "name": "Int" }
+                }
+              },
+              "trait": {
+                "trait": {
+                  "library": { "tag": "self" },
+                  "path": ["Iterable"],
+                  "kind": "trait"
+                },
+                "arguments": [
+                  {
+                    "tag": "ptr",
+                    "pointee": { "tag": "primitive", "name": "Bool" }
+                  }
+                ],
+                "associated_bindings": [
+                  {
+                    "name": "Item",
+                    "type": {
+                      "tag": "nominal",
+                      "declaration": {
+                        "library": { "tag": "dependency", "alias": "dep" },
+                        "path": ["model", "Data"],
+                        "kind": "struct"
+                      },
+                      "arguments": []
+                    }
+                  }
+                ]
+              },
+              "name": "Item"
+            }
+          },
+          {
+            "parameter": { "tag": "receiver" },
+            "type": {
+              "tag": "function_item",
+              "function": {
+                "tag": "declaration",
+                "declaration": {
+                  "library": { "tag": "dependency", "alias": "dep" },
+                  "path": ["helpers", "call"],
+                  "kind": "function"
+                }
+              },
+              "owner_type_arguments": [],
+              "type_arguments": [{ "tag": "primitive", "name": "Str" }],
+              "effect_arguments": [[]]
+            }
+          }
+        ],
+        "return_type": {
+          "tag": "self_type",
+          "owner": {
+            "tag": "declaration",
+            "declaration": {
+              "library": { "tag": "self" },
+              "path": ["model", "Container"],
+              "kind": "struct"
+            }
+          }
+        },
+        "parameter_modes": [
+          {
+            "parameter": { "tag": "receiver" },
+            "mode": { "tag": "fixed", "mode": "borrow" }
+          },
+          {
+            "parameter": { "tag": "position", "index": 0 },
+            "mode": {
+              "tag": "callable_use",
+              "callable": {
+                "tag": "opaque_callable",
+                "function": {
+                  "tag": "trait_member",
+                  "owner": {
+                    "library": { "tag": "self" },
+                    "path": ["Callable"],
+                    "kind": "trait"
+                  },
+                  "kind": "method",
+                  "name": "invoke"
+                },
+                "owner_type_arguments": [],
+                "type_arguments": [],
+                "effect_arguments": [[]]
+              }
+            }
+          }
+        ],
+        "parameter_escape": [
+          {
+            "parameter": { "tag": "position", "index": 1 },
+            "escape": "may_escape"
+          }
+        ],
+        "effect_upper": [
+          { "tag": "system", "name": "console" },
+          {
+            "tag": "handled",
+            "effect": {
+              "library": { "tag": "dependency", "alias": "dep" },
+              "path": ["IO"],
+              "kind": "effect"
+            },
+            "arguments": [{ "tag": "primitive", "name": "Str" }]
+          },
+          {
+            "tag": "fail",
+            "payload": {
+              "tag": "list",
+              "element": { "tag": "primitive", "name": "Float" }
+            }
+          },
+          { "tag": "mut" },
+          { "tag": "unsafe" },
+          {
+            "tag": "formal",
+            "formal": {
+              "owner": {
+                "tag": "declaration",
+                "declaration": {
+                  "library": { "tag": "self" },
+                  "path": ["api", "missing_function"],
+                  "kind": "function"
+                }
+              },
+              "binder": "declaration",
+              "kind": "effect",
+              "index": 0
+            }
+          },
+          {
+            "tag": "method_application",
+            "method": {
+              "tag": "trait_member",
+              "owner": {
+                "library": { "tag": "self" },
+                "path": ["Callable"],
+                "kind": "trait"
+              },
+              "kind": "method",
+              "name": "invoke"
+            },
+            "self": {
+              "tag": "self_type",
+              "owner": {
+                "tag": "declaration",
+                "declaration": {
+                  "library": { "tag": "self" },
+                  "path": ["model", "Choice"],
+                  "kind": "enum"
+                }
+              }
+            },
+            "trait_type_arguments": [],
+            "method_type_arguments": [{ "tag": "primitive", "name": "Int" }],
+            "effect_arguments": [[{ "tag": "system", "name": "fs" }]]
+          },
+          {
+            "tag": "full_destruction",
+            "type": {
+              "tag": "tuple",
+              "elements": [
+                { "tag": "primitive", "name": "Int" },
+                { "tag": "primitive", "name": "Bool" }
+              ]
+            }
+          },
+          {
+            "tag": "selected_call",
+            "callable": {
+              "tag": "opaque_callable",
+              "function": {
+                "tag": "impl_member",
+                "owner": {
+                  "library": { "tag": "self" },
+                  "type_parameter_count": 0,
+                  "target": { "tag": "primitive", "name": "Int" }
+                },
+                "kind": "method",
+                "name": "selected"
+              },
+              "owner_type_arguments": [],
+              "type_arguments": [],
+              "effect_arguments": []
+            }
+          }
+        ],
+        "generic_requirements": [
+          {
+            "tag": "trait",
+            "subject": {
+              "tag": "formal",
+              "formal": {
+                "owner": {
+                  "tag": "declaration",
+                  "declaration": {
+                    "library": { "tag": "self" },
+                    "path": ["api", "missing_function"],
+                    "kind": "function"
+                  }
+                },
+                "binder": "declaration",
+                "kind": "type",
+                "index": 0
+              }
+            },
+            "bound": {
+              "trait": {
+                "library": { "tag": "self" },
+                "path": ["Comparable"],
+                "kind": "trait"
+              },
+              "arguments": [],
+              "associated_bindings": []
+            }
+          },
+          {
+            "tag": "callable_shape",
+            "subject": {
+              "tag": "nominal",
+              "declaration": {
+                "library": { "tag": "self" },
+                "path": ["Callback"],
+                "kind": "type_alias"
+              },
+              "arguments": []
+            },
+            "shape": {
+              "parameters": [
+                {
+                  "type": {
+                    "tag": "range",
+                    "element": { "tag": "primitive", "name": "Int" }
+                  },
+                  "mode": { "tag": "fixed", "mode": "move" },
+                  "escape": "noescape"
+                }
+              ],
+              "result": { "tag": "primitive", "name": "Unit" },
+              "effect_upper": []
+            }
+          }
+        ]
+      },
+      "check": {
+        "return_traits": [
+          {
+            "trait": {
+              "library": { "tag": "self" },
+              "path": ["Comparable"],
+              "kind": "trait"
+            },
+            "arguments": [{ "tag": "primitive", "name": "Int" }],
+            "associated_bindings": []
+          }
+        ],
+        "structure": [
+          {
+            "tag": "parameters",
+            "match": "exact",
+            "items": [
+              { "parameter": { "tag": "receiver" } },
+              {
+                "parameter": { "tag": "position", "index": 0 },
+                "type": { "tag": "primitive", "name": "Int" }
+              }
+            ]
+          },
+          {
+            "tag": "fields",
+            "match": "contains",
+            "ordered": false,
+            "items": [
+              { "name": "id" },
+              {
+                "name": "value",
+                "type": { "tag": "primitive", "name": "Str" },
+                "visibility": "private"
+              }
+            ]
+          },
+          {
+            "tag": "variants",
+            "match": "exact",
+            "ordered": true,
+            "items": [
+              { "name": "None", "layout": { "tag": "unit" } },
+              {
+                "name": "Pair",
+                "layout": {
+                  "tag": "tuple",
+                  "elements": [
+                    { "tag": "primitive", "name": "Int" },
+                    { "tag": "primitive", "name": "Str" }
+                  ]
+                }
+              },
+              {
+                "name": "Named",
+                "layout": {
+                  "tag": "named",
+                  "match": "contains",
+                  "ordered": false,
+                  "fields": [{ "name": "item", "visibility": "public" }]
+                }
+              },
+              { "name": "Deferred" }
+            ]
+          },
+          {
+            "tag": "members",
+            "match": "contains",
+            "items": [
+              { "name": "call", "kind": "method" },
+              { "name": "Item", "kind": "associated_type" }
+            ],
+            "ordered": false
+          }
+        ],
+        "visibility": "public",
+        "exports": {
+          "match": "contains",
+          "items": [
+            { "name": { "path": ["api", "call"], "namespace": "value" } },
+            {
+              "name": { "path": ["Model"], "namespace": "type" },
+              "target": {
+                "tag": "declaration",
+                "declaration": {
+                  "library": { "tag": "self" },
+                  "path": ["model", "Model"],
+                  "kind": "struct"
+                }
+              }
+            }
+          ]
+        },
+        "reject_new": {
+          "allowed_exports": [
+            { "path": ["api", "call"], "namespace": "value" },
+            { "path": ["IO"], "namespace": "effect" }
+          ],
+          "allowed_impls": [
+            {
+              "implementation": {
+                "library": { "tag": "self" },
+                "type_parameter_count": 1,
+                "target": {
+                  "tag": "nominal",
+                  "declaration": {
+                    "library": { "tag": "self" },
+                    "path": ["model", "Box"],
+                    "kind": "struct"
+                  },
+                  "arguments": [{ "tag": "local_type_parameter", "index": 0 }]
+                },
+                "trait": {
+                  "trait": {
+                    "library": { "tag": "self" },
+                    "path": ["Comparable"],
+                    "kind": "trait"
+                  },
+                  "arguments": [{ "tag": "local_type_parameter", "index": 0 }],
+                  "associated_bindings": [
+                    {
+                      "name": "Item",
+                      "type": {
+                        "tag": "list",
+                        "element": { "tag": "local_type_parameter", "index": 0 }
+                      }
+                    }
+                  ]
+                }
+              },
+              "predicates": [
+                {
+                  "subject": {
+                    "tag": "range",
+                    "element": { "tag": "local_type_parameter", "index": 0 }
+                  },
+                  "requires": {
+                    "trait": {
+                      "library": { "tag": "self" },
+                      "path": ["Comparable"],
+                      "kind": "trait"
+                    },
+                    "arguments": [
+                      {
+                        "tag": "ptr",
+                        "pointee": { "tag": "local_type_parameter", "index": 0 }
+                      }
+                    ],
+                    "associated_bindings": []
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "target": {
+        "tag": "trait_member",
+        "owner": {
+          "library": { "tag": "self" },
+          "path": ["MissingTrait"],
+          "kind": "trait"
+        },
+        "kind": "method",
+        "name": "missing_method"
+      },
+      "set": {
+        "return_type": {
+          "tag": "self_type",
+          "owner": {
+            "tag": "declaration",
+            "declaration": {
+              "library": { "tag": "self" },
+              "path": ["Choice"],
+              "kind": "enum"
+            }
+          }
+        },
+        "effect_upper": [],
+        "generic_requirements": []
+      }
+    },
+    {
+      "target": {
+        "tag": "impl_member",
+        "owner": {
+          "library": { "tag": "self" },
+          "type_parameter_count": 1,
+          "target": {
+            "tag": "list",
+            "element": { "tag": "local_type_parameter", "index": 0 }
+          },
+          "trait": {
+            "trait": {
+              "library": { "tag": "self" },
+              "path": ["MissingTrait"],
+              "kind": "trait"
+            },
+            "arguments": [],
+            "associated_bindings": []
+          }
+        },
+        "kind": "associated_type",
+        "name": "Item"
+      },
+      "set": {
+        "return_type": {
+          "tag": "self_type",
+          "owner": {
+            "tag": "declaration",
+            "declaration": {
+              "library": { "tag": "self" },
+              "path": ["MissingTrait"],
+              "kind": "trait"
+            }
+          }
+        }
+      }
+    },
+    {
+      "target": {
+        "tag": "impl",
+        "implementation": {
+          "library": { "tag": "dependency", "alias": "dep" },
+          "type_parameter_count": 2,
+          "target": {
+            "tag": "associated",
+            "base": {
+              "tag": "tuple",
+              "elements": [
+                {
+                  "tag": "list",
+                  "element": { "tag": "local_type_parameter", "index": 0 }
+                },
+                {
+                  "tag": "range",
+                  "element": {
+                    "tag": "ptr",
+                    "pointee": { "tag": "primitive", "name": "Never" }
+                  }
+                }
+              ]
+            },
+            "trait": {
+              "trait": {
+                "library": { "tag": "dependency", "alias": "dep" },
+                "path": ["Outer"],
+                "kind": "trait"
+              },
+              "arguments": [
+                {
+                  "tag": "nominal",
+                  "declaration": {
+                    "library": { "tag": "dependency", "alias": "dep" },
+                    "path": ["Data"],
+                    "kind": "struct"
+                  },
+                  "arguments": []
+                }
+              ],
+              "associated_bindings": [
+                {
+                  "name": "Inner",
+                  "type": { "tag": "primitive", "name": "Unit" }
+                }
+              ]
+            },
+            "name": "Item"
+          }
+        }
+      },
+      "set": {
+        "return_type": {
+          "tag": "self_type",
+          "owner": {
+            "tag": "impl",
+            "implementation": {
+              "library": { "tag": "self" },
+              "type_parameter_count": 0,
+              "target": { "tag": "primitive", "name": "Int" }
+            }
+          }
+        }
+      },
+      "check": { "visibility": "private" }
+    }
+  ],
+  "owner": "host-selected-library-label",
+  "semantics_version": "0.1",
+  "format_version": 1,
+  "format": "vorton.contract"
+}

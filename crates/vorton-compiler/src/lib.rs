@@ -1,6 +1,7 @@
-//! Canonical Vorton frontend, pure in-memory project resolver, and declaration preparation.
+//! Canonical Vorton frontend, contract input reader, project resolver, and declaration preparation.
 
 mod checker;
+mod contract;
 mod lexer;
 mod parser;
 mod project;
@@ -11,6 +12,7 @@ pub mod diagnostic;
 
 pub use ast::Program;
 pub use checker::PreparedProject;
+pub use contract::{ContractDiagnostic, ContractDiagnosticKind, ContractDocument};
 pub use diagnostic::FrontendDiagnostic;
 pub use project::{
     CoreRoleDiagnostic, CoreRoleIssue, FileModulePath, FileModulePathError,
@@ -27,6 +29,15 @@ pub use project::{
 pub fn parse(source: &str) -> Result<Program, FrontendDiagnostic> {
     let tokens = lexer::lex(source)?;
     parser::parse(tokens, source.len())
+}
+
+/// Decodes one in-memory Vorton contract document without binding it to source.
+///
+/// Success guarantees the supported UTF-8 JSON profile, format version, and
+/// record structure only. The returned document is owned and opaque; this
+/// entry point does not resolve contract references or check source semantics.
+pub fn decode_contract(source: &[u8]) -> Result<ContractDocument, ContractDiagnostic> {
+    contract::decode_contract(source)
 }
 
 /// Validates and resolves a platform-independent, in-memory Vorton library DAG
