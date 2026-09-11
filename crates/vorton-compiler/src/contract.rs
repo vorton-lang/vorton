@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer};
 ///
 /// The carrier is intentionally opaque. Decoding does not bind references to a
 /// project, apply clauses, or establish any source-language semantic fact.
-pub struct ContractDocument(Document);
+pub struct ContractDocument(pub(crate) Document);
 
 /// A stable category for one contract input failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,8 +308,8 @@ macro_rules! json_object {
         }
     ) => {
         #[derive(Debug, PartialEq)]
-        struct $name {
-            $($field: $field_type),*
+        pub(crate) struct $name {
+            $(pub(crate) $field: $field_type),*
         }
 
         impl<'de> Deserialize<'de> for $name {
@@ -344,7 +344,7 @@ macro_rules! json_string_enum {
         }
     ) => {
         #[derive(Debug, PartialEq)]
-        enum $name {
+        pub(crate) enum $name {
             $($variant),*
         }
 
@@ -385,7 +385,7 @@ macro_rules! json_tagged_object_enum {
         }
     ) => {
         #[derive(Debug, PartialEq)]
-        enum $name {
+        pub(crate) enum $name {
             $(
                 $variant {
                     $($field: $field_type),*
@@ -423,10 +423,10 @@ macro_rules! json_tagged_object_enum {
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
-struct WireU64(u64);
+pub(crate) struct WireU64(pub(crate) u64);
 
 #[derive(Debug, PartialEq)]
-struct NonEmptyVec<T>(Vec<T>);
+pub(crate) struct NonEmptyVec<T>(pub(crate) Vec<T>);
 
 impl<'de, T> Deserialize<'de> for NonEmptyVec<T>
 where
@@ -446,7 +446,7 @@ where
 }
 
 #[derive(Debug, PartialEq)]
-struct TupleElements<T>(Vec<T>);
+pub(crate) struct TupleElements<T>(pub(crate) Vec<T>);
 
 impl<'de, T> Deserialize<'de> for TupleElements<T>
 where
@@ -468,7 +468,7 @@ where
 }
 
 #[derive(Debug, PartialEq)]
-struct Identifier(String);
+pub(crate) struct Identifier(pub(crate) String);
 
 impl<'de> Deserialize<'de> for Identifier {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

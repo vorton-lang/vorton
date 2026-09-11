@@ -344,6 +344,8 @@ pub struct ResolvedProject {
     pub(crate) modules: BTreeMap<ModuleRef, ResolvedModule>,
     pub(crate) entities: BTreeMap<EntityId, Entity>,
     pub(crate) core_roles: CoreRoles,
+    pub(crate) name_bindings:
+        BTreeMap<ModuleRef, BTreeMap<(Namespace, String), Vec<ResolvedNameBinding>>>,
 }
 
 impl fmt::Debug for ResolvedProject {
@@ -617,6 +619,16 @@ pub(crate) struct ResolvedImport {
     pub(crate) public: bool,
     pub(crate) local_name: String,
     pub(crate) target: EntityId,
+}
+
+/// The exact target and visibility of one frozen module-namespace binding.
+///
+/// The Checker consumes this narrow carrier when binding contract paths. It is
+/// deliberately private so name lookup is not published as a second API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedNameBinding {
+    pub(crate) target: EntityId,
+    pub(crate) public: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -942,6 +954,7 @@ pub(crate) struct ResolvedStatement {
 pub(crate) enum ResolvedStatementKind {
     Let {
         bindings: Vec<ResolvedBinding>,
+        mutable: Option<Span>,
         annotation: Option<ResolvedType>,
         value: ResolvedExpr,
     },

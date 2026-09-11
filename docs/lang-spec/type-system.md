@@ -19,6 +19,14 @@ Vorton 使用 Hindley-Milner 类型推断（let-polymorphism），扩展了 effe
 
 `Never` 与任何类型统一（它是类型格的底部元素）。它是永不返回的操作（如 `fail.raise`）的返回类型。
 
+### 初始 Checker API 支持边界
+
+当前 `vorton_compiler::check_project` 是完整类型系统的第一个窄闭环，不改变本页后续规则。它要求每个可达普通 module-level 函数具有显式单态参数类型和显式返回类型，并只接受 `Int`、`Float`、`Bool`、`Unit`、`Never`、由这些类型组成的 tuple，以及可展开到同一集合的非泛型 type alias。透明 source 分组和 alias 不产生新的类型 identity；已知 constructor arity 与 alias cycle 在 body 前检查。`Str`、container、用户 nominal、generic/formal、associated type 与 callable shape 仍返回稳定 `Unsupported`，不能以 placeholder 类型进入 opaque 结果。
+
+这个入口支持 literal、参数／不可变 local 引用、顺序 shadowing、tuple 构造和 ordinal projection、block、if/else、简单 `let`、expression statement、return、本文定义的 primitive 运算与 exact ordinary-function direct call。完整显式 header 先闭合，因此 forward/self/mutual recursion 不需要临时 unknown scheme；每个 body 只形成一次 typed 结果。Borrow 与 Move source mode 保持原选择；受支持 Copy 值上的 private 省略 mode 形成 Borrow，实际 `pub` 输入必须由 source 或受支持 contract 明确选择。其余已解析 carrier 明确 `Unsupported`，而不是完整语言中的非法语义或已经通过检查的程序。
+
+省略 source effect header 或显式 `with {}` 只有在 body operation 和 exact direct-call graph 都落在上述纯子集时才形成 empty row。`CheckedProject` 内部保留 normalized type、数值、exact callee、mode、empty effect 和 typed body，但不公开可编辑 identity／通用查询接口，也不表示完整接口 S 或最终 `TypedHIR`。
+
 ## 数值语义
 
 Lexer、Parser 与 AST 只按[词法和语法规范](lexical.md#数值字面量)忠实保留十进制字面量拼写；范围检查与数值解释由 Checker 完成。`Int` 与 `Float` 的普通算术只接受同型 operand，不做隐式跨数值类型转换，也不建立数值重载体系。

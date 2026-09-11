@@ -1,4 +1,4 @@
-//! Canonical Vorton frontend, contract input reader, project resolver, and declaration preparation.
+//! Canonical Vorton frontend, contract reader, project resolver, declaration preparation, and initial Checker.
 
 mod checker;
 mod contract;
@@ -11,7 +11,9 @@ pub mod ast;
 pub mod diagnostic;
 
 pub use ast::Program;
-pub use checker::PreparedProject;
+pub use checker::{
+    CheckDiagnostic, CheckDiagnosticKind, CheckOrigin, CheckedProject, PreparedProject,
+};
 pub use contract::{ContractDiagnostic, ContractDiagnosticKind, ContractDocument};
 pub use diagnostic::FrontendDiagnostic;
 pub use project::{
@@ -60,4 +62,23 @@ pub fn resolve_project(sources: &ProjectSources) -> Result<ResolvedProject, Proj
 /// does not check signatures or bodies, expand aliases, or produce typed HIR.
 pub fn prepare_project(project: ResolvedProject) -> Result<PreparedProject, ProjectDiagnostic> {
     checker::prepare_project(project)
+}
+
+/// Resolves and checks one closed in-memory project together with selected
+/// format-1 contract documents.
+///
+/// `owners` maps each document owner label to the real [`LibraryId`] in this
+/// project. An empty document list is valid, and unused owner mappings have no
+/// effect. The current narrow Checker accepts explicit monomorphic pure-value
+/// functions over `Int`, `Float`, `Bool`, `Unit`, `Never`, tuples, and
+/// non-generic transparent aliases. Any reachable source or selected clause
+/// outside that subset returns [`CheckDiagnosticKind::Unsupported`] rather than
+/// being treated as checked. Success returns one owned opaque result containing
+/// the typed bodies and exact facts established during this call.
+pub fn check_project(
+    sources: &ProjectSources,
+    owners: &std::collections::BTreeMap<String, LibraryId>,
+    documents: Vec<ContractDocument>,
+) -> Result<CheckedProject, CheckDiagnostic> {
+    checker::check_project(sources, owners, documents)
 }

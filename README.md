@@ -44,7 +44,7 @@ fn message() -> Str {
 
 ## 当前构建与 CI
 
-根 workspace 固定使用 Rust `1.98.0`。Compiler library 提供四个保持分层的入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 验证并解析显式纯内存库 DAG 及宿主指定的唯一官方 core，返回统一的 owned opaque `ResolvedProject`；`vorton_compiler::prepare_project(ResolvedProject)` 检查 supertrait 目标类别、trait inheritance cycle 与 effect alias cycle，返回 owned opaque `PreparedProject`；`vorton_compiler::decode_contract(&[u8])` 按 [contract format 1](docs/contract-format.md) 读取一份纯内存 JSON 输入，返回 owned opaque `ContractDocument` 或结构化 `ContractDiagnostic`。契约读取成功只证明版本、读取 profile 与记录结构成立，不绑定 owner／引用，也不应用 `set` 或执行 `check`。项目阶段失败仍使用带 `LibraryId`、库内 source key 与 UTF-8 byte span 的结构化 `ProjectDiagnostic`；`parse` 的签名与单 source 行为不依赖项目或契约输入。
+根 workspace 固定使用 Rust `1.98.0`。Compiler library 提供五个保持分层的入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 验证并解析显式纯内存库 DAG 及宿主指定的唯一官方 core，返回统一的 owned opaque `ResolvedProject`；`vorton_compiler::prepare_project(ResolvedProject)` 检查 supertrait 目标类别、trait inheritance cycle 与 effect alias cycle，返回 owned opaque `PreparedProject`；`vorton_compiler::decode_contract(&[u8])` 按 [contract format 1](docs/contract-format.md) 读取一份纯内存 JSON 输入，返回 owned opaque `ContractDocument` 或结构化 `ContractDiagnostic`；`vorton_compiler::check_project(&ProjectSources, &BTreeMap<String, LibraryId>, Vec<ContractDocument>)` 将真实项目与选定契约一起闭合为 owned opaque `CheckedProject`。契约读取成功只证明版本、读取 profile 与记录结构成立；owner／引用绑定、受支持 `set` 的一致性和函数体检查只在 `check_project` 中发生。项目阶段失败仍以原有 `ProjectDiagnosticKind` 和真实 origin 包在 `CheckDiagnostic` 中；`parse` 的签名与单 source 行为不依赖项目或契约输入。
 
 ```rust
 use std::collections::BTreeMap;
@@ -63,7 +63,7 @@ let sources = ProjectSources {
         (
             app,
             LibrarySources {
-                root: "use model::Config; fn run(config: Config) {}".to_owned(),
+                root: "use model::Number; fn run(value: Number) -> Int { value }".to_owned(),
                 modules: BTreeMap::new(),
                 dependencies: BTreeMap::from([
                     ("model".to_owned(), model),
@@ -74,7 +74,7 @@ let sources = ProjectSources {
         (
             model,
             LibrarySources {
-                root: "pub struct Config {}".to_owned(),
+                root: "pub type Number = Int;".to_owned(),
                 modules: BTreeMap::new(),
                 dependencies: BTreeMap::from([("runtime".to_owned(), core)]),
             },
@@ -96,7 +96,7 @@ let prepared = prepare_project(resolved).expect("declaration graphs are valid");
 契约内容由宿主读取并直接作为字节传入；reader 不读取文件名、cwd、环境或网络：
 
 ```rust
-use vorton_compiler::decode_contract;
+use vorton_compiler::{check_project, decode_contract};
 
 let contract_bytes = br#"{
   "format": "vorton.contract",
@@ -106,9 +106,17 @@ let contract_bytes = br#"{
   "records": []
 }"#;
 let contract = decode_contract(contract_bytes).expect("contract structure is readable");
+let checked = check_project(
+    &sources,
+    &BTreeMap::from([("app".to_owned(), app)]),
+    vec![contract],
+)
+.expect("the selected narrow source and contract subset checks together");
 ```
 
-`LibraryId` 只区分本次输入中的库实例；依赖别名由每个 `LibrarySources` 明确给出。宿主读取仓库唯一的 [`core/root.vorton`](core/root.vorton)，把它作为 `core` 对应库的真实 root source 传入；每个可达非 core 库都必须以自己选择的别名直接依赖该 ID。Resolver 不读取磁盘，也不按别名或 ID 数值猜测 core。`PreparedProject` 完整保留名称层结果，并只额外证明 supertrait 指向真实 named trait、trait inheritance graph 与 effect alias declaration graph 无环；它不表示 effective signature、alias normalization、body checking、完整接口或 TypedHIR 已经完成。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
+`LibraryId` 只区分本次输入中的库实例；依赖别名由每个 `LibrarySources` 明确给出。宿主读取仓库唯一的 [`core/root.vorton`](core/root.vorton)，把它作为 `core` 对应库的真实 root source 传入；每个可达非 core 库都必须以自己选择的别名直接依赖该 ID。Resolver 不读取磁盘，也不按别名或 ID 数值猜测 core。`PreparedProject` 完整保留名称层结果，并只额外证明 supertrait 指向真实 named trait、trait inheritance graph 与 effect alias declaration graph 无环。
+
+当前 `check_project` 只接受显式单态、纯值函数：类型限于 `Int`、`Float`、`Bool`、`Unit`、`Never`、这些类型组成的 tuple，以及可展开为它们的非泛型 alias；body 限于已实现的 literal、局部值、tuple、block、if/return、纯运算与 exact direct call。它核对受支持的 contract type、Borrow/Move mode、空 effect 上界和空 generic requirements，并把其余已解析 source 或已选择 clause 稳定报告为 `CheckDiagnosticKind::Unsupported`。`CheckedProject` 保留本轮真实形成的类型、字面量值、callee、mode、纯 effect 与 typed body，但不公开内部 ID 或通用查询面，也不代表完整接口、完整 Checker 或最终 TypedHIR。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
 
 ```powershell
 python .agents/scripts/validate_current_tree.py
