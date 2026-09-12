@@ -1201,9 +1201,11 @@ fn check_callback_rows(
     inference: &mut TypeInference,
     origin: &CheckOrigin,
 ) -> Result<(), CheckDiagnostic> {
-    for (_, expected) in checks {
+    for (actual, expected) in checks {
         let expected = expected.instantiate(&BTreeMap::new(), actuals);
-        EffectRow::default().union(&expected, inference, origin)?;
+        let mut required = EffectRow::default();
+        required.union(&expected, inference, origin)?;
+        required.union(actual, inference, origin)?;
     }
     Ok(())
 }

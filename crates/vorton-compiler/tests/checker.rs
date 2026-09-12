@@ -2776,3 +2776,13 @@ fn use_it() -> Int { Wrap { value: B {} }.get() }
     );
     assert!(failure.message.contains("cycle"), "{failure:?}");
 }
+
+#[test]
+fn joint_effect_legality_uses_all_callback_lower_bounds() {
+    check(r#"
+fn first() -> Unit with {fail<Int>} {}
+fn second() -> Unit with {fail<Bool>} {}
+fn select<F: Fn + fn() -> Unit with {E1, E2}, G: Fn + fn() -> Unit with {E1, E3}, effect E1, effect E2, effect E3>(left: call F, right: call G) with {} {}
+fn use_it() with {} { select(first, second); }
+"#).expect("E1 stays empty; E2 and E3 separately carry the incompatible payloads");
+}
