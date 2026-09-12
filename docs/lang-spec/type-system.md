@@ -23,7 +23,7 @@ Vorton 使用 Hindley-Milner 类型推断，并扩展 effect row 和 trait bound
 
 当前 `vorton_compiler::check_project` 闭合普通 module／inline-module 函数的第一段 HM 子集。类型限于 `Int`、`Float`、`Bool`、`Unit`、`Never`、这些类型或函数 formal 组成的 tuple，以及可展开到同一集合的非泛型 type alias。函数可声明无 bound 的 type parameters；内部函数可省略参数和返回类型并由 body 推断、泛化。Metavariable、声明 formal 和已发布 scheme 在内部保持不同身份，成功的 `CheckedProject` 不保留未解 metavariable。`Str`、container、用户 nominal、generic alias、associated type、callable shape、Trait bound 和 effect formal 仍稳定返回 `Unsupported`。
 
-直接调用对已发布 scheme 每次产生一份 fresh mapping，参数与返回关系共同消费该 mapping。同一强连通递归组在未发布状态下共享 monomorphic provisional 类型；每个 body 只形成一次 typed draft，整组求解后才 final-zonk、泛化并原子发布。组外调用可分别实例化为不同 concrete 类型，组内 polymorphic recursion 和 occurs-check 无限类型拒绝。
+直接调用对已发布 scheme 每次产生一份 fresh mapping，参数与返回关系共同消费该 mapping。同一强连通递归组在未发布状态下共享 monomorphic provisional 类型；每个 body 只形成一次 typed draft，整组求解后才 final-zonk、泛化并原子发布。组外调用可分别实例化为不同 concrete 类型，组内 polymorphic recursion 和 occurs-check 无限类型拒绝。函数只泛化签名中的自由变量；body 内尚未确定的调用 actual 不能增加公开 formal。未被签名或 body 使用的显式 formal 保留声明身份，但不创建无用途的调用 actual；实际需要而无法推断的 body 类型明确诊断。
 
 普通局部绑定保持同一个 monotype。这个入口继续支持 literal、参数／不可变 local 引用、顺序 shadowing、tuple 构造和 concrete ordinal projection、block、if/else、简单 `let`、expression statement、return、本文定义的 primitive 运算与 exact ordinary-function direct call。已解析但不在这组 expression／statement carrier 内的表面仍返回 `Unsupported`。
 

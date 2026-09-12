@@ -1189,6 +1189,21 @@ fn closes_recursive_generic_groups_atomically_and_rejects_infinite_types() {
 }
 
 #[test]
+fn a_large_inferred_recursive_group_resolves_without_variable_chain_recursion() {
+    let mut source = String::new();
+    for index in 0..4_096 {
+        writeln!(
+            &mut source,
+            "fn f{index}(x) {{ f{}(x) }}",
+            (index + 1) % 4_096
+        )
+        .expect("writing to a String cannot fail");
+    }
+    check(&source)
+        .expect("a shallow finite SCC must not exhaust the host stack through type links");
+}
+
+#[test]
 fn generic_contracts_align_formals_across_source_and_partial_records() {
     let sources = project("pub fn identity<T>(value) -> T { value }");
     let formal = function_formal("identity", 0);

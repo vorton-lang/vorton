@@ -621,7 +621,43 @@ fn check_prepared_project(
             let body = group_drafts
                 .remove(identity)
                 .expect("every generalized function has one typed draft");
-            let generalized = function_generalization(identity, header, &body, &mut inference);
+            let generalized = function_generalization(identity, header, &mut inference);
+            let mut used_variables = BTreeSet::new();
+            let mut used_formals = BTreeSet::new();
+            for ty in header
+                .parameters
+                .iter()
+                .map(|parameter| &parameter.ty)
+                .chain(std::iter::once(&header.return_type))
+            {
+                collect_inference_inputs(&inference, ty, &mut used_variables, &mut used_formals);
+            }
+            collect_typed_variables(&body, &inference, &mut used_variables, &mut used_formals);
+            if used_variables
+                .iter()
+                .any(|variable| !generalized.variables.contains_key(variable))
+            {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "a body type cannot be inferred from its use; unresolved call actuals cannot add callable type parameters",
+                    header.context.origin(body.span),
+                    Vec::new(),
+                ));
+            }
+            let instantiation_formals = generalized
+                .local_formals
+                .iter()
+                .filter(|formal| {
+                    generalized
+                        .variables
+                        .values()
+                        .any(|inferred| inferred == *formal)
+                        || used_formals
+                            .iter()
+                            .any(|used| inference.formals_equivalent(used, formal))
+                })
+                .cloned()
+                .collect();
             let parameters = header
                 .parameters
                 .iter()
@@ -642,6 +678,7 @@ fn check_prepared_project(
                 identity.clone(),
                 CallableScheme {
                     quantified: generalized.local_formals.clone(),
+                    instantiation_formals,
                     parameters,
                     return_type,
                 },
@@ -756,6 +793,9 @@ fn display_unification_failure(failure: &UnificationFailure) -> String {
 #[derive(Clone)]
 struct CallableScheme {
     quantified: Vec<TypeFormal>,
+    // Vacuous declaration binders remain part of the public scheme, but no
+    // parameter, result or body consumes an actual for them at a call site.
+    instantiation_formals: BTreeSet<TypeFormal>,
     parameters: Vec<CheckedType>,
     return_type: CheckedType,
 }
@@ -787,7 +827,6 @@ struct FunctionGeneralization {
 fn function_generalization(
     identity: &EntityId,
     header: &FunctionHeader,
-    body: &TypedBlock,
     inference: &mut TypeInference,
 ) -> FunctionGeneralization {
     let mut variables = BTreeSet::new();
@@ -806,7 +845,6 @@ fn function_generalization(
         &mut variables,
         &mut referenced_formals,
     );
-    collect_typed_variables(body, inference, &mut variables, &mut referenced_formals);
     let variables = variables
         .into_iter()
         .enumerate()
@@ -1352,11 +1390,14 @@ impl TypeInference {
     }
 
     fn resolve(&self, ty: &CheckedType) -> CheckedType {
+        let mut ty = ty;
+        while let CheckedType::Infer(variable) = ty {
+            let Some(bound) = self.substitutions.get(variable) else {
+                return ty.clone();
+            };
+            ty = bound;
+        }
         match ty {
-            CheckedType::Infer(variable) => self
-                .substitutions
-                .get(variable)
-                .map_or_else(|| ty.clone(), |bound| self.resolve(bound)),
             CheckedType::Tuple(elements) => CheckedType::Tuple(
                 elements
                     .iter()
@@ -3670,24 +3711,17 @@ fn collect_mode_constraints_block(
     binding_parameters: &BTreeMap<EntityId, ParameterKey>,
     constraints: &mut ModeConstraints,
     inference: &TypeInference,
-) {
-    let mut continues = true;
+) -> bool {
     for statement in &block.statements {
-        if !continues {
-            continue;
-        }
-        match &statement.kind {
-            TypedStatementKind::Let { value, .. } => {
-                collect_mode_constraints_expr(
-                    value,
-                    ValueContext::Consume,
-                    headers,
-                    binding_parameters,
-                    constraints,
-                    inference,
-                );
-                continues = inference.resolve(&value.ty) != CheckedType::Never;
-            }
+        let continues = match &statement.kind {
+            TypedStatementKind::Let { value, .. } => collect_mode_constraints_expr(
+                value,
+                ValueContext::Consume,
+                headers,
+                binding_parameters,
+                constraints,
+                inference,
+            ),
             TypedStatementKind::Return(Some(value)) => {
                 collect_mode_constraints_expr(
                     value,
@@ -3697,23 +3731,23 @@ fn collect_mode_constraints_block(
                     constraints,
                     inference,
                 );
-                continues = false;
+                false
             }
-            TypedStatementKind::Expression(expression) => {
-                collect_mode_constraints_expr(
-                    expression,
-                    ValueContext::Discard,
-                    headers,
-                    binding_parameters,
-                    constraints,
-                    inference,
-                );
-                continues = inference.resolve(&expression.ty) != CheckedType::Never;
-            }
-            TypedStatementKind::Return(None) => continues = false,
+            TypedStatementKind::Expression(expression) => collect_mode_constraints_expr(
+                expression,
+                ValueContext::Discard,
+                headers,
+                binding_parameters,
+                constraints,
+                inference,
+            ),
+            TypedStatementKind::Return(None) => false,
+        };
+        if !continues {
+            return false;
         }
     }
-    if continues && let Some(tail) = &block.tail {
+    if let Some(tail) = &block.tail {
         collect_mode_constraints_expr(
             tail,
             tail_context,
@@ -3721,7 +3755,9 @@ fn collect_mode_constraints_block(
             binding_parameters,
             constraints,
             inference,
-        );
+        )
+    } else {
+        true
     }
 }
 
@@ -3732,7 +3768,7 @@ fn collect_mode_constraints_expr(
     binding_parameters: &BTreeMap<EntityId, ParameterKey>,
     constraints: &mut ModeConstraints,
     inference: &TypeInference,
-) {
+) -> bool {
     match &expression.kind {
         TypedExprKind::Reference { binding, .. } => {
             if matches!(context, ValueContext::Consume | ValueContext::Return)
@@ -3742,48 +3778,56 @@ fn collect_mode_constraints_expr(
                 constraints.required_move.insert(parameter.clone());
             }
         }
-        TypedExprKind::Parenthesized(inner) => collect_mode_constraints_expr(
-            inner,
-            context,
-            headers,
-            binding_parameters,
-            constraints,
-            inference,
-        ),
+        TypedExprKind::Parenthesized(inner) => {
+            return collect_mode_constraints_expr(
+                inner,
+                context,
+                headers,
+                binding_parameters,
+                constraints,
+                inference,
+            );
+        }
         TypedExprKind::Tuple(elements) => {
             for element in elements {
-                collect_mode_constraints_expr(
+                if !collect_mode_constraints_expr(
                     element,
                     ValueContext::Consume,
                     headers,
                     binding_parameters,
                     constraints,
                     inference,
-                );
+                ) {
+                    return false;
+                }
             }
         }
-        TypedExprKind::Block(block) => collect_mode_constraints_block(
-            block,
-            context,
-            headers,
-            binding_parameters,
-            constraints,
-            inference,
-        ),
+        TypedExprKind::Block(block) => {
+            return collect_mode_constraints_block(
+                block,
+                context,
+                headers,
+                binding_parameters,
+                constraints,
+                inference,
+            );
+        }
         TypedExprKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            collect_mode_constraints_expr(
+            if !collect_mode_constraints_expr(
                 condition,
                 ValueContext::Borrow,
                 headers,
                 binding_parameters,
                 constraints,
                 inference,
-            );
-            collect_mode_constraints_block(
+            ) {
+                return false;
+            }
+            let then_continues = collect_mode_constraints_block(
                 then_branch,
                 if else_branch.is_some() {
                     context
@@ -3795,7 +3839,7 @@ fn collect_mode_constraints_expr(
                 constraints,
                 inference,
             );
-            if let Some(else_branch) = else_branch {
+            let else_continues = if let Some(else_branch) = else_branch {
                 collect_mode_constraints_expr(
                     else_branch,
                     context,
@@ -3803,27 +3847,43 @@ fn collect_mode_constraints_expr(
                     binding_parameters,
                     constraints,
                     inference,
-                );
+                )
+            } else {
+                true
+            };
+            if !then_continues && !else_continues {
+                return false;
             }
         }
-        TypedExprKind::Unary { operand, .. } => collect_mode_constraints_expr(
-            operand,
-            ValueContext::Borrow,
-            headers,
-            binding_parameters,
-            constraints,
-            inference,
-        ),
-        TypedExprKind::Binary { left, right, .. } => {
-            collect_mode_constraints_expr(
+        TypedExprKind::Unary { operand, .. } => {
+            if !collect_mode_constraints_expr(
+                operand,
+                ValueContext::Borrow,
+                headers,
+                binding_parameters,
+                constraints,
+                inference,
+            ) {
+                return false;
+            }
+        }
+        TypedExprKind::Binary {
+            operator,
+            left,
+            right,
+            ..
+        } => {
+            if !collect_mode_constraints_expr(
                 left,
                 ValueContext::Borrow,
                 headers,
                 binding_parameters,
                 constraints,
                 inference,
-            );
-            collect_mode_constraints_expr(
+            ) {
+                return false;
+            }
+            let right_continues = collect_mode_constraints_expr(
                 right,
                 ValueContext::Borrow,
                 headers,
@@ -3831,6 +3891,11 @@ fn collect_mode_constraints_expr(
                 constraints,
                 inference,
             );
+            if !right_continues
+                && !matches!(operator, BinaryOperator::LogicAnd | BinaryOperator::LogicOr)
+            {
+                return false;
+            }
         }
         TypedExprKind::Call {
             callee, arguments, ..
@@ -3841,64 +3906,58 @@ fn collect_mode_constraints_expr(
             for (index, (argument, parameter)) in
                 arguments.iter().zip(&callee_header.parameters).enumerate()
             {
-                match parameter.mode.as_ref().map(|mode| mode.value) {
-                    Some(ParameterMode::Move) => collect_mode_constraints_expr(
-                        argument,
-                        ValueContext::Consume,
-                        headers,
-                        binding_parameters,
-                        constraints,
-                        inference,
-                    ),
-                    Some(ParameterMode::Borrow) => collect_mode_constraints_expr(
-                        argument,
-                        ValueContext::Borrow,
-                        headers,
-                        binding_parameters,
-                        constraints,
-                        inference,
-                    ),
+                let mode = parameter.mode.as_ref().map(|mode| mode.value);
+                let context = match mode {
+                    Some(ParameterMode::Move) => ValueContext::Consume,
+                    Some(ParameterMode::Borrow) | None => ValueContext::Borrow,
                     Some(ParameterMode::MutBorrow | ParameterMode::Call) => unreachable!(
                         "unsupported parameter modes are rejected during header collection"
                     ),
-                    None => {
-                        collect_mode_constraints_expr(
-                            argument,
-                            ValueContext::Borrow,
-                            headers,
-                            binding_parameters,
-                            constraints,
-                            inference,
-                        );
-                        let mut consumed = BTreeSet::new();
-                        collect_consumed_parameters(
-                            argument,
-                            binding_parameters,
-                            &mut consumed,
-                            inference,
-                        );
-                        for source in consumed {
-                            constraints
-                                .implications
-                                .insert(((callee.as_ref().clone(), index), source));
-                        }
+                };
+                if !collect_mode_constraints_expr(
+                    argument,
+                    context,
+                    headers,
+                    binding_parameters,
+                    constraints,
+                    inference,
+                ) {
+                    return false;
+                }
+                if mode.is_none() {
+                    let mut consumed = BTreeSet::new();
+                    collect_consumed_parameters(
+                        argument,
+                        binding_parameters,
+                        &mut consumed,
+                        inference,
+                    );
+                    for source in consumed {
+                        constraints
+                            .implications
+                            .insert(((callee.as_ref().clone(), index), source));
                     }
                 }
             }
         }
-        TypedExprKind::TupleField { receiver, .. } => collect_mode_constraints_expr(
-            receiver,
-            ValueContext::Borrow,
-            headers,
-            binding_parameters,
-            constraints,
-            inference,
-        ),
+        TypedExprKind::TupleField { receiver, .. } => {
+            if !collect_mode_constraints_expr(
+                receiver,
+                ValueContext::Borrow,
+                headers,
+                binding_parameters,
+                constraints,
+                inference,
+            ) {
+                return false;
+            }
+        }
         TypedExprKind::Integer { .. }
         | TypedExprKind::Float(_)
         | TypedExprKind::Boolean(_)
         | TypedExprKind::Unit => {}
     }
+    inference.resolve(&expression.ty) != CheckedType::Never
 }
 
 fn collect_consumed_parameters(
@@ -3907,6 +3966,9 @@ fn collect_consumed_parameters(
     consumed: &mut BTreeSet<ParameterKey>,
     inference: &TypeInference,
 ) {
+    if inference.resolve(&expression.ty) == CheckedType::Never {
+        return;
+    }
     match &expression.kind {
         TypedExprKind::Reference { binding, .. }
             if !is_copy_type(&inference.resolve(&expression.ty)) =>
@@ -3928,7 +3990,9 @@ fn collect_consumed_parameters(
             else_branch: Some(else_branch),
             ..
         } => {
-            if let Some(tail) = &then_branch.tail {
+            if inference.resolve(&then_branch.ty) != CheckedType::Never
+                && let Some(tail) = &then_branch.tail
+            {
                 collect_consumed_parameters(tail, binding_parameters, consumed, inference);
             }
             collect_consumed_parameters(else_branch, binding_parameters, consumed, inference);
@@ -4410,14 +4474,18 @@ fn validate_usage_expr(
                     vec![function.context.origin(receiver.span)],
                 ));
             }
-            return validate_usage_expr(
+            let Some(next) = validate_usage_expr(
                 receiver,
                 ValueContext::Borrow,
                 Some(state),
                 headers,
                 function,
                 inference,
-            );
+            )?
+            else {
+                return Ok(None);
+            };
+            state = next;
         }
         TypedExprKind::Integer { .. }
         | TypedExprKind::Float(_)
@@ -5631,6 +5699,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 let mapping = scheme
                     .quantified
                     .iter()
+                    .filter(|formal| scheme.instantiation_formals.contains(*formal))
                     .cloned()
                     .map(|formal| {
                         let actual = self.inference.fresh();
@@ -6205,6 +6274,84 @@ mod checking_tests {
                 assert_closed_block(&function.body);
             }
         }
+    }
+
+    #[test]
+    fn nested_unreachable_uses_do_not_infer_move_parameters() {
+        for body in [
+            "({ return y; }, x);",
+            "take({ return y; }, x);",
+            "return y; x;",
+        ] {
+            let checked = check_project(
+                &sources(&format!(
+                    "fn take<T>(n: Int, x: move T) -> T {{ x }} \
+                     fn f<T>(x: T, y: move T) -> T {{ {body} }}"
+                )),
+                &BTreeMap::new(),
+                Vec::new(),
+            )
+            .expect("unreachable ownership uses cannot change the calling convention");
+            let function = checked
+                .functions
+                .values()
+                .find(|function| function.identity.name == "f")
+                .unwrap();
+            assert_eq!(function.parameters[0].mode, ParameterMode::Borrow);
+            assert_closed_block(&function.body);
+        }
+    }
+
+    #[test]
+    fn body_only_call_actuals_do_not_expand_the_callable_scheme() {
+        let source = "fn unused<T>() -> Int { 1 } pub fn caller() -> Int { unused() }";
+        let document = crate::decode_contract(br#"{"format":"vorton.contract","format_version":1,"semantics_version":"0.1","owner":"app","records":[{"target":{"tag":"declaration","declaration":{"library":{"tag":"self"},"path":["caller"],"kind":"function"}},"type_parameters":[],"set":{"return_type":{"tag":"primitive","name":"Int"},"generic_requirements":[]}}]}"#).unwrap();
+        for documents in [Vec::new(), vec![document]] {
+            let checked = check_project(
+                &sources(source),
+                &BTreeMap::from([("app".to_owned(), APP)]),
+                documents,
+            )
+            .expect("a vacuous callee formal cannot change the concrete caller signature");
+            let caller = checked
+                .functions
+                .values()
+                .find(|function| function.identity.name == "caller")
+                .unwrap();
+            assert!(caller.scheme.is_empty());
+            let unused = checked
+                .functions
+                .values()
+                .find(|function| function.identity.name == "unused")
+                .unwrap();
+            assert_eq!(unused.scheme.len(), 1);
+            let TypedExprKind::Call {
+                instantiation: CallInstantiation::Published(mapping),
+                ..
+            } = &caller.body.tail.as_ref().unwrap().kind
+            else {
+                panic!("caller retains the published direct call");
+            };
+            assert!(
+                mapping.is_empty(),
+                "no type relation consumes the vacuous formal"
+            );
+            assert_closed_block(&caller.body);
+        }
+
+        let diagnostic = check_project(
+            &sources(
+                "fn stop() -> Never { stop() } \
+                 fn produce<T>() -> T { produce() } \
+                 fn internal<T>() -> Int { let value: T = produce(); stop() } \
+                 fn caller() -> Int { internal() }",
+            ),
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .expect_err("a formal consumed only by the callee body still needs a real call actual");
+        assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
+        assert!(diagnostic.message.contains("body type cannot be inferred"));
     }
 
     #[test]
