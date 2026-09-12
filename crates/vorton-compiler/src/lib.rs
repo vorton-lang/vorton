@@ -69,19 +69,20 @@ pub fn prepare_project(project: ResolvedProject) -> Result<PreparedProject, Proj
 ///
 /// `owners` maps each document owner label to the real [`LibraryId`] in this
 /// project. An empty document list is valid, and unused owner mappings have no
-/// effect. The current narrow Checker accepts pure-value functions over `Int`,
-/// `Float`, `Bool`, `Unit`, `Never`, tuples, struct/enum applications, and
-/// non-generic transparent aliases. Nominals retain exact owners and actuals;
-/// construction, Copy field reads, borrowed fields, whole-value transfers, and
-/// cleanup proven empty from actual members are supported. It supports
-/// function-level HM inference and type formals, recursive binding groups,
-/// per-call instantiation, matching generic contract formals, and whole-binding
-/// Borrow/Move checks for supported generic and nominal values. Any reachable
-/// source or selected clause outside that subset returns
-/// [`CheckDiagnosticKind::Unsupported`] rather than being treated as checked.
-/// Success returns one owned opaque result containing closed schemes, typed
-/// bodies, call mappings, nominal definitions, construction and field identities,
-/// and the exact facts established during this call.
+/// effect. The Checker supports scalar/tuple/nominal types, transparent aliases,
+/// associated projections, ordinary traits and impls, and named function values
+/// used by shared Fn consumers. Each function or method body generates one draft;
+/// real recursive groups close types, evidence, type/effect actuals, parameter
+/// modes, effect rows and whole-value cleanup together. Normal and possible
+/// failure exits retain live owners and pending argument/construction temporaries.
+/// Generic full-destruction and method relations remain formal when appropriate.
+///
+/// Handler/catch, capturing closures, general callable returns or storage,
+/// FnMut/FnOnce entry, Mut/partial move, user Drop/Rc/Weak and other unsupported
+/// source or contract clauses return [`CheckDiagnosticKind::Unsupported`].
+/// Success returns an owned opaque carrier with closed schemes, selection and
+/// evidence, unique call mappings, typed bodies and semantic cleanup obligations.
+/// It does not expose a query API or constitute the complete interface/TypedHIR.
 pub fn check_project(
     sources: &ProjectSources,
     owners: &std::collections::BTreeMap<String, LibraryId>,

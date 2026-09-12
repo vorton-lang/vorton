@@ -82,6 +82,76 @@ fn document(records: &str) -> String {
 }
 
 #[test]
+fn trait_proof_can_grow_before_reaching_its_base_fact() {
+    check(
+        r#"
+trait P {}
+trait Step { type Next; }
+struct Wrap<T> { value: T }
+struct Grow<T> { value: T }
+struct A {}
+struct End {}
+impl Step for A { type Next = Wrap<Grow<A>>; }
+impl<T> Step for Grow<T> { type Next = End; }
+impl P for End {}
+impl<T: Step> P for Wrap<T> where T::Next: P {}
+fn need<T: P>(value: &T) -> Unit {}
+fn use_proof() { need(Wrap { value: A {} }); }
+"#,
+    )
+    .expect("Wrap<A>:P closes through Wrap<Grow<A>>:P and End:P");
+}
+
+#[test]
+fn ordinary_and_method_bodies_share_real_recursive_dependencies() {
+    check(
+        r#"
+trait Tick { fn tick(self: &Self) -> Int; }
+struct Runner { n: Int }
+impl Runner {
+    fn new(n: Int) -> Self { Runner { n } }
+    fn read(self: &Self) -> Int { self.n }
+    fn step(self: &Self, n: Int) -> Int {
+        if n == 0 { self.read() } else { again(self, n - 1) }
+    }
+}
+
+impl Tick for Runner { fn tick(self: &Self) -> Int { self.read() } }
+fn again(runner: &Runner, n: Int) -> Int { runner.step(n) }
+fn dictionary<T: Tick>(value: &T) -> Int { value.tick() }
+fn use_methods() -> Int {
+    let runner = Runner::new(2);
+    dictionary(runner) + runner.step(3)
+}
+"#,
+    )
+    .expect("method dependencies close with ordinary recursion and formal evidence");
+}
+
+#[test]
+fn explicit_effect_rows_propagate_through_real_calls_and_module_ceilings() {
+    check(
+        r#"
+effect alias IO = {console, fs};
+fn declared() -> Unit with {IO, process, mut, unsafe, fail<Int>} {}
+fn relay() -> Unit with {IO, process, mut, unsafe, fail<Int>} { declared() }
+"#,
+    )
+    .expect("a public upper bound is retained even when its body is pure");
+    for source in [
+        "fn noisy() with {console} {} fn quiet() with {} { noisy() }",
+        "requires {}; fn noisy() with {console} {}",
+        "effect alias Bad = {fail<Int>, fail<Bool>}; fn bad() with {Bad} {}",
+    ] {
+        assert_eq!(
+            error(source).kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn checks_real_typed_bodies_recursion_literals_aliases_and_copy_modes() {
     let source = r#"
 requires {};
@@ -224,8 +294,6 @@ fn unsupported_carriers_are_not_accepted_by_spelling_or_call_shape() {
         "fn target() -> Int { 1 } fn nested() -> Int { target()(1) }",
         "fn bad(value: &mut Int) -> Int { value }",
         "fn bad(value: scoped &Int) -> Int { value }",
-        "fn bad() -> Int with {fs} { 1 }",
-        "requires {fs}; fn bad() -> Int { 1 }",
         "fn bad() -> Str { \"text\" }",
         "fn bad(value: List<Int>) -> Int { 1 }",
         "const VALUE: Int = 1; fn good() -> Int { 1 }",
@@ -240,7 +308,7 @@ fn unsupported_carriers_are_not_accepted_by_spelling_or_call_shape() {
 }
 
 #[test]
-fn alias_cycles_and_wrong_arity_are_type_errors_while_tuple_comparison_is_unsupported() {
+fn alias_cycles_and_wrong_arity_are_type_errors_and_tuple_comparison_requires_evidence() {
     for source in [
         "type A = B; type B = A; fn value() -> A { 1 }",
         "fn value() -> Int<Bool> { 1 }",
@@ -249,7 +317,7 @@ fn alias_cycles_and_wrong_arity_are_type_errors_while_tuple_comparison_is_unsupp
     }
     assert_eq!(
         error("fn value() -> Bool { (1, 2) == (1, 2) }").kind,
-        CheckDiagnosticKind::Unsupported
+        CheckDiagnosticKind::TypeMismatch
     );
 }
 
@@ -731,13 +799,10 @@ fn header_diagnostics_use_logical_source_order_even_when_alias_expansion_reaches
 }
 
 #[test]
-fn source_shapes_methods_and_other_declarations_remain_unsupported() {
+fn source_concrete_shapes_and_adjacent_declarations_remain_unsupported() {
     let cases = [
         "fn apply(callback: fn(Int) -> Int) -> Int { 1 }",
-        "fn bad(value: Int) -> Bool { value.eq(value) }",
-        "trait Value {} fn good() -> Int { 1 }",
         "extern fn host() -> Int with {}; fn good() -> Int { 1 }",
-        "impl Int { fn value(self: &Self) -> Int { 1 } } fn good() -> Int { 1 }",
         "fn bad() -> Int { [1, 2]; 1 }",
     ];
     for source in cases {
@@ -771,7 +836,7 @@ fn unsupported_contract_shape_wins_atomically_even_beside_an_unbindable_supporte
 }
 
 #[test]
-fn each_selected_contract_family_outside_the_subset_is_explicitly_unsupported() {
+fn contract_families_distinguish_unsupported_capabilities_from_binding_errors() {
     let sources = project("fn value(input: Int) -> Int { input }");
     let target = function_target("value");
     let records = [
@@ -784,13 +849,12 @@ fn each_selected_contract_family_outside_the_subset_is_explicitly_unsupported() 
         format!(
             r#"{{"target":{target},"set":{{"return_type":{{"tag":"primitive","name":"Str"}}}}}}"#
         ),
-        format!(r#"{{"target":{target},"set":{{"effect_upper":[{{"tag":"mut"}}]}}}}"#),
         format!(
             r#"{{"target":{target},"set":{{"generic_requirements":[{{"tag":"trait","subject":{{"tag":"primitive","name":"Int"}},"bound":{{"trait":{{"library":{{"tag":"self"}},"path":["Missing"],"kind":"trait"}},"arguments":[],"associated_bindings":[]}}}}]}}}}"#
         ),
         r#"{"target":{"tag":"declaration","declaration":{"library":{"tag":"self"},"path":["value"],"kind":"struct"}},"set":{"return_type":{"tag":"primitive","name":"Int"}}}"#.to_owned(),
     ];
-    for record in records {
+    for (index, record) in records.into_iter().enumerate() {
         let diagnostic = check_project(
             &sources,
             &BTreeMap::from([("app".to_owned(), APP)]),
@@ -799,7 +863,11 @@ fn each_selected_contract_family_outside_the_subset_is_explicitly_unsupported() 
         .expect_err("selected clause or target is outside the initial subset");
         assert_eq!(
             diagnostic.kind,
-            CheckDiagnosticKind::Unsupported,
+            if matches!(index, 0 | 3) {
+                CheckDiagnosticKind::ContractBinding
+            } else {
+                CheckDiagnosticKind::Unsupported
+            },
             "record: {record}"
         );
     }
@@ -927,13 +995,10 @@ fn unit_if_discards_its_then_value_in_every_outer_context() {
     ] {
         check(&format!("fn f<T>(flag: Bool, x: &T) -> Unit {{ {body} }}"))
             .expect("discarding a borrowed then value does not transfer ownership");
-        assert_eq!(
-            error(&format!(
-                "fn f<T>(flag: Bool, x: move T) -> Unit {{ {body} }}"
-            ))
-            .kind,
-            CheckDiagnosticKind::Unsupported
-        );
+        check(&format!(
+            "fn f<T>(flag: Bool, x: move T) -> Unit {{ {body} }}"
+        ))
+        .expect("a discarded owned branch contributes D(T)");
     }
     assert_eq!(
         error("fn make<T>() -> T { make() } fn f(flag: Bool) -> Unit { if flag { make() } }").kind,
@@ -947,14 +1012,11 @@ fn nested_never_widening_preserves_generic_ownership() {
         "if flag { bottom } else { pair }",
         "if flag { pair } else { bottom }",
     ] {
-        assert_eq!(
-            error(&format!(
-                "fn f<T>(flag: Bool, pair: move (T, Int), bottom: (Never, Int)) -> (T, Int) {{ \
+        check(&format!(
+            "fn f<T>(flag: Bool, pair: move (T, Int), bottom: (Never, Int)) -> (T, Int) {{ \
                  let result = {branches}; result }}"
-            ))
-            .kind,
-            CheckDiagnosticKind::Unsupported
-        );
+        ))
+        .expect("the unselected owned branch contributes its destruction relation");
     }
     check("fn f<T>(bottom: (Never, Int)) -> (T, Int) { let result: (T, Int) = bottom; result }")
         .expect("an annotated widening transfers only the actual result into the new owner");
@@ -1397,12 +1459,12 @@ fn defers_numeric_obligations_until_the_whole_recursive_group_is_constrained() {
     );
     assert_eq!(
         error("fn equal<T>(value: T) -> Bool { value == value }").kind,
-        CheckDiagnosticKind::Unsupported
+        CheckDiagnosticKind::TypeMismatch
     );
 }
 
 #[test]
-fn early_return_rejects_generic_temporaries_from_partially_evaluated_expressions() {
+fn early_return_cleans_generic_temporaries_from_partially_evaluated_expressions() {
     for source in [
         "fn take<T>(value: move T, count: Int) -> T { value } \
          fn bad<T>(value: move T) -> Int { \
@@ -1414,9 +1476,7 @@ fn early_return_rejects_generic_temporaries_from_partially_evaluated_expressions
              0 \
          }",
     ] {
-        let diagnostic = error(source);
-        assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
-        assert!(diagnostic.message.contains("temporary"));
+        check(source).expect("early return retains the pending generic temporary cleanup relation");
     }
 
     check("fn good<T>(value: move T) -> T { return value; }")
@@ -1453,18 +1513,18 @@ fn tracks_whole_generic_owners_across_moves_aliases_branches_and_cleanup() {
         ),
         (
             "fn discard<T>(value: move T) -> Unit with {} {}",
-            CheckDiagnosticKind::Unsupported,
+            CheckDiagnosticKind::TypeMismatch,
         ),
         (
-            "fn choose<T>(left: move T, right: move T) -> T { left }",
-            CheckDiagnosticKind::Unsupported,
+            "fn choose<T>(left: move T, right: move T) -> T with {} { left }",
+            CheckDiagnosticKind::TypeMismatch,
         ),
         (
-            "fn early<T>(flag: Bool, left: move T, right: move T) -> T { \
+            "fn early<T>(flag: Bool, left: move T, right: move T) -> T with {} { \
                  if flag { return left; } \
                  right \
              }",
-            CheckDiagnosticKind::Unsupported,
+            CheckDiagnosticKind::TypeMismatch,
         ),
         (
             "fn first<T>(pair: move (T, Int)) -> T { pair.0 }",
@@ -1533,10 +1593,8 @@ fn nominal_cleanup_handles_long_field_graphs_without_host_recursion() {
     "
     ))
     .expect("borrowing and whole transfer create no owning cleanup demand");
-    assert_eq!(
-        error(&format!("{ring} fn drop_recursive(value: move Node0) {{}}")).kind,
-        CheckDiagnosticKind::Unsupported,
-        "a real recursive cleanup obligation ends with a structured diagnostic",
+    check(&format!("{ring} fn drop_recursive(value: move Node0) {{}}")).expect(
+        "structural recursion retains an exact destruction relation without unfolding forever",
     );
 
     let chain = (0..count)
@@ -1554,7 +1612,7 @@ fn nominal_cleanup_handles_long_field_graphs_without_host_recursion() {
 }
 
 #[test]
-fn finite_repeated_nominal_owners_clean_up_without_accepting_recursive_payloads() {
+fn finite_repeated_nominal_owners_clean_up_and_retain_recursive_destruction_relations() {
     for source in [
         "struct Box<T> { value: T } fn drop_box(value: move Box<Box<Int>>) {}",
         "struct Box<T> { value: T } fn wrap<T>(value: T) -> Box<T> { Box { value } } fn drop_call() { wrap(wrap(1)); }",
@@ -1566,11 +1624,8 @@ fn finite_repeated_nominal_owners_clean_up_without_accepting_recursive_payloads(
         "struct Grow<T> { next: Grow<(T, T)> } fn drop_growing(value: move Grow<Int>) {}",
         "struct Box<T> { value: T } struct Recursive { next: Box<Recursive> } fn drop_recursive(value: move Recursive) {}",
     ] {
-        assert_eq!(
-            error(source).kind,
-            CheckDiagnosticKind::Unsupported,
-            "{source}"
-        );
+        check(source)
+            .expect("generic and structural recursive destruction retain formal relations");
     }
 }
 
@@ -1620,8 +1675,6 @@ fn nominal_whole_moves_do_not_grant_copy_or_field_ownership() {
         "struct Box<T> { value: T } fn bad<T>(value: Box<T>) -> T { value.value }",
         "struct Box<T> { value: T } fn take<T>(value: T) -> T { value } fn bad<T>(value: &Box<T>) -> T { take(value.value) }",
         "struct Box<T> { value: T } fn bad<T>(value: &Box<T>) { let owned = value.value; }",
-        "struct Box<T> { value: T } fn bad<T>(value: move Box<T>) {}",
-        "struct Box<T> { value: T } fn bad<T>(value: T) { let owner = Box { value }; }",
     ] {
         assert_eq!(
             error(source).kind,
@@ -1641,9 +1694,7 @@ fn nominal_construction_preserves_source_order_and_partial_temporary_cleanup() {
         let source = format!(
             "struct Pair<T> {{ last: Unit, first: T }} enum Choice<T> {{ Named {{ last: Unit, first: T }}, Pos(T, Unit) }} fn bad<T>(value: T) {{ let pending = {construction}; }}"
         );
-        let diagnostic = error(&source);
-        assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
-        assert!(diagnostic.message.contains("temporary"), "{diagnostic:?}");
+        check(&source).expect("pending construction members contribute return cleanup effects");
     }
     check(r#"
 struct Pair<T> { first: T, last: Unit }
@@ -1811,16 +1862,11 @@ fn nominal_cross_library_contracts_and_reexports_keep_original_identity_and_priv
 #[test]
 fn nominal_support_does_not_ignore_bounds_impls_or_open_adjacent_capabilities() {
     for source in [
-        "struct Box<T: Copy> { value: T }",
-        "enum Choice<T: Clone> { Value(T) }",
-        "struct Value {} impl Value { fn get(self: &Self) -> Int { 1 } }",
         "struct Value {} impl Drop for Value { fn drop(self: &mut Self) -> Unit {} }",
         "struct Box<T> { value: T } type Alias<T> = Box<T>;",
         "struct Value { text: Str }",
         "struct Value { items: List<Int> }",
         "struct Point { x: Int } fn bad(value: Point) -> Point { Point { ..value, x: 2 } }",
-        "struct Point { x: Int } fn bad(value: &Point) -> Int { value.method() }",
-        "struct Point { x: Int } fn bad(value: &Point) -> Bool { value == value }",
     ] {
         assert_eq!(
             error(source).kind,
@@ -1828,4 +1874,657 @@ fn nominal_support_does_not_ignore_bounds_impls_or_open_adjacent_capabilities() 
             "{source}"
         );
     }
+}
+
+#[test]
+fn operation_calls_and_unsafe_use_real_effect_identities() {
+    check(
+        r#"
+requires {unsafe, Tick, console, mut, fail<Int>};
+effect Tick { fn tick(value: Int) -> Int; }
+fn raw() -> Int with {unsafe, console, mut, fail<Int>} { 1 }
+fn operate(value: Int) -> Int with {Tick, console, mut, fail<Int>} {
+    unsafe { raw() };
+    Tick.tick(value)
+}
+fn raise() -> Never with {fail<Int>} { fail.raise(1) }
+"#,
+    )
+    .expect("unsafe removes only unsafe; operation and failure keep their owners");
+    check("effect Echo<T> { fn echo(value: T) -> T; } fn use_echo() -> Int with {Echo<Int>} { Echo.echo(1) }")
+        .expect("operation type actual is closed by its argument");
+    for source in [
+        "fn bad() { unsafe { 1 }; }",
+        "requires {unsafe, console}; fn noisy() with {unsafe, console} {} fn bad() with {} { unsafe { noisy() } }",
+        "effect Echo<T> { fn echo(value: T) -> T; } fn bad() { Echo.echo(1); Echo.echo(true); }",
+        "effect Echo<T> { fn echo(value: T) -> T; } fn bad<T>(value: &T) { Echo.echo(value); }",
+    ] {
+        assert_eq!(
+            error(source).kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn shared_fn_callbacks_use_one_minimal_effect_actual_for_all_arguments() {
+    check(
+        r#"
+fn pure() -> Unit with {} {}
+fn console_callback() -> Unit with {console} {}
+fn file_callback() -> Unit with {fs} {}
+fn sequence<F: Fn + fn() -> Unit with {E}, G: Fn + fn() -> Unit with {E}, effect E>(
+    first: call F, second: call G
+) -> Unit with {E} {
+    first(); second();
+}
+fn pure_use() with {} { let callback = pure; sequence(callback, pure); }
+fn combined_use() with {console, fs} { sequence(console_callback, file_callback); }
+"#,
+    )
+    .expect("shared Fn and both callback lower bounds are checked in the same call mapping");
+    let mismatch = error(
+        r#"
+fn first() -> Unit with {fail<Int>} {}
+fn second() -> Unit with {fail<Bool>} {}
+fn sequence<F: Fn + fn() -> Unit with {E}, G: Fn + fn() -> Unit with {E}, effect E>(first: call F, second: call G) with {E} { first(); second(); }
+fn bad() { sequence(first, second); }
+"#,
+    );
+    assert_eq!(mismatch.kind, CheckDiagnosticKind::TypeMismatch);
+    assert_eq!(error("fn provider() -> Unit {} fn take<F: Fn + fn() -> Unit>(f: call F) { f(); } fn bad() { take(provider); }").kind, CheckDiagnosticKind::Unsupported);
+    assert_eq!(
+        error("fn bad<F: FnOnce + fn() -> Unit>(f: call F) { f(); }").kind,
+        CheckDiagnosticKind::Unsupported
+    );
+}
+
+#[test]
+fn ordinary_omitted_shape_rows_are_constrained_only_by_actual_body_consumers() {
+    check(
+        r#"
+fn pure() -> Unit with {} {}
+fn noisy() -> Unit with {console} {}
+fn require_pure<F: Fn + fn() -> Unit>(callback: call F) -> Unit with {} { callback(); }
+fn ignore<F: Fn + fn() -> Unit>(callback: call F) -> Unit with {} {}
+fn check_both() with {} { require_pure(pure); ignore(noisy); }
+"#,
+    )
+    .expect("an omitted shape row can close to pure without constraining an unused callback");
+    assert_eq!(error("fn noisy() -> Unit with {console} {} fn require_pure<F: Fn + fn() -> Unit>(callback: call F) with {} { callback(); } fn bad() { require_pure(noisy); }").kind, CheckDiagnosticKind::TypeMismatch);
+}
+
+#[test]
+fn recursive_callback_effect_actuals_keep_the_same_formal_relationship() {
+    check(
+        r#"
+fn first<F: Fn + fn() -> Unit with {E}, effect E>(done: Bool, callback: call F) -> Unit with {E} {
+    if done { callback() } else { second(true, callback) }
+}
+fn second<G: Fn + fn() -> Unit with {R}, effect R>(done: Bool, callback: call G) -> Unit with {R} {
+    if done { callback() } else { first(true, callback) }
+}
+fn console_callback() -> Unit with {console} {}
+fn use_recursion() with {console} { first(false, console_callback); }
+"#,
+    )
+    .expect("mutual recursion preserves type and effect actuals without another body pass");
+}
+
+#[test]
+fn contract_effect_terms_and_partial_conflicts_keep_document_paths() {
+    let sources = project(
+        "fn noisy() with {console} {} fn relay() { noisy(); } fn discard<T>(value: move T) {} fn apply<F: Fn + fn() -> Unit with {E}, effect E>(callback: call F) { callback(); }",
+    );
+    let discard = function_target("discard");
+    let apply = function_target("apply");
+    let type_formal = |target: &str| {
+        format!(
+            r#"{{"tag":"formal","formal":{{"owner":{target},"binder":"declaration","kind":"type","index":0}}}}"#
+        )
+    };
+    let records = format!(
+        r#"
+{{"target":{},"set":{{"effect_upper":[{{"tag":"system","name":"console"}}]}}}},
+{{"target":{discard},"type_parameters":["Alpha"],"set":{{"effect_upper":[{{"tag":"full_destruction","type":{}}}]}}}},
+{{"target":{apply},"type_parameters":["Callback"],"set":{{"effect_upper":[{{"tag":"selected_call","callable":{}}}],"parameter_modes":[{{"parameter":{{"tag":"position","index":0}},"mode":{{"tag":"callable_use","callable":{}}}}}]}}}}
+"#,
+        function_target("relay"),
+        type_formal(&discard),
+        type_formal(&apply),
+        type_formal(&apply)
+    );
+    check_project(
+        &sources,
+        &BTreeMap::from([("app".to_owned(), APP)]),
+        vec![contract(&document(&records))],
+    )
+    .expect("contract effects and shared callable_use enter the ordinary checker");
+    let wrong = document(&format!(
+        r#"{{"target":{},"set":{{"effect_upper":[]}}}}"#,
+        function_target("relay")
+    ));
+    let diagnostic = check_project(
+        &sources,
+        &BTreeMap::from([("app".to_owned(), APP)]),
+        vec![contract(&wrong)],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(diagnostic.primary, Some(CheckOrigin::Contract { ref json_path, .. }) if json_path == "$.records[0].set.effect_upper")
+    );
+    let conflict = document(&format!(
+        r#"{{"target":{},"set":{{"effect_upper":[]}}}},{{"target":{},"set":{{"effect_upper":[{{"tag":"system","name":"console"}}]}}}}"#,
+        function_target("relay"),
+        function_target("relay")
+    ));
+    assert_eq!(
+        check_project(
+            &sources,
+            &BTreeMap::from([("app".to_owned(), APP)]),
+            vec![contract(&conflict)]
+        )
+        .unwrap_err()
+        .kind,
+        CheckDiagnosticKind::ContractConflict
+    );
+}
+
+#[test]
+fn contract_requirements_are_grouped_before_body_selection_and_never_unioned() {
+    let source = "trait Value { fn value(self: &Self) -> Int; } trait Other {} struct Item {} impl Value for Item { fn value(self: &Self) -> Int { 1 } } fn extract<T>(item: &T) -> Int { item.value() } fn use_it() -> Int { extract(Item {}) }";
+    let target = function_target("extract");
+    let formal = format!(
+        r#"{{"tag":"formal","formal":{{"owner":{target},"binder":"declaration","kind":"type","index":0}}}}"#
+    );
+    let predicate = |name: &str| {
+        format!(
+            r#"{{"tag":"trait","subject":{formal},"bound":{{"trait":{{"library":{{"tag":"self"}},"path":["{name}"],"kind":"trait"}},"arguments":[],"associated_bindings":[]}}}}"#
+        )
+    };
+    let record = |requirements: &str| {
+        format!(
+            r#"{{"target":{target},"type_parameters":["Alpha"],"set":{{"generic_requirements":[{requirements}]}}}}"#
+        )
+    };
+    let owners = BTreeMap::from([("app".to_owned(), APP)]);
+    check_project(
+        &project(source),
+        &owners,
+        vec![contract(&document(&record(&predicate("Value"))))],
+    )
+    .expect("P is available during dictionary selection");
+    assert_eq!(
+        check_project(
+            &project(source),
+            &owners,
+            vec![contract(&document(&record("")))]
+        )
+        .unwrap_err()
+        .kind,
+        CheckDiagnosticKind::TypeMismatch
+    );
+    let conflict = format!(
+        "{},{}",
+        record(&predicate("Value")),
+        record(&predicate("Other"))
+    );
+    assert_eq!(
+        check_project(
+            &project(source),
+            &owners,
+            vec![contract(&document(&conflict))]
+        )
+        .unwrap_err()
+        .kind,
+        CheckDiagnosticKind::ContractConflict
+    );
+}
+
+#[test]
+fn contract_trait_and_impl_members_bind_receiver_outer_and_own_formals() {
+    let source = "trait Work<T> { fn run<U>(self: &Self, input: &T, value: move U) -> U; } struct Holder<T> { stored: T } impl<T> Work<T> for Holder<T> { fn run<V>(self: &Self, input: &T, value: move V) -> V { value } } fn use_it() -> Bool { Holder { stored: 1 }.run(1, true) }";
+    let trait_ref = r#"{"library":{"tag":"self"},"path":["Work"],"kind":"trait"}"#;
+    let trait_owner = format!(r#"{{"tag":"declaration","declaration":{trait_ref}}}"#);
+    let trait_target =
+        format!(r#"{{"tag":"trait_member","owner":{trait_ref},"kind":"method","name":"run"}}"#);
+    let impl_ref = r#"{"library":{"tag":"self"},"type_parameter_count":1,"target":{"tag":"nominal","declaration":{"library":{"tag":"self"},"path":["Holder"],"kind":"struct"},"arguments":[{"tag":"local_type_parameter","index":0}]},"trait":{"trait":{"library":{"tag":"self"},"path":["Work"],"kind":"trait"},"arguments":[{"tag":"local_type_parameter","index":0}],"associated_bindings":[]}}"#;
+    let impl_owner = format!(r#"{{"tag":"impl","implementation":{impl_ref}}}"#);
+    let impl_target =
+        format!(r#"{{"tag":"impl_member","owner":{impl_ref},"kind":"method","name":"run"}}"#);
+    let formal = |owner: &str, binder: &str| {
+        format!(
+            r#"{{"tag":"formal","formal":{{"owner":{owner},"binder":"{binder}","kind":"type","index":0}}}}"#
+        )
+    };
+    let trait_self = format!(
+        r#"{{"tag":"self_type","owner":{{"tag":"declaration","declaration":{trait_ref}}}}}"#
+    );
+    let impl_self =
+        format!(r#"{{"tag":"self_type","owner":{{"tag":"impl","implementation":{impl_ref}}}}}"#);
+    let record = |target: &str, self_type: &str, outer: &str, own: &str| {
+        format!(
+            r#"{{"target":{target},"type_parameters":["Local"],"set":{{"parameter_types":[{{"parameter":{{"tag":"receiver"}},"type":{self_type}}},{{"parameter":{{"tag":"position","index":0}},"type":{outer}}},{{"parameter":{{"tag":"position","index":1}},"type":{own}}}],"return_type":{own},"effect_upper":[]}}}}"#
+        )
+    };
+    let records = format!(
+        "{},{}",
+        record(
+            &trait_target,
+            &trait_self,
+            &formal(&trait_owner, "declaration"),
+            &formal(&trait_target, "method")
+        ),
+        record(
+            &impl_target,
+            &impl_self,
+            &formal(&impl_owner, "impl"),
+            &formal(&impl_target, "method")
+        )
+    );
+    check_project(
+        &project(source),
+        &BTreeMap::from([("app".to_owned(), APP)]),
+        vec![contract(&document(&records))],
+    )
+    .expect("trait and impl contracts share each callable's actual owner scope");
+}
+
+#[test]
+fn callback_support_does_not_enable_general_returns_or_aggregate_storage() {
+    for source in [
+        "fn callback() -> Unit with {} {} fn factory() { callback }",
+        "fn return_owned<F: Fn + fn() -> Unit>(callback: move F) -> F { callback }",
+        "fn callback() -> Unit with {} {} fn bad() { let pair = (callback, 1); }",
+        "fn pack<T>(value: move T) { let pair = (value, 1); } fn callback() -> Unit with {} {} fn bad() { pack(callback); }",
+        "fn identity<T>(value: move T) -> T { value } fn callback() -> Unit with {} {} fn bad() { let alias = identity(callback); }",
+        "fn raise<T>(value: move T) -> Never { fail.raise(value) } fn callback() -> Unit with {} {} fn bad() { raise(callback); }",
+    ] {
+        assert_eq!(
+            error(source).kind,
+            CheckDiagnosticKind::Unsupported,
+            "{source}"
+        );
+    }
+    check("fn callback() -> Unit with {} {} fn observe<T>(value: &T) {} fn good() { let alias = callback; observe(alias); alias(); }")
+        .expect("an immutable named-function alias can be borrowed and called");
+}
+
+#[test]
+fn associated_bounds_defaults_and_finite_repeated_proofs_close() {
+    check(
+        r#"
+trait P {}
+trait Step { type Next: P; }
+struct A {}
+struct Wrap<T> { value: T }
+impl P for A {}
+impl<T: P> P for Wrap<T> {}
+impl Step for A { type Next = Self; }
+fn need<T: P>(value: &T) -> Unit {}
+fn associated<T: Step>(owner: &T, value: &T::Next) -> Unit { need(value); }
+fn repeated() { need(Wrap { value: Wrap { value: A {} } }); associated(A {}, A {}); }
+trait Default { type Value = Int; fn value(self: &Self) -> Self::Value; }
+struct First {}
+struct Second {}
+impl Default for First { fn value(self: &Self) -> Int { 1 } }
+impl Default for Second { type Value = Bool; fn value(self: &Self) -> Bool { true } }
+fn defaults() { let first: Int = First {}.value(); let second: Bool = Second {}.value(); }
+"#,
+    )
+    .expect("associated bound, override, Next=Self, and repeated finite evidence");
+    for source in [
+        "trait P {} trait Step { type Next: P; } struct A {} impl Step for A { type Next = Int; }",
+        "trait P {} trait Q: P {} struct A {} impl Q for A {}",
+        "trait P { fn read(self: &Self) -> Int; } struct A {} impl P for A {}",
+        "trait P {} struct A {} impl P for A { fn extra(self: &Self) {} }",
+        "trait P { fn read(self: &Self) -> Int; } struct A {} impl P for A { fn read(self: move Self) -> Int { 1 } }",
+    ] {
+        assert_eq!(
+            error(source).kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn projection_cycles_and_growing_search_have_distinct_bounded_diagnostics() {
+    for source in [
+        "trait Step { type Next; } struct A {} impl Step for A { type Next = Self::Next; }",
+        "trait Step { type Next; } struct A {} struct B {} impl Step for A { type Next = B::Next; } impl Step for B { type Next = A::Next; }",
+        "trait P {} struct A {} impl P for A where A: P {} fn need<T: P>(value: &T) {} fn use_it() { need(A {}); }",
+    ] {
+        let failure = error(source);
+        assert!(failure.message.contains("cycle"), "{failure:?}");
+        assert!(failure.primary.is_some());
+    }
+    let failure = error(
+        "trait P {} struct Grow<T> { value: T } struct A {} impl<T> P for Grow<T> where Grow<Grow<T>>: P {} fn need<T: P>(value: &T) {} fn use_it() { need(Grow { value: A {} }); }",
+    );
+    assert!(
+        failure.message.contains("proof incomplete") && failure.message.contains("limit"),
+        "{failure:?}"
+    );
+    eprintln!("growth probe: {failure:?}");
+    assert!(failure.primary.is_some());
+}
+
+#[test]
+fn public_trait_surfaces_preserve_private_representation_boundaries() {
+    check("pub trait P { fn read(self: &Self) -> Int; } struct Hidden {} impl P for Hidden { fn read(self: &Self) -> Int { 1 } } pub struct Public { hidden: Hidden } fn inside() { Hidden {}.read(); }").expect("private target impl stays inside its module");
+    for source in [
+        "trait Hidden {} pub trait Public: Hidden {}",
+        "trait Hidden {} pub struct Public<T: Hidden> { value: T }",
+        "trait Hidden {} pub fn public<T: Hidden>(value: &T) -> Unit {}",
+        "struct Hidden {} pub trait Public { type Item = Hidden; }",
+        "trait Public {} struct Hidden {} pub struct Open {} impl Public for Open {} pub trait Result { type Item; } impl Result for Open { type Item = Hidden; }",
+        "effect Hidden { fn action() -> Unit; } pub fn public() -> Unit with { Hidden } {}",
+    ] {
+        let failure = error(source);
+        assert!(failure.message.contains("private"), "{failure:?}: {source}");
+    }
+}
+
+#[test]
+fn contract_domain_is_available_before_source_projection_selection() {
+    let target = function_target("take");
+    let formal = format!(
+        r#"{{"tag":"formal","formal":{{"owner":{target},"binder":"declaration","kind":"type","index":0}}}}"#
+    );
+    let predicate = format!(
+        r#"{{"tag":"trait","subject":{formal},"bound":{{"trait":{{"library":{{"tag":"self"}},"path":["Value"],"kind":"trait"}},"arguments":[],"associated_bindings":[]}}}}"#
+    );
+    let record = format!(
+        r#"{{"target":{target},"type_parameters":["Alpha"],"set":{{"generic_requirements":[{predicate}]}}}}"#
+    );
+    let source = "trait Value { type Item; } struct A {} impl Value for A { type Item = Int; } fn take<T>(owner: &T, item: &T::Item) -> Unit {} fn use_it() { take(A {}, 1); }";
+    check_project(
+        &project(source),
+        &BTreeMap::from([("app".to_owned(), APP)]),
+        vec![contract(&document(&record))],
+    )
+    .expect("P determines source associated lookup before header normalization");
+}
+
+#[test]
+fn core_comparisons_use_explicit_and_generic_evidence() {
+    check(r#"
+struct Value { stored: Int }
+impl PartialEq for Value { fn eq(self: &Self, other: &Self) -> Bool with {} { self.stored == other.stored } }
+impl Eq for Value {}
+fn compare<T: PartialEq>(left: &T, right: &T) -> Bool with {} { left == right }
+fn concrete() -> Bool { compare(Value { stored: 1 }, Value { stored: 2 }) }
+"#).expect("source core implementation and fixed generic dictionary use the comparison solver");
+    assert!(
+        error("struct A {} fn compare(left: &A, right: &A) -> Bool { left == right }")
+            .message
+            .contains("no evidence")
+    );
+    assert!(
+        error("impl PartialEq for Int { fn eq(self: &Self, other: &Self) -> Bool { true } }")
+            .message
+            .contains("orphan")
+    );
+}
+
+#[test]
+fn disjoint_where_domains_select_evidence_but_not_a_public_impl_identity() {
+    let source = r#"
+trait Tag { type Kind; }
+trait Read { fn read(self: &Self) -> Int; }
+struct A {} struct B {} struct Wrap<T> { value: T }
+impl Tag for A { type Kind = Int; }
+impl Tag for B { type Kind = Bool; }
+impl<T: Tag<Kind = Int>> Read for Wrap<T> { fn read(self: &Self) -> Int { 1 } }
+impl<T: Tag<Kind = Bool>> Read for Wrap<T> { fn read(self: &Self) -> Int { 2 } }
+fn use_it() { Wrap { value: A {} }.read(); Wrap { value: B {} }.read(); }
+"#;
+    check(source).expect(
+        "associated equalities prove disjoint input domains and select the applicable impl",
+    );
+    let implementation = r#"{"library":{"tag":"self"},"type_parameter_count":1,"target":{"tag":"nominal","declaration":{"library":{"tag":"self"},"path":["Wrap"],"kind":"struct"},"arguments":[{"tag":"local_type_parameter","index":0}]},"trait":{"trait":{"library":{"tag":"self"},"path":["Read"],"kind":"trait"},"arguments":[],"associated_bindings":[]}}"#;
+    let record = format!(
+        r#"{{"target":{{"tag":"impl_member","owner":{implementation},"kind":"method","name":"read"}},"set":{{"effect_upper":[]}}}}"#
+    );
+    let failure = check_project(
+        &project(source),
+        &BTreeMap::from([("app".to_owned(), APP)]),
+        vec![contract(&document(&record))],
+    )
+    .unwrap_err();
+    assert!(
+        failure.message.contains("ImplRef is ambiguous"),
+        "{failure:?}"
+    );
+    assert!(
+        matches!(failure.primary, Some(CheckOrigin::Contract { ref json_path, .. }) if json_path == "$.records[0].target")
+    );
+}
+
+#[test]
+fn nominal_formation_conditions_are_checked_in_signatures_and_fields() {
+    check("trait P {} struct A {} impl P for A {} struct Box<T: P> { value: T } fn valid<T: P>(value: &Box<T>) {} struct Container<T: P> { value: Box<T> } fn use_it() { valid(Box { value: A {} }); }").expect("formation conditions use the declared domain");
+    for source in [
+        "trait P {} struct Box<T: P> { value: T } fn bad() { Box { value: 1 }; }",
+        "trait P {} struct Box<T: P> { value: T } fn bad(value: &Box<Int>) {}",
+        "trait P {} struct Box<T: P> { value: T } fn bad<T>(value: &Box<T>) {}",
+        "trait P {} struct Box<T: P> { value: T } struct Bad<T> { value: Box<T> }",
+    ] {
+        assert!(error(source).message.contains("no evidence"), "{source}");
+    }
+}
+
+#[test]
+fn method_effect_contracts_keep_abstract_and_per_impl_rows() {
+    check(
+        r#"
+trait Run { fn run(self: &Self) -> Unit; }
+struct First {} struct Second {}
+impl Run for First { fn run(self: &Self) -> Unit with {console} {} }
+impl Run for Second { fn run(self: &Self) -> Unit with {fs} {} }
+fn abstract_run<T: Run>(value: &T) -> Unit { value.run(); }
+fn first() with {console} { abstract_run(First {}); }
+fn second() with {fs} { abstract_run(Second {}); }
+trait Fixed { fn run(self: &Self) -> Unit with {console, fs}; }
+impl Fixed for First { fn run(self: &Self) -> Unit with {console} {} }
+fn generic_fixed<T: Fixed>(value: &T) with {console, fs} { value.run(); }
+fn concrete_fixed() with {console, fs} { generic_fixed(First {}); }
+fn scheme() with {Run::run<Second>} { second(); }
+"#,
+    )
+    .expect("an abstract method relationship does not union unrelated impl rows");
+    for source in [
+        "trait Loop { fn step(self: &Self) -> Unit with {Loop::step<Self>}; }",
+        "trait Loop { fn first(self: &Self) -> Unit with {Loop::second<Self>}; fn second(self: &Self) -> Unit with {Loop::first<Self>}; }",
+        "trait Run { fn run(self: &Self) -> Unit; } fn bad<T: Run>(value: &T) with {} { value.run(); }",
+        "trait Fixed { fn run(self: &Self) with {console}; } struct A {} impl Fixed for A { fn run(self: &Self) with {fs} {} }",
+    ] {
+        let failure = error(source);
+        assert_eq!(
+            failure.kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{failure:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_merge_legality_and_effect_only_type_actuals_close_at_the_call() {
+    check(
+        r#"
+fn payload<T>() -> Unit with {fail<T>} {}
+fn bound() with {fail<Int>} { payload(); }
+fn pure() -> Unit with {} {}
+fn fail_int() -> Unit with {fail<Int>} {}
+fn attempt<T, F: Fn + fn() -> Unit with {E}, effect E>(error: T, callback: call F) -> Unit {
+    callback(); fail.raise(error)
+}
+fn legal() with {fail<Int>} { attempt(1, pure); attempt(1, fail_int); }
+"#,
+    )
+    .expect("effect-only type actuals and callback merge obligations use the call mapping");
+    let failure = error(
+        "fn fail_bool() -> Unit with {fail<Bool>} {} fn attempt<T, F: Fn + fn() -> Unit with {E}, effect E>(error: T, callback: call F) { callback(); fail.raise(error); } fn bad() { attempt(1, fail_bool); }",
+    );
+    assert!(failure.message.contains("payload conflict"), "{failure:?}");
+}
+
+#[test]
+fn nested_shared_shapes_and_fixed_method_rows_use_the_same_callback_actual() {
+    check(r#"
+fn pure() -> Unit with {} {}
+fn apply<G: Fn + fn() -> Unit with {}>(callback: call G) -> Unit with {} { callback(); }
+fn nested<G: Fn + fn() -> Unit with {E}, F: Fn + fn(call G) -> Unit with {E}, effect E>(higher: call F, lower: call G) -> Unit with {E} { higher(lower); }
+fn use_nested() with {} { nested(apply, pure); }
+trait Row { fn row(self: &Self) -> Unit; }
+struct A {}
+fn console() -> Unit with {console} {}
+impl Row for A { fn row(self: &Self) -> Unit { console(); } }
+fn select<F: Fn + fn() -> Unit with {Row::row<A>, E}, effect E>(callback: call F) -> Unit with {E} {}
+fn smallest() with {} { select(console); }
+"#).expect("nested call G is fixed Borrow; method contribution leaves the smallest E empty");
+    let failure = error(
+        "trait P {} fn constrained<T: P>(value: &T) -> Int with {} { 1 } fn take<F: Fn + fn(&Int) -> Int with {}>(callback: call F) -> Int { callback(1) } fn bad() -> Int { take(constrained) }",
+    );
+    assert!(failure.message.contains("no evidence"), "{failure:?}");
+}
+
+#[test]
+fn contract_shared_shape_without_an_upper_keeps_selected_call_relation() {
+    let target = function_target("apply");
+    let formal = function_formal("apply", 0);
+    let predicate = format!(
+        r#"{{"tag":"trait","subject":{formal},"bound":{{"trait":{{"library":{{"tag":"dependency","alias":"vorton_core"}},"path":["Fn"],"kind":"trait"}},"arguments":[],"associated_bindings":[]}}}}"#
+    );
+    let shape = format!(
+        r#"{{"tag":"callable_shape","subject":{formal},"shape":{{"parameters":[],"result":{{"tag":"primitive","name":"Unit"}}}}}}"#
+    );
+    let record = format!(
+        r#"{{"target":{target},"type_parameters":["F"],"set":{{"generic_requirements":[{predicate},{shape}],"parameter_modes":[{{"parameter":{{"tag":"position","index":0}},"mode":{{"tag":"callable_use","callable":{formal}}}}}]}}}}"#
+    );
+    let source = "fn apply<F>(callback: &F) -> Unit { callback(); } fn console() -> Unit with {console} {} fn use_it() with {console} { apply(console); }";
+    check_project(&project(source), &BTreeMap::from([("app".to_owned(), APP)]), vec![contract(&document(&record))]).expect("an unspecified contract shape row relates to this exact callback instead of defaulting to pure");
+}
+
+#[test]
+fn contract_receiver_types_precede_method_and_field_constraints() {
+    let source = "struct Point { x: Int } impl Point { fn read(self: &Self) -> Int { self.x } } fn method(value) -> Int { value.read() } fn field(value) -> Int { value.x }";
+    let point = r#"{"tag":"nominal","declaration":{"library":{"tag":"self"},"path":["Point"],"kind":"struct"},"arguments":[]}"#;
+    let records = ["method", "field"].into_iter().map(|name| format!(r#"{{"target":{},"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{point}}}]}}}}"#, function_target(name))).collect::<Vec<_>>().join(",");
+    check_project(&project(source), &BTreeMap::from([("app".to_owned(), APP)]), vec![contract(&document(&records))]).expect("an explicit contract receiver is available to selection without specializing an unconstrained identity function");
+}
+
+#[test]
+fn trait_owner_actuals_can_be_inferred_from_the_shared_call_constraints() {
+    check(r#"
+trait Accept<T> { fn accept(self: &Self, value: move T) -> T; }
+struct A {}
+impl<T> Accept<T> for A { fn accept(self: &Self, value: move T) -> T { value } }
+trait P {} impl P for A {}
+fn make<T: P>() -> T { make() }
+trait Factory { fn create() -> A; }
+impl Factory for A { fn create() { make() } }
+fn inherited_result() -> A { A::create() }
+fn use_it() -> A { let number: Int = A {}.accept(1); let flag: Bool = A {}.accept(true); make() }
+"#).expect("owner actuals and return constraints use the one call substitution before evidence selection");
+}
+
+#[test]
+fn dictionary_selection_and_structured_where_domains_are_observable() {
+    check(r#"
+trait Read { fn read(self: &Self) -> Int; }
+struct A {}
+impl Read for A { fn read(self: &Self) -> Int with {console} { 1 } }
+impl A { fn read(self: &Self) -> Int with {fs} { 2 } }
+fn dictionary<T: Read>(value: &T) -> Int { value.read() }
+fn via_dictionary() -> Int with {console} { dictionary(A {}) }
+fn via_inherent() -> Int with {fs} { A {}.read() }
+trait Pair {} impl<T> Pair for T {}
+trait Has {}
+trait Next { type Item; }
+impl Next for A { type Item = Int; }
+struct Wrap<T> { value: T }
+impl<T: Next> Has for Wrap<T> where (T::Item, Int): Pair {}
+fn require<T: Has>(value: &T) {}
+fn where_subject() { require(Wrap { value: A {} }); }
+"#).expect("actual inherent spelling cannot replace the generic dictionary; where tuple/projection is proved");
+    for (source, message) in [
+        (
+            "trait Read { fn read(self: &Self) -> Int; } trait Other { fn read(self: &Self) -> Int; } struct A {} impl Read for A { fn read(self: &Self) -> Int { 1 } } impl Other for A { fn read(self: &Self) -> Int { 2 } } fn ambiguous() { A {}.read(); }",
+            "ambiguous",
+        ),
+        (
+            "trait Read { fn read<T>(self: &Self, value: &T) -> Int; } trait Extra {} struct A {} impl Read for A { fn read<U: Extra>(self: &Self, value: &U) -> Int { 1 } }",
+            "no evidence",
+        ),
+        (
+            "trait P {} struct A {} impl<T> P for T {} impl P for A {}",
+            "overlapping",
+        ),
+        (
+            "trait Pair {} trait Has {} struct Wrap<T> { value: T } impl<T> Has for Wrap<T> where (T, Int): Pair {} fn need<T: Has>(value: &T) {} fn bad() { need(Wrap { value: 1 }); }",
+            "no evidence",
+        ),
+    ] {
+        let failure = error(source);
+        assert!(failure.message.contains(message), "{failure:?}");
+    }
+}
+
+#[test]
+fn cross_library_impls_and_trait_aliases_keep_the_original_orphan_owner() {
+    let library = "pub trait Read { fn read(self: &Self) -> Int; } pub struct Foreign {}";
+    let make = |root: &str| ProjectSources {
+        entry: APP,
+        core: CORE,
+        libraries: with_core(BTreeMap::from([
+            (
+                APP,
+                LibrarySources {
+                    root: root.to_owned(),
+                    modules: BTreeMap::new(),
+                    dependencies: BTreeMap::from([("model".to_owned(), DEPENDENCY)]),
+                },
+            ),
+            (
+                DEPENDENCY,
+                LibrarySources {
+                    root: library.to_owned(),
+                    modules: BTreeMap::new(),
+                    dependencies: BTreeMap::new(),
+                },
+            ),
+        ])),
+    };
+    check_project(&make("pub use model::Read as Reading; pub struct Local {} impl Reading for Local { fn read(self: &Self) -> Int { 1 } } fn use_it() -> Int { Local {}.read() }"), &BTreeMap::new(), Vec::new()).expect("foreign trait with a local nominal target is a valid impl");
+    let failure = check_project(&make("pub use model::Read as Reading; use model::Foreign; type Alias = Foreign; impl Reading for Alias { fn read(self: &Self) -> Int { 1 } }"), &BTreeMap::new(), Vec::new()).unwrap_err();
+    assert!(failure.message.contains("orphan"), "{failure:?}");
+}
+
+#[test]
+fn inherent_associated_selection_checks_its_owner_domain() {
+    check("trait P {} struct A {} impl P for A {} struct Wrap<T> { value: T } impl<T: P> Wrap<T> { type Item = Int; } type Good = Wrap<A>; fn accept(value: &Good::Item) -> Int { value } fn use_it() -> Int { accept(1) }").expect("inherent associated selection uses its checked owner applicability");
+    let failure = error(
+        "trait P {} struct Wrap<T> { value: T } impl<T: P> Wrap<T> { type Item = Int; } type Bad = Wrap<Int>; fn accept(value: &Bad::Item) -> Int { value }",
+    );
+    assert!(failure.message.contains("no evidence"), "{failure:?}");
+}
+
+#[test]
+fn associated_bindings_normalize_in_signatures_callback_shapes_and_effects() {
+    check(r#"
+trait Has { type Item; }
+struct A {} impl Has for A { type Item = Int; }
+fn from_bound<T: Has<Item = Int>>(value: &T::Item) -> Int { value + 1 }
+struct Box<T: Has> { value: T::Item }
+fn field(value: &Box<A>) -> Int { value.value }
+fn construct() -> Box<A> { Box { value: 1 } }
+fn provider<T: Has>(owner: &T, value: &T::Item) -> Unit with {} {}
+fn take<F: Fn + fn(&A, &Int) -> Unit with {}>(callback: call F) { callback(A {}, 1); }
+fn callback() { take(provider); }
+fn source() with {fail<Int>} {}
+fn projected_effect() with {fail<A::Item>} { source(); }
+"#).expect("associated equality and selected concrete projections are normalized before their consumers");
 }

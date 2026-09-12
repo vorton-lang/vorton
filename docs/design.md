@@ -61,9 +61,9 @@ Language intrinsic declaration 使用独立 `Language` origin，不通过隐藏 
 
 `prepare_project` 直接消费 owned `ResolvedProject`，以 exact declaration identity 检查 supertrait 目标类别、trait inheritance graph 与 effect alias declaration graph，并返回 owned、opaque 的 `PreparedProject`。成功结果完整保留原项目，只额外承载这些声明不变量已经成立的状态；graph adjacency 与 traversal state 只是准备期间的临时视图。它不形成 effective signature、展开后的 alias、完整 Checker 结果、接口 S 或 TypedHIR，也不重新执行 Parser 或 Resolver。
 
-`check_project` 从同一 `ProjectSources` 依次执行既有 Resolver 与 declaration preparation，建立当前受支持的 source header、formal、名义声明及非泛型 alias 规范类型，再绑定选定 contract。它从 exact direct-call graph 建立 callable SCC；每组 body 各生成一次 constraints 与 typed draft，组内调用复用 monomorphic provisional 类型，组外调用实例化已经发布的 scheme。组内调用以 exact callee 关联同一未发布 binding；参数、返回和 body 的实际类型需求在 shared type 图中共同闭合。全部约束成立后才 generalize，并保留每个 binder 对原始 shared type identity 的对应；final-zonk 从该对应形成递归 actual mapping、冻结 body 并原子发布全组，不从最终类型逆推关联。契约 path 只消费 `ResolvedProject` 内部冻结的 module/namespace binding、真实直接依赖边和 exact entity；该 carrier 不公开名称查询 API，也不重新运行 Parser、Resolver、body inference 或 import fixed-point。失败不返回部分结果。
+`check_project` 从同一 `ProjectSources` 依次执行既有 Resolver 与 declaration preparation，建立当前受支持的 source header、formal、名义声明及非泛型 alias 规范类型，再绑定选定 contract。每个 body 先生成一次 constraints 与 typed draft，再从普通函数、方法和具名函数值 provider 的真实依赖建立 callable SCC；已选方法与 effect 引用可以补充未发布组的依赖。组内调用复用 monomorphic provisional 类型，组外调用实例化已经发布的 scheme。组内调用以 exact callee 关联同一未发布 binding；参数、返回和 body 的实际类型需求在 shared type 图中共同闭合。全部约束成立后才 generalize，并保留每个 binder 对原始 shared type identity 的对应；final-zonk 从该对应形成递归 actual mapping、冻结 body 并原子发布全组，不从最终类型逆推关联。契约 path 只消费 `ResolvedProject` 内部冻结的 module/namespace binding、真实直接依赖边和 exact entity；该 carrier 不公开名称查询 API，也不重新运行 Parser、Resolver、body inference 或 import fixed-point。失败不返回部分结果。
 
-当前 `CheckedProject` 是 owned、opaque 的窄 Checker carrier。它承载纯值 HM 子集实际形成的 closed callable scheme、每次已发布调用的唯一 type mapping、组内 provisional call 关系、normalized type、名义 owner formal/actual、按源码顺序的 typed construction 与 exact field selection、interpreted literal、exact direct callee、Borrow/Move parameter convention、whole-binding use 与实际成员空清理状态闭合、empty effect 事实与每个函数唯一的 typed body；成功结果没有 raw metavariable。Option、Ordering 的名义声明与构造进入同一类型模型；其余 Resolver 已验证的 exact core 协议仍只保留既有依赖 profile，额外 core declaration 仍走普通 Checker 边界。这个结果不是完整接口 S 或最终 TypedHIR，不能向下游暗示尚未检查的 Trait/impl、非空 effect、pattern、partial move、完整 resource 或 callable 事实。
+当前 `CheckedProject` 是 owned、opaque 的 Checker carrier。普通函数与方法共享一次 body draft、真实递归组和 type/effect 实例化。成功结果保存闭合 callable scheme、Trait/impl/projection selection 与 evidence、唯一调用 mapping、normalized type、名义 owner formal/actual、typed construction/field、interpreted literal、Borrow/Move/shared Fn convention、实际 effect row，以及 normal/return/failure 出口的 live-owner 和 pending-temporary 清理义务。正式 method application、selected call 和 full destruction 关系可以保留；raw metavariable、待选 impl 和未定 mode 不得保留。Primitive comparison 使用同一 exact core 选择事实；不开放捕获 closure、handler/catch、用户 Drop/Rc/Weak、partial move、完整资源操作、接口 S 查询或最终 TypedHIR。
 
 名称选择先在每个适用 namespace 内应用词法 shadowing，再按 path 的 root、每个中间 container 与 terminal category 过滤并合并候选。不能用不合法的跨 namespace candidate 抢占合法结果，也不能为得到结果而回退到同 namespace 已被遮蔽的 declaration。Enum constructor、custom-effect operation 与已知 named construction/pattern field 的 owner 集合已经闭合，缺失或类别错误必须在 Resolver 拒绝；普通 field/method receiver 与 type-relative impl/associated selection 仍是 Checker obligation。Effect 与 effect alias 不是 Type/Value 的 type-relative `::` base。
 
@@ -135,9 +135,9 @@ CoreHIR validator 拒绝 surface-only variant、未选择 callee/impl/evidence�
 | `Drop` lvalue | Ownership move，源立即失效 |
 | Scalar value | Copy，源保持可用 |
 
-显式 `Clone` 产生递归独立副本，不等同于 share。包含资源的值保持唯一 ownership；`Drop` 在 scope-end 执行。编译器只可在类型无用户 `Drop` 且释放时点不可被 `Weak` 观察时提前释放。
+显式 `Clone` 的值关系与 effect 由对应实现定义，不普遍承诺递归独立副本。包含资源的值保持唯一 ownership；`Drop` 在 scope-end 执行。编译器只可在类型无用户 `Drop` 且释放时点不可被 `Weak` 观察时提前释放。
 
-拥有用户 `Drop` 的类型不能同时实现 `Clone`。Generic `Drop` impl 若需要在销毁时取得 runtime trait evidence，则在没有显式 object-layout evidence contract 时被拒绝；不需要 runtime evidence 的 unbounded generic `Drop` 仍合法。
+拥有用户 `Drop` 的类型不能具有 `Copy` 资格；合法 `Clone` 实现仍须满足其值关系与实际 effect。Generic `Drop` impl 若需要在销毁时取得 runtime trait evidence，则在没有显式 object-layout evidence contract 时被拒绝；不需要 runtime evidence 的 unbounded generic `Drop` 仍合法。
 
 同一 scope 按 binding 逆序 Drop；aggregate 字段按声明顺序释放，集合元素按其规范顺序释放。Normal return、failure、`break`、`continue` 与 handler exit 都必须执行相同 ownership cleanup。Panic 直接终止程序，不要求建立 unwind cleanup edge，也不保证尚存值的 `Drop`；panic 前已经完成的 mutation、IO 与资源移交保持发生。环由显式 weak reference 打破，不引入 cycle collector。
 

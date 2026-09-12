@@ -327,7 +327,9 @@ trait Pipeline {
 
 ## Drop 边界
 
-用户 `Drop::drop` 的最终推断 effect row 必须为空；`fail`、system effect、handled effect 与逃逸的 `mut` 均禁止。编译器生成的字段递归释放、RC deallocation 与已验证 intrinsic cleanup 不属于用户 effect body。
+用户 `Drop::drop` 可以产生 system effect 与按既有规则未消除的 mut；最终外逸 row 不得包含 fail、handled effect 或 unsafe obligation。完整销毁的摘要包括 hook、剩余字段/元素和可能的最后一个 Rc owner 清理，不能用单个 `Drop::drop` scheme 替代。发生清理的 callable 必须计入这些 may-effects，`with {}` 不能隐藏它们；纯内存释放与 RC bookkeeping 的既有分类不变。
+
+当前 Checker 只开放无用户 Drop/Rc/Weak 的整值清理以及泛型 full_destruction(T) 关系，尚不接受用户 Drop 实现。不能证明无退出的调用需保留 caller 的清理：只有 handled atom 的操作也可能因动态 handler arm 失败而离开挂起计算。先前已求值但尚未移交的 Move temporary 归 caller；进入 callee 后的 Move 值归 callee。物理 cleanup 指令由后续资源阶段安排，不得在那里补改公开 effect。
 
 ## Canonical 边界
 

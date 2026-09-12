@@ -1570,6 +1570,21 @@ impl ResolverState {
             kind: owner_kind,
             name: "impl".to_owned(),
         };
+        let impl_identity = impl_id(module, source, declaration.span, owner_kind);
+        self.entities.insert(
+            impl_identity.clone(),
+            Entity {
+                declared_at: Some(OriginRef {
+                    library: module.library(),
+                    source: source.clone(),
+                    span: declaration.span,
+                }),
+                public: false,
+                owner: None,
+                members: BTreeMap::new(),
+                shape: EntityShape::Plain,
+            },
+        );
         let mut seen = BTreeMap::<(Namespace, String), OriginRef>::new();
         for member in members {
             let (name, namespace, kind) = match &member.kind {
@@ -1609,12 +1624,19 @@ impl ResolverState {
                 Some(owner.clone()),
             );
             diagnostics.extend(type_declaration_name_diagnostic(&id));
+            self.entities
+                .get_mut(&impl_identity)
+                .expect("impl owner indexed")
+                .members
+                .entry(id.name.clone())
+                .or_default()
+                .push(id.clone());
             self.entities.insert(
                 id,
                 Entity {
                     declared_at: Some(origin),
                     public: member.visibility.is_some(),
-                    owner: None,
+                    owner: Some(impl_identity.clone()),
                     members: BTreeMap::new(),
                     shape: EntityShape::Plain,
                 },
@@ -1727,7 +1749,7 @@ impl ResolverState {
             Entity {
                 declared_at: None,
                 public: false,
-                owner: None,
+                owner: Some(impl_id(module, source, span, kind)),
                 members: BTreeMap::new(),
                 shape: EntityShape::Plain,
             },
@@ -3115,8 +3137,21 @@ impl<'state> BodyResolver<'state> {
         &mut self,
         declaration: &Declaration,
     ) -> Result<ResolvedDeclaration, ProjectDiagnostic> {
-        let entity =
-            declaration_entity(&self.module, &self.source, declaration).map(|value| value.0);
+        let entity = match &declaration.kind {
+            DeclarationKind::InherentImpl(_) => Some(impl_id(
+                &self.module,
+                &self.source,
+                declaration.span,
+                EntityKind::InherentImpl,
+            )),
+            DeclarationKind::TraitImpl(_) => Some(impl_id(
+                &self.module,
+                &self.source,
+                declaration.span,
+                EntityKind::TraitImpl,
+            )),
+            _ => declaration_entity(&self.module, &self.source, declaration).map(|value| value.0),
+        };
         let public = match &declaration.kind {
             DeclarationKind::Function(declared) => declared.visibility.is_some(),
             DeclarationKind::Struct(declared) => declared.visibility.is_some(),
@@ -6164,6 +6199,10 @@ fn source_id(
         }),
         owner,
     }
+}
+
+fn impl_id(module: &ModuleRef, source: &SourceRef, span: Span, kind: EntityKind) -> EntityId {
+    source_id(module, source, span, Namespace::Member, kind, "impl", None)
 }
 
 fn owner_key_from_entity(entity: &EntityId) -> OwnerKey {
