@@ -1516,6 +1516,27 @@ fn imported() -> Option<Int> { Some(1) }
 }
 
 #[test]
+fn finite_repeated_nominal_owners_clean_up_without_accepting_recursive_payloads() {
+    for source in [
+        "struct Box<T> { value: T } fn drop_box(value: move Box<Box<Int>>) {}",
+        "struct Box<T> { value: T } fn wrap<T>(value: T) -> Box<T> { Box { value } } fn drop_call() { wrap(wrap(1)); }",
+    ] {
+        check(source).expect("finite nominal nesting contains only pure actual members");
+    }
+    for source in [
+        "struct Box<T> { value: T } fn drop_box<T>(value: move Box<Box<T>>) {}",
+        "struct Grow<T> { next: Grow<(T, T)> } fn drop_growing(value: move Grow<Int>) {}",
+        "struct Box<T> { value: T } struct Recursive { next: Box<Recursive> } fn drop_recursive(value: move Recursive) {}",
+    ] {
+        assert_eq!(
+            error(source).kind,
+            CheckDiagnosticKind::Unsupported,
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn nominal_identity_arity_members_and_payload_types_are_checked() {
     for source in [
         "struct A { x: Int } struct B { x: Int } fn bad(value: A) -> B { value }",

@@ -2963,37 +2963,47 @@ fn has_empty_cleanup(ty: &CheckedType, nominals: &BTreeMap<EntityId, NominalDefi
     fn visit(
         ty: &CheckedType,
         nominals: &BTreeMap<EntityId, NominalDefinition>,
+        formal_cleanup: &BTreeMap<TypeFormal, bool>,
         active: &mut BTreeSet<EntityId>,
     ) -> bool {
         match ty {
-            CheckedType::Tuple(elements) => elements.iter().all(|ty| visit(ty, nominals, active)),
+            CheckedType::Formal(formal) => formal_cleanup.get(formal).copied().unwrap_or(false),
+            CheckedType::Tuple(elements) => elements
+                .iter()
+                .all(|ty| visit(ty, nominals, formal_cleanup, active)),
             CheckedType::Nominal(nominal) => {
-                // A declaration edge can recurse with growing actuals. Bound this
-                // proof by owner identity; recursive formation/cleanup stays unsupported.
-                if !active.insert(nominal.declaration.clone()) {
+                if active.contains(&nominal.declaration) {
                     return false;
                 }
-                let replacements = nominal.replacements(nominals);
-                let empty =
-                    nominals[&nominal.declaration]
-                        .constructors
-                        .values()
-                        .all(|constructor| {
-                            constructor.fields.iter().all(|field| {
-                                visit(
-                                    &instantiate_type(&field.ty, &replacements),
-                                    nominals,
-                                    active,
-                                )
-                            })
-                        });
+                let definition = &nominals[&nominal.declaration];
+                // Actuals are finite type operands, not recursive field edges.
+                // Close their cleanup facts before entering this declaration;
+                // fields then consume only the formals they actually store.
+                let actual_cleanup = definition
+                    .formals
+                    .iter()
+                    .cloned()
+                    .zip(
+                        nominal
+                            .arguments
+                            .iter()
+                            .map(|actual| visit(actual, nominals, formal_cleanup, active)),
+                    )
+                    .collect();
+                active.insert(nominal.declaration.clone());
+                let empty = definition.constructors.values().all(|constructor| {
+                    constructor
+                        .fields
+                        .iter()
+                        .all(|field| visit(&field.ty, nominals, &actual_cleanup, active))
+                });
                 active.remove(&nominal.declaration);
                 empty
             }
             other => is_copy_type(other),
         }
     }
-    visit(ty, nominals, &mut BTreeSet::new())
+    visit(ty, nominals, &BTreeMap::new(), &mut BTreeSet::new())
 }
 
 #[allow(dead_code)]
