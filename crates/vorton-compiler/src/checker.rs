@@ -1329,7 +1329,6 @@ fn close_typed_expr(expression: TypedExpr, closure: &BodyClosure<'_>) -> TypedEx
         other => other,
     };
     TypedExpr {
-        cleanup_empty: expression.cleanup_empty,
         span: expression.span,
         ty: closure.close_type(&expression.ty),
         kind,
@@ -2959,51 +2958,108 @@ fn is_copy_type(ty: &CheckedType) -> bool {
     }
 }
 
-fn has_empty_cleanup(ty: &CheckedType, nominals: &BTreeMap<EntityId, NominalDefinition>) -> bool {
-    fn visit(
-        ty: &CheckedType,
-        nominals: &BTreeMap<EntityId, NominalDefinition>,
-        formal_cleanup: &BTreeMap<TypeFormal, bool>,
-        active: &mut BTreeSet<EntityId>,
-    ) -> bool {
-        match ty {
-            CheckedType::Formal(formal) => formal_cleanup.get(formal).copied().unwrap_or(false),
-            CheckedType::Tuple(elements) => elements
-                .iter()
-                .all(|ty| visit(ty, nominals, formal_cleanup, active)),
-            CheckedType::Nominal(nominal) => {
-                if active.contains(&nominal.declaration) {
-                    return false;
+fn cleanup_is_empty(
+    requirements: &[CheckedType],
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
+) -> bool {
+    enum Frame<'a> {
+        Type(&'a CheckedType),
+        Combine(usize),
+        EnterNominal(&'a NominalType),
+        ExitNominal(&'a EntityId, usize),
+    }
+
+    // This proof runs only at an owning cleanup boundary. All traversal state
+    // lives in these work vectors, including nominal fields and actuals.
+    let mut frames = vec![Frame::Combine(requirements.len())];
+    frames.extend(requirements.iter().rev().map(Frame::Type));
+    let mut values = Vec::new();
+    let mut environments = vec![BTreeMap::new()];
+    let mut active = BTreeSet::new();
+    while let Some(frame) = frames.pop() {
+        match frame {
+            Frame::Type(ty) => match ty {
+                CheckedType::Formal(formal) => values.push(
+                    environments
+                        .last()
+                        .expect("a cleanup formal has a current environment")
+                        .get(formal.as_ref())
+                        .copied()
+                        .unwrap_or(false),
+                ),
+                CheckedType::Tuple(elements) => {
+                    frames.push(Frame::Combine(elements.len()));
+                    frames.extend(elements.iter().rev().map(Frame::Type));
                 }
-                let definition = &nominals[&nominal.declaration];
-                // Actuals are finite type operands, not recursive field edges.
-                // Close their cleanup facts before entering this declaration;
-                // fields then consume only the formals they actually store.
-                let actual_cleanup = definition
-                    .formals
-                    .iter()
-                    .cloned()
-                    .zip(
-                        nominal
-                            .arguments
-                            .iter()
-                            .map(|actual| visit(actual, nominals, formal_cleanup, active)),
-                    )
-                    .collect();
-                active.insert(nominal.declaration.clone());
-                let empty = definition.constructors.values().all(|constructor| {
-                    constructor
-                        .fields
-                        .iter()
-                        .all(|field| visit(&field.ty, nominals, &actual_cleanup, active))
-                });
-                active.remove(&nominal.declaration);
-                empty
+                CheckedType::Nominal(nominal) => {
+                    if active.contains(&nominal.declaration) {
+                        values.push(false);
+                    } else {
+                        // Finite actual operands close before this declaration
+                        // enters the active field path. This keeps Box<Box<Int>>
+                        // distinct from a recursive declaration edge.
+                        frames.push(Frame::EnterNominal(nominal));
+                        frames.extend(nominal.arguments.iter().rev().map(Frame::Type));
+                    }
+                }
+                CheckedType::Infer(_) => values.push(false),
+                CheckedType::Int
+                | CheckedType::Float
+                | CheckedType::Bool
+                | CheckedType::Unit
+                | CheckedType::Never => values.push(true),
+            },
+            Frame::Combine(count) => {
+                let start = values
+                    .len()
+                    .checked_sub(count)
+                    .expect("each cleanup operand produces one fact");
+                let empty = values[start..].iter().all(|empty| *empty);
+                values.truncate(start);
+                values.push(empty);
             }
-            other => is_copy_type(other),
+            Frame::EnterNominal(nominal) => {
+                let definition = &nominals[&nominal.declaration];
+                let first = values
+                    .len()
+                    .checked_sub(nominal.arguments.len())
+                    .expect("nominal actuals have closed cleanup facts");
+                environments.push(
+                    definition
+                        .formals
+                        .iter()
+                        .cloned()
+                        .zip(values.drain(first..))
+                        .collect(),
+                );
+                active.insert(nominal.declaration.clone());
+                let field_count = definition
+                    .constructors
+                    .values()
+                    .map(|constructor| constructor.fields.len())
+                    .sum();
+                frames.push(Frame::ExitNominal(&nominal.declaration, field_count));
+                for constructor in definition.constructors.values().rev() {
+                    frames.extend(
+                        constructor
+                            .fields
+                            .iter()
+                            .rev()
+                            .map(|field| Frame::Type(&field.ty)),
+                    );
+                }
+            }
+            Frame::ExitNominal(declaration, count) => {
+                active.remove(declaration);
+                environments.pop();
+                frames.push(Frame::Combine(count));
+            }
         }
     }
-    visit(ty, nominals, &BTreeMap::new(), &mut BTreeSet::new())
+    let [empty] = values.as_slice() else {
+        unreachable!("a cleanup demand produces one final fact")
+    };
+    *empty
 }
 
 #[allow(dead_code)]
@@ -4621,7 +4677,7 @@ enum Availability {
 
 #[derive(Clone)]
 struct BindingUsage {
-    cleanup_empty: bool,
+    cleanup: Vec<CheckedType>,
     ownership: OwnershipKind,
     availability: Availability,
     origin: OriginRef,
@@ -4630,7 +4686,22 @@ struct BindingUsage {
 #[derive(Clone, Default)]
 struct UsageState {
     bindings: BTreeMap<EntityId, BindingUsage>,
-    temporaries: Vec<OriginRef>,
+    temporaries: Vec<PendingCleanup>,
+}
+
+#[derive(Clone)]
+struct PendingCleanup {
+    origin: OriginRef,
+    types: Vec<CheckedType>,
+}
+
+impl UsageState {
+    fn take_temporaries(&mut self, checkpoint: usize) -> Vec<CheckedType> {
+        self.temporaries
+            .drain(checkpoint..)
+            .flat_map(|temporary| temporary.types)
+            .collect()
+    }
 }
 
 fn validate_whole_value_use(
@@ -4657,7 +4728,11 @@ fn validate_whole_value_use(
             state.bindings.insert(
                 parameter.binding.clone(),
                 BindingUsage {
-                    cleanup_empty: has_empty_cleanup(&inference.resolve(&parameter.ty), nominals),
+                    cleanup: if mode == ParameterMode::Move {
+                        vec![inference.resolve(&parameter.ty)]
+                    } else {
+                        Vec::new()
+                    },
                     ownership: if mode == ParameterMode::Move {
                         OwnershipKind::Owned
                     } else {
@@ -4680,7 +4755,7 @@ fn validate_whole_value_use(
             nominals,
         )?;
         if let Some(state) = state {
-            validate_normal_exit(&state, header)?;
+            validate_normal_exit(&state, header, nominals)?;
         }
     }
     Ok(())
@@ -4717,13 +4792,13 @@ fn validate_usage_block(
                 if let Some(next) = &mut continuation
                     && !is_copy_type(&inference.resolve(ty))
                 {
-                    next.temporaries.truncate(temporary_checkpoint);
+                    let cleanup = next.take_temporaries(temporary_checkpoint);
                     let identity = binding.as_ref().clone();
                     locals.push(identity.clone());
                     next.bindings.insert(
                         identity.clone(),
                         BindingUsage {
-                            cleanup_empty: value.cleanup_empty,
+                            cleanup,
                             ownership: OwnershipKind::Owned,
                             availability: Availability::Live,
                             origin: entity_origin(&identity)
@@ -4747,7 +4822,7 @@ fn validate_usage_block(
                     Some(state)
                 };
                 if let Some(exit) = &continuation {
-                    validate_normal_exit(exit, function)?;
+                    validate_normal_exit(exit, function, nominals)?;
                 }
                 continuation = None;
             }
@@ -4782,7 +4857,7 @@ fn validate_usage_block(
         close_unreachable_expr(tail, tail_context, headers, inference);
     }
     if let Some(state) = &mut continuation {
-        validate_scope_cleanup(state, &locals, function)?;
+        validate_scope_cleanup(state, &locals, function, nominals)?;
         for local in locals {
             state.bindings.remove(&local);
         }
@@ -4805,7 +4880,6 @@ fn validate_usage_expr(
     };
     let expression_span = expression.span;
     let expression_type = inference.resolve(&expression.ty);
-    expression.cleanup_empty = has_empty_cleanup(&expression_type, nominals);
     let temporary_checkpoint = state.temporaries.len();
     match &mut expression.kind {
         TypedExprKind::Reference { binding, use_kind } => {
@@ -4815,7 +4889,6 @@ fn validate_usage_expr(
                 let usage = state.bindings.get_mut(binding.as_ref()).expect(
                     "every non-Copy typed reference names a tracked parameter or local owner",
                 );
-                expression.cleanup_empty = usage.cleanup_empty;
                 match usage.availability {
                     Availability::Moved => {
                         return Err(source_diagnostic(
@@ -4844,10 +4917,11 @@ fn validate_usage_expr(
                     {
                         usage.availability = Availability::Moved;
                         *use_kind = Some(ValueUseKind::Move);
-                        if matches!(context, ValueContext::Consume) && !expression.cleanup_empty {
-                            state
-                                .temporaries
-                                .push(function.context.origin(expression_span));
+                        if matches!(context, ValueContext::Consume) && !usage.cleanup.is_empty() {
+                            state.temporaries.push(PendingCleanup {
+                                origin: function.context.origin(expression_span),
+                                types: usage.cleanup.clone(),
+                            });
                         }
                     }
                     ValueContext::Consume | ValueContext::Return => {
@@ -4859,7 +4933,8 @@ fn validate_usage_expr(
                         ));
                     }
                     ValueContext::Discard
-                        if usage.ownership == OwnershipKind::Owned && !usage.cleanup_empty =>
+                        if usage.ownership == OwnershipKind::Owned
+                            && !cleanup_is_empty(&usage.cleanup, nominals) =>
                     {
                         return Err(source_diagnostic(
                             CheckDiagnosticKind::Unsupported,
@@ -4884,7 +4959,6 @@ fn validate_usage_expr(
                 inference,
                 nominals,
             )?;
-            expression.cleanup_empty = inner.cleanup_empty;
             return Ok(next);
         }
         TypedExprKind::Tuple(elements) => {
@@ -4904,21 +4978,15 @@ fn validate_usage_expr(
                 return Ok(None);
             };
             state = next;
-            expression.cleanup_empty = elements.iter().all(|element| element.cleanup_empty);
-            state.temporaries.truncate(temporary_checkpoint);
-            if !expression.cleanup_empty {
-                match context {
-                    ValueContext::Consume => {
-                        state
-                            .temporaries
-                            .push(function.context.origin(expression_span));
-                    }
-                    ValueContext::Return => {}
-                    ValueContext::Borrow | ValueContext::Discard => {
-                        return Err(temporary_cleanup_diagnostic(expression_span, function));
-                    }
-                }
-            }
+            let cleanup = state.take_temporaries(temporary_checkpoint);
+            use_temporary(
+                &mut state,
+                cleanup,
+                context,
+                expression_span,
+                function,
+                nominals,
+            )?;
         }
         TypedExprKind::Construct(construction) => {
             let mut continuation = Some(state);
@@ -4937,22 +5005,15 @@ fn validate_usage_expr(
                 return Ok(None);
             };
             state = next;
-            expression.cleanup_empty = construction
-                .fields
-                .iter()
-                .all(|field| field.value.cleanup_empty);
-            state.temporaries.truncate(temporary_checkpoint);
-            if !expression.cleanup_empty {
-                match context {
-                    ValueContext::Consume => state
-                        .temporaries
-                        .push(function.context.origin(expression_span)),
-                    ValueContext::Return => {}
-                    ValueContext::Borrow | ValueContext::Discard => {
-                        return Err(temporary_cleanup_diagnostic(expression_span, function));
-                    }
-                }
-            }
+            let cleanup = state.take_temporaries(temporary_checkpoint);
+            use_temporary(
+                &mut state,
+                cleanup,
+                context,
+                expression_span,
+                function,
+                nominals,
+            )?;
         }
         TypedExprKind::Block(block) => {
             let next = validate_usage_block(
@@ -4964,7 +5025,6 @@ fn validate_usage_expr(
                 inference,
                 nominals,
             )?;
-            expression.cleanup_empty = block.tail.as_ref().is_none_or(|tail| tail.cleanup_empty);
             return Ok(next);
         }
         TypedExprKind::If {
@@ -5007,30 +5067,16 @@ fn validate_usage_expr(
             } else {
                 after_condition
             };
-            expression.cleanup_empty = else_branch.is_none()
-                || ((then_state.is_none()
-                    || then_branch
-                        .tail
-                        .as_ref()
-                        .is_none_or(|tail| tail.cleanup_empty))
-                    && (else_state.is_none()
-                        || else_branch
-                            .as_ref()
-                            .is_none_or(|branch| branch.cleanup_empty)));
-            // Branch values can widen from a Copy tuple containing Never to a
-            // non-Copy result. Transfer each actual branch value into one joined
-            // result slot, independently of the branch's temporary count.
+            // Each continuing branch contributes its actual result obligations.
+            // Join them before publishing a single result temporary; no cleanup
+            // proof is needed when the result is simply moved onward.
+            let mut cleanup = Vec::new();
             for branch in [&mut then_state, &mut else_state].into_iter().flatten() {
-                branch.temporaries.truncate(temporary_checkpoint);
+                cleanup.extend(branch.take_temporaries(temporary_checkpoint));
             }
             let mut joined = merge_usage_states(then_state, else_state);
-            if let Some(state) = &mut joined
-                && matches!(context, ValueContext::Consume)
-                && !expression.cleanup_empty
-            {
-                state
-                    .temporaries
-                    .push(function.context.origin(expression_span));
+            if let Some(state) = &mut joined {
+                use_temporary(state, cleanup, context, expression_span, function, nominals)?;
             }
             return Ok(joined);
         }
@@ -5140,19 +5186,19 @@ fn validate_usage_expr(
             if expression_type == CheckedType::Never {
                 return Ok(None);
             }
-            if !expression.cleanup_empty {
-                match context {
-                    ValueContext::Consume => {
-                        state
-                            .temporaries
-                            .push(function.context.origin(expression_span));
-                    }
-                    ValueContext::Return => {}
-                    ValueContext::Borrow | ValueContext::Discard => {
-                        return Err(temporary_cleanup_diagnostic(expression_span, function));
-                    }
-                }
-            }
+            let cleanup = if is_copy_type(&expression_type) {
+                Vec::new()
+            } else {
+                vec![expression_type.clone()]
+            };
+            use_temporary(
+                &mut state,
+                cleanup,
+                context,
+                expression_span,
+                function,
+                nominals,
+            )?;
         }
         TypedExprKind::Field {
             receiver, use_kind, ..
@@ -5366,6 +5412,27 @@ fn close_unreachable_expr(
     }
 }
 
+fn use_temporary(
+    state: &mut UsageState,
+    cleanup: Vec<CheckedType>,
+    context: ValueContext,
+    span: Span,
+    function: &FunctionHeader,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
+) -> Result<(), CheckDiagnostic> {
+    match context {
+        ValueContext::Consume if !cleanup.is_empty() => state.temporaries.push(PendingCleanup {
+            origin: function.context.origin(span),
+            types: cleanup,
+        }),
+        ValueContext::Borrow | ValueContext::Discard if !cleanup_is_empty(&cleanup, nominals) => {
+            return Err(temporary_cleanup_diagnostic(span, function));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn temporary_cleanup_diagnostic(span: Span, function: &FunctionHeader) -> CheckDiagnostic {
     source_diagnostic(
         CheckDiagnosticKind::Unsupported,
@@ -5379,13 +5446,15 @@ fn validate_scope_cleanup(
     state: &UsageState,
     locals: &[EntityId],
     function: &FunctionHeader,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<(), CheckDiagnostic> {
     for local in locals.iter().rev() {
         let usage = state
             .bindings
             .get(local)
             .expect("a tracked non-Copy local remains in its lexical scope state");
-        if usage.availability != Availability::Moved && !usage.cleanup_empty {
+        if usage.availability != Availability::Moved && !cleanup_is_empty(&usage.cleanup, nominals)
+        {
             return Err(source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
                 "a generic local owner remains at scope exit and requires D(T) cleanup",
@@ -5400,19 +5469,25 @@ fn validate_scope_cleanup(
 fn validate_normal_exit(
     state: &UsageState,
     function: &FunctionHeader,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<(), CheckDiagnostic> {
-    if let Some(temporary) = state.temporaries.last() {
+    if let Some(temporary) = state
+        .temporaries
+        .iter()
+        .rev()
+        .find(|temporary| !cleanup_is_empty(&temporary.types, nominals))
+    {
         return Err(source_diagnostic(
             CheckDiagnosticKind::Unsupported,
             "a partially evaluated expression retains a generic temporary that requires D(T) cleanup",
-            temporary.clone(),
+            temporary.origin.clone(),
             vec![function.origin.clone()],
         ));
     }
     if let Some(usage) = state.bindings.values().find(|usage| {
         usage.ownership == OwnershipKind::Owned
             && usage.availability != Availability::Moved
-            && !usage.cleanup_empty
+            && !cleanup_is_empty(&usage.cleanup, nominals)
     }) {
         return Err(source_diagnostic(
             CheckDiagnosticKind::Unsupported,
@@ -5495,7 +5570,6 @@ enum TypedStatementKind {
 
 #[allow(dead_code)]
 struct TypedExpr {
-    cleanup_empty: bool,
     span: Span,
     ty: CheckedType,
     kind: TypedExprKind,
@@ -6068,7 +6142,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                     ));
                 };
                 Ok(TypedExpr {
-                    cleanup_empty: false,
                     span: expression.span,
                     ty: CheckedType::Int,
                     kind: TypedExprKind::Integer {
@@ -6090,20 +6163,17 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                     ));
                 };
                 Ok(TypedExpr {
-                    cleanup_empty: false,
                     span: expression.span,
                     ty: CheckedType::Float,
                     kind: TypedExprKind::Float(value.to_bits()),
                 })
             }
             ResolvedExprKind::Boolean(value) => Ok(TypedExpr {
-                cleanup_empty: false,
                 span: expression.span,
                 ty: CheckedType::Bool,
                 kind: TypedExprKind::Boolean(*value),
             }),
             ResolvedExprKind::Unit => Ok(TypedExpr {
-                cleanup_empty: false,
                 span: expression.span,
                 ty: CheckedType::Unit,
                 kind: TypedExprKind::Unit,
@@ -6127,7 +6197,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                     related: vec![self.origin(receiver.span)],
                 });
                 Ok(TypedExpr {
-                    cleanup_empty: false,
                     span: expression.span,
                     ty: result,
                     kind: TypedExprKind::Field {
@@ -6140,7 +6209,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             ResolvedExprKind::Parenthesized(inner) => {
                 let inner = self.check_expr(inner)?;
                 Ok(TypedExpr {
-                    cleanup_empty: false,
                     span: expression.span,
                     ty: inner.ty.clone(),
                     kind: TypedExprKind::Parenthesized(Box::new(inner)),
@@ -6160,7 +6228,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                     CheckedType::Tuple(typed.iter().map(|element| element.ty.clone()).collect())
                 };
                 Ok(TypedExpr {
-                    cleanup_empty: false,
                     span: expression.span,
                     ty,
                     kind: TypedExprKind::Tuple(typed),
@@ -6169,7 +6236,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             ResolvedExprKind::Block(block) => {
                 let block = self.check_block(block)?;
                 Ok(TypedExpr {
-                    cleanup_empty: false,
                     span: expression.span,
                     ty: block.ty.clone(),
                     kind: TypedExprKind::Block(Box::new(block)),
@@ -6232,7 +6298,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             ));
         };
         Ok(TypedExpr {
-            cleanup_empty: false,
             span: origin.span,
             ty: ty.clone(),
             kind: TypedExprKind::Reference {
@@ -6290,7 +6355,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             branch_type
         };
         Ok(TypedExpr {
-            cleanup_empty: false,
             span: origin.span,
             ty,
             kind: TypedExprKind::If {
@@ -6311,7 +6375,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             && let Some(literal_span) = minimum_integer_literal(operand)
         {
             return Ok(TypedExpr {
-                cleanup_empty: false,
                 span: origin.span,
                 ty: CheckedType::Int,
                 kind: TypedExprKind::Integer {
@@ -6362,7 +6425,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             }
         }
         Ok(TypedExpr {
-            cleanup_empty: false,
             span: origin.span,
             ty: self.inference.resolve(&operand.ty),
             kind: TypedExprKind::Unary {
@@ -6526,7 +6588,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             }
         };
         Ok(TypedExpr {
-            cleanup_empty: false,
             span: origin.span,
             ty,
             kind: TypedExprKind::Binary {
@@ -6706,7 +6767,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             return_type
         };
         Ok(TypedExpr {
-            cleanup_empty: false,
             span: origin.span,
             ty,
             kind: TypedExprKind::Call {
@@ -6757,7 +6817,6 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             result
         };
         Ok(TypedExpr {
-            cleanup_empty: false,
             span: origin.span,
             ty,
             kind: TypedExprKind::TupleField {
@@ -6954,7 +7013,6 @@ impl BodyChecker<'_, '_> {
             CheckedType::Nominal(Box::new(nominal.clone()))
         };
         TypedExpr {
-            cleanup_empty: false,
             span: origin.span,
             ty,
             kind: TypedExprKind::Construct(Box::new(TypedConstruction {

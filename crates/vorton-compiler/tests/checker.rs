@@ -1516,6 +1516,44 @@ fn imported() -> Option<Int> { Some(1) }
 }
 
 #[test]
+fn nominal_cleanup_handles_long_field_graphs_without_host_recursion() {
+    let count = 1024;
+    let ring = (0..count)
+        .map(|index| {
+            format!(
+                "struct Node{index} {{ next: Node{} }}\n",
+                (index + 1) % count
+            )
+        })
+        .collect::<String>();
+    check(&format!(
+        "{ring}
+        fn borrow(value: &Node0) {{}}
+        fn forward(value: Node0) -> Node0 {{ let next = value; next }}
+    "
+    ))
+    .expect("borrowing and whole transfer create no owning cleanup demand");
+    assert_eq!(
+        error(&format!("{ring} fn drop_recursive(value: move Node0) {{}}")).kind,
+        CheckDiagnosticKind::Unsupported,
+        "a real recursive cleanup obligation ends with a structured diagnostic",
+    );
+
+    let chain = (0..count)
+        .map(|index| {
+            let next = if index + 1 == count {
+                "Int".to_owned()
+            } else {
+                format!("Node{}", index + 1)
+            };
+            format!("struct Node{index} {{ next: {next} }}\n")
+        })
+        .collect::<String>();
+    check(&format!("{chain} fn drop_finite(value: move Node0) {{}}"))
+        .expect("actual pure cleanup walks all finite fields on an explicit work stack");
+}
+
+#[test]
 fn finite_repeated_nominal_owners_clean_up_without_accepting_recursive_payloads() {
     for source in [
         "struct Box<T> { value: T } fn drop_box(value: move Box<Box<Int>>) {}",
