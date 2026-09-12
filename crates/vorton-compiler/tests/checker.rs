@@ -847,6 +847,122 @@ fn function_formal(name: &str, index: u64) -> String {
 }
 
 #[test]
+fn contracted_scc_member_cannot_acquire_an_undeclared_peer_formal() {
+    for (left, parameters) in [
+        ("fn left(x) { right(x) }", ""),
+        (
+            "fn left<S>(x) { right(x) }",
+            r#", "type_parameters":["Alpha"]"#,
+        ),
+    ] {
+        let right = "fn right<T>(x: T) -> T { left(x) }";
+        let record = format!(
+            r#"{{"target":{}{parameters},"set":{{"generic_requirements":[]}}}}"#,
+            function_target("left")
+        );
+        for source in [format!("{left} {right}"), format!("{right} {left}")] {
+            let diagnostic = check_project(
+                &project(&source),
+                &BTreeMap::from([("app".to_owned(), APP)]),
+                vec![contract(&document(&record))],
+            )
+            .expect_err("a peer formal must correspond to a declared source/contract formal");
+            assert_eq!(diagnostic.kind, CheckDiagnosticKind::ContractConflict);
+            assert!(matches!(
+                diagnostic.primary,
+                Some(CheckOrigin::Contract { .. })
+            ));
+        }
+    }
+    let record = format!(
+        r#"{{"target":{},"type_parameters":["Alpha"],"set":{{"generic_requirements":[]}}}}"#,
+        function_target("left")
+    );
+    check_project(
+        &project("fn left<S>(x: S) -> S { right(x) } fn right<T>(x: T) -> T { left(x) }"),
+        &BTreeMap::from([("app".to_owned(), APP)]),
+        vec![contract(&document(&record))],
+    )
+    .expect("an SCC-equivalent formal is valid when source and contract declare it");
+}
+
+#[test]
+fn recursive_tuple_projection_waits_for_its_receiver_type() {
+    for (projected, base, step) in [
+        ("b(x).0", "(x, true)", "(a(x - 1), false)"),
+        (
+            "-(b(x).0).0",
+            "((x, true), false)",
+            "((a(x - 1), false), true)",
+        ),
+    ] {
+        let a = format!("fn a(x: Int) -> Int {{ {projected} }}");
+        let b = format!("fn b(x: Int) {{ if x == 0 {{ {base} }} else {{ {step} }} }}");
+        for source in [format!("{a} {b}"), format!("{b} {a}")] {
+            check(&source).expect("projection equations close before their numeric consumers");
+        }
+    }
+    for (index, message) in [(1, "incompatible"), (2, "outside a 2-element tuple")] {
+        let diagnostic = error(&format!(
+            "fn a(x: Int) -> Int {{ b(x).{index} }} \
+             fn b(x: Int) {{ if x == 0 {{ (x, true) }} else {{ (a(x - 1), false) }} }}"
+        ));
+        assert_eq!(diagnostic.kind, CheckDiagnosticKind::TypeMismatch);
+        assert!(diagnostic.message.contains(message));
+        let Some(CheckOrigin::Source(origin)) = diagnostic.primary else {
+            panic!("projection diagnostics retain the index origin")
+        };
+        assert_eq!((origin.span.start, origin.span.end), (27, 28));
+    }
+    assert_eq!(
+        error("fn unknown(x) { x.0 }").kind,
+        CheckDiagnosticKind::Unsupported
+    );
+}
+
+#[test]
+fn unit_if_discards_its_then_value_in_every_outer_context() {
+    for body in [
+        "if flag { x }",
+        "let result = if flag { x };",
+        "if flag { x };",
+    ] {
+        check(&format!("fn f<T>(flag: Bool, x: &T) -> Unit {{ {body} }}"))
+            .expect("discarding a borrowed then value does not transfer ownership");
+        assert_eq!(
+            error(&format!(
+                "fn f<T>(flag: Bool, x: move T) -> Unit {{ {body} }}"
+            ))
+            .kind,
+            CheckDiagnosticKind::Unsupported
+        );
+    }
+    assert_eq!(
+        error("fn make<T>() -> T { make() } fn f(flag: Bool) -> Unit { if flag { make() } }").kind,
+        CheckDiagnosticKind::Unsupported
+    );
+}
+
+#[test]
+fn nested_never_widening_preserves_generic_ownership() {
+    for branches in [
+        "if flag { bottom } else { pair }",
+        "if flag { pair } else { bottom }",
+    ] {
+        assert_eq!(
+            error(&format!(
+                "fn f<T>(flag: Bool, pair: move (T, Int), bottom: (Never, Int)) -> (T, Int) {{ \
+                 let result = {branches}; result }}"
+            ))
+            .kind,
+            CheckDiagnosticKind::Unsupported
+        );
+    }
+    check("fn f<T>(bottom: (Never, Int)) -> (T, Int) { let result: (T, Int) = bottom; result }")
+        .expect("an annotated widening transfers only the actual result into the new owner");
+}
+
+#[test]
 fn short_circuit_rhs_divergence_does_not_make_the_whole_boolean_expression_diverge() {
     for operator in ["&&", "||"] {
         let diagnostic = error(&format!(
