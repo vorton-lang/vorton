@@ -113,7 +113,7 @@ Panic 发生后不再求值后续表达式，并终止整个程序。语言不�
 
 Effect row 可以用 `TraitPath::method<SelfActual, ..., effect {row}>` 引用 trait 的完整公开方法 scheme。`TraitPath` 必须名称解析到 exact trait，terminal 必须是该 owner 的 exact method；module/import/re-export alias 可以改变可见路径，但不能改变 identity。裸方法名、`T::method` 或从 impl 集合按名称猜测都非法。
 
-Actual 顺序固定为 `SelfActual`、trait type actuals、method type actuals，最后是各 effect-row actual。Row actual 可以包含已绑定 formals、既有 atoms 和嵌套的确定 scheme application。Type actual、effect actual、trait evidence 与 scheme application 必须消费同一次实例化关系，不能各自重建 substitution。引用总是取得完整公开调用 scheme，而不是某个 body 的较窄 row；显式公共上界不能直接或间接引用自身来定义自身。
+Actual 顺序固定为 `SelfActual`、trait type actuals、method type actuals，最后是各 effect-row actual。Row actual 可以包含已绑定 formals、既有 atoms 和嵌套的确定 scheme application。Type actual、effect actual、trait evidence 与 scheme application 必须消费同一次实例化关系，不能各自重建 substitution。引用必须满足同一次 type/effect mapping 下的方法自身 named-trait 和 callable-shape 条件；只有 Self 的 trait evidence 不足以证明这些条件。输入 shape 的检查不把 callback 的 row 自动加入方法调用 row。引用总是取得完整公开调用 scheme，而不是某个 body 的较窄 row；显式公共上界不能直接或间接引用自身来定义自身。
 
 Effect alias 可以沿用自己的既有 type parameters 并引用参数已给定的方法 scheme；alias 不成为 effect-formal 的新量化 owner，也不改变透明展开规则。Canonical 0.1 不提供独立 associated effect member/assignment、匿名 effect 函数或全局 impl-effect union。
 

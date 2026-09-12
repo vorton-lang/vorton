@@ -2528,3 +2528,251 @@ fn source() with {fail<Int>} {}
 fn projected_effect() with {fail<A::Item>} { source(); }
 "#).expect("associated equality and selected concrete projections are normalized before their consumers");
 }
+
+#[test]
+fn verification_regression_distinct_owner_formals() {
+    let cases = [
+        (
+            "conformance_wrong_dictionary",
+            r#"trait Identity { fn id<U>(self: &Self, value: move U) -> U; }
+struct Wrap<T> { value: T }
+impl<T> Identity for Wrap<T> { fn id<U>(self: &Self, value: move T) -> T { value } }
+fn dictionary<X: Identity>(value: &X) -> Bool { value.id(true) }
+fn use_it() -> Bool { dictionary(Wrap { value: 1 }) }"#,
+            false,
+        ),
+        (
+            "inherent_wrong_return",
+            r#"struct Wrap<T> { value: T }
+impl<T> Wrap<T> { fn bad<U>(value: move U) -> T { value } }"#,
+            false,
+        ),
+        (
+            "regular_wrong_return",
+            r#"fn bad<T, U>(value: move U) -> T { value }"#,
+            false,
+        ),
+    ];
+    let mut observed = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (name, source, _) in &cases {
+        let result = check(source);
+        observed.push(result.is_ok());
+        diagnostics.push(format!("{name}: {result:?}"));
+    }
+    let expected = cases
+        .iter()
+        .map(|(_, _, accepted)| *accepted)
+        .collect::<Vec<_>>();
+    assert_eq!(observed, expected, "{}", diagnostics.join("\n"));
+}
+
+#[test]
+fn verification_regression_inherent_applicability() {
+    let cases = [
+        (
+            "inherent_disjoint",
+            r#"trait Kind { type Item; }
+struct A {}
+struct B {}
+struct Wrap<T> { value: T }
+impl Kind for A { type Item = Int; }
+impl Kind for B { type Item = Bool; }
+impl<T: Kind<Item = Int>> Wrap<T> { fn get(self: &Self) -> Int { 1 } }
+impl<T: Kind<Item = Bool>> Wrap<T> { fn get(self: &Self) -> Int { 2 } }
+fn use_it() -> Int { Wrap { value: B {} }.get() }"#,
+            true,
+        ),
+        (
+            "inherent_disjoint_reverse",
+            r#"trait Kind { type Item; }
+struct A {}
+struct B {}
+struct Wrap<T> { value: T }
+impl Kind for A { type Item = Int; }
+impl Kind for B { type Item = Bool; }
+impl<T: Kind<Item = Bool>> Wrap<T> { fn get(self: &Self) -> Int { 2 } }
+impl<T: Kind<Item = Int>> Wrap<T> { fn get(self: &Self) -> Int { 1 } }
+fn use_it() -> Int { Wrap { value: B {} }.get() }"#,
+            true,
+        ),
+        (
+            "inherent_disjoint_only_applicable",
+            r#"trait Kind { type Item; }
+struct A {}
+struct B {}
+struct Wrap<T> { value: T }
+impl Kind for A { type Item = Int; }
+impl Kind for B { type Item = Bool; }
+
+impl<T: Kind<Item = Bool>> Wrap<T> { fn get(self: &Self) -> Int { 2 } }
+fn use_it() -> Int { Wrap { value: B {} }.get() }"#,
+            true,
+        ),
+    ];
+    let mut observed = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (name, source, _) in &cases {
+        let result = check(source);
+        observed.push(result.is_ok());
+        diagnostics.push(format!("{name}: {result:?}"));
+    }
+    let expected = cases
+        .iter()
+        .map(|(_, _, accepted)| *accepted)
+        .collect::<Vec<_>>();
+    assert_eq!(observed, expected, "{}", diagnostics.join("\n"));
+}
+
+#[test]
+fn verification_regression_joint_effect_minimum() {
+    let cases = [
+        (
+            "effect_unique_joint_minimum",
+            r#"fn console_callback() -> Unit with {console} {}
+fn sequence<F: Fn + fn() -> Unit with {E1, E2}, G: Fn + fn() -> Unit with {E1}, effect E1, effect E2>(first: call F, second: call G) -> Unit with {E1, E2} {
+    first(); second();
+}
+fn use_it() with {console} { sequence(console_callback, console_callback); }"#,
+            true,
+        ),
+        (
+            "effect_no_unique_minimum",
+            r#"fn console_callback() -> Unit with {console} {}
+fn sequence<F: Fn + fn() -> Unit with {E1, E2}, effect E1, effect E2>(first: call F) -> Unit with {E1, E2} { first(); }
+fn use_it() with {console} { sequence(console_callback); }"#,
+            false,
+        ),
+        (
+            "effect_single_minimum",
+            r#"fn console_callback() -> Unit with {console} {}
+fn sequence<F: Fn + fn() -> Unit with {E1}, G: Fn + fn() -> Unit with {E1}, effect E1, effect E2>(first: call F, second: call G) -> Unit with {E1, E2} {
+    first(); second();
+}
+fn use_it() with {console} { sequence(console_callback, console_callback); }"#,
+            true,
+        ),
+    ];
+    let mut observed = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (name, source, _) in &cases {
+        let result = check(source);
+        observed.push(result.is_ok());
+        diagnostics.push(format!("{name}: {result:?}"));
+    }
+    let expected = cases
+        .iter()
+        .map(|(_, _, accepted)| *accepted)
+        .collect::<Vec<_>>();
+    assert_eq!(observed, expected, "{}", diagnostics.join("\n"));
+}
+
+#[test]
+fn verification_regression_method_scheme_requirements() {
+    let cases = [
+        (
+            "method_scheme_own_requirement",
+            r#"trait P {}
+trait Run { fn run<T: P>(value: &T) -> Unit; }
+struct A {}
+impl Run for A { fn run<T: P>(value: &T) -> Unit {} }
+fn expose() with {Run::run<A, Int>} {}"#,
+            false,
+        ),
+        (
+            "method_scheme_with_evidence",
+            r#"trait P {}
+trait Run { fn run<T: P>(value: &T) -> Unit; }
+struct A {}
+impl Run for A { fn run<T: P>(value: &T) -> Unit {} }
+fn expose() with {Run::run<A, Int>} {}
+impl P for Int {}"#,
+            true,
+        ),
+        (
+            "method_direct_own_requirement",
+            r#"trait P {}
+trait Run { fn run<T: P>(value: &T) -> Unit; }
+struct A {}
+impl Run for A { fn run<T: P>(value: &T) -> Unit {} }
+fn expose() { A::run(1); }"#,
+            false,
+        ),
+    ];
+    let mut observed = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (name, source, _) in &cases {
+        let result = check(source);
+        observed.push(result.is_ok());
+        diagnostics.push(format!("{name}: {result:?}"));
+    }
+    let expected = cases
+        .iter()
+        .map(|(_, _, accepted)| *accepted)
+        .collect::<Vec<_>>();
+    assert_eq!(observed, expected, "{}", diagnostics.join("\n"));
+}
+
+#[test]
+fn formal_scope_protection_preserves_distinct_parameters_across_method_recursion() {
+    check(r#"
+struct Wrap<T> { value: T }
+impl<T> Wrap<T> {
+    fn relay<U>(self: &Self, value: move U) -> U { bridge(self, value) }
+}
+fn bridge<A, B>(receiver: &Wrap<A>, value: move B) -> B { receiver.relay(value) }
+fn use_it() -> Bool { Wrap { value: 1 }.relay(true) }
+"#).expect("SCC correspondences can align separate callables while keeping each visible binder distinct");
+}
+
+#[test]
+fn method_scheme_checks_its_callable_shape_without_emitting_input_effects() {
+    let declaration = r#"
+trait Run { fn run<F: Fn + fn(Int) -> Int with {E}, effect E>(callback: call F) -> Unit; }
+struct A {}
+impl Run for A { fn run<G: Fn + fn(Int) -> Int with {R}, effect R>(callback: call G) -> Unit {} }
+"#;
+    for (caller, accepted) in [
+        (
+            "fn allowed<G: Fn + fn(Int) -> Int with {console}>(callback: call G) with {Run::run<A, G, effect {console}>} {} fn observe<G: Fn + fn(Int) -> Int with {console}>(callback: call G) with {} { allowed(callback); }",
+            true,
+        ),
+        (
+            "fn wrong_type<G: Fn + fn(Bool) -> Bool with {}>(callback: call G) with {Run::run<A, G, effect {}>} {}",
+            false,
+        ),
+        (
+            "fn wrong_row<G: Fn + fn(Int) -> Int with {console}>(callback: call G) with {Run::run<A, G, effect {}>} {}",
+            false,
+        ),
+    ] {
+        let result = check(&format!("{declaration} {caller}"));
+        assert_eq!(result.is_ok(), accepted, "{result:?}");
+    }
+    let cycle = error(
+        r#"
+trait Loop { fn run<F: Fn + fn() -> Unit with {Loop::run<Self, F>}>(callback: call F) -> Unit; }
+struct A {}
+impl Loop for A { fn run<G: Fn + fn() -> Unit with {Loop::run<Self, G>}>(callback: call G) -> Unit {} }
+fn use_it<G: Fn + fn() -> Unit with {}>(callback: call G) with {Loop::run<A, G>} {}
+"#,
+    );
+    assert!(cycle.message.contains("recursive"), "{cycle:?}");
+}
+
+#[test]
+fn incomplete_inherent_applicability_cannot_fall_back_to_a_trait_method() {
+    let failure = error(
+        r#"
+trait P {}
+struct B {}
+impl P for B where B: P {}
+struct Wrap<T> { value: T }
+impl<T: P> Wrap<T> { fn get(self: &Self) -> Int { 1 } }
+trait Fallback { fn get(self: &Self) -> Int; }
+impl<T> Fallback for Wrap<T> { fn get(self: &Self) -> Int { 2 } }
+fn use_it() -> Int { Wrap { value: B {} }.get() }
+"#,
+    );
+    assert!(failure.message.contains("cycle"), "{failure:?}");
+}

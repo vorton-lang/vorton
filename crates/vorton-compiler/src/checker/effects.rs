@@ -806,6 +806,9 @@ impl EffectEnvironment<'_, '_> {
         enum Frame {
             Term(EffectTerm),
             End(EffectTerm),
+            CheckRows { actual: EffectRow, upper: EffectRow },
+            CaptureActual { outer: EffectRow, upper: EffectRow },
+            CompareRows { outer: EffectRow, actual: EffectRow },
         }
         let givens = header
             .requirements
@@ -839,6 +842,25 @@ impl EffectEnvironment<'_, '_> {
                 ));
             }
             let term = match frame {
+                Frame::CheckRows { actual, upper } => {
+                    let outer = std::mem::take(&mut result);
+                    pending.push(Frame::CaptureActual { outer, upper });
+                    pending.extend(actual.0.into_iter().rev().map(Frame::Term));
+                    continue;
+                }
+                Frame::CaptureActual { outer, upper } => {
+                    let actual = std::mem::take(&mut result);
+                    pending.push(Frame::CompareRows { outer, actual });
+                    pending.extend(upper.0.into_iter().rev().map(Frame::Term));
+                    continue;
+                }
+                Frame::CompareRows { outer, actual } => {
+                    if needed.is_empty() {
+                        self.subset(&actual, &result, header, inference, &origin)?;
+                    }
+                    result = outer;
+                    continue;
+                }
                 Frame::End(term) => {
                     active.remove(&term);
                     continue;
@@ -966,12 +988,30 @@ impl EffectEnvironment<'_, '_> {
                             .cloned()
                             .zip(types[1 + definition.formals.len()..].iter().cloned()),
                     );
+                    for requirement in &method_header.requirements {
+                        solver.prove(
+                            &requirement
+                                .instantiate(&mapping)
+                                .map_types(|ty| inference.canonical(ty)),
+                        )?;
+                    }
                     let effect_mapping = method_header
                         .effect_formals
                         .iter()
                         .cloned()
                         .zip(effects.iter().cloned())
                         .collect();
+                    let mut shape_checks = Vec::new();
+                    for required in &method_header.shapes {
+                        let subject = instantiate_type(&required.subject, &mapping);
+                        let actual = self.callable_shape(&subject, header, inference, &origin)?;
+                        let expected = required.shape.instantiate(&mapping, &effect_mapping);
+                        self.match_callback_types(&actual, &expected, header, inference, &origin)?;
+                        shape_checks.push((
+                            solver.normalize_row(&actual.effect)?,
+                            solver.normalize_row(&expected.effect)?,
+                        ));
+                    }
                     let replacement = if let Some(upper) = &method_header.effect_upper {
                         Some(upper.instantiate(&mapping, &effect_mapping))
                     } else {
@@ -1012,17 +1052,20 @@ impl EffectEnvironment<'_, '_> {
                             }
                         }
                     };
+                    if !active.insert(term.clone()) {
+                        return Err(effect_diagnostic(
+                            "illegal recursive method-effect contract or input requirement",
+                            origin,
+                        ));
+                    }
+                    pending.push(Frame::End(term.clone()));
                     if let Some(replacement) = replacement {
-                        if !active.insert(term.clone()) {
-                            return Err(effect_diagnostic(
-                                "illegal recursive public method-effect contract",
-                                origin,
-                            ));
-                        }
-                        pending.push(Frame::End(term));
                         pending.extend(replacement.0.into_iter().rev().map(Frame::Term));
                     } else {
                         result.union(&EffectRow(vec![term]), inference, &origin)?;
+                    }
+                    for (actual, upper) in shape_checks.into_iter().rev() {
+                        pending.push(Frame::CheckRows { actual, upper });
                     }
                 }
                 _ => result.union(&EffectRow(vec![term]), inference, &origin)?,

@@ -433,7 +433,7 @@ impl SourceTypeNormalizer<'_> {
                 }
             }
         } else {
-            for implementation in self
+            'inherent: for implementation in self
                 .selection
                 .implementations
                 .values()
@@ -455,7 +455,13 @@ impl SourceTypeNormalizer<'_> {
                     &mut mapping,
                 )? {
                     for requirement in &implementation.requirements {
-                        solver.prove(&requirement.instantiate(&mapping))?;
+                        match solver.prove(&requirement.instantiate(&mapping)) {
+                            Ok(_) => {}
+                            Err(diagnostic) if diagnostic.message.starts_with("no evidence") => {
+                                continue 'inherent;
+                            }
+                            Err(diagnostic) => return Err(diagnostic),
+                        }
                     }
                     candidates.push((method.clone(), mapping));
                 }

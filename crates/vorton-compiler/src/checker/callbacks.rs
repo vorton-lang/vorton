@@ -844,73 +844,12 @@ impl CallBinder<'_, '_> {
         expected: &CallableShape,
         origin: &CheckOrigin,
     ) -> Result<(), CheckDiagnostic> {
-        if actual.parameters.len() != expected.parameters.len() {
-            return Err(effect_diagnostic(
-                "callback shape arity differs",
-                origin.clone(),
-            ));
+        EffectEnvironment {
+            normalizer: self.normalizer,
+            headers: self.headers,
+            schemes: self.schemes,
         }
-        for ((_, actual_mode), (_, expected_mode)) in
-            actual.parameters.iter().zip(&expected.parameters)
-        {
-            if actual_mode != expected_mode {
-                return Err(effect_diagnostic(
-                    "callback parameter modes are invariant",
-                    origin.clone(),
-                ));
-            }
-        }
-        let pairs = actual
-            .parameters
-            .iter()
-            .map(|(ty, _)| ty)
-            .zip(expected.parameters.iter().map(|(ty, _)| ty))
-            .chain(std::iter::once((
-                &actual.return_type,
-                &expected.return_type,
-            )))
-            .collect::<Vec<_>>();
-        for (actual, expected) in &pairs {
-            if !has_projection(actual) && !has_projection(expected) {
-                self.inference.unify(actual, expected).map_err(|failure| {
-                    effect_diagnostic(
-                        format!(
-                            "callback input/result type is invariant: {}",
-                            display_unification_failure(&failure)
-                        ),
-                        origin.clone(),
-                    )
-                })?;
-            }
-        }
-        let givens = self
-            .function
-            .requirements
-            .iter()
-            .map(|requirement| requirement.map_types(|ty| self.inference.canonical(ty)))
-            .collect::<Vec<_>>();
-        let mut solver = SelectionSolver::new(
-            &self.normalizer.selection,
-            &self.normalizer.project.core_roles,
-            &givens,
-            origin.clone(),
-        )?;
-        for (actual, expected) in pairs {
-            let actual = solver.normalize(&self.inference.canonical(actual))?;
-            let expected = solver.normalize(&self.inference.canonical(expected))?;
-            self.inference
-                .unify(&actual, &expected)
-                .map_err(|failure| {
-                    effect_diagnostic(
-                        format!(
-                            "callback input/result type is invariant: {}",
-                            display_unification_failure(&failure)
-                        ),
-                        origin.clone(),
-                    )
-                })?;
-        }
-        Ok(())
+        .match_callback_types(actual, expected, self.function, self.inference, origin)
     }
 
     pub(super) fn bind_function_value(
@@ -990,83 +929,12 @@ impl CallBinder<'_, '_> {
         ty: &CheckedType,
         origin: &CheckOrigin,
     ) -> Result<CallableShape, CheckDiagnostic> {
-        let ty = self.inference.canonical(ty);
-        match &ty {
-            CheckedType::Function(item) => {
-                let header = &self.headers[&item.function];
-                let (parameters, return_type, effect) =
-                    if let Some(scheme) = self.schemes.get(&item.function) {
-                        (
-                            scheme.parameters.clone(),
-                            scheme.return_type.clone(),
-                            scheme.effect.clone(),
-                        )
-                    } else {
-                        (
-                            header
-                                .parameters
-                                .iter()
-                                .map(|parameter| parameter.ty.clone())
-                                .collect(),
-                            header.return_type.clone(),
-                            header
-                                .trait_upper
-                                .clone()
-                                .or_else(|| header.effect_upper.clone())
-                                .expect("an unpublished function value has a closed header"),
-                        )
-                    };
-                let types = item.mapping.types.iter().cloned().collect();
-                let effects = item.mapping.effects.iter().cloned().collect();
-                Ok(CallableShape {
-                    parameters: parameters
-                        .iter()
-                        .zip(&header.parameters)
-                        .map(|(ty, parameter)| {
-                            (
-                                instantiate_type(ty, &types),
-                                parameter
-                                    .mode
-                                    .as_ref()
-                                    .expect("function value modes are closed")
-                                    .value,
-                            )
-                        })
-                        .collect(),
-                    return_type: instantiate_type(&return_type, &types),
-                    effect: effect.instantiate(&types, &effects),
-                })
-            }
-            _ => {
-                let requirements = self
-                    .function
-                    .requirements
-                    .iter()
-                    .map(|requirement| requirement.map_types(|ty| self.inference.canonical(ty)))
-                    .collect::<Vec<_>>();
-                self.normalizer
-                    .shared_callable(&ty, &requirements, origin.clone())
-                    .map_err(|mut diagnostic| {
-                        diagnostic.kind = CheckDiagnosticKind::Unsupported;
-                        diagnostic.message =
-                            "indirect invocation requires retained shared Fn evidence".to_owned();
-                        diagnostic
-                    })?;
-                let shapes = self
-                    .function
-                    .shapes
-                    .iter()
-                    .filter(|shape| self.inference.canonical(&shape.subject) == ty)
-                    .collect::<Vec<_>>();
-                let Some(shape) = shapes.first() else {
-                    return Err(effect_diagnostic(
-                        "shared Fn input has no callable shape",
-                        origin.clone(),
-                    ));
-                };
-                Ok(shape.shape.clone())
-            }
+        EffectEnvironment {
+            normalizer: self.normalizer,
+            headers: self.headers,
+            schemes: self.schemes,
         }
+        .callable_shape(ty, self.function, self.inference, origin)
     }
 
     pub(super) fn bind_indirect(
@@ -1152,6 +1020,7 @@ impl CallBinder<'_, '_> {
             .map(|formal| (formal, EffectRow::default()))
             .collect::<BTreeMap<_, _>>();
         let mut checks = Vec::new();
+        let mut demands = Vec::new();
         let mut evidence = Vec::new();
         for required in shapes {
             let subject = instantiate_type(&required.subject, types);
@@ -1227,27 +1096,91 @@ impl CallBinder<'_, '_> {
                     EffectRow(vec![term.clone()]).subset_of(&fixed, self.inference, origin)?;
                     continue;
                 }
-                if destinations.len() != 1 {
-                    if destinations.is_empty() {
-                        return Err(effect_diagnostic(
-                            "callback effect exceeds its shape row",
-                            origin.clone(),
-                        ));
-                    }
+                if destinations.is_empty() {
                     return Err(effect_diagnostic(
-                        "callback row has no unique minimal effect-actual solution",
+                        "callback effect exceeds its shape row",
                         origin.clone(),
                     ));
                 }
-                let destination = destinations.first().expect("one effect destination");
-                lower.get_mut(destination).expect("effect actual").union(
-                    &EffectRow(vec![term.clone()]),
-                    self.inference,
-                    origin,
-                )?;
+                demands.push((term.clone(), destinations.clone()));
             }
             checks.push((actual.effect, expected.effect));
         }
+        // Each row actual must satisfy all callback lower bounds and remain a
+        // legal row wherever that formal occurs, including unused callbacks.
+        check_callback_rows(&checks, &lower, self.inference, origin)?;
+        let mut work = 0;
+        while !demands.is_empty() {
+            let mut deferred = Vec::new();
+            let mut changed = false;
+            for (term, destinations) in demands {
+                work += 1;
+                if work > SELECTION_WORK_LIMIT {
+                    return Err(effect_diagnostic(
+                        "callback minimum proof incomplete: deterministic work limit reached",
+                        origin.clone(),
+                    ));
+                }
+                let mut available = EffectRow::default();
+                for destination in &destinations {
+                    available.union(&lower[destination], self.inference, origin)?;
+                }
+                if available
+                    .0
+                    .iter()
+                    .any(|available| available.same_atom(&term))
+                {
+                    EffectRow(vec![term]).subset_of(&available, self.inference, origin)?;
+                    changed = true;
+                    continue;
+                }
+                let mut possible = BTreeSet::new();
+                let mut failure = None;
+                for destination in destinations {
+                    work += checks.len() + 1;
+                    if work > SELECTION_WORK_LIMIT {
+                        return Err(effect_diagnostic(
+                            "callback minimum proof incomplete: deterministic work limit reached",
+                            origin.clone(),
+                        ));
+                    }
+                    let mut trial = self.inference.clone();
+                    let mut actuals = lower.clone();
+                    let result = actuals
+                        .get_mut(&destination)
+                        .expect("effect actual")
+                        .union(&EffectRow(vec![term.clone()]), &mut trial, origin)
+                        .and_then(|()| check_callback_rows(&checks, &actuals, &mut trial, origin));
+                    match result {
+                        Ok(()) => {
+                            possible.insert(destination);
+                        }
+                        Err(error) => failure = Some(error),
+                    }
+                }
+                if possible.is_empty() {
+                    return Err(failure.expect("every destination had a row conflict"));
+                }
+                if possible.len() == 1 {
+                    lower
+                        .get_mut(possible.first().expect("forced destination"))
+                        .expect("effect actual")
+                        .union(&EffectRow(vec![term]), self.inference, origin)?;
+                    check_callback_rows(&checks, &lower, self.inference, origin)?;
+                    changed = true;
+                } else {
+                    deferred.push((term, possible));
+                }
+            }
+            if !deferred.is_empty() && !changed {
+                return Err(effect_diagnostic(
+                    "callback row has no unique minimal effect-actual solution",
+                    origin.clone(),
+                ));
+            }
+            demands = deferred;
+        }
+        check_callback_rows(&checks, &lower, self.inference, origin)?;
         for (actual, expected) in checks {
             actual.subset_of(
                 &expected.instantiate(&BTreeMap::new(), &lower),
@@ -1259,5 +1192,178 @@ impl CallBinder<'_, '_> {
             effects: lower,
             evidence,
         }))
+    }
+}
+
+fn check_callback_rows(
+    checks: &[(EffectRow, EffectRow)],
+    actuals: &BTreeMap<EffectFormal, EffectRow>,
+    inference: &mut TypeInference,
+    origin: &CheckOrigin,
+) -> Result<(), CheckDiagnostic> {
+    for (_, expected) in checks {
+        let expected = expected.instantiate(&BTreeMap::new(), actuals);
+        EffectRow::default().union(&expected, inference, origin)?;
+    }
+    Ok(())
+}
+
+impl EffectEnvironment<'_, '_> {
+    pub(super) fn match_callback_types(
+        &self,
+        actual: &CallableShape,
+        expected: &CallableShape,
+        caller: &FunctionHeader,
+        inference: &mut TypeInference,
+        origin: &CheckOrigin,
+    ) -> Result<(), CheckDiagnostic> {
+        if actual.parameters.len() != expected.parameters.len() {
+            return Err(effect_diagnostic(
+                "callback shape arity differs",
+                origin.clone(),
+            ));
+        }
+        for ((_, actual_mode), (_, expected_mode)) in
+            actual.parameters.iter().zip(&expected.parameters)
+        {
+            if actual_mode != expected_mode {
+                return Err(effect_diagnostic(
+                    "callback parameter modes are invariant",
+                    origin.clone(),
+                ));
+            }
+        }
+        let pairs = actual
+            .parameters
+            .iter()
+            .map(|(ty, _)| ty)
+            .zip(expected.parameters.iter().map(|(ty, _)| ty))
+            .chain(std::iter::once((
+                &actual.return_type,
+                &expected.return_type,
+            )))
+            .collect::<Vec<_>>();
+        for (actual, expected) in &pairs {
+            if !has_projection(actual) && !has_projection(expected) {
+                inference.unify(actual, expected).map_err(|failure| {
+                    effect_diagnostic(
+                        format!(
+                            "callback input/result type is invariant: {}",
+                            display_unification_failure(&failure)
+                        ),
+                        origin.clone(),
+                    )
+                })?;
+            }
+        }
+        let givens = caller
+            .requirements
+            .iter()
+            .map(|requirement| requirement.map_types(|ty| inference.canonical(ty)))
+            .collect::<Vec<_>>();
+        let mut solver = SelectionSolver::new(
+            &self.normalizer.selection,
+            &self.normalizer.project.core_roles,
+            &givens,
+            origin.clone(),
+        )?;
+        for (actual, expected) in pairs {
+            let actual = solver.normalize(&inference.canonical(actual))?;
+            let expected = solver.normalize(&inference.canonical(expected))?;
+            inference.unify(&actual, &expected).map_err(|failure| {
+                effect_diagnostic(
+                    format!(
+                        "callback input/result type is invariant: {}",
+                        display_unification_failure(&failure)
+                    ),
+                    origin.clone(),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn callable_shape(
+        &self,
+        ty: &CheckedType,
+        caller: &FunctionHeader,
+        inference: &TypeInference,
+        origin: &CheckOrigin,
+    ) -> Result<CallableShape, CheckDiagnostic> {
+        let ty = inference.canonical(ty);
+        match &ty {
+            CheckedType::Function(item) => {
+                let header = &self.headers[&item.function];
+                let (parameters, return_type, effect) =
+                    if let Some(scheme) = self.schemes.get(&item.function) {
+                        (
+                            scheme.parameters.clone(),
+                            scheme.return_type.clone(),
+                            scheme.effect.clone(),
+                        )
+                    } else {
+                        (
+                            header
+                                .parameters
+                                .iter()
+                                .map(|parameter| parameter.ty.clone())
+                                .collect(),
+                            header.return_type.clone(),
+                            header
+                                .trait_upper
+                                .clone()
+                                .or_else(|| header.effect_upper.clone())
+                                .expect("an unpublished function value has a closed header"),
+                        )
+                    };
+                let types = item.mapping.types.iter().cloned().collect();
+                let effects = item.mapping.effects.iter().cloned().collect();
+                Ok(CallableShape {
+                    parameters: parameters
+                        .iter()
+                        .zip(&header.parameters)
+                        .map(|(ty, parameter)| {
+                            (
+                                instantiate_type(ty, &types),
+                                parameter
+                                    .mode
+                                    .as_ref()
+                                    .expect("function value modes are closed")
+                                    .value,
+                            )
+                        })
+                        .collect(),
+                    return_type: instantiate_type(&return_type, &types),
+                    effect: effect.instantiate(&types, &effects),
+                })
+            }
+            _ => {
+                let requirements = caller
+                    .requirements
+                    .iter()
+                    .map(|requirement| requirement.map_types(|ty| inference.canonical(ty)))
+                    .collect::<Vec<_>>();
+                self.normalizer
+                    .shared_callable(&ty, &requirements, origin.clone())
+                    .map_err(|mut diagnostic| {
+                        diagnostic.kind = CheckDiagnosticKind::Unsupported;
+                        diagnostic.message =
+                            "indirect invocation requires retained shared Fn evidence".to_owned();
+                        diagnostic
+                    })?;
+                let shapes = caller
+                    .shapes
+                    .iter()
+                    .filter(|shape| inference.canonical(&shape.subject) == ty)
+                    .collect::<Vec<_>>();
+                let Some(shape) = shapes.first() else {
+                    return Err(effect_diagnostic(
+                        "shared Fn input has no callable shape",
+                        origin.clone(),
+                    ));
+                };
+                Ok(shape.shape.clone())
+            }
+        }
     }
 }

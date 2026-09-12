@@ -568,6 +568,15 @@ fn check_prepared_project(
     let public_exports = actual_public_exports(project);
     let (function_order, mut headers) =
         collect_supported_headers(project, &mut normalizer, &mut inference, &public_exports)?;
+    for (identity, header) in &headers {
+        for formal in header.outer_formals.iter().chain(&header.declared_formals) {
+            inference
+                .formal_scopes
+                .entry(formal.clone())
+                .or_default()
+                .insert(identity.clone());
+        }
+    }
     let contract_selections =
         apply_contract_documents(project, owners, &documents, &mut headers, &normalizer)?;
     for ((identity, index), (ty, _)) in &contract_selections.parameter_types {
@@ -2092,11 +2101,12 @@ struct TypeFormal {
     name: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TypeInference {
     next_variable: u32,
     substitutions: BTreeMap<TypeVariable, CheckedType>,
     formal_parents: BTreeMap<TypeFormal, TypeFormal>,
+    formal_scopes: BTreeMap<TypeFormal, BTreeSet<EntityId>>,
     receiver_hints: BTreeMap<TypeVariable, CheckedType>,
     next_effect_variable: u32,
     effect_substitutions: BTreeMap<u32, EffectRow>,
@@ -2292,10 +2302,18 @@ impl TypeInference {
             .iter()
             .filter(|formal| self.formal_root(formal) == right_root)
             .collect::<Vec<_>>();
-        if left_members
-            .iter()
-            .any(|left| right_members.iter().any(|right| left.owner == right.owner))
-        {
+        // Different lexical owners can still bind independent parameters in
+        // one callable. Preserve that distinction through entire SCC classes.
+        if left_members.iter().any(|left| {
+            right_members.iter().any(|right| {
+                left.owner == right.owner
+                    || self.formal_scopes.get(*left).is_some_and(|left_scopes| {
+                        self.formal_scopes
+                            .get(*right)
+                            .is_some_and(|right_scopes| !left_scopes.is_disjoint(right_scopes))
+                    })
+            })
+        }) {
             return Err(UnificationFailure::Mismatch(
                 Box::new(CheckedType::Formal(Box::new(left))),
                 Box::new(CheckedType::Formal(Box::new(right))),
@@ -9453,5 +9471,49 @@ fn run() with {} { invoke(ignore, noisy); }
             item.mapping.effects,
             provider.mapping.as_ref().unwrap().effects
         );
+    }
+    #[test]
+    fn verification_regression_joint_minimum_keeps_only_forced_effect_actuals() {
+        for (source, first, second) in [
+            (
+                r#"
+fn console_callback() -> Unit with {console} {}
+fn sequence<F: Fn + fn() -> Unit with {E1, E2}, G: Fn + fn() -> Unit with {E1}, effect E1, effect E2>(first: call F, second: call G) -> Unit with {E1, E2} { first(); second(); }
+fn use_it() with {console} { sequence(console_callback, console_callback); }
+"#,
+                EffectRow(vec![EffectTerm::System(SystemEffect::Console)]),
+                EffectRow::default(),
+            ),
+            (
+                r#"
+fn failure() -> Unit with {fail<Int>} {}
+fn pure() -> Unit with {} {}
+fn sequence<F: Fn + fn() -> Unit with {E1, E2}, G: Fn + fn() -> Unit with {fail<Bool>, E1}, effect E1, effect E2>(first: call F, second: call G) -> Unit with {E2} {}
+fn use_it() with {fail<Int>} { sequence(failure, pure); }
+"#,
+                EffectRow::default(),
+                EffectRow(vec![EffectTerm::Fail(CheckedType::Int)]),
+            ),
+        ] {
+            let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new())
+                .expect("joint lower bounds and row legality have a unique least actual");
+            let caller = checked
+                .functions
+                .values()
+                .find(|function| function.identity.name == "use_it")
+                .unwrap();
+            let TypedStatementKind::Expression(call) = &caller.body.statements[0].kind else {
+                panic!("call statement")
+            };
+            let TypedExprKind::Call {
+                instantiation: CallInstantiation::Published(mapping),
+                ..
+            } = &call.kind
+            else {
+                panic!("closed mapping")
+            };
+            assert_eq!(mapping.effects[0].1, first);
+            assert_eq!(mapping.effects[1].1, second);
+        }
     }
 }
