@@ -5,12 +5,13 @@ use crate::ast::{BinaryOperator, ParameterMode, Span, UnaryOperator};
 use crate::contract;
 use crate::contract::ContractDocument;
 use crate::project::{
-    EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, Namespace, OriginRef,
+    EntityId, EntityKind, EntityShape, EntitySite, LibraryId, ModuleRef, Namespace, OriginRef,
     ProjectDiagnostic, ProjectDiagnosticKind, ProjectSources, ResolvedBlock, ResolvedCallArgument,
-    ResolvedDeclaration, ResolvedDeclarationKind, ResolvedEffectSet, ResolvedExpr,
-    ResolvedExprKind, ResolvedNamedType, ResolvedParameterAnnotation, ResolvedProject,
-    ResolvedReference, ResolvedReturnAnnotation, ResolvedStatement, ResolvedStatementKind,
-    ResolvedType, ResolvedTypeArgument, ResolvedTypeKind, SourceRef, SupertraitTargetKind,
+    ResolvedConstructEntry, ResolvedDeclaration, ResolvedDeclarationKind, ResolvedEffectSet,
+    ResolvedExpr, ResolvedExprKind, ResolvedNamedType, ResolvedParameterAnnotation,
+    ResolvedProject, ResolvedReference, ResolvedReturnAnnotation, ResolvedSelection,
+    ResolvedStatement, ResolvedStatementKind, ResolvedType, ResolvedTypeArgument, ResolvedTypeKind,
+    ResolvedVariantFields, SourceRef, SupertraitTargetKind,
 };
 
 /// An owned resolved project whose declaration graph invariants have been checked.
@@ -28,7 +29,8 @@ pub struct PreparedProject(ResolvedProject);
 /// been checked together.
 ///
 /// The result is intentionally opaque. It retains the exact resolved project,
-/// closed callable schemes, normalized types, call mappings, parameter
+/// closed callable schemes, normalized nominal definitions and actuals, typed
+/// construction and field identities, call mappings, parameter
 /// conventions, whole-binding use facts, pure-effect facts, interpreted
 /// literals, exact direct callees, and one typed body for every supported
 /// reachable function. It is a narrow Checker result; it is not the complete
@@ -43,6 +45,7 @@ pub struct CheckedProject {
     documents: Vec<ContractDocument>,
     contract_selections: ContractSelections,
     aliases: BTreeMap<EntityId, CheckedType>,
+    nominals: BTreeMap<EntityId, NominalDefinition>,
     functions: BTreeMap<EntityId, CheckedFunction>,
 }
 
@@ -546,8 +549,9 @@ fn check_prepared_project(
     let project = &prepared.0;
     let mut inference = TypeInference::default();
     let mut normalizer = SourceTypeNormalizer::new(project);
+    let public_exports = actual_public_exports(project);
     let (function_order, mut headers) =
-        collect_supported_headers(project, &mut normalizer, &mut inference)?;
+        collect_supported_headers(project, &mut normalizer, &mut inference, &public_exports)?;
     let contract_selections =
         apply_contract_documents(project, owners, &documents, &mut headers, &normalizer)?;
     validate_public_inputs(&function_order, &headers, &contract_selections)?;
@@ -593,7 +597,12 @@ fn check_prepared_project(
             group_drafts.insert(identity.clone(), body);
         }
 
-        validate_type_obligations(&obligations, &mut inference)?;
+        validate_type_obligations(
+            &mut obligations,
+            &mut inference,
+            project,
+            &normalizer.nominals,
+        )?;
         apply_contract_type_constraints(
             &group,
             &mut headers,
@@ -608,7 +617,13 @@ fn check_prepared_project(
         )?;
 
         infer_parameter_modes(&group, &mut headers, &group_drafts, &inference)?;
-        validate_whole_value_use(&group, &headers, &mut group_drafts, &inference)?;
+        validate_whole_value_use(
+            &group,
+            &headers,
+            &mut group_drafts,
+            &inference,
+            &normalizer.nominals,
+        )?;
 
         // Close demands in the shared monotype graph before introducing any
         // generalized scheme binders. Calls refer to exact group bindings.
@@ -720,6 +735,7 @@ fn check_prepared_project(
                 inference: &inference,
                 function: &member.generalization,
                 group: &group_members,
+                obligations: &obligations,
             };
             group_schemes.insert(
                 identity.clone(),
@@ -754,6 +770,15 @@ fn check_prepared_project(
             let header = headers
                 .get_mut(identity)
                 .expect("a closed group scheme retains its source header");
+            if header.public_export {
+                for ty in scheme
+                    .parameters
+                    .iter()
+                    .chain(std::iter::once(&scheme.return_type))
+                {
+                    validate_public_nominals(ty, &public_exports, &header.origin)?;
+                }
+            }
             for (parameter, closed) in header.parameters.iter_mut().zip(&scheme.parameters) {
                 parameter.ty = closed.clone();
             }
@@ -813,6 +838,7 @@ fn check_prepared_project(
         })
         .collect();
     let aliases = std::mem::take(&mut normalizer.normalized_aliases);
+    let nominals = std::mem::take(&mut normalizer.nominals);
     drop(normalizer);
     Ok(CheckedProject {
         prepared,
@@ -820,6 +846,7 @@ fn check_prepared_project(
         documents,
         contract_selections,
         aliases,
+        nominals,
         functions,
     })
 }
@@ -871,6 +898,14 @@ fn instantiate_type(
                 .map(|element| instantiate_type(element, replacements))
                 .collect(),
         ),
+        CheckedType::Nominal(nominal) => CheckedType::Nominal(Box::new(NominalType {
+            declaration: nominal.declaration.clone(),
+            arguments: nominal
+                .arguments
+                .iter()
+                .map(|ty| instantiate_type(ty, replacements))
+                .collect(),
+        })),
         _ => ty.clone(),
     }
 }
@@ -1034,10 +1069,27 @@ fn collect_expr_variables(
         | TypedExprKind::Unary { operand: inner, .. }
         | TypedExprKind::TupleField {
             receiver: inner, ..
+        }
+        | TypedExprKind::Field {
+            receiver: inner, ..
         } => collect_expr_variables(inner, inference, variables, formals, recursive_calls),
         TypedExprKind::Tuple(elements) => {
             for element in elements {
                 collect_expr_variables(element, inference, variables, formals, recursive_calls);
+            }
+        }
+        TypedExprKind::Construct(construction) => {
+            for actual in &construction.nominal.arguments {
+                collect_inference_inputs(inference, actual, variables, formals);
+            }
+            for field in &construction.fields {
+                collect_expr_variables(
+                    &field.value,
+                    inference,
+                    variables,
+                    formals,
+                    recursive_calls,
+                );
             }
         }
         TypedExprKind::Block(block) => {
@@ -1090,6 +1142,7 @@ struct BodyClosure<'a> {
     inference: &'a TypeInference,
     function: &'a FunctionGeneralization,
     group: &'a BTreeMap<EntityId, GroupMember>,
+    obligations: &'a [TypeObligation],
 }
 
 impl BodyClosure<'_> {
@@ -1225,6 +1278,54 @@ fn close_typed_expr(expression: TypedExpr, closure: &BodyClosure<'_>) -> TypedEx
             receiver: Box::new(close_typed_expr(*receiver, closure)),
             index,
         },
+        TypedExprKind::Field {
+            receiver,
+            selection,
+            use_kind,
+        } => {
+            let selection = match selection {
+                FieldSelection::Pending(index) => {
+                    let obligation = &closure.obligations[index];
+                    let TypeObligationKind::FieldProjection {
+                        selected: Some(identity),
+                        ..
+                    } = &obligation.kind
+                    else {
+                        unreachable!("every field selection closes before publication")
+                    };
+                    FieldSelection::Exact(identity.clone(), obligation.primary.clone())
+                }
+                exact => exact,
+            };
+            TypedExprKind::Field {
+                receiver: Box::new(close_typed_expr(*receiver, closure)),
+                selection,
+                use_kind,
+            }
+        }
+        TypedExprKind::Construct(construction) => {
+            TypedExprKind::Construct(Box::new(TypedConstruction {
+                nominal: NominalType {
+                    declaration: construction.nominal.declaration,
+                    arguments: construction
+                        .nominal
+                        .arguments
+                        .iter()
+                        .map(|actual| closure.close_type(actual))
+                        .collect(),
+                },
+                constructor: construction.constructor,
+                fields: construction
+                    .fields
+                    .into_iter()
+                    .map(|field| TypedConstructField {
+                        declaration: field.declaration,
+                        origin: field.origin,
+                        value: close_typed_expr(field.value, closure),
+                    })
+                    .collect(),
+            }))
+        }
         other => other,
     };
     TypedExpr {
@@ -1346,10 +1447,26 @@ fn collect_function_calls_expr(expression: &ResolvedExpr, calls: &mut BTreeSet<E
         | ResolvedExprKind::Unary { operand: inner, .. }
         | ResolvedExprKind::TupleField {
             receiver: inner, ..
+        }
+        | ResolvedExprKind::Field {
+            receiver: inner, ..
         } => collect_function_calls_expr(inner, calls),
         ResolvedExprKind::Tuple(elements) => {
             for element in elements {
                 collect_function_calls_expr(element, calls);
+            }
+        }
+        ResolvedExprKind::NamedConstruct { entries, .. } => {
+            for entry in entries {
+                match entry {
+                    ResolvedConstructEntry::Field {
+                        value: Some(value), ..
+                    } => collect_function_calls_expr(value, calls),
+                    ResolvedConstructEntry::Spread(value) => {
+                        collect_function_calls_expr(value, calls)
+                    }
+                    _ => {}
+                }
             }
         }
         ResolvedExprKind::Block(block) => collect_function_calls_block(block, calls),
@@ -1416,6 +1533,45 @@ enum CheckedType {
     Infer(TypeVariable),
     Formal(Box<TypeFormal>),
     Tuple(Vec<CheckedType>),
+    Nominal(Box<NominalType>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct NominalType {
+    declaration: EntityId,
+    arguments: Vec<CheckedType>,
+}
+
+struct NominalDefinition {
+    formals: Vec<TypeFormal>,
+    constructors: BTreeMap<EntityId, NominalFields>,
+}
+
+#[derive(Clone)]
+struct NominalFields {
+    shape: EntityShape,
+    fields: Vec<NominalField>,
+}
+
+#[derive(Clone)]
+struct NominalField {
+    identity: EntityId,
+    origin: OriginRef,
+    ty: CheckedType,
+}
+
+impl NominalType {
+    fn replacements(
+        &self,
+        definitions: &BTreeMap<EntityId, NominalDefinition>,
+    ) -> BTreeMap<TypeFormal, CheckedType> {
+        definitions[&self.declaration]
+            .formals
+            .iter()
+            .cloned()
+            .zip(self.arguments.iter().cloned())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1466,6 +1622,14 @@ impl TypeInference {
                     .map(|element| self.resolve(element))
                     .collect(),
             ),
+            CheckedType::Nominal(nominal) => CheckedType::Nominal(Box::new(NominalType {
+                declaration: nominal.declaration.clone(),
+                arguments: nominal
+                    .arguments
+                    .iter()
+                    .map(|ty| self.resolve(ty))
+                    .collect(),
+            })),
             _ => ty.clone(),
         }
     }
@@ -1552,6 +1716,15 @@ impl TypeInference {
             (CheckedType::Formal(left), CheckedType::Formal(right)) => {
                 self.unify_formals(*left, *right)
             }
+            (CheckedType::Nominal(left), CheckedType::Nominal(right))
+                if left.declaration == right.declaration =>
+            {
+                debug_assert_eq!(left.arguments.len(), right.arguments.len());
+                for (left, right) in left.arguments.iter().zip(&right.arguments) {
+                    self.unify(left, right)?;
+                }
+                Ok(())
+            }
             (left, right) => Err(UnificationFailure::Mismatch(
                 Box::new(left),
                 Box::new(right),
@@ -1591,6 +1764,11 @@ impl TypeInference {
                     self.unresolved_variables(element, variables);
                 }
             }
+            CheckedType::Nominal(nominal) => {
+                for argument in &nominal.arguments {
+                    self.unresolved_variables(argument, variables);
+                }
+            }
             _ => {}
         }
     }
@@ -1603,6 +1781,11 @@ impl TypeInference {
             CheckedType::Tuple(elements) => {
                 for element in &elements {
                     self.referenced_formals(element, formals);
+                }
+            }
+            CheckedType::Nominal(nominal) => {
+                for argument in &nominal.arguments {
+                    self.referenced_formals(argument, formals);
                 }
             }
             _ => {}
@@ -1625,6 +1808,14 @@ impl TypeInference {
                     .map(|element| self.close_type(element, generalized))
                     .collect(),
             ),
+            CheckedType::Nominal(nominal) => CheckedType::Nominal(Box::new(NominalType {
+                declaration: nominal.declaration,
+                arguments: nominal
+                    .arguments
+                    .iter()
+                    .map(|ty| self.close_type(ty, generalized))
+                    .collect(),
+            })),
             resolved => resolved,
         }
     }
@@ -1636,6 +1827,10 @@ fn contains_variable(ty: &CheckedType, needle: TypeVariable, inference: &TypeInf
         CheckedType::Tuple(elements) => elements
             .iter()
             .any(|element| contains_variable(element, needle, inference)),
+        CheckedType::Nominal(nominal) => nominal
+            .arguments
+            .iter()
+            .any(|ty| contains_variable(ty, needle, inference)),
         _ => false,
     }
 }
@@ -1681,18 +1876,22 @@ struct SourceTypeNormalizer {
     aliases: BTreeMap<EntityId, AliasDefinition>,
     arities: BTreeMap<EntityId, usize>,
     normalized_aliases: BTreeMap<EntityId, CheckedType>,
+    nominals: BTreeMap<EntityId, NominalDefinition>,
+    self_types: BTreeMap<EntityId, CheckedType>,
 }
 
 enum NormalizeFrame {
     Type(ResolvedType),
     FinishTuple(usize),
     FinishAlias(EntityId),
+    FinishNominal(EntityId, usize),
 }
 
 impl SourceTypeNormalizer {
     fn new(project: &ResolvedProject) -> Self {
         let mut aliases = BTreeMap::new();
         let mut arities = BTreeMap::new();
+        let mut nominals = BTreeMap::new();
 
         for identity in project.entities.keys() {
             if identity.kind == EntityKind::LanguageType {
@@ -1718,8 +1917,25 @@ impl SourceTypeNormalizer {
                     }
                     | ResolvedDeclarationKind::Enum {
                         type_parameters, ..
+                    } => {
+                        nominals.insert(
+                            identity.clone(),
+                            NominalDefinition {
+                                formals: type_parameters
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(ordinal, parameter)| TypeFormal {
+                                        owner: identity.clone(),
+                                        ordinal,
+                                        name: parameter.binding.identity.name.clone(),
+                                    })
+                                    .collect(),
+                                constructors: BTreeMap::new(),
+                            },
+                        );
+                        Some(type_parameters.len())
                     }
-                    | ResolvedDeclarationKind::Trait {
+                    ResolvedDeclarationKind::Trait {
                         type_parameters, ..
                     }
                     | ResolvedDeclarationKind::Effect {
@@ -1753,10 +1969,35 @@ impl SourceTypeNormalizer {
             }
         }
 
+        let self_types = project
+            .entities
+            .iter()
+            .filter_map(|(identity, entity)| {
+                if identity.kind != EntityKind::SelfType {
+                    return None;
+                }
+                let owner = entity.owner.as_ref()?;
+                let definition = nominals.get(owner)?;
+                Some((
+                    identity.clone(),
+                    CheckedType::Nominal(Box::new(NominalType {
+                        declaration: owner.clone(),
+                        arguments: definition
+                            .formals
+                            .iter()
+                            .cloned()
+                            .map(|formal| CheckedType::Formal(Box::new(formal)))
+                            .collect(),
+                    })),
+                ))
+            })
+            .collect();
         Self {
             aliases,
             arities,
             normalized_aliases: BTreeMap::new(),
+            nominals,
+            self_types,
         }
     }
 
@@ -1849,6 +2090,30 @@ impl SourceTypeNormalizer {
                             continue;
                         }
 
+                        if target.kind == EntityKind::SelfType {
+                            if positional_count != 0 {
+                                return Err(source_diagnostic(
+                                    CheckDiagnosticKind::TypeMismatch,
+                                    "Self does not accept type arguments",
+                                    occurrence,
+                                    Vec::new(),
+                                ));
+                            }
+                            if let Some(ty) = self.self_types.get(&target) {
+                                values.push(ty.clone());
+                                continue;
+                            }
+                        }
+                        if matches!(target.kind, EntityKind::Struct | EntityKind::Enum) {
+                            frames.push(NormalizeFrame::FinishNominal(target, positional_count));
+                            frames.extend(named.arguments.into_iter().rev().map(|argument| {
+                                let ResolvedTypeArgument::Type(ty) = argument else {
+                                    unreachable!("associated arguments are rejected above")
+                                };
+                                NormalizeFrame::Type(*ty)
+                            }));
+                            continue;
+                        }
                         if target.kind == EntityKind::TypeParameter {
                             if positional_count != 0 {
                                 return Err(source_diagnostic(
@@ -1928,6 +2193,17 @@ impl SourceTypeNormalizer {
                     let elements = values.split_off(first);
                     values.push(CheckedType::Tuple(elements));
                 }
+                NormalizeFrame::FinishNominal(declaration, argument_count) => {
+                    let first = values
+                        .len()
+                        .checked_sub(argument_count)
+                        .expect("each actual produces one type");
+                    let arguments = values.split_off(first);
+                    values.push(CheckedType::Nominal(Box::new(NominalType {
+                        declaration,
+                        arguments,
+                    })));
+                }
                 NormalizeFrame::FinishAlias(identity) => {
                     let normalized = values
                         .last()
@@ -1947,6 +2223,111 @@ impl SourceTypeNormalizer {
         };
         Ok(normalized.clone())
     }
+}
+
+fn collect_nominal_definition(
+    project: &ResolvedProject,
+    declaration: &ResolvedDeclaration,
+    normalizer: &mut SourceTypeNormalizer,
+    public_exports: &BTreeSet<EntityId>,
+) -> Result<(), CheckDiagnostic> {
+    let identity = declaration
+        .identity
+        .as_ref()
+        .expect("nominal declaration has an identity");
+    let (parameters, constructors) = match &declaration.kind {
+        ResolvedDeclarationKind::Struct {
+            type_parameters,
+            fields,
+        } => (
+            type_parameters,
+            vec![(
+                identity.clone(),
+                EntityShape::Plain,
+                fields
+                    .iter()
+                    .map(|field| (field.identity.clone(), field.public, &field.ty))
+                    .collect::<Vec<_>>(),
+            )],
+        ),
+        ResolvedDeclarationKind::Enum {
+            type_parameters,
+            variants,
+        } => (
+            type_parameters,
+            variants
+                .iter()
+                .map(|variant| {
+                    let fields = match &variant.fields {
+                        ResolvedVariantFields::Unit => Vec::new(),
+                        ResolvedVariantFields::Named(fields) => fields
+                            .iter()
+                            .map(|field| (field.identity.clone(), true, &field.ty))
+                            .collect(),
+                        ResolvedVariantFields::Positional(fields) => fields
+                            .iter()
+                            .enumerate()
+                            .map(|(index, ty)| {
+                                let field = &project.entities[&variant.identity].members
+                                    [&format!("#{index}")][0];
+                                (field.clone(), true, ty)
+                            })
+                            .collect(),
+                    };
+                    (
+                        variant.identity.clone(),
+                        project.entities[&variant.identity].shape,
+                        fields,
+                    )
+                })
+                .collect(),
+        ),
+        _ => unreachable!("only nominal declarations enter this collector"),
+    };
+    if let Some(parameter) = parameters
+        .iter()
+        .find(|parameter| !parameter.bounds.is_empty())
+    {
+        return Err(source_diagnostic(
+            CheckDiagnosticKind::Unsupported,
+            "non-empty nominal bounds require the later Trait Checker",
+            parameter.binding.origin.clone(),
+            Vec::new(),
+        ));
+    }
+    let formals = parameters
+        .iter()
+        .zip(&normalizer.nominals[identity].formals)
+        .map(|(parameter, formal)| (parameter.binding.identity.clone(), formal.clone()))
+        .collect();
+    let context = SourceContext::from_origin(&declaration.origin);
+    let mut normalized = BTreeMap::new();
+    for (constructor, shape, fields) in constructors {
+        let mut typed_fields = Vec::new();
+        for (field, public, ty) in fields {
+            if public && public_exports.contains(identity) {
+                validate_public_type_visibility(public_exports, ty, &normalizer.aliases)?;
+            }
+            typed_fields.push(NominalField {
+                identity: field,
+                origin: context.origin(ty.span),
+                ty: normalizer.normalize_with_formals(ty, &formals)?,
+            });
+        }
+        normalized.insert(
+            constructor,
+            NominalFields {
+                shape,
+                fields: typed_fields,
+            },
+        );
+    }
+    normalizer
+        .nominals
+        .get_mut(identity)
+        .expect("nominal formals were indexed")
+        .constructors = normalized;
+    Ok(())
 }
 
 fn actual_public_exports(project: &ResolvedProject) -> BTreeSet<EntityId> {
@@ -1980,9 +2361,9 @@ fn collect_supported_headers(
     project: &ResolvedProject,
     normalizer: &mut SourceTypeNormalizer,
     inference: &mut TypeInference,
+    public_exports: &BTreeSet<EntityId>,
 ) -> Result<(Vec<EntityId>, BTreeMap<EntityId, FunctionHeader>), CheckDiagnostic> {
     let core_declarations = core_role_declarations(&project.core_roles);
-    let public_exports = actual_public_exports(project);
     let mut order = Vec::new();
     let mut headers = BTreeMap::new();
     let mut diagnostics = Vec::new();
@@ -2009,15 +2390,20 @@ fn collect_supported_headers(
         }
 
         for declaration in &body.declarations {
-            if declaration
-                .identity
-                .as_ref()
-                .is_some_and(|identity| core_declarations.contains(identity))
-            {
+            if declaration.identity.as_ref().is_some_and(|identity| {
+                identity.kind == EntityKind::Trait && core_declarations.contains(identity)
+            }) {
                 continue;
             }
             match &declaration.kind {
                 ResolvedDeclarationKind::Module(_) => {}
+                ResolvedDeclarationKind::Struct { .. } | ResolvedDeclarationKind::Enum { .. } => {
+                    if let Err(diagnostic) =
+                        collect_nominal_definition(project, declaration, normalizer, public_exports)
+                    {
+                        push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
+                    }
+                }
                 ResolvedDeclarationKind::TypeAlias {
                     type_parameters,
                     value,
@@ -2047,7 +2433,7 @@ fn collect_supported_headers(
                                     .insert(identity.clone(), normalized);
                                 if public_export
                                     && let Err(diagnostic) = validate_public_type_visibility(
-                                        &public_exports,
+                                        public_exports,
                                         value,
                                         &normalizer.aliases,
                                     )
@@ -2085,7 +2471,7 @@ fn collect_supported_headers(
                         normalizer,
                         inference,
                         public_export,
-                        &public_exports,
+                        public_exports,
                     ) {
                         Ok(header) => {
                             order.push(identity.clone());
@@ -2191,27 +2577,35 @@ fn validate_public_type_visibility(
             ResolvedTypeKind::Grouped(inner) => pending.push(*inner),
             ResolvedTypeKind::Tuple(elements) => pending.extend(elements.into_iter().rev()),
             ResolvedTypeKind::Named(named) => {
+                for argument in named.arguments.into_iter().rev() {
+                    if let ResolvedTypeArgument::Type(ty) = argument {
+                        pending.push(*ty);
+                    }
+                }
                 let ResolvedReference::Exact {
                     occurrence, target, ..
                 } = named.reference
                 else {
                     continue;
                 };
-                if target.kind != EntityKind::TypeAlias {
+                if !matches!(
+                    target.kind,
+                    EntityKind::TypeAlias | EntityKind::Struct | EntityKind::Enum
+                ) {
                     continue;
                 }
                 if !public_exports.contains(&target) {
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::TypeMismatch,
                         format!(
-                            "public type surface references private type alias `{}`",
+                            "public type surface references private type `{}`",
                             target.name
                         ),
                         occurrence,
                         entity_origin(&target).into_iter().collect(),
                     ));
                 }
-                if visited_aliases.insert(target.clone()) {
+                if target.kind == EntityKind::TypeAlias && visited_aliases.insert(target.clone()) {
                     let definition = aliases
                         .get(&target)
                         .expect("every exact type alias has a resolved definition");
@@ -2220,6 +2614,32 @@ fn validate_public_type_visibility(
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_public_nominals(
+    ty: &CheckedType,
+    public_exports: &BTreeSet<EntityId>,
+    origin: &OriginRef,
+) -> Result<(), CheckDiagnostic> {
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        match ty {
+            CheckedType::Tuple(elements) => pending.extend(elements),
+            CheckedType::Nominal(nominal) => {
+                if !public_exports.contains(&nominal.declaration) {
+                    return Err(source_diagnostic(
+                        CheckDiagnosticKind::TypeMismatch,
+                        "public function exposes a private nominal type",
+                        origin.clone(),
+                        entity_origin(&nominal.declaration).into_iter().collect(),
+                    ));
+                }
+                pending.extend(&nominal.arguments);
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -2513,6 +2933,16 @@ fn display_type(ty: &CheckedType) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        CheckedType::Nominal(nominal) => format!(
+            "{}<{}>",
+            nominal.declaration.name,
+            nominal
+                .arguments
+                .iter()
+                .map(display_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -2524,8 +2954,112 @@ fn is_copy_type(ty: &CheckedType) -> bool {
         | CheckedType::Unit
         | CheckedType::Never => true,
         CheckedType::Tuple(elements) => elements.iter().all(is_copy_type),
-        CheckedType::Infer(_) | CheckedType::Formal(_) => false,
+        CheckedType::Infer(_) | CheckedType::Formal(_) | CheckedType::Nominal(_) => false,
     }
+}
+
+fn cleanup_is_empty(
+    requirements: &[CheckedType],
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
+) -> bool {
+    enum Frame<'a> {
+        Type(&'a CheckedType),
+        Combine(usize),
+        EnterNominal(&'a NominalType),
+        ExitNominal(&'a EntityId, usize),
+    }
+
+    // This proof runs only at an owning cleanup boundary. All traversal state
+    // lives in these work vectors, including nominal fields and actuals.
+    let mut frames = vec![Frame::Combine(requirements.len())];
+    frames.extend(requirements.iter().rev().map(Frame::Type));
+    let mut values = Vec::new();
+    let mut environments = vec![BTreeMap::new()];
+    let mut active = BTreeSet::new();
+    while let Some(frame) = frames.pop() {
+        match frame {
+            Frame::Type(ty) => match ty {
+                CheckedType::Formal(formal) => values.push(
+                    environments
+                        .last()
+                        .expect("a cleanup formal has a current environment")
+                        .get(formal.as_ref())
+                        .copied()
+                        .unwrap_or(false),
+                ),
+                CheckedType::Tuple(elements) => {
+                    frames.push(Frame::Combine(elements.len()));
+                    frames.extend(elements.iter().rev().map(Frame::Type));
+                }
+                CheckedType::Nominal(nominal) => {
+                    if active.contains(&nominal.declaration) {
+                        values.push(false);
+                    } else {
+                        // Finite actual operands close before this declaration
+                        // enters the active field path. This keeps Box<Box<Int>>
+                        // distinct from a recursive declaration edge.
+                        frames.push(Frame::EnterNominal(nominal));
+                        frames.extend(nominal.arguments.iter().rev().map(Frame::Type));
+                    }
+                }
+                CheckedType::Infer(_) => values.push(false),
+                CheckedType::Int
+                | CheckedType::Float
+                | CheckedType::Bool
+                | CheckedType::Unit
+                | CheckedType::Never => values.push(true),
+            },
+            Frame::Combine(count) => {
+                let start = values
+                    .len()
+                    .checked_sub(count)
+                    .expect("each cleanup operand produces one fact");
+                let empty = values[start..].iter().all(|empty| *empty);
+                values.truncate(start);
+                values.push(empty);
+            }
+            Frame::EnterNominal(nominal) => {
+                let definition = &nominals[&nominal.declaration];
+                let first = values
+                    .len()
+                    .checked_sub(nominal.arguments.len())
+                    .expect("nominal actuals have closed cleanup facts");
+                environments.push(
+                    definition
+                        .formals
+                        .iter()
+                        .cloned()
+                        .zip(values.drain(first..))
+                        .collect(),
+                );
+                active.insert(nominal.declaration.clone());
+                let field_count = definition
+                    .constructors
+                    .values()
+                    .map(|constructor| constructor.fields.len())
+                    .sum();
+                frames.push(Frame::ExitNominal(&nominal.declaration, field_count));
+                for constructor in definition.constructors.values().rev() {
+                    frames.extend(
+                        constructor
+                            .fields
+                            .iter()
+                            .rev()
+                            .map(|field| Frame::Type(&field.ty)),
+                    );
+                }
+            }
+            Frame::ExitNominal(declaration, count) => {
+                active.remove(declaration);
+                environments.pop();
+                frames.push(Frame::Combine(count));
+            }
+        }
+    }
+    let [empty] = values.as_slice() else {
+        unreachable!("a cleanup demand produces one final fact")
+    };
+    *empty
 }
 
 #[allow(dead_code)]
@@ -3006,10 +3540,19 @@ fn unsupported_contract_type_path(ty: &contract::Type, path: &str) -> Option<Str
                 unsupported_contract_type_path(element, &format!("{path}.elements[{index}]"))
             })
         }
-        contract::Type::Nominal { declaration, .. }
-            if matches!(declaration.kind, contract::DeclarationKind::TypeAlias) =>
+        contract::Type::Nominal {
+            declaration,
+            arguments,
+        } if matches!(
+            declaration.kind,
+            contract::DeclarationKind::TypeAlias
+                | contract::DeclarationKind::Struct
+                | contract::DeclarationKind::Enum
+        ) =>
         {
-            None
+            arguments.iter().enumerate().find_map(|(index, argument)| {
+                unsupported_contract_type_path(argument, &format!("{path}.arguments[{index}]"))
+            })
         }
         _ => Some(path.to_owned()),
     }
@@ -3144,15 +3687,20 @@ fn normalize_contract_type(
             declaration,
             arguments,
         } => {
-            if !matches!(declaration.kind, contract::DeclarationKind::TypeAlias) {
-                return Err(contract_diagnostic(
-                    CheckDiagnosticKind::Unsupported,
-                    "only non-generic type aliases are supported as nominal contract types",
-                    context.document_index,
-                    path,
-                    Vec::new(),
-                ));
-            }
+            let expected_kind = match declaration.kind {
+                contract::DeclarationKind::TypeAlias => EntityKind::TypeAlias,
+                contract::DeclarationKind::Struct => EntityKind::Struct,
+                contract::DeclarationKind::Enum => EntityKind::Enum,
+                _ => {
+                    return Err(contract_diagnostic(
+                        CheckDiagnosticKind::Unsupported,
+                        "contract nominal type kind is outside the current Checker subset",
+                        context.document_index,
+                        path,
+                        Vec::new(),
+                    ));
+                }
+            };
             let target = lookup_contract_path(
                 context.project,
                 context.owner,
@@ -3169,10 +3717,10 @@ fn normalize_contract_type(
                     Vec::new(),
                 )
             })?;
-            if target.kind != EntityKind::TypeAlias {
+            if target.kind != expected_kind {
                 return Err(contract_diagnostic(
                     CheckDiagnosticKind::ContractBinding,
-                    "nominal contract type does not resolve to a type alias",
+                    "nominal contract type does not resolve to its declared kind",
                     context.document_index,
                     path,
                     entity_origin(&target)
@@ -3180,6 +3728,40 @@ fn normalize_contract_type(
                         .into_iter()
                         .collect(),
                 ));
+            }
+            if expected_kind != EntityKind::TypeAlias {
+                let definition = &context.normalizer.nominals[&target];
+                if definition.formals.len() != arguments.len() {
+                    return Err(contract_diagnostic(
+                        CheckDiagnosticKind::ContractBinding,
+                        format!(
+                            "nominal type expects {} argument(s) but the contract supplied {}",
+                            definition.formals.len(),
+                            arguments.len()
+                        ),
+                        context.document_index,
+                        path,
+                        entity_origin(&target)
+                            .map(CheckOrigin::Source)
+                            .into_iter()
+                            .collect(),
+                    ));
+                }
+                let arguments = arguments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, argument)| {
+                        normalize_contract_type(
+                            context,
+                            &format!("{path}.arguments[{index}]"),
+                            argument,
+                        )
+                    })
+                    .collect::<Result<_, _>>()?;
+                return Ok(CheckedType::Nominal(Box::new(NominalType {
+                    declaration: target,
+                    arguments,
+                })));
             }
             let Some(definition) = context.normalizer.aliases.get(&target) else {
                 unreachable!("every resolved type alias is indexed by the source normalizer")
@@ -3606,6 +4188,14 @@ fn inferred_types_equal(
             .iter()
             .zip(right)
             .all(|(left, right)| inferred_types_equal(left, right, inference)),
+        (CheckedType::Nominal(left), CheckedType::Nominal(right))
+            if left.declaration == right.declaration =>
+        {
+            left.arguments
+                .iter()
+                .zip(&right.arguments)
+                .all(|(left, right)| inferred_types_equal(left, right, inference))
+        }
         _ => inferred == selected,
     }
 }
@@ -3854,6 +4444,20 @@ fn collect_mode_constraints_expr(
                 }
             }
         }
+        TypedExprKind::Construct(construction) => {
+            for field in &construction.fields {
+                if !collect_mode_constraints_expr(
+                    &field.value,
+                    ValueContext::Consume,
+                    headers,
+                    binding_parameters,
+                    constraints,
+                    inference,
+                ) {
+                    return false;
+                }
+            }
+        }
         TypedExprKind::Block(block) => {
             return collect_mode_constraints_block(
                 block,
@@ -3992,7 +4596,7 @@ fn collect_mode_constraints_expr(
                 }
             }
         }
-        TypedExprKind::TupleField { receiver, .. } => {
+        TypedExprKind::TupleField { receiver, .. } | TypedExprKind::Field { receiver, .. } => {
             if !collect_mode_constraints_expr(
                 receiver,
                 ValueContext::Borrow,
@@ -4073,6 +4677,7 @@ enum Availability {
 
 #[derive(Clone)]
 struct BindingUsage {
+    cleanup: Vec<CheckedType>,
     ownership: OwnershipKind,
     availability: Availability,
     origin: OriginRef,
@@ -4081,7 +4686,22 @@ struct BindingUsage {
 #[derive(Clone, Default)]
 struct UsageState {
     bindings: BTreeMap<EntityId, BindingUsage>,
-    temporaries: Vec<OriginRef>,
+    temporaries: Vec<PendingCleanup>,
+}
+
+#[derive(Clone)]
+struct PendingCleanup {
+    origin: OriginRef,
+    types: Vec<CheckedType>,
+}
+
+impl UsageState {
+    fn take_temporaries(&mut self, checkpoint: usize) -> Vec<CheckedType> {
+        self.temporaries
+            .drain(checkpoint..)
+            .flat_map(|temporary| temporary.types)
+            .collect()
+    }
 }
 
 fn validate_whole_value_use(
@@ -4089,6 +4709,7 @@ fn validate_whole_value_use(
     headers: &BTreeMap<EntityId, FunctionHeader>,
     bodies: &mut BTreeMap<EntityId, TypedBlock>,
     inference: &TypeInference,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<(), CheckDiagnostic> {
     for identity in function_order {
         let header = headers
@@ -4107,6 +4728,11 @@ fn validate_whole_value_use(
             state.bindings.insert(
                 parameter.binding.clone(),
                 BindingUsage {
+                    cleanup: if mode == ParameterMode::Move {
+                        vec![inference.resolve(&parameter.ty)]
+                    } else {
+                        Vec::new()
+                    },
                     ownership: if mode == ParameterMode::Move {
                         OwnershipKind::Owned
                     } else {
@@ -4126,9 +4752,10 @@ fn validate_whole_value_use(
             headers,
             header,
             inference,
+            nominals,
         )?;
         if let Some(state) = state {
-            validate_normal_exit(&state, header)?;
+            validate_normal_exit(&state, header, nominals)?;
         }
     }
     Ok(())
@@ -4141,6 +4768,7 @@ fn validate_usage_block(
     headers: &BTreeMap<EntityId, FunctionHeader>,
     function: &FunctionHeader,
     inference: &TypeInference,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<Option<UsageState>, CheckDiagnostic> {
     let mut locals = Vec::new();
     let mut continuation = state;
@@ -4159,16 +4787,18 @@ fn validate_usage_block(
                     headers,
                     function,
                     inference,
+                    nominals,
                 )?;
                 if let Some(next) = &mut continuation
                     && !is_copy_type(&inference.resolve(ty))
                 {
-                    next.temporaries.truncate(temporary_checkpoint);
+                    let cleanup = next.take_temporaries(temporary_checkpoint);
                     let identity = binding.as_ref().clone();
                     locals.push(identity.clone());
                     next.bindings.insert(
                         identity.clone(),
                         BindingUsage {
+                            cleanup,
                             ownership: OwnershipKind::Owned,
                             availability: Availability::Live,
                             origin: entity_origin(&identity)
@@ -4186,12 +4816,13 @@ fn validate_usage_block(
                         headers,
                         function,
                         inference,
+                        nominals,
                     )?
                 } else {
                     Some(state)
                 };
                 if let Some(exit) = &continuation {
-                    validate_normal_exit(exit, function)?;
+                    validate_normal_exit(exit, function, nominals)?;
                 }
                 continuation = None;
             }
@@ -4203,6 +4834,7 @@ fn validate_usage_block(
                     headers,
                     function,
                     inference,
+                    nominals,
                 )?;
             }
         }
@@ -4216,6 +4848,7 @@ fn validate_usage_block(
                 headers,
                 function,
                 inference,
+                nominals,
             )?
         } else {
             Some(state)
@@ -4224,7 +4857,7 @@ fn validate_usage_block(
         close_unreachable_expr(tail, tail_context, headers, inference);
     }
     if let Some(state) = &mut continuation {
-        validate_scope_cleanup(state, &locals, function)?;
+        validate_scope_cleanup(state, &locals, function, nominals)?;
         for local in locals {
             state.bindings.remove(&local);
         }
@@ -4239,6 +4872,7 @@ fn validate_usage_expr(
     headers: &BTreeMap<EntityId, FunctionHeader>,
     function: &FunctionHeader,
     inference: &TypeInference,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<Option<UsageState>, CheckDiagnostic> {
     let Some(mut state) = state else {
         close_unreachable_expr(expression, context, headers, inference);
@@ -4283,10 +4917,11 @@ fn validate_usage_expr(
                     {
                         usage.availability = Availability::Moved;
                         *use_kind = Some(ValueUseKind::Move);
-                        if matches!(context, ValueContext::Consume) {
-                            state
-                                .temporaries
-                                .push(function.context.origin(expression_span));
+                        if matches!(context, ValueContext::Consume) && !usage.cleanup.is_empty() {
+                            state.temporaries.push(PendingCleanup {
+                                origin: function.context.origin(expression_span),
+                                types: usage.cleanup.clone(),
+                            });
                         }
                     }
                     ValueContext::Consume | ValueContext::Return => {
@@ -4297,7 +4932,10 @@ fn validate_usage_expr(
                             vec![usage.origin.clone()],
                         ));
                     }
-                    ValueContext::Discard if usage.ownership == OwnershipKind::Owned => {
+                    ValueContext::Discard
+                        if usage.ownership == OwnershipKind::Owned
+                            && !cleanup_is_empty(&usage.cleanup, nominals) =>
+                    {
                         return Err(source_diagnostic(
                             CheckDiagnosticKind::Unsupported,
                             "discarding an owned generic value requires the later D(T) cleanup solver",
@@ -4312,11 +4950,20 @@ fn validate_usage_expr(
             }
         }
         TypedExprKind::Parenthesized(inner) => {
-            return validate_usage_expr(inner, context, Some(state), headers, function, inference);
+            let next = validate_usage_expr(
+                inner,
+                context,
+                Some(state),
+                headers,
+                function,
+                inference,
+                nominals,
+            )?;
+            return Ok(next);
         }
         TypedExprKind::Tuple(elements) => {
             let mut continuation = Some(state);
-            for element in elements {
+            for element in elements.iter_mut() {
                 continuation = validate_usage_expr(
                     element,
                     ValueContext::Consume,
@@ -4324,29 +4971,61 @@ fn validate_usage_expr(
                     headers,
                     function,
                     inference,
+                    nominals,
                 )?;
             }
             let Some(next) = continuation else {
                 return Ok(None);
             };
             state = next;
-            state.temporaries.truncate(temporary_checkpoint);
-            if !is_copy_type(&expression_type) {
-                match context {
-                    ValueContext::Consume => {
-                        state
-                            .temporaries
-                            .push(function.context.origin(expression_span));
-                    }
-                    ValueContext::Return => {}
-                    ValueContext::Borrow | ValueContext::Discard => {
-                        return Err(temporary_cleanup_diagnostic(expression_span, function));
-                    }
-                }
+            let cleanup = state.take_temporaries(temporary_checkpoint);
+            use_temporary(
+                &mut state,
+                cleanup,
+                context,
+                expression_span,
+                function,
+                nominals,
+            )?;
+        }
+        TypedExprKind::Construct(construction) => {
+            let mut continuation = Some(state);
+            for field in &mut construction.fields {
+                continuation = validate_usage_expr(
+                    &mut field.value,
+                    ValueContext::Consume,
+                    continuation,
+                    headers,
+                    function,
+                    inference,
+                    nominals,
+                )?;
             }
+            let Some(next) = continuation else {
+                return Ok(None);
+            };
+            state = next;
+            let cleanup = state.take_temporaries(temporary_checkpoint);
+            use_temporary(
+                &mut state,
+                cleanup,
+                context,
+                expression_span,
+                function,
+                nominals,
+            )?;
         }
         TypedExprKind::Block(block) => {
-            return validate_usage_block(block, context, Some(state), headers, function, inference);
+            let next = validate_usage_block(
+                block,
+                context,
+                Some(state),
+                headers,
+                function,
+                inference,
+                nominals,
+            )?;
+            return Ok(next);
         }
         TypedExprKind::If {
             condition,
@@ -4360,6 +5039,7 @@ fn validate_usage_expr(
                 headers,
                 function,
                 inference,
+                nominals,
             )?;
             let mut then_state = validate_usage_block(
                 then_branch,
@@ -4372,6 +5052,7 @@ fn validate_usage_expr(
                 headers,
                 function,
                 inference,
+                nominals,
             )?;
             let mut else_state = if let Some(else_branch) = else_branch {
                 validate_usage_expr(
@@ -4381,24 +5062,21 @@ fn validate_usage_expr(
                     headers,
                     function,
                     inference,
+                    nominals,
                 )?
             } else {
                 after_condition
             };
-            // Branch values can widen from a Copy tuple containing Never to a
-            // non-Copy result. Transfer each actual branch value into one joined
-            // result slot, independently of the branch's temporary count.
+            // Each continuing branch contributes its actual result obligations.
+            // Join them before publishing a single result temporary; no cleanup
+            // proof is needed when the result is simply moved onward.
+            let mut cleanup = Vec::new();
             for branch in [&mut then_state, &mut else_state].into_iter().flatten() {
-                branch.temporaries.truncate(temporary_checkpoint);
+                cleanup.extend(branch.take_temporaries(temporary_checkpoint));
             }
             let mut joined = merge_usage_states(then_state, else_state);
-            if let Some(state) = &mut joined
-                && matches!(context, ValueContext::Consume)
-                && !is_copy_type(&expression_type)
-            {
-                state
-                    .temporaries
-                    .push(function.context.origin(expression_span));
+            if let Some(state) = &mut joined {
+                use_temporary(state, cleanup, context, expression_span, function, nominals)?;
             }
             return Ok(joined);
         }
@@ -4410,6 +5088,7 @@ fn validate_usage_expr(
                 headers,
                 function,
                 inference,
+                nominals,
             )?
             else {
                 return Ok(None);
@@ -4429,6 +5108,7 @@ fn validate_usage_expr(
                 headers,
                 function,
                 inference,
+                nominals,
             )?;
             if matches!(operator, BinaryOperator::LogicAnd | BinaryOperator::LogicOr) {
                 let right_state = validate_usage_expr(
@@ -4438,6 +5118,7 @@ fn validate_usage_expr(
                     headers,
                     function,
                     inference,
+                    nominals,
                 )?;
                 return Ok(merge_usage_states(after_left, right_state));
             }
@@ -4448,6 +5129,7 @@ fn validate_usage_expr(
                 headers,
                 function,
                 inference,
+                nominals,
             )?
             else {
                 return Ok(None);
@@ -4493,6 +5175,7 @@ fn validate_usage_expr(
                     headers,
                     function,
                     inference,
+                    nominals,
                 )?;
             }
             let Some(next) = continuation else {
@@ -4503,19 +5186,50 @@ fn validate_usage_expr(
             if expression_type == CheckedType::Never {
                 return Ok(None);
             }
-            if !is_copy_type(&expression_type) {
-                match context {
-                    ValueContext::Consume => {
-                        state
-                            .temporaries
-                            .push(function.context.origin(expression_span));
-                    }
-                    ValueContext::Return => {}
-                    ValueContext::Borrow | ValueContext::Discard => {
-                        return Err(temporary_cleanup_diagnostic(expression_span, function));
-                    }
-                }
+            let cleanup = if is_copy_type(&expression_type) {
+                Vec::new()
+            } else {
+                vec![expression_type.clone()]
+            };
+            use_temporary(
+                &mut state,
+                cleanup,
+                context,
+                expression_span,
+                function,
+                nominals,
+            )?;
+        }
+        TypedExprKind::Field {
+            receiver, use_kind, ..
+        } => {
+            let copy = is_copy_type(&expression_type);
+            if !copy && matches!(context, ValueContext::Consume | ValueContext::Return) {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "moving a non-Copy field requires later partial-move facts; a borrowed field cannot become owned",
+                    function.context.origin(expression_span),
+                    vec![function.context.origin(receiver.span)],
+                ));
             }
+            *use_kind = Some(if copy {
+                ValueUseKind::Copy
+            } else {
+                ValueUseKind::Borrow
+            });
+            let Some(next) = validate_usage_expr(
+                receiver,
+                ValueContext::Borrow,
+                Some(state),
+                headers,
+                function,
+                inference,
+                nominals,
+            )?
+            else {
+                return Ok(None);
+            };
+            state = next;
         }
         TypedExprKind::TupleField { receiver, .. } => {
             if !is_copy_type(&inference.resolve(&receiver.ty)) {
@@ -4533,6 +5247,7 @@ fn validate_usage_expr(
                 headers,
                 function,
                 inference,
+                nominals,
             )?
             else {
                 return Ok(None);
@@ -4609,6 +5324,21 @@ fn close_unreachable_expr(
                 close_unreachable_expr(element, ValueContext::Consume, headers, inference);
             }
         }
+        TypedExprKind::Construct(construction) => {
+            for field in &mut construction.fields {
+                close_unreachable_expr(&mut field.value, ValueContext::Consume, headers, inference);
+            }
+        }
+        TypedExprKind::Field {
+            receiver, use_kind, ..
+        } => {
+            *use_kind = Some(if expression_is_copy {
+                ValueUseKind::Copy
+            } else {
+                ValueUseKind::Borrow
+            });
+            close_unreachable_expr(receiver, ValueContext::Borrow, headers, inference);
+        }
         TypedExprKind::Block(block) => {
             close_unreachable_block(block, context, headers, inference);
         }
@@ -4682,6 +5412,27 @@ fn close_unreachable_expr(
     }
 }
 
+fn use_temporary(
+    state: &mut UsageState,
+    cleanup: Vec<CheckedType>,
+    context: ValueContext,
+    span: Span,
+    function: &FunctionHeader,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
+) -> Result<(), CheckDiagnostic> {
+    match context {
+        ValueContext::Consume if !cleanup.is_empty() => state.temporaries.push(PendingCleanup {
+            origin: function.context.origin(span),
+            types: cleanup,
+        }),
+        ValueContext::Borrow | ValueContext::Discard if !cleanup_is_empty(&cleanup, nominals) => {
+            return Err(temporary_cleanup_diagnostic(span, function));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn temporary_cleanup_diagnostic(span: Span, function: &FunctionHeader) -> CheckDiagnostic {
     source_diagnostic(
         CheckDiagnosticKind::Unsupported,
@@ -4695,13 +5446,15 @@ fn validate_scope_cleanup(
     state: &UsageState,
     locals: &[EntityId],
     function: &FunctionHeader,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<(), CheckDiagnostic> {
     for local in locals.iter().rev() {
         let usage = state
             .bindings
             .get(local)
             .expect("a tracked non-Copy local remains in its lexical scope state");
-        if usage.availability != Availability::Moved {
+        if usage.availability != Availability::Moved && !cleanup_is_empty(&usage.cleanup, nominals)
+        {
             return Err(source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
                 "a generic local owner remains at scope exit and requires D(T) cleanup",
@@ -4716,17 +5469,25 @@ fn validate_scope_cleanup(
 fn validate_normal_exit(
     state: &UsageState,
     function: &FunctionHeader,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<(), CheckDiagnostic> {
-    if let Some(temporary) = state.temporaries.last() {
+    if let Some(temporary) = state
+        .temporaries
+        .iter()
+        .rev()
+        .find(|temporary| !cleanup_is_empty(&temporary.types, nominals))
+    {
         return Err(source_diagnostic(
             CheckDiagnosticKind::Unsupported,
             "a partially evaluated expression retains a generic temporary that requires D(T) cleanup",
-            temporary.clone(),
+            temporary.origin.clone(),
             vec![function.origin.clone()],
         ));
     }
     if let Some(usage) = state.bindings.values().find(|usage| {
-        usage.ownership == OwnershipKind::Owned && usage.availability != Availability::Moved
+        usage.ownership == OwnershipKind::Owned
+            && usage.availability != Availability::Moved
+            && !cleanup_is_empty(&usage.cleanup, nominals)
     }) {
         return Err(source_diagnostic(
             CheckDiagnosticKind::Unsupported,
@@ -4829,6 +5590,7 @@ enum TypedExprKind {
     },
     Parenthesized(Box<TypedExpr>),
     Tuple(Vec<TypedExpr>),
+    Construct(Box<TypedConstruction>),
     Block(Box<TypedBlock>),
     If {
         condition: Box<TypedExpr>,
@@ -4855,6 +5617,29 @@ enum TypedExprKind {
         receiver: Box<TypedExpr>,
         index: usize,
     },
+    Field {
+        receiver: Box<TypedExpr>,
+        selection: FieldSelection,
+        use_kind: Option<ValueUseKind>,
+    },
+}
+
+#[allow(dead_code)]
+enum FieldSelection {
+    Pending(usize),
+    Exact(Box<EntityId>, OriginRef),
+}
+
+struct TypedConstruction {
+    nominal: NominalType,
+    constructor: EntityId,
+    fields: Vec<TypedConstructField>,
+}
+
+struct TypedConstructField {
+    declaration: EntityId,
+    origin: OriginRef,
+    value: TypedExpr,
 }
 
 #[allow(dead_code)]
@@ -4885,7 +5670,15 @@ enum TypeObligationKind {
     Numeric,
     Equality,
     Ordering,
-    TupleProjection { index: usize, result: CheckedType },
+    TupleProjection {
+        index: usize,
+        result: CheckedType,
+    },
+    FieldProjection {
+        field: Box<ResolvedSelection>,
+        result: CheckedType,
+        selected: Option<Box<EntityId>>,
+    },
 }
 
 struct TypeObligation {
@@ -4896,40 +5689,63 @@ struct TypeObligation {
 }
 
 fn validate_type_obligations(
-    obligations: &[TypeObligation],
+    obligations: &mut [TypeObligation],
     inference: &mut TypeInference,
+    project: &ResolvedProject,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<(), CheckDiagnostic> {
-    // Projections relate an already generated receiver and result. Resolve
-    // these equations before checking consumers such as numeric operations.
+    // All projections consume the same body constraints before numeric checks.
     let mut pending = obligations
         .iter()
-        .filter(|obligation| matches!(obligation.kind, TypeObligationKind::TupleProjection { .. }))
+        .enumerate()
+        .filter_map(|(index, obligation)| {
+            matches!(
+                obligation.kind,
+                TypeObligationKind::TupleProjection { .. }
+                    | TypeObligationKind::FieldProjection { .. }
+            )
+            .then_some(index)
+        })
         .collect::<Vec<_>>();
     while !pending.is_empty() {
         let previous_count = pending.len();
         let mut deferred = Vec::new();
-        for obligation in pending {
-            let TypeObligationKind::TupleProjection { index, result } = &obligation.kind else {
-                unreachable!("only tuple projections enter the pending equations");
-            };
+        for index in pending {
+            let obligation = &mut obligations[index];
             let receiver = inference.resolve(&obligation.ty);
-            let Some(field) =
-                tuple_field_type(&receiver, *index, &obligation.primary, &obligation.related)?
-            else {
-                deferred.push(obligation);
+            let (field_type, result) = match &mut obligation.kind {
+                TypeObligationKind::TupleProjection { index, result } => (
+                    tuple_field_type(&receiver, *index, &obligation.primary, &obligation.related)?,
+                    result,
+                ),
+                TypeObligationKind::FieldProjection {
+                    field,
+                    result,
+                    selected,
+                } => {
+                    let resolved = nominal_field_type(&receiver, field, project, nominals)?;
+                    let ty = resolved.map(|(identity, ty)| {
+                        *selected = Some(Box::new(identity));
+                        ty
+                    });
+                    (ty, result)
+                }
+                _ => unreachable!("only projections enter the pending equations"),
+            };
+            let Some(field_type) = field_type else {
+                deferred.push(index);
                 continue;
             };
-            let resolved_result = inference.resolve(result);
-            let constraint = if matches!(resolved_result, CheckedType::Infer(_)) {
-                inference.unify(&field, result)
+            let constraint = if matches!(inference.resolve(result), CheckedType::Infer(_)) {
+                inference.unify(&field_type, result)
             } else {
-                inference.satisfy(&field, result)
+                inference.satisfy(&field_type, result)
             };
             constraint.map_err(|failure| {
                 source_diagnostic(
                     CheckDiagnosticKind::TypeMismatch,
                     format!(
-                        "tuple projection result is incompatible: {}",
+                        "projection result is incompatible: {}",
                         display_unification_failure(&failure)
                     ),
                     obligation.primary.clone(),
@@ -4938,10 +5754,10 @@ fn validate_type_obligations(
             })?;
         }
         if deferred.len() == previous_count {
-            let obligation = deferred[0];
+            let obligation = &obligations[deferred[0]];
             return Err(source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
-                "tuple projection requires a known tuple structure after recursive-group inference",
+                "projection requires a known receiver structure after recursive-group inference",
                 obligation.primary.clone(),
                 obligation.related.clone(),
             ));
@@ -4985,9 +5801,9 @@ fn validate_type_obligations(
                         obligation.related.clone(),
                     ))
                 }
-                CheckedType::Tuple(_) => Err(source_diagnostic(
+                CheckedType::Tuple(_) | CheckedType::Nominal(_) => Err(source_diagnostic(
                     CheckDiagnosticKind::Unsupported,
-                    "tuple trait comparison is outside the current Checker subset",
+                    "aggregate trait comparison is outside the current Checker subset",
                     obligation.primary.clone(),
                     obligation.related.clone(),
                 )),
@@ -4998,11 +5814,72 @@ fn validate_type_obligations(
                     obligation.related.clone(),
                 )),
             },
-            TypeObligationKind::TupleProjection { .. } => Ok(()),
+            TypeObligationKind::TupleProjection { .. }
+            | TypeObligationKind::FieldProjection { .. } => Ok(()),
         };
         result?;
     }
     Ok(())
+}
+
+fn nominal_field_type(
+    receiver: &CheckedType,
+    selection: &ResolvedSelection,
+    project: &ResolvedProject,
+    nominals: &BTreeMap<EntityId, NominalDefinition>,
+) -> Result<Option<(EntityId, CheckedType)>, CheckDiagnostic> {
+    let nominal = match receiver {
+        CheckedType::Infer(_) => return Ok(None),
+        CheckedType::Nominal(nominal) if nominal.declaration.kind == EntityKind::Struct => nominal,
+        CheckedType::Formal(_) | CheckedType::Never | CheckedType::Nominal(_) => {
+            return Err(source_diagnostic(
+                CheckDiagnosticKind::Unsupported,
+                "field selection requires a known ordinary struct receiver",
+                selection.origin.clone(),
+                Vec::new(),
+            ));
+        }
+        _ => {
+            return Err(source_diagnostic(
+                CheckDiagnosticKind::TypeMismatch,
+                "field selection requires a struct receiver",
+                selection.origin.clone(),
+                Vec::new(),
+            ));
+        }
+    };
+    let definition = &nominals[&nominal.declaration].constructors[&nominal.declaration];
+    let Some(field) = definition
+        .fields
+        .iter()
+        .find(|field| field.identity.name == selection.name)
+    else {
+        return Err(source_diagnostic(
+            CheckDiagnosticKind::TypeMismatch,
+            "struct has no such field",
+            selection.origin.clone(),
+            entity_origin(&nominal.declaration).into_iter().collect(),
+        ));
+    };
+    if selection
+        .declaration
+        .as_ref()
+        .is_some_and(|identity| identity != &field.identity)
+    {
+        return Err(source_diagnostic(
+            CheckDiagnosticKind::TypeMismatch,
+            "field belongs to a different nominal declaration",
+            selection.origin.clone(),
+            vec![field.origin.clone()],
+        ));
+    }
+    let module = module_for_origin(project, &selection.origin)
+        .expect("field occurrence belongs to a source module");
+    check_field_access(project, &field.identity, &module, &selection.origin)?;
+    Ok(Some((
+        field.identity.clone(),
+        instantiate_type(&field.ty, &nominal.replacements(nominals)),
+    )))
 }
 
 fn tuple_field_type(
@@ -5302,6 +6179,33 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 kind: TypedExprKind::Unit,
             }),
             ResolvedExprKind::Path(reference) => self.check_value_reference(reference, origin),
+            ResolvedExprKind::NamedConstruct { target, entries } => {
+                self.check_named_construction(origin, target, entries)
+            }
+            ResolvedExprKind::Field { receiver, field } => {
+                let receiver = self.check_expr(receiver)?;
+                let result = self.inference.fresh();
+                let index = self.obligations.len();
+                self.obligations.push(TypeObligation {
+                    kind: TypeObligationKind::FieldProjection {
+                        field: Box::new(field.clone()),
+                        result: result.clone(),
+                        selected: None,
+                    },
+                    ty: receiver.ty.clone(),
+                    primary: field.origin.clone(),
+                    related: vec![self.origin(receiver.span)],
+                });
+                Ok(TypedExpr {
+                    span: expression.span,
+                    ty: result,
+                    kind: TypedExprKind::Field {
+                        receiver: Box::new(receiver),
+                        selection: FieldSelection::Pending(index),
+                        use_kind: None,
+                    },
+                })
+            }
             ResolvedExprKind::Parenthesized(inner) => {
                 let inner = self.check_expr(inner)?;
                 Ok(TypedExpr {
@@ -5368,7 +6272,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
     }
 
     fn check_value_reference(
-        &self,
+        &mut self,
         reference: &ResolvedReference,
         origin: OriginRef,
     ) -> Result<TypedExpr, CheckDiagnostic> {
@@ -5380,6 +6284,11 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 Vec::new(),
             ));
         };
+        if target.kind == EntityKind::EnumConstructor {
+            let (nominal, constructor, _) =
+                self.construction_header(reference, &[EntityShape::ConstructorUnit], &origin)?;
+            return Ok(self.finish_construction(origin, nominal, constructor, Vec::new()));
+        }
         let Some(ty) = self.values.get(target) else {
             return Err(source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
@@ -5598,10 +6507,10 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                             related: vec![self.origin(left.span), self.origin(right.span)],
                         });
                     }
-                    CheckedType::Tuple(_) => {
+                    CheckedType::Tuple(_) | CheckedType::Nominal(_) => {
                         return Err(source_diagnostic(
                             CheckDiagnosticKind::Unsupported,
-                            "tuple trait comparison is outside the current Checker subset",
+                            "aggregate trait comparison is outside the current Checker subset",
                             self.origin(operator.0),
                             Vec::new(),
                         ));
@@ -5642,10 +6551,10 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                             related: vec![self.origin(left.span), self.origin(right.span)],
                         });
                     }
-                    CheckedType::Tuple(_) => {
+                    CheckedType::Tuple(_) | CheckedType::Nominal(_) => {
                         return Err(source_diagnostic(
                             CheckDiagnosticKind::Unsupported,
-                            "tuple trait comparison is outside the current Checker subset",
+                            "aggregate trait comparison is outside the current Checker subset",
                             self.origin(operator.0),
                             Vec::new(),
                         ));
@@ -5714,6 +6623,38 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
         callee: &ResolvedExpr,
         arguments: &[ResolvedCallArgument],
     ) -> Result<TypedExpr, CheckDiagnostic> {
+        if let ResolvedExprKind::Path(reference @ ResolvedReference::Exact { target, .. }) =
+            &callee.kind
+            && target.kind == EntityKind::EnumConstructor
+        {
+            let (nominal, constructor, fields) = self.construction_header(
+                reference,
+                &[EntityShape::ConstructorPositional],
+                &origin,
+            )?;
+            if arguments.len() != fields.len() {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::CallMismatch,
+                    "enum payload argument count does not match its variant",
+                    origin,
+                    entity_origin(&constructor).into_iter().collect(),
+                ));
+            }
+            let mut typed = Vec::new();
+            for (argument, field) in arguments.iter().zip(fields) {
+                let ResolvedCallArgument::Expression(value) = argument else {
+                    return Err(source_diagnostic(
+                        CheckDiagnosticKind::Unsupported,
+                        "constructor mode assertions are outside the current Checker subset",
+                        origin,
+                        Vec::new(),
+                    ));
+                };
+                let value = self.check_expr(value)?;
+                typed.push(self.check_construct_field(field, self.origin(value.span), value)?);
+            }
+            return Ok(self.finish_construction(origin, nominal, constructor, typed));
+        }
         let target = direct_function_callee(callee).ok_or_else(|| {
             source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
@@ -5886,6 +6827,220 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
     }
 }
 
+impl BodyChecker<'_, '_> {
+    fn construction_header(
+        &mut self,
+        reference: &ResolvedReference,
+        shapes: &[EntityShape],
+        origin: &OriginRef,
+    ) -> Result<(NominalType, EntityId, Vec<NominalField>), CheckDiagnostic> {
+        let ResolvedReference::Exact { target, .. } = reference else {
+            return Err(source_diagnostic(
+                CheckDiagnosticKind::Unsupported,
+                "type-dependent construction is outside the current Checker subset",
+                origin.clone(),
+                Vec::new(),
+            ));
+        };
+        let nominal = {
+            let owner = if target.kind == EntityKind::EnumConstructor {
+                self.project.entities[target]
+                    .owner
+                    .as_ref()
+                    .expect("variant retains its nominal owner")
+                    .clone()
+            } else {
+                target.clone()
+            };
+            let Some(definition) = self.normalizer.nominals.get(&owner) else {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "construction target is outside the current Checker subset",
+                    origin.clone(),
+                    entity_origin(target).into_iter().collect(),
+                ));
+            };
+            NominalType {
+                declaration: owner,
+                arguments: definition
+                    .formals
+                    .iter()
+                    .map(|_| self.inference.fresh())
+                    .collect(),
+            }
+        };
+        let constructor = if target.kind == EntityKind::EnumConstructor {
+            target.clone()
+        } else {
+            nominal.declaration.clone()
+        };
+        let definition = &self.normalizer.nominals[&nominal.declaration];
+        let Some(fields) = definition
+            .constructors
+            .get(&constructor)
+            .filter(|fields| shapes.contains(&fields.shape))
+        else {
+            return Err(source_diagnostic(
+                CheckDiagnosticKind::TypeMismatch,
+                "construction syntax does not match the nominal or variant payload shape",
+                origin.clone(),
+                entity_origin(&constructor).into_iter().collect(),
+            ));
+        };
+        let replacements = nominal.replacements(&self.normalizer.nominals);
+        let fields = fields
+            .fields
+            .iter()
+            .map(|field| NominalField {
+                ty: instantiate_type(&field.ty, &replacements),
+                ..field.clone()
+            })
+            .collect();
+        Ok((nominal, constructor, fields))
+    }
+
+    fn check_named_construction(
+        &mut self,
+        origin: OriginRef,
+        target: &ResolvedReference,
+        entries: &[ResolvedConstructEntry],
+    ) -> Result<TypedExpr, CheckDiagnostic> {
+        let (nominal, constructor, fields) = self.construction_header(
+            target,
+            &[EntityShape::Plain, EntityShape::ConstructorNamed],
+            &origin,
+        )?;
+        let module = module_for_origin(self.project, &origin)
+            .expect("construction belongs to a resolved module");
+        let mut remaining = fields
+            .iter()
+            .map(|field| (field.identity.clone(), field.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut typed = Vec::new();
+        for entry in entries {
+            let ResolvedConstructEntry::Field {
+                member,
+                value,
+                shorthand,
+            } = entry
+            else {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "struct update spread is outside the current Checker subset",
+                    origin,
+                    Vec::new(),
+                ));
+            };
+            let identity = member.declaration.as_ref();
+            let Some(field) = identity.and_then(|identity| remaining.remove(identity)) else {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::TypeMismatch,
+                    "duplicate, unknown, or foreign construction field",
+                    member.origin.clone(),
+                    entity_origin(&constructor).into_iter().collect(),
+                ));
+            };
+            check_field_access(self.project, &field.identity, &module, &member.origin)?;
+            let value = if let Some(value) = value {
+                self.check_expr(value)?
+            } else {
+                self.check_value_reference(
+                    shorthand
+                        .as_deref()
+                        .expect("field shorthand retains its reference"),
+                    member.origin.clone(),
+                )?
+            };
+            typed.push(self.check_construct_field(field, member.origin.clone(), value)?);
+        }
+        if !remaining.is_empty() {
+            return Err(source_diagnostic(
+                CheckDiagnosticKind::TypeMismatch,
+                format!(
+                    "construction is missing field(s): {}",
+                    remaining
+                        .keys()
+                        .map(|identity| identity.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                origin,
+                remaining
+                    .values()
+                    .map(|field| field.origin.clone())
+                    .collect(),
+            ));
+        }
+        Ok(self.finish_construction(origin, nominal, constructor, typed))
+    }
+
+    fn check_construct_field(
+        &mut self,
+        field: NominalField,
+        origin: OriginRef,
+        value: TypedExpr,
+    ) -> Result<TypedConstructField, CheckDiagnostic> {
+        self.inference
+            .satisfy(&value.ty, &field.ty)
+            .map_err(|failure| {
+                source_diagnostic(
+                    CheckDiagnosticKind::TypeMismatch,
+                    format!(
+                        "construction field cannot satisfy its declared type: {}",
+                        display_unification_failure(&failure)
+                    ),
+                    self.origin(value.span),
+                    vec![field.origin],
+                )
+            })?;
+        Ok(TypedConstructField {
+            declaration: field.identity,
+            origin,
+            value,
+        })
+    }
+
+    fn finish_construction(
+        &self,
+        origin: OriginRef,
+        nominal: NominalType,
+        constructor: EntityId,
+        fields: Vec<TypedConstructField>,
+    ) -> TypedExpr {
+        let ty = if fields.iter().any(|field| self.is_never(&field.value.ty)) {
+            CheckedType::Never
+        } else {
+            CheckedType::Nominal(Box::new(nominal.clone()))
+        };
+        TypedExpr {
+            span: origin.span,
+            ty,
+            kind: TypedExprKind::Construct(Box::new(TypedConstruction {
+                nominal,
+                constructor,
+                fields,
+            })),
+        }
+    }
+}
+
+fn check_field_access(
+    project: &ResolvedProject,
+    field: &EntityId,
+    module: &ModuleRef,
+    origin: &OriginRef,
+) -> Result<(), CheckDiagnostic> {
+    if project.entities[field].public || module.is_descendant_of(&field.module) {
+        return Ok(());
+    }
+    Err(source_diagnostic(
+        CheckDiagnosticKind::TypeMismatch,
+        "field is private to its declaring module",
+        origin.clone(),
+        entity_origin(field).into_iter().collect(),
+    ))
+}
+
 fn minimum_integer_literal(expression: &ResolvedExpr) -> Option<Span> {
     match &expression.kind {
         ResolvedExprKind::Parenthesized(inner) => minimum_integer_literal(inner),
@@ -5999,6 +7154,11 @@ mod checking_tests {
                     assert_closed_type(element, scheme);
                 }
             }
+            CheckedType::Nominal(nominal) => {
+                for actual in &nominal.arguments {
+                    assert_closed_type(actual, scheme);
+                }
+            }
             CheckedType::Formal(formal) => assert!(
                 scheme.contains(formal.as_ref()),
                 "published type has free formal {}::{}",
@@ -6031,6 +7191,34 @@ mod checking_tests {
     fn assert_closed_expr(expression: &TypedExpr, scheme: &[TypeFormal]) {
         assert_closed_type(&expression.ty, scheme);
         match &expression.kind {
+            TypedExprKind::Construct(construction) => {
+                for actual in &construction.nominal.arguments {
+                    assert_closed_type(actual, scheme);
+                }
+                for field in &construction.fields {
+                    assert_closed_expr(&field.value, scheme);
+                }
+            }
+            TypedExprKind::Field {
+                receiver,
+                selection,
+                use_kind,
+            } => {
+                assert_closed_expr(receiver, scheme);
+                let FieldSelection::Exact(identity, origin) = selection else {
+                    panic!("field must retain an exact closed selection")
+                };
+                assert_eq!(identity.kind, EntityKind::Field);
+                assert_eq!(
+                    origin.library,
+                    scheme.first().map_or(origin.library, |formal| formal
+                        .owner
+                        .module
+                        .source_library()
+                        .unwrap())
+                );
+                assert!(use_kind.is_some());
+            }
             TypedExprKind::Parenthesized(inner)
             | TypedExprKind::Unary { operand: inner, .. }
             | TypedExprKind::TupleField {
@@ -6090,6 +7278,100 @@ mod checking_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn nominal_result_retains_owner_actual_constructor_field_and_closed_body_facts() {
+        let checked = crate::check_project(
+            &sources(
+                r#"
+struct Box<T> { value: T }
+enum Choice<T> { Named { second: Int, first: T }, Empty }
+fn observe<T>(value: &T) {}
+fn field<T>(value: &Box<T>) { observe(value.value); }
+fn wrap<T>(value: T) -> Box<T> { Box { value } }
+fn relay<T>(value: Box<T>) -> Box<T> { if true { relay(value) } else { value } }
+fn ordered<T>(value: T) -> Choice<T> { Choice::Named { first: value, second: 1 } }
+fn concrete() -> Option<Int> { Option::Some(1) }
+"#,
+            ),
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .expect("nominal facts close before publication");
+        for (identity, definition) in &checked.nominals {
+            for formal in &definition.formals {
+                assert_eq!(&formal.owner, identity);
+            }
+            for constructor in definition.constructors.values() {
+                for field in &constructor.fields {
+                    assert_closed_type(&field.ty, &definition.formals);
+                }
+            }
+        }
+        for function in checked.functions.values() {
+            for parameter in &function.parameters {
+                assert_closed_type(&parameter.ty, &function.scheme);
+            }
+            assert_closed_type(&function.return_type, &function.scheme);
+            assert_closed_block(&function.body, &function.scheme);
+        }
+        let ordered = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "ordered")
+            .unwrap();
+        let TypedExprKind::Construct(construction) = &ordered.body.tail.as_ref().unwrap().kind
+        else {
+            panic!("constructor is a distinct typed operation")
+        };
+        assert_eq!(
+            construction
+                .fields
+                .iter()
+                .map(|field| field.declaration.name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(
+            construction.fields[0].origin.span.start < construction.fields[1].origin.span.start
+        );
+        assert_eq!(
+            checked.prepared.0.entities[&construction.constructor]
+                .owner
+                .as_ref(),
+            Some(&construction.nominal.declaration)
+        );
+        assert_eq!(
+            construction.nominal.arguments,
+            vec![CheckedType::Formal(Box::new(ordered.scheme[0].clone()))]
+        );
+        for field in &construction.fields {
+            assert_eq!(
+                checked.prepared.0.entities[&field.declaration]
+                    .owner
+                    .as_ref(),
+                Some(&construction.constructor)
+            );
+        }
+        let concrete = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "concrete")
+            .unwrap();
+        let TypedExprKind::Construct(construction) = &concrete.body.tail.as_ref().unwrap().kind
+        else {
+            panic!("Option construction is retained")
+        };
+        assert_eq!(
+            construction.constructor,
+            checked.prepared.0.core_roles.option.some
+        );
+        assert_eq!(
+            construction.nominal.declaration,
+            checked.prepared.0.core_roles.option.declaration
+        );
+        assert_eq!(construction.nominal.arguments, vec![CheckedType::Int]);
     }
 
     #[test]
