@@ -116,7 +116,9 @@ let checked = check_project(
 
 `LibraryId` 只区分本次输入中的库实例；依赖别名由每个 `LibrarySources` 明确给出。宿主读取仓库唯一的 [`core/root.vorton`](core/root.vorton)，把它作为 `core` 对应库的真实 root source 传入；每个可达非 core 库都必须以自己选择的别名直接依赖该 ID。Resolver 不读取磁盘，也不按别名或 ID 数值猜测 core。`PreparedProject` 完整保留名称层结果，并只额外证明 supertrait 指向真实 named trait、trait inheritance graph 与 effect alias declaration graph 无环。
 
-当前 `check_project` 只接受显式单态、纯值函数：类型限于 `Int`、`Float`、`Bool`、`Unit`、`Never`、这些类型组成的 tuple，以及可展开为它们的非泛型 alias；body 限于已实现的 literal、局部值、tuple、block、if/return、纯运算与 exact direct call。它核对受支持的 contract type、Borrow/Move mode、空 effect 上界和空 generic requirements，并把其余已解析 source 或已选择 clause 稳定报告为 `CheckDiagnosticKind::Unsupported`。`CheckedProject` 保留本轮真实形成的类型、字面量值、callee、mode、纯 effect 与 typed body，但不公开内部 ID 或通用查询面，也不代表完整接口、完整 Checker 或最终 TypedHIR。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
+当前 `check_project` 支持普通 module／inline-module 纯函数的受限 HM 推断，包括函数泛型、内部参数与返回类型推断、函数泛化、递归组和逐调用实例化；普通局部 `let` 保持 monotype。类型限于 `Int`、`Float`、`Bool`、`Unit`、`Never`、函数 formal、由它们组成的 tuple，以及受支持的非泛型 alias。它核对双边泛型 contract、Borrow/Move mode、空 effect 上界和空 generic requirements，并检查泛型值的借用与整值移交；需要泛型清理、部分移动或非空 requirement/effect 等超出支持面的用法返回 `CheckDiagnosticKind::Unsupported`。完整边界见[当前 Checker API 支持说明](docs/lang-spec/type-system.md#当前-checker-api-支持边界)。
+
+`CheckedProject` 保留已闭合的 scheme、typed body、调用 mapping，以及真实形成的类型、字面量值、callee、mode 和纯 effect，但不公开内部 ID 或通用查询面，也不代表完整接口、完整 Checker 或最终 TypedHIR。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
 
 ```powershell
 python .agents/scripts/validate_current_tree.py
