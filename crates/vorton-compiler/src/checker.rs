@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use crate::ast::{BinaryOperator, ParameterMode, Span, UnaryOperator};
@@ -610,92 +610,142 @@ fn check_prepared_project(
         infer_parameter_modes(&group, &mut headers, &group_drafts, &inference)?;
         validate_whole_value_use(&group, &headers, &mut group_drafts, &inference)?;
 
-        // Generalization and the downstream callable environment are reached only
-        // after every unpublished group fact above has closed successfully.
-        let mut group_schemes = BTreeMap::new();
-        let mut group_bodies = BTreeMap::new();
+        // Close demands in the shared monotype graph before introducing any
+        // generalized scheme binders. Calls refer to exact group bindings.
+        let mut requirements = BTreeMap::new();
+        let mut callers: BTreeMap<EntityId, Vec<(EntityId, Span)>> = BTreeMap::new();
         for identity in &group {
-            let header = headers
-                .get(identity)
-                .expect("a generalized function remains in the header table");
-            let body = group_drafts
-                .remove(identity)
-                .expect("every generalized function has one typed draft");
-            let generalized = function_generalization(identity, header, &mut inference);
-            let mut used_variables = BTreeSet::new();
-            let mut used_formals = BTreeSet::new();
+            let header = &headers[identity];
+            let body = &group_drafts[identity];
+            let mut variables = BTreeSet::new();
+            let mut formals = BTreeSet::new();
             for ty in header
                 .parameters
                 .iter()
                 .map(|parameter| &parameter.ty)
                 .chain(std::iter::once(&header.return_type))
             {
-                collect_inference_inputs(&inference, ty, &mut used_variables, &mut used_formals);
+                collect_inference_inputs(&inference, ty, &mut variables, &mut formals);
             }
-            collect_typed_variables(&body, &inference, &mut used_variables, &mut used_formals);
-            if used_variables
-                .iter()
-                .any(|variable| !generalized.variables.contains_key(variable))
-                || used_formals.iter().any(|formal| {
-                    !generalized
-                        .local_formals
-                        .iter()
-                        .any(|local| inference.formals_equivalent(formal, local))
-                })
-            {
-                return Err(source_diagnostic(
-                    CheckDiagnosticKind::Unsupported,
-                    "a body type cannot be inferred in this callable scope; unresolved or foreign call actuals cannot add callable type parameters",
+            let mut scope = type_dependencies(&inference, &variables, &formals);
+            scope.extend(
+                header
+                    .declared_formals
+                    .iter()
+                    .map(|formal| CheckedType::Formal(Box::new(inference.formal_root(formal)))),
+            );
+            let mut recursive_calls = Vec::new();
+            collect_typed_variables(
+                body,
+                &inference,
+                &mut variables,
+                &mut formals,
+                &mut recursive_calls,
+            );
+            let required = type_dependencies(&inference, &variables, &formals);
+            if !required.is_subset(&scope) {
+                return Err(unbound_body_type(
                     header.context.origin(body.span),
                     Vec::new(),
                 ));
             }
-            let instantiation_formals = generalized
-                .local_formals
+            requirements.insert(identity.clone(), GroupTypeRequirements { scope, required });
+            for (callee, span) in recursive_calls {
+                callers
+                    .entry(callee)
+                    .or_default()
+                    .push((identity.clone(), span));
+            }
+        }
+
+        // Propagate each actual type demand to every recursive caller. The
+        // finite worklist contains shared inference identities, not new types.
+        let mut pending = requirements
+            .iter()
+            .flat_map(|(identity, member)| {
+                member
+                    .required
+                    .iter()
+                    .map(|shared| (identity.clone(), shared.clone()))
+            })
+            .collect::<VecDeque<_>>();
+        while let Some((callee, shared)) = pending.pop_front() {
+            for (caller, span) in callers.get(&callee).into_iter().flatten() {
+                let member = requirements
+                    .get_mut(caller)
+                    .expect("recursive caller is in the group");
+                if !member.scope.contains(&shared) {
+                    return Err(unbound_body_type(
+                        headers[caller].context.origin(*span),
+                        vec![headers[&callee].origin.clone()],
+                    ));
+                }
+                if member.required.insert(shared.clone()) {
+                    pending.push_back((caller.clone(), shared.clone()));
+                }
+            }
+        }
+
+        // Generalize the now-closed group. Keep each binder's original shared
+        // type identity so recursive actuals are never inferred from final types.
+        let mut group_members = BTreeMap::new();
+        for identity in &group {
+            let generalization =
+                function_generalization(identity, &headers[identity], &mut inference);
+            let required = requirements[identity]
+                .required
                 .iter()
-                .filter(|formal| {
-                    generalized
-                        .variables
-                        .values()
-                        .any(|inferred| inferred == *formal)
-                        || used_formals
-                            .iter()
-                            .any(|used| inference.formals_equivalent(used, formal))
-                })
-                .cloned()
-                .collect();
-            let parameters = header
-                .parameters
-                .iter()
-                .map(|parameter| {
-                    inference.close_type(
-                        &parameter.ty,
-                        &generalized.variables,
-                        &generalized.local_formals,
-                    )
+                .map(|shared| {
+                    generalization
+                        .formal_for(shared, &inference)
+                        .expect("every closed group demand has a binder in the function scope")
+                        .clone()
                 })
                 .collect();
-            let return_type = inference.close_type(
-                &header.return_type,
-                &generalized.variables,
-                &generalized.local_formals,
+            group_members.insert(
+                identity.clone(),
+                GroupMember {
+                    generalization,
+                    required,
+                },
             );
+        }
+
+        let mut group_schemes = BTreeMap::new();
+        let mut group_bodies = BTreeMap::new();
+        for identity in &group {
+            let header = &headers[identity];
+            let member = &group_members[identity];
+            let closure = BodyClosure {
+                inference: &inference,
+                function: &member.generalization,
+                group: &group_members,
+            };
             group_schemes.insert(
                 identity.clone(),
                 CallableScheme {
-                    quantified: generalized.local_formals.clone(),
-                    instantiation_formals,
-                    parameters,
-                    return_type,
+                    quantified: member
+                        .generalization
+                        .bindings
+                        .iter()
+                        .map(|(formal, _)| formal.clone())
+                        .collect(),
+                    instantiation_formals: member.required.clone(),
+                    parameters: header
+                        .parameters
+                        .iter()
+                        .map(|parameter| closure.close_type(&parameter.ty))
+                        .collect(),
+                    return_type: closure.close_type(&header.return_type),
                 },
             );
             group_bodies.insert(
                 identity.clone(),
                 close_typed_block(
-                    body,
-                    &inference,
-                    &generalized.variables,
-                    &generalized.local_formals,
+                    group_drafts
+                        .remove(identity)
+                        .expect("every member has one typed draft"),
+                    &closure,
                 ),
             );
         }
@@ -826,8 +876,53 @@ fn instantiate_type(
 }
 
 struct FunctionGeneralization {
-    variables: BTreeMap<TypeVariable, TypeFormal>,
-    local_formals: Vec<TypeFormal>,
+    // Forward receipt created when each scheme binder is introduced. The source
+    // is the shared inference identity, not a reconstructed finalized type.
+    bindings: Vec<(TypeFormal, CheckedType)>,
+}
+
+impl FunctionGeneralization {
+    fn formal_for(&self, shared: &CheckedType, inference: &TypeInference) -> Option<&TypeFormal> {
+        self.bindings.iter().find_map(|(formal, source)| {
+            inferred_types_equal(shared, source, inference).then_some(formal)
+        })
+    }
+}
+
+struct GroupTypeRequirements {
+    scope: BTreeSet<CheckedType>,
+    required: BTreeSet<CheckedType>,
+}
+
+struct GroupMember {
+    generalization: FunctionGeneralization,
+    required: BTreeSet<TypeFormal>,
+}
+
+fn type_dependencies(
+    inference: &TypeInference,
+    variables: &BTreeSet<TypeVariable>,
+    formals: &BTreeSet<TypeFormal>,
+) -> BTreeSet<CheckedType> {
+    variables
+        .iter()
+        .copied()
+        .map(CheckedType::Infer)
+        .chain(
+            formals
+                .iter()
+                .map(|formal| CheckedType::Formal(Box::new(inference.formal_root(formal)))),
+        )
+        .collect()
+}
+
+fn unbound_body_type(origin: OriginRef, related: Vec<OriginRef>) -> CheckDiagnostic {
+    source_diagnostic(
+        CheckDiagnosticKind::Unsupported,
+        "a body type cannot be inferred in this callable scope; unresolved or foreign call actuals cannot add callable type parameters",
+        origin,
+        related,
+    )
 }
 
 fn function_generalization(
@@ -837,54 +932,47 @@ fn function_generalization(
 ) -> FunctionGeneralization {
     let mut variables = BTreeSet::new();
     let mut referenced_formals = BTreeSet::new();
-    for parameter in &header.parameters {
-        collect_inference_inputs(
-            inference,
-            &parameter.ty,
-            &mut variables,
-            &mut referenced_formals,
-        );
+    for ty in header
+        .parameters
+        .iter()
+        .map(|parameter| &parameter.ty)
+        .chain(std::iter::once(&header.return_type))
+    {
+        collect_inference_inputs(inference, ty, &mut variables, &mut referenced_formals);
     }
-    collect_inference_inputs(
-        inference,
-        &header.return_type,
-        &mut variables,
-        &mut referenced_formals,
-    );
-    let variables = variables
+    let mut generalized = FunctionGeneralization {
+        bindings: header
+            .declared_formals
+            .iter()
+            .map(|formal| {
+                (
+                    formal.clone(),
+                    CheckedType::Formal(Box::new(formal.clone())),
+                )
+            })
+            .collect(),
+    };
+    for variable in variables {
+        let ordinal = generalized.bindings.len();
+        generalized.bindings.push((
+            TypeFormal {
+                owner: identity.clone(),
+                ordinal,
+                name: format!("T{ordinal}"),
+            },
+            CheckedType::Infer(variable),
+        ));
+    }
+    let foreign_roots = referenced_formals
         .into_iter()
-        .enumerate()
-        .map(|(offset, variable)| {
-            let ordinal = header.declared_formals.len() + offset;
-            (
-                variable,
-                TypeFormal {
-                    owner: identity.clone(),
-                    ordinal,
-                    name: format!("T{ordinal}"),
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut local_formals = header.declared_formals.clone();
-    local_formals.extend(variables.values().cloned());
-    let mut foreign_roots = referenced_formals
-        .into_iter()
-        .filter(|formal| {
-            !local_formals
-                .iter()
-                .any(|local| inference.formals_equivalent(formal, local))
-        })
         .map(|formal| inference.formal_root(&formal))
         .collect::<BTreeSet<_>>();
-    while let Some(foreign) = foreign_roots.pop_first() {
-        if local_formals
-            .iter()
-            .any(|local| inference.formals_equivalent(&foreign, local))
-        {
+    for foreign in foreign_roots {
+        let shared = CheckedType::Formal(Box::new(foreign.clone()));
+        if generalized.formal_for(&shared, inference).is_some() {
             continue;
         }
-        let ordinal = local_formals.len();
+        let ordinal = generalized.bindings.len();
         let local = TypeFormal {
             owner: identity.clone(),
             ordinal,
@@ -892,13 +980,10 @@ fn function_generalization(
         };
         inference
             .unify_formals(foreign, local.clone())
-            .expect("a foreign formal class has no formal owned by this function");
-        local_formals.push(local);
+            .expect("a foreign signature formal has no binder owned by this function");
+        generalized.bindings.push((local, shared));
     }
-    FunctionGeneralization {
-        variables,
-        local_formals,
-    }
+    generalized
 }
 
 fn collect_inference_inputs(
@@ -916,22 +1001,23 @@ fn collect_typed_variables(
     inference: &TypeInference,
     variables: &mut BTreeSet<TypeVariable>,
     formals: &mut BTreeSet<TypeFormal>,
+    recursive_calls: &mut Vec<(EntityId, Span)>,
 ) {
     collect_inference_inputs(inference, &block.ty, variables, formals);
     for statement in &block.statements {
         match &statement.kind {
             TypedStatementKind::Let { ty, value, .. } => {
                 collect_inference_inputs(inference, ty, variables, formals);
-                collect_expr_variables(value, inference, variables, formals);
+                collect_expr_variables(value, inference, variables, formals, recursive_calls);
             }
             TypedStatementKind::Return(Some(value)) | TypedStatementKind::Expression(value) => {
-                collect_expr_variables(value, inference, variables, formals);
+                collect_expr_variables(value, inference, variables, formals, recursive_calls);
             }
             TypedStatementKind::Return(None) => {}
         }
     }
     if let Some(tail) = &block.tail {
-        collect_expr_variables(tail, inference, variables, formals);
+        collect_expr_variables(tail, inference, variables, formals, recursive_calls);
     }
 }
 
@@ -940,6 +1026,7 @@ fn collect_expr_variables(
     inference: &TypeInference,
     variables: &mut BTreeSet<TypeVariable>,
     formals: &mut BTreeSet<TypeFormal>,
+    recursive_calls: &mut Vec<(EntityId, Span)>,
 ) {
     collect_inference_inputs(inference, &expression.ty, variables, formals);
     match &expression.kind {
@@ -947,41 +1034,47 @@ fn collect_expr_variables(
         | TypedExprKind::Unary { operand: inner, .. }
         | TypedExprKind::TupleField {
             receiver: inner, ..
-        } => collect_expr_variables(inner, inference, variables, formals),
+        } => collect_expr_variables(inner, inference, variables, formals, recursive_calls),
         TypedExprKind::Tuple(elements) => {
             for element in elements {
-                collect_expr_variables(element, inference, variables, formals);
+                collect_expr_variables(element, inference, variables, formals, recursive_calls);
             }
         }
         TypedExprKind::Block(block) => {
-            collect_typed_variables(block, inference, variables, formals);
+            collect_typed_variables(block, inference, variables, formals, recursive_calls);
         }
         TypedExprKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            collect_expr_variables(condition, inference, variables, formals);
-            collect_typed_variables(then_branch, inference, variables, formals);
+            collect_expr_variables(condition, inference, variables, formals, recursive_calls);
+            collect_typed_variables(then_branch, inference, variables, formals, recursive_calls);
             if let Some(else_branch) = else_branch {
-                collect_expr_variables(else_branch, inference, variables, formals);
+                collect_expr_variables(else_branch, inference, variables, formals, recursive_calls);
             }
         }
         TypedExprKind::Binary { left, right, .. } => {
-            collect_expr_variables(left, inference, variables, formals);
-            collect_expr_variables(right, inference, variables, formals);
+            collect_expr_variables(left, inference, variables, formals, recursive_calls);
+            collect_expr_variables(right, inference, variables, formals, recursive_calls);
         }
         TypedExprKind::Call {
+            callee,
             arguments,
             instantiation,
             ..
         } => {
             for argument in arguments {
-                collect_expr_variables(argument, inference, variables, formals);
+                collect_expr_variables(argument, inference, variables, formals, recursive_calls);
             }
-            if let CallInstantiation::Published(mapping) = instantiation {
-                for (_, actual) in mapping {
-                    collect_inference_inputs(inference, actual, variables, formals);
+            match instantiation {
+                CallInstantiation::Published(mapping) | CallInstantiation::Provisional(mapping) => {
+                    for (_, actual) in mapping {
+                        collect_inference_inputs(inference, actual, variables, formals);
+                    }
+                }
+                CallInstantiation::RecursiveBinding => {
+                    recursive_calls.push((callee.as_ref().clone(), expression.span));
                 }
             }
         }
@@ -993,61 +1086,79 @@ fn collect_expr_variables(
     }
 }
 
-fn close_typed_block(
-    block: TypedBlock,
-    inference: &TypeInference,
-    generalized: &BTreeMap<TypeVariable, TypeFormal>,
-    local_formals: &[TypeFormal],
-) -> TypedBlock {
+struct BodyClosure<'a> {
+    inference: &'a TypeInference,
+    function: &'a FunctionGeneralization,
+    group: &'a BTreeMap<EntityId, GroupMember>,
+}
+
+impl BodyClosure<'_> {
+    fn close_type(&self, ty: &CheckedType) -> CheckedType {
+        self.inference.close_type(ty, self.function)
+    }
+
+    fn close_instantiation(
+        &self,
+        callee: &EntityId,
+        instantiation: CallInstantiation,
+    ) -> CallInstantiation {
+        match instantiation {
+            CallInstantiation::Published(mapping) => CallInstantiation::Published(
+                mapping
+                    .into_iter()
+                    .map(|(formal, actual)| (formal, self.close_type(&actual)))
+                    .collect(),
+            ),
+            CallInstantiation::RecursiveBinding => {
+                let member = self
+                    .group
+                    .get(callee)
+                    .expect("a recursive draft references its exact unpublished group binding");
+                CallInstantiation::Provisional(
+                    member
+                        .generalization
+                        .bindings
+                        .iter()
+                        .filter(|(formal, _)| member.required.contains(formal))
+                        .map(|(formal, shared)| (formal.clone(), self.close_type(shared)))
+                        .collect(),
+                )
+            }
+            CallInstantiation::Provisional(_) => {
+                unreachable!("a recursive call is frozen exactly once from its group binding")
+            }
+        }
+    }
+}
+
+fn close_typed_block(block: TypedBlock, closure: &BodyClosure<'_>) -> TypedBlock {
     TypedBlock {
         span: block.span,
         statements: block
             .statements
             .into_iter()
-            .map(|statement| {
-                close_typed_statement(statement, inference, generalized, local_formals)
-            })
+            .map(|statement| close_typed_statement(statement, closure))
             .collect(),
-        tail: block.tail.map(|tail| {
-            Box::new(close_typed_expr(
-                *tail,
-                inference,
-                generalized,
-                local_formals,
-            ))
-        }),
-        ty: inference.close_type(&block.ty, generalized, local_formals),
+        tail: block
+            .tail
+            .map(|tail| Box::new(close_typed_expr(*tail, closure))),
+        ty: closure.close_type(&block.ty),
     }
 }
 
-fn close_typed_statement(
-    statement: TypedStatement,
-    inference: &TypeInference,
-    generalized: &BTreeMap<TypeVariable, TypeFormal>,
-    local_formals: &[TypeFormal],
-) -> TypedStatement {
+fn close_typed_statement(statement: TypedStatement, closure: &BodyClosure<'_>) -> TypedStatement {
     let kind = match statement.kind {
         TypedStatementKind::Let { binding, ty, value } => TypedStatementKind::Let {
             binding,
-            ty: inference.close_type(&ty, generalized, local_formals),
-            value: Box::new(close_typed_expr(
-                *value,
-                inference,
-                generalized,
-                local_formals,
-            )),
+            ty: closure.close_type(&ty),
+            value: Box::new(close_typed_expr(*value, closure)),
         },
-        TypedStatementKind::Return(value) => TypedStatementKind::Return(value.map(|value| {
-            Box::new(close_typed_expr(
-                *value,
-                inference,
-                generalized,
-                local_formals,
-            ))
-        })),
-        TypedStatementKind::Expression(expression) => TypedStatementKind::Expression(Box::new(
-            close_typed_expr(*expression, inference, generalized, local_formals),
-        )),
+        TypedStatementKind::Return(value) => TypedStatementKind::Return(
+            value.map(|value| Box::new(close_typed_expr(*value, closure))),
+        ),
+        TypedStatementKind::Expression(expression) => {
+            TypedStatementKind::Expression(Box::new(close_typed_expr(*expression, closure)))
+        }
     };
     TypedStatement {
         span: statement.span,
@@ -1055,62 +1166,32 @@ fn close_typed_statement(
     }
 }
 
-fn close_typed_expr(
-    expression: TypedExpr,
-    inference: &TypeInference,
-    generalized: &BTreeMap<TypeVariable, TypeFormal>,
-    local_formals: &[TypeFormal],
-) -> TypedExpr {
+fn close_typed_expr(expression: TypedExpr, closure: &BodyClosure<'_>) -> TypedExpr {
     let kind = match expression.kind {
-        TypedExprKind::Parenthesized(inner) => TypedExprKind::Parenthesized(Box::new(
-            close_typed_expr(*inner, inference, generalized, local_formals),
-        )),
+        TypedExprKind::Parenthesized(inner) => {
+            TypedExprKind::Parenthesized(Box::new(close_typed_expr(*inner, closure)))
+        }
         TypedExprKind::Tuple(elements) => TypedExprKind::Tuple(
             elements
                 .into_iter()
-                .map(|element| close_typed_expr(element, inference, generalized, local_formals))
+                .map(|element| close_typed_expr(element, closure))
                 .collect(),
         ),
-        TypedExprKind::Block(block) => TypedExprKind::Block(Box::new(close_typed_block(
-            *block,
-            inference,
-            generalized,
-            local_formals,
-        ))),
+        TypedExprKind::Block(block) => {
+            TypedExprKind::Block(Box::new(close_typed_block(*block, closure)))
+        }
         TypedExprKind::If {
             condition,
             then_branch,
             else_branch,
         } => TypedExprKind::If {
-            condition: Box::new(close_typed_expr(
-                *condition,
-                inference,
-                generalized,
-                local_formals,
-            )),
-            then_branch: Box::new(close_typed_block(
-                *then_branch,
-                inference,
-                generalized,
-                local_formals,
-            )),
-            else_branch: else_branch.map(|branch| {
-                Box::new(close_typed_expr(
-                    *branch,
-                    inference,
-                    generalized,
-                    local_formals,
-                ))
-            }),
+            condition: Box::new(close_typed_expr(*condition, closure)),
+            then_branch: Box::new(close_typed_block(*then_branch, closure)),
+            else_branch: else_branch.map(|branch| Box::new(close_typed_expr(*branch, closure))),
         },
         TypedExprKind::Unary { operator, operand } => TypedExprKind::Unary {
             operator,
-            operand: Box::new(close_typed_expr(
-                *operand,
-                inference,
-                generalized,
-                local_formals,
-            )),
+            operand: Box::new(close_typed_expr(*operand, closure)),
         },
         TypedExprKind::Binary {
             operator,
@@ -1119,18 +1200,8 @@ fn close_typed_expr(
             comparison,
         } => TypedExprKind::Binary {
             operator,
-            left: Box::new(close_typed_expr(
-                *left,
-                inference,
-                generalized,
-                local_formals,
-            )),
-            right: Box::new(close_typed_expr(
-                *right,
-                inference,
-                generalized,
-                local_formals,
-            )),
+            left: Box::new(close_typed_expr(*left, closure)),
+            right: Box::new(close_typed_expr(*right, closure)),
             comparison,
         },
         TypedExprKind::Call {
@@ -1138,42 +1209,27 @@ fn close_typed_expr(
             arguments,
             parameter_modes,
             instantiation,
-        } => TypedExprKind::Call {
-            callee,
-            arguments: arguments
-                .into_iter()
-                .map(|argument| close_typed_expr(argument, inference, generalized, local_formals))
-                .collect(),
-            parameter_modes,
-            instantiation: match instantiation {
-                CallInstantiation::Published(mapping) => CallInstantiation::Published(
-                    mapping
-                        .into_iter()
-                        .map(|(formal, actual)| {
-                            (
-                                formal,
-                                inference.close_type(&actual, generalized, local_formals),
-                            )
-                        })
-                        .collect(),
-                ),
-                CallInstantiation::Provisional => CallInstantiation::Provisional,
-            },
-        },
+        } => {
+            let instantiation = closure.close_instantiation(&callee, instantiation);
+            TypedExprKind::Call {
+                callee,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| close_typed_expr(argument, closure))
+                    .collect(),
+                parameter_modes,
+                instantiation,
+            }
+        }
         TypedExprKind::TupleField { receiver, index } => TypedExprKind::TupleField {
-            receiver: Box::new(close_typed_expr(
-                *receiver,
-                inference,
-                generalized,
-                local_formals,
-            )),
+            receiver: Box::new(close_typed_expr(*receiver, closure)),
             index,
         },
         other => other,
     };
     TypedExpr {
         span: expression.span,
-        ty: inference.close_type(&expression.ty, generalized, local_formals),
+        ty: closure.close_type(&expression.ty),
         kind,
     }
 }
@@ -1553,30 +1609,20 @@ impl TypeInference {
         }
     }
 
-    fn close_type(
-        &self,
-        ty: &CheckedType,
-        generalized: &BTreeMap<TypeVariable, TypeFormal>,
-        local_formals: &[TypeFormal],
-    ) -> CheckedType {
+    fn close_type(&self, ty: &CheckedType, generalized: &FunctionGeneralization) -> CheckedType {
         match self.resolve(ty) {
-            CheckedType::Infer(variable) => CheckedType::Formal(Box::new(
-                generalized
-                    .get(&variable)
-                    .expect("every unresolved draft variable is generalized")
-                    .clone(),
-            )),
-            CheckedType::Formal(formal) => CheckedType::Formal(Box::new(
-                local_formals
-                    .iter()
-                    .find(|local| self.formals_equivalent(formal.as_ref(), local))
-                    .expect("every published formal has a binder in this callable scheme")
-                    .clone(),
-            )),
+            shared @ (CheckedType::Infer(_) | CheckedType::Formal(_)) => {
+                CheckedType::Formal(Box::new(
+                    generalized
+                        .formal_for(&shared, self)
+                        .expect("every published type is bound by its recorded callable binder")
+                        .clone(),
+                ))
+            }
             CheckedType::Tuple(elements) => CheckedType::Tuple(
                 elements
                     .iter()
-                    .map(|element| self.close_type(element, generalized, local_formals))
+                    .map(|element| self.close_type(element, generalized))
                     .collect(),
             ),
             resolved => resolved,
@@ -4814,7 +4860,10 @@ enum TypedExprKind {
 #[allow(dead_code)]
 enum CallInstantiation {
     Published(Vec<(TypeFormal, CheckedType)>),
-    Provisional,
+    // During inference, the call's exact callee references an unpublished
+    // group binding. Group closure resolves that binding's forward receipt.
+    RecursiveBinding,
+    Provisional(Vec<(TypeFormal, CheckedType)>),
 }
 
 #[allow(dead_code)]
@@ -5696,7 +5745,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                         .map(|parameter| parameter.ty.clone())
                         .collect::<Vec<_>>(),
                     header.return_type.clone(),
-                    CallInstantiation::Provisional,
+                    CallInstantiation::RecursiveBinding,
                 )
             } else {
                 let scheme = self.environment.schemes.get(&target).expect(
@@ -6018,9 +6067,15 @@ mod checking_tests {
                 for argument in arguments {
                     assert_closed_expr(argument, scheme);
                 }
-                if let CallInstantiation::Published(mapping) = instantiation {
-                    for (_, actual) in mapping {
-                        assert_closed_type(actual, scheme);
+                match instantiation {
+                    CallInstantiation::Published(mapping)
+                    | CallInstantiation::Provisional(mapping) => {
+                        for (_, actual) in mapping {
+                            assert_closed_type(actual, scheme);
+                        }
+                    }
+                    CallInstantiation::RecursiveBinding => {
+                        panic!("published body retains an unfinished group binding")
                     }
                 }
             }
@@ -6218,7 +6273,16 @@ mod checking_tests {
             }
             _ => panic!("repeat else branch is its direct recursive call"),
         };
-        assert!(matches!(recursive, CallInstantiation::Provisional));
+        let CallInstantiation::Provisional(mapping) = recursive else {
+            panic!("a recursive call retains its shared group actuals");
+        };
+        assert_eq!(
+            mapping,
+            &vec![(
+                repeat.scheme[0].clone(),
+                CheckedType::Formal(Box::new(repeat.scheme[0].clone()))
+            )]
+        );
 
         for function in checked.functions.values() {
             for parameter in &function.parameters {
@@ -6392,6 +6456,98 @@ mod checking_tests {
                 assert_closed_block(&function.body, &function.scheme);
             }
         }
+    }
+
+    #[test]
+    fn recursive_calls_require_the_actuals_consumed_by_callee_bodies() {
+        let make = "fn make<T>() -> T { make() }";
+        for (a, b) in [
+            (
+                "pub fn a() -> Never { b() }",
+                "fn b<U>() -> Never { let y: U = make(); a() }",
+            ),
+            (
+                "fn a<T>() -> Never { let x: T = make(); b() }",
+                "fn b<U>() -> Never { let y: U = make(); a() }",
+            ),
+        ] {
+            for source in [format!("{make} {a} {b}"), format!("{make} {b} {a}")] {
+                let diagnostic = check_project(&sources(&source), &BTreeMap::new(), Vec::new())
+                    .expect_err("recursive calls cannot omit a callee body's required type actual");
+                assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
+            }
+        }
+        for (a, b) in [
+            (
+                "fn a<T>(x: move T) -> Never { b() }",
+                "fn b<U>() -> Never { let y: U = make(); a(y) }",
+            ),
+            (
+                "fn a(x) { b(x) }",
+                "fn b(y) { if false { y } else { a(y) } }",
+            ),
+        ] {
+            for source in [format!("{make} {a} {b}"), format!("{make} {b} {a}")] {
+                let checked = check_project(&sources(&source), &BTreeMap::new(), Vec::new())
+                    .expect("the shared actual is determined through the other recursive edge");
+                let a = checked
+                    .functions
+                    .values()
+                    .find(|function| function.identity.name == "a")
+                    .unwrap();
+                let b = checked
+                    .functions
+                    .values()
+                    .find(|function| function.identity.name == "b")
+                    .unwrap();
+                let TypedExprKind::Call {
+                    instantiation: CallInstantiation::Provisional(mapping),
+                    ..
+                } = &a.body.tail.as_ref().unwrap().kind
+                else {
+                    panic!("a retains its actual recursive mapping to b");
+                };
+                assert_eq!(
+                    mapping,
+                    &vec![(
+                        b.scheme[0].clone(),
+                        CheckedType::Formal(Box::new(a.scheme[0].clone()))
+                    )]
+                );
+                for function in checked.functions.values() {
+                    assert_closed_block(&function.body, &function.scheme);
+                }
+            }
+        }
+
+        let checked = check_project(
+            &sources(
+                "fn a<T>() -> Never { b() } fn b<U>() -> Never { a() } fn entry() -> Never { a() }",
+            ),
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .expect("vacuous recursive binders do not manufacture type demands");
+        for function in checked.functions.values() {
+            let TypedExprKind::Call { instantiation, .. } =
+                &function.body.tail.as_ref().unwrap().kind
+            else {
+                panic!("direct call tail")
+            };
+            let (CallInstantiation::Published(mapping) | CallInstantiation::Provisional(mapping)) =
+                instantiation
+            else {
+                panic!("all bindings are frozen")
+            };
+            assert!(mapping.is_empty());
+            assert_closed_block(&function.body, &function.scheme);
+        }
+
+        let diagnostic = check_project(
+            &sources(&format!("{make} fn stop() -> Never {{ stop() }} fn a<T>() -> Never {{ let x: T = make(); stop() }} fn b<U>() -> Never {{ let y: U = make(); a() }}")),
+            &BTreeMap::new(), Vec::new(),
+        ).expect_err("the group-external version has the same unclosed actual");
+        assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
     }
 
     #[test]
