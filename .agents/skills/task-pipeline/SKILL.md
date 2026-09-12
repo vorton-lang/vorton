@@ -106,8 +106,10 @@ Verification 必须是 fresh、read-only task，在 PR head SHA 对应的 clean 
 
 - 不静默重跑失败命令，先保留 exact failure。`NEEDS_CLARIFICATION` 只在 Issue 不变时由同一 Execution task 续接。
 - Issue 出现新正文编辑时，阶段先核对原生修订与实际变化：Execution 在合同不变但只缺精确事实时可按 `NEEDS_CLARIFICATION` 续接，范围、设计、验收、依赖或用户保留决定变化时立即 `NEEDS_DECISION`；修订身份或变化无法核对时，Readiness 使用 `BLOCKED`、Execution 使用 `FAILED`、Verification 使用 `EVIDENCE_GAP` 报告实际证据缺口。任何路径都不得在原阶段静默替换采用的修订。
-- 合同及用户保留决定不变时，局部实现缺陷与 `PRODUCT_FAIL` 均由原 Execution task 续接修复，沿用该 Issue 的唯一 branch、PR 与 worktree，不因该 verdict 重启。Planning 只转交绑定 candidate SHA 的 Verifier findings 与原始证据；Execution 自行复核触发条件，不将 Verifier 判断当作新的合同。任一修复产生新 SHA 后重开 fresh Verification。
-- 合同不变但实现路线失败时，由原 Execution 删除失败路径并重做，不得建立 compatibility bridge、双实现或临时第二 authority。
+- 同一 Issue 连续两轮独立 Verification 未通过后，立即暂停返修并保留原 task、branch、PR 与 worktree；非 `PASS` 裁决及未形成有效终态的中断均计入，开发阶段的单次命令失败不计为独立轮次。Planning 先做只读评估，向用户报告问题是否源于架构或实现路线、初始实现是否已偏离合同、已确认的共同根因与证据缺口，以及继续修复、替换相关机制或重做分支的建议。须区分产品缺陷与证据/基础设施问题，不能仅因检查未过就断言架构错误。
+- 触发两轮暂停后，必须取得用户针对本次评估的明确批准，才可按批准的路线和范围恢复；此前的开工、继续推进或自动返修授权不能代替这次批准。批准前不得继续小修、重写，或启动新实现/验证来试错。计数在用户明确批准后续执行时重新开始，不能由 agent 自行归零。
+- 未触发上述暂停门，且合同及用户保留决定不变时，局部实现缺陷与 `PRODUCT_FAIL` 均由原 Execution task 续接修复，沿用该 Issue 的唯一 branch、PR 与 worktree，不因该 verdict 重启。Planning 只转交绑定 candidate SHA 的 Verifier findings 与原始证据；Execution 自行复核触发条件，不将 Verifier 判断当作新的合同。任一修复产生新 SHA 后重开 fresh Verification。
+- 合同不变但实现路线失败时，也须先遵守上述暂停与批准要求，再由原 Execution 删除失败路径并重做，不得建立 compatibility bridge、双实现或临时第二 authority。
 - `NEEDS_DECISION`，或发现规范、公开语义、保证、依赖、抽象边界、验收需要改变时，第一次即停止并返回 Planning；由用户决定并更新 Issue body 后重开 fresh Readiness，不得边实现边追加 Issue 评论。
 - `EVIDENCE_GAP` 回到 Planning；`INFRA_BLOCKED` 只处理已确认且与 candidate 行为无关的基础设施阻塞。Execution `FAILED` 按已确认原因进入上述对应路由，不得自动重跑。
 - 默认不设置 task-local 资源限制。只有实测失败、实测超时或相同且已记录的 case 才能按证据设置限制；未知时长不能用预测式 wall timeout。
