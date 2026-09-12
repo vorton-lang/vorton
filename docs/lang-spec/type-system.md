@@ -29,7 +29,7 @@ Vorton 使用 Hindley-Milner 类型推断，并扩展 effect row 和 trait bound
 
 无 bound 的 generic formal 不默认具有 `Copy`。Checker 对当前子集保留 whole-binding 的 live／moved 状态：完整返回、`let` 转移和 Move 参数调用会转移 owner；互斥分支可各自完整转移一次，顺序重复转移、移交后使用和借入值变成 owned 结果会拒绝。只借用或所有正常出口都已完整移交的 generic owner 可形成 Pure 结果；需要 `D(T)` cleanup、generic partial projection 或 Copy evidence 的路径返回 `Unsupported`。现有 concrete scalar 及全元素 concrete-Copy tuple 保持 Copy 行为。
 
-Source 与 format-1 contract 的 generic function 必须都显式声明同一 formal 数量，并通过 exact target、declaration binder、type kind、ordinal 和完整参数／返回使用关系对齐；formal 显示名可以 alpha 改名。Contract 不能把源码推断出的 generic 关系用 concrete type 单态化。`generic_requirements` 未选择和显式 `[]` 继续保持不同输入事实，非空 requirement 尚未支持。实际导出的 public 输入类型和 mode 逐 position 由 source 或所属 contract 明确；private 输入、返回类型和 empty effect 可继续推断。
+Source 与 format-1 contract 的 generic function 必须都显式声明同一 formal 数量；已选择的参数／返回条款通过 exact target、declaration binder、type kind、ordinal 和使用关系对齐，未选择的条款无需重复整份 signature。Formal 显示名可以 alpha 改名。Contract 不能把源码推断出的 generic 关系用 concrete type 单态化。`generic_requirements` 未选择和显式 `[]` 继续保持不同输入事实，非空 requirement 尚未支持。实际导出的 public 输入类型和 mode 逐 position 由 source 或所属 contract 明确；private 输入、返回类型和 empty effect 可继续推断。
 
 省略 source effect header 或显式 `with {}` 只有在 body operation 和 exact direct-call graph 都落在上述纯子集，且所有正常出口没有待清理 generic owner 时才形成 empty row。`CheckedProject` 内部保留 closed scheme、调用 mapping、normalized type、数值、exact callee、mode、empty effect、binding/use origin 和每个函数唯一的 typed body，但不公开可编辑 identity／通用查询接口，也不表示完整接口 S 或最终 `TypedHIR`。
 

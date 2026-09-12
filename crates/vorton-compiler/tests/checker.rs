@@ -277,34 +277,40 @@ fn public_parameter_mode_can_only_be_selected_by_source_or_contract() {
 }
 
 #[test]
-fn contracts_do_not_supply_omitted_source_type_identity() {
+fn contracts_accept_resolved_omissions_but_cannot_specialize_inferred_identity() {
     let owners = BTreeMap::from([("app".to_owned(), APP)]);
     let parameter_record = format!(
         r#"{{"target":{},"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{{"tag":"primitive","name":"Int"}}}}]}}}}"#,
         function_target("identity")
     );
-    let diagnostic = check_project(
+    check_project(
         &project("fn identity(value) -> Int { value }"),
         &owners,
         vec![contract(&document(&parameter_record))],
     )
-    .expect_err("a contract cannot monomorphize an unannotated source parameter");
-    assert_eq!(diagnostic.kind, CheckDiagnosticKind::ContractConflict);
-    assert!(matches!(
-        diagnostic.primary,
-        Some(CheckOrigin::Contract { .. })
-    ));
+    .expect("the source body already fixes the omitted parameter to Int");
 
     let return_record = format!(
         r#"{{"target":{},"set":{{"return_type":{{"tag":"primitive","name":"Int"}}}}}}"#,
         function_target("identity")
     );
-    let diagnostic = check_project(
+    check_project(
         &project("fn identity(value: Int) { value }"),
         &owners,
         vec![contract(&document(&return_record))],
     )
-    .expect_err("a contract cannot supply an omitted source return identity");
+    .expect("the source body already fixes the omitted return to Int");
+
+    let specializing = format!(
+        r#"{{"target":{},"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{{"tag":"primitive","name":"Int"}}}}],"return_type":{{"tag":"primitive","name":"Int"}}}}}}"#,
+        function_target("identity")
+    );
+    let diagnostic = check_project(
+        &project("fn identity(value) { value }"),
+        &owners,
+        vec![contract(&document(&specializing))],
+    )
+    .expect_err("a contract cannot monomorphize the source-inferred identity relation");
     assert_eq!(diagnostic.kind, CheckDiagnosticKind::ContractConflict);
     assert!(matches!(
         diagnostic.primary,
@@ -1166,6 +1172,126 @@ fn generic_contract_formals_require_the_exact_owner_binder_and_ordinal() {
         .kind,
         CheckDiagnosticKind::ContractConflict
     );
+}
+
+#[test]
+fn contracts_preserve_source_inferred_formals_and_allow_optional_generic_clauses() {
+    let owners = BTreeMap::from([("app".to_owned(), APP)]);
+    let formal = function_formal("identity", 0);
+    let tuple =
+        format!(r#"{{"tag":"tuple","elements":[{formal},{{"tag":"primitive","name":"Int"}}]}}"#);
+    let specializing = format!(
+        r#"{{"target":{},"type_parameters":["Alpha"],"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{tuple}}}],"return_type":{tuple}}}}}"#,
+        function_target("identity")
+    );
+    assert_eq!(
+        check_project(
+            &project("fn identity<T>(value) { value }"),
+            &owners,
+            vec![contract(&document(&specializing))],
+        )
+        .expect_err("an unused source formal cannot hide a new tuple specialization")
+        .kind,
+        CheckDiagnosticKind::ContractConflict
+    );
+
+    let optional = format!(
+        r#"{{"target":{},"type_parameters":["Alpha"],"set":{{"generic_requirements":[]}}}}"#,
+        function_target("identity")
+    );
+    check_project(
+        &project("fn identity<T>(value: move T) -> T { value }"),
+        &owners,
+        vec![contract(&document(&optional))],
+    )
+    .expect("a generic contract may select only its explicit empty requirements");
+
+    let left_formal = function_formal("left", 0);
+    let left_tuple = format!(
+        r#"{{"tag":"tuple","elements":[{left_formal},{{"tag":"primitive","name":"Int"}}]}}"#
+    );
+    let scc_contract = format!(
+        r#"{{"target":{},"type_parameters":["Alpha"],"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{left_tuple}}}],"return_type":{left_tuple}}}}}"#,
+        function_target("left")
+    );
+    assert_eq!(
+        check_project(
+            &project(
+                "fn left<T>(value) { right(value) } \
+                 fn right<U>(value) { left(value) }",
+            ),
+            &owners,
+            vec![contract(&document(&scc_contract))],
+        )
+        .expect_err("a contract cannot specialize a source-inferred SCC relation")
+        .kind,
+        CheckDiagnosticKind::ContractConflict
+    );
+
+    let merging_peer = format!(
+        r#"{{"target":{},"type_parameters":["Alpha"],"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{left_formal}}}],"return_type":{left_formal}}}}}"#,
+        function_target("left")
+    );
+    assert_eq!(
+        check_project(
+            &project(
+                "fn left<T>(value) { right(value) } \
+                 fn right<U>(value: U) -> U { left(value) }",
+            ),
+            &owners,
+            vec![contract(&document(&merging_peer))],
+        )
+        .expect_err("a contract cannot merge an unused local formal with a peer formal")
+        .kind,
+        CheckDiagnosticKind::ContractConflict
+    );
+}
+
+#[test]
+fn defers_numeric_obligations_until_the_whole_recursive_group_is_constrained() {
+    for source in [
+        "fn negate(value) -> Int { -value }",
+        "fn negate(value) -> Int { let result = -value; let exact: Int = value; result }",
+        "fn left(x, y) -> Int { if true { x + y } else { right(x, y) } } \
+         fn right(x: Int, y: Int) -> Int { left(x, y) }",
+        "fn right(x: Int, y: Int) -> Int { left(x, y) } \
+         fn left(x, y) -> Int { if true { x + y } else { right(x, y) } }",
+        "fn equal(x, y) -> Bool { if true { x == y } else { exact(x, y) } } \
+         fn exact(x: Int, y: Int) -> Bool { equal(x, y) }",
+    ] {
+        check(source).expect("later body or SCC constraints select the concrete numeric type");
+    }
+
+    assert_eq!(
+        error("fn negate<T>(value: T) -> T { -value }").kind,
+        CheckDiagnosticKind::Unsupported
+    );
+    assert_eq!(
+        error("fn equal<T>(value: T) -> Bool { value == value }").kind,
+        CheckDiagnosticKind::Unsupported
+    );
+}
+
+#[test]
+fn early_return_rejects_generic_temporaries_from_partially_evaluated_expressions() {
+    for source in [
+        "fn take<T>(value: move T, count: Int) -> T { value } \
+         fn bad<T>(value: move T) -> Int { \
+             take(value, { return 0; }); \
+             0 \
+         }",
+        "fn bad<T>(value: move T) -> Int { \
+             let pair = (value, { return 0; }); \
+             0 \
+         }",
+    ] {
+        let diagnostic = error(source);
+        assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
+        assert!(diagnostic.message.contains("temporary"));
+    }
+
+    check("fn good<T>(value: move T) -> T { return value; }")
+        .expect("a completed return transfers the only generic owner");
 }
 
 #[test]

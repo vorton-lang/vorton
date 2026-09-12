@@ -550,33 +550,31 @@ fn check_prepared_project(
         collect_supported_headers(project, &mut normalizer, &mut inference)?;
     let contract_selections =
         apply_contract_documents(project, owners, &documents, &mut headers, &normalizer)?;
-    apply_contract_type_constraints(
-        &function_order,
-        &mut headers,
-        &contract_selections,
-        &mut inference,
-    )?;
     validate_public_inputs(&function_order, &headers, &contract_selections)?;
 
     let groups = function_binding_groups(&function_order, &headers);
     let mut schemes = BTreeMap::new();
-    let mut draft_bodies = BTreeMap::new();
-    let mut generalizations = BTreeMap::new();
+    let mut closed_bodies = BTreeMap::new();
 
     for group in groups {
         let members = group.iter().cloned().collect::<BTreeSet<_>>();
+        let mut group_drafts = BTreeMap::new();
+        let mut obligations = Vec::new();
         for identity in &group {
             let header = headers
                 .get(identity)
                 .expect("a binding-group member remains in the header table");
             let mut checker = BodyChecker::new(
                 project,
-                &headers,
-                &schemes,
-                &members,
+                BodyEnvironment {
+                    headers: &headers,
+                    schemes: &schemes,
+                    group: &members,
+                },
                 header,
                 &mut normalizer,
                 &mut inference,
+                &mut obligations,
             );
             let body = checker.check_block(&header.body)?;
             inference
@@ -592,17 +590,38 @@ fn check_prepared_project(
                         vec![origin_as_source(&header.return_origin, &header.origin)],
                     )
                 })?;
-            draft_bodies.insert(identity.clone(), body);
+            group_drafts.insert(identity.clone(), body);
         }
 
+        validate_type_obligations(&obligations, &inference)?;
+        apply_contract_type_constraints(
+            &group,
+            &mut headers,
+            &contract_selections,
+            &mut inference,
+        )?;
+        validate_contracted_inference_is_explicit(
+            &group,
+            &headers,
+            &contract_selections,
+            &inference,
+        )?;
+
+        infer_parameter_modes(&group, &mut headers, &group_drafts, &inference)?;
+        validate_whole_value_use(&group, &headers, &mut group_drafts, &inference)?;
+
+        // Generalization and the downstream callable environment are reached only
+        // after every unpublished group fact above has closed successfully.
+        let mut group_schemes = BTreeMap::new();
+        let mut group_bodies = BTreeMap::new();
         for identity in &group {
             let header = headers
                 .get(identity)
                 .expect("a generalized function remains in the header table");
-            let body = draft_bodies
-                .get(identity)
+            let body = group_drafts
+                .remove(identity)
                 .expect("every generalized function has one typed draft");
-            let generalized = function_generalization(identity, header, body, &mut inference);
+            let generalized = function_generalization(identity, header, &body, &mut inference);
             let parameters = header
                 .parameters
                 .iter()
@@ -619,7 +638,7 @@ fn check_prepared_project(
                 &generalized.variables,
                 &generalized.local_formals,
             );
-            schemes.insert(
+            group_schemes.insert(
                 identity.clone(),
                 CallableScheme {
                     quantified: generalized.local_formals.clone(),
@@ -627,41 +646,29 @@ fn check_prepared_project(
                     return_type,
                 },
             );
-            generalizations.insert(identity.clone(), generalized);
+            group_bodies.insert(
+                identity.clone(),
+                close_typed_block(
+                    body,
+                    &inference,
+                    &generalized.variables,
+                    &generalized.local_formals,
+                ),
+            );
         }
-    }
 
-    for (identity, scheme) in &schemes {
-        let header = headers
-            .get_mut(identity)
-            .expect("every published scheme retains its source header");
-        for (parameter, closed) in header.parameters.iter_mut().zip(&scheme.parameters) {
-            parameter.ty = closed.clone();
+        for (identity, scheme) in &group_schemes {
+            let header = headers
+                .get_mut(identity)
+                .expect("a closed group scheme retains its source header");
+            for (parameter, closed) in header.parameters.iter_mut().zip(&scheme.parameters) {
+                parameter.ty = closed.clone();
+            }
+            header.return_type = scheme.return_type.clone();
         }
-        header.return_type = scheme.return_type.clone();
+        schemes.extend(group_schemes);
+        closed_bodies.extend(group_bodies);
     }
-
-    let mut closed_bodies = BTreeMap::new();
-    for identity in &function_order {
-        let body = draft_bodies
-            .remove(identity)
-            .expect("every supported function has exactly one typed draft");
-        let generalized = generalizations
-            .get(identity)
-            .expect("every supported function has a generalization mapping");
-        closed_bodies.insert(
-            identity.clone(),
-            close_typed_block(
-                body,
-                &inference,
-                &generalized.variables,
-                &generalized.local_formals,
-            ),
-        );
-    }
-
-    infer_parameter_modes(&function_order, &mut headers, &closed_bodies)?;
-    validate_whole_value_use(&function_order, &headers, &mut closed_bodies)?;
 
     let mut functions = BTreeMap::new();
     for identity in function_order {
@@ -2519,7 +2526,7 @@ fn validate_contract_generic_structure(
         if header.declared_formals.is_empty() {
             continue;
         }
-        let Some(type_parameter_origin) = selections.type_parameters.get(target) else {
+        let Some(_) = selections.type_parameters.get(target) else {
             return Err(CheckDiagnostic {
                 kind: CheckDiagnosticKind::ContractConflict,
                 message: "a generic source function requires an explicit matching contract type-parameter list"
@@ -2528,20 +2535,6 @@ fn validate_contract_generic_structure(
                 related: vec![CheckOrigin::Source(header.origin.clone())],
             });
         };
-        let complete_parameters = header.parameters.iter().enumerate().all(|(index, _)| {
-            selections
-                .parameter_types
-                .contains_key(&(target.clone(), index))
-        });
-        if !complete_parameters || !selections.return_types.contains_key(target) {
-            return Err(CheckDiagnostic {
-                kind: CheckDiagnosticKind::ContractConflict,
-                message: "a generic contract must state every parameter type and the return type so formal use relationships are complete"
-                    .to_owned(),
-                primary: Some(type_parameter_origin.clone()),
-                related: vec![CheckOrigin::Source(header.origin.clone())],
-            });
-        }
     }
     Ok(())
 }
@@ -3422,42 +3415,42 @@ fn apply_contract_type_constraints(
                 continue;
             };
             reject_contract_specialization(
-                parameter.source_type_explicit,
-                selected,
+                &parameter.ty,
                 &parameter.type_origin,
                 selected_origin,
+                inference,
             )?;
-            inference
-                .unify(&parameter.ty, selected)
-                .map_err(|failure| {
-                    contract_type_conflict(
-                        "parameter",
-                        &failure,
-                        selected_origin,
-                        &parameter.type_origin,
-                    )
-                })?;
+            let inferred = inference.resolve(&parameter.ty);
+            if !inferred_types_equal(&inferred, selected, inference) {
+                return Err(contract_type_conflict(
+                    "parameter",
+                    &inferred,
+                    selected,
+                    selected_origin,
+                    &parameter.type_origin,
+                ));
+            }
             if !parameter.source_type_explicit {
                 parameter.type_origin = selected_origin.clone();
             }
         }
         if let Some((selected, selected_origin)) = selections.return_types.get(identity) {
             reject_contract_specialization(
-                header.source_return_explicit,
-                selected,
+                &header.return_type,
                 &header.return_origin,
                 selected_origin,
+                inference,
             )?;
-            inference
-                .unify(&header.return_type, selected)
-                .map_err(|failure| {
-                    contract_type_conflict(
-                        "return",
-                        &failure,
-                        selected_origin,
-                        &header.return_origin,
-                    )
-                })?;
+            let inferred = inference.resolve(&header.return_type);
+            if !inferred_types_equal(&inferred, selected, inference) {
+                return Err(contract_type_conflict(
+                    "return",
+                    &inferred,
+                    selected,
+                    selected_origin,
+                    &header.return_origin,
+                ));
+            }
             if !header.source_return_explicit {
                 header.return_origin = selected_origin.clone();
             }
@@ -3467,15 +3460,17 @@ fn apply_contract_type_constraints(
 }
 
 fn reject_contract_specialization(
-    source_explicit: bool,
-    selected: &CheckedType,
+    source: &CheckedType,
     source_origin: &CheckOrigin,
     selected_origin: &CheckOrigin,
+    inference: &TypeInference,
 ) -> Result<(), CheckDiagnostic> {
-    if !source_explicit && !type_contains_formal(selected) {
+    let mut unresolved = BTreeSet::new();
+    inference.unresolved_variables(source, &mut unresolved);
+    if !unresolved.is_empty() {
         return Err(CheckDiagnostic {
             kind: CheckDiagnosticKind::ContractConflict,
-            message: "a concrete contract type cannot specialize an otherwise inferred generic source type; write the concrete source type explicitly"
+            message: "a contract type cannot replace an unresolved source-inferred generic relationship; declare the intended source relationship explicitly"
                 .to_owned(),
             primary: Some(selected_origin.clone()),
             related: vec![source_origin.clone()],
@@ -3484,29 +3479,79 @@ fn reject_contract_specialization(
     Ok(())
 }
 
-fn type_contains_formal(ty: &CheckedType) -> bool {
-    match ty {
-        CheckedType::Formal(_) => true,
-        CheckedType::Tuple(elements) => elements.iter().any(type_contains_formal),
-        _ => false,
-    }
-}
-
 fn contract_type_conflict(
     position: &str,
-    failure: &UnificationFailure,
+    inferred: &CheckedType,
+    selected: &CheckedType,
     selected_origin: &CheckOrigin,
     source_origin: &CheckOrigin,
 ) -> CheckDiagnostic {
     CheckDiagnostic {
         kind: CheckDiagnosticKind::ContractConflict,
         message: format!(
-            "contract {position} type conflicts with source inference: {}",
-            display_unification_failure(failure)
+            "contract {position} type {} conflicts with source-inferred type {}",
+            display_type(selected),
+            display_type(inferred)
         ),
         primary: Some(selected_origin.clone()),
         related: vec![source_origin.clone()],
     }
+}
+
+fn inferred_types_equal(
+    inferred: &CheckedType,
+    selected: &CheckedType,
+    inference: &TypeInference,
+) -> bool {
+    let inferred = inference.resolve(inferred);
+    let selected = inference.resolve(selected);
+    match (&inferred, &selected) {
+        (CheckedType::Formal(left), CheckedType::Formal(right)) => {
+            inference.formals_equivalent(left, right)
+        }
+        (CheckedType::Tuple(left), CheckedType::Tuple(right)) if left.len() == right.len() => left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| inferred_types_equal(left, right, inference)),
+        _ => inferred == selected,
+    }
+}
+
+fn validate_contracted_inference_is_explicit(
+    group: &[EntityId],
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    selections: &ContractSelections,
+    inference: &TypeInference,
+) -> Result<(), CheckDiagnostic> {
+    for identity in group {
+        let Some(contract_origin) = selections.targets.get(identity) else {
+            continue;
+        };
+        let header = headers
+            .get(identity)
+            .expect("every contracted group member retains its source header");
+        let mut unresolved = BTreeSet::new();
+        for parameter in &header.parameters {
+            inference.unresolved_variables(&parameter.ty, &mut unresolved);
+        }
+        inference.unresolved_variables(&header.return_type, &mut unresolved);
+        if !unresolved.is_empty() {
+            return Err(CheckDiagnostic {
+                kind: CheckDiagnosticKind::ContractConflict,
+                message: "a contracted function retains inferred generic formals that were not explicitly declared by both source and contract"
+                    .to_owned(),
+                primary: Some(
+                    selections
+                        .type_parameters
+                        .get(identity)
+                        .unwrap_or(contract_origin)
+                        .clone(),
+                ),
+                related: vec![CheckOrigin::Source(header.origin.clone())],
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -3514,6 +3559,7 @@ enum ValueContext {
     Borrow,
     Consume,
     Discard,
+    Return,
 }
 
 type ParameterKey = (EntityId, usize);
@@ -3528,6 +3574,7 @@ fn infer_parameter_modes(
     function_order: &[EntityId],
     headers: &mut BTreeMap<EntityId, FunctionHeader>,
     bodies: &BTreeMap<EntityId, TypedBlock>,
+    inference: &TypeInference,
 ) -> Result<(), CheckDiagnostic> {
     let binding_parameters = headers
         .iter()
@@ -3545,10 +3592,11 @@ fn infer_parameter_modes(
             bodies
                 .get(identity)
                 .expect("every checked function has one closed body"),
-            ValueContext::Consume,
+            ValueContext::Return,
             headers,
             &binding_parameters,
             &mut constraints,
+            inference,
         );
     }
 
@@ -3608,35 +3656,59 @@ fn collect_mode_constraints_block(
     headers: &BTreeMap<EntityId, FunctionHeader>,
     binding_parameters: &BTreeMap<EntityId, ParameterKey>,
     constraints: &mut ModeConstraints,
+    inference: &TypeInference,
 ) {
+    let mut continues = true;
     for statement in &block.statements {
+        if !continues {
+            continue;
+        }
         match &statement.kind {
-            TypedStatementKind::Let { value, .. } => collect_mode_constraints_expr(
-                value,
-                ValueContext::Consume,
-                headers,
-                binding_parameters,
-                constraints,
-            ),
-            TypedStatementKind::Return(Some(value)) => collect_mode_constraints_expr(
-                value,
-                ValueContext::Consume,
-                headers,
-                binding_parameters,
-                constraints,
-            ),
-            TypedStatementKind::Expression(expression) => collect_mode_constraints_expr(
-                expression,
-                ValueContext::Discard,
-                headers,
-                binding_parameters,
-                constraints,
-            ),
-            TypedStatementKind::Return(None) => {}
+            TypedStatementKind::Let { value, .. } => {
+                collect_mode_constraints_expr(
+                    value,
+                    ValueContext::Consume,
+                    headers,
+                    binding_parameters,
+                    constraints,
+                    inference,
+                );
+                continues = inference.resolve(&value.ty) != CheckedType::Never;
+            }
+            TypedStatementKind::Return(Some(value)) => {
+                collect_mode_constraints_expr(
+                    value,
+                    ValueContext::Return,
+                    headers,
+                    binding_parameters,
+                    constraints,
+                    inference,
+                );
+                continues = false;
+            }
+            TypedStatementKind::Expression(expression) => {
+                collect_mode_constraints_expr(
+                    expression,
+                    ValueContext::Discard,
+                    headers,
+                    binding_parameters,
+                    constraints,
+                    inference,
+                );
+                continues = inference.resolve(&expression.ty) != CheckedType::Never;
+            }
+            TypedStatementKind::Return(None) => continues = false,
         }
     }
-    if let Some(tail) = &block.tail {
-        collect_mode_constraints_expr(tail, tail_context, headers, binding_parameters, constraints);
+    if continues && let Some(tail) = &block.tail {
+        collect_mode_constraints_expr(
+            tail,
+            tail_context,
+            headers,
+            binding_parameters,
+            constraints,
+            inference,
+        );
     }
 }
 
@@ -3646,19 +3718,25 @@ fn collect_mode_constraints_expr(
     headers: &BTreeMap<EntityId, FunctionHeader>,
     binding_parameters: &BTreeMap<EntityId, ParameterKey>,
     constraints: &mut ModeConstraints,
+    inference: &TypeInference,
 ) {
     match &expression.kind {
         TypedExprKind::Reference { binding, .. } => {
-            if matches!(context, ValueContext::Consume)
-                && !is_copy_type(&expression.ty)
+            if matches!(context, ValueContext::Consume | ValueContext::Return)
+                && !is_copy_type(&inference.resolve(&expression.ty))
                 && let Some(parameter) = binding_parameters.get(binding.as_ref())
             {
                 constraints.required_move.insert(parameter.clone());
             }
         }
-        TypedExprKind::Parenthesized(inner) => {
-            collect_mode_constraints_expr(inner, context, headers, binding_parameters, constraints)
-        }
+        TypedExprKind::Parenthesized(inner) => collect_mode_constraints_expr(
+            inner,
+            context,
+            headers,
+            binding_parameters,
+            constraints,
+            inference,
+        ),
         TypedExprKind::Tuple(elements) => {
             for element in elements {
                 collect_mode_constraints_expr(
@@ -3667,12 +3745,18 @@ fn collect_mode_constraints_expr(
                     headers,
                     binding_parameters,
                     constraints,
+                    inference,
                 );
             }
         }
-        TypedExprKind::Block(block) => {
-            collect_mode_constraints_block(block, context, headers, binding_parameters, constraints)
-        }
+        TypedExprKind::Block(block) => collect_mode_constraints_block(
+            block,
+            context,
+            headers,
+            binding_parameters,
+            constraints,
+            inference,
+        ),
         TypedExprKind::If {
             condition,
             then_branch,
@@ -3684,6 +3768,7 @@ fn collect_mode_constraints_expr(
                 headers,
                 binding_parameters,
                 constraints,
+                inference,
             );
             collect_mode_constraints_block(
                 then_branch,
@@ -3691,6 +3776,7 @@ fn collect_mode_constraints_expr(
                 headers,
                 binding_parameters,
                 constraints,
+                inference,
             );
             if let Some(else_branch) = else_branch {
                 collect_mode_constraints_expr(
@@ -3699,6 +3785,7 @@ fn collect_mode_constraints_expr(
                     headers,
                     binding_parameters,
                     constraints,
+                    inference,
                 );
             }
         }
@@ -3708,6 +3795,7 @@ fn collect_mode_constraints_expr(
             headers,
             binding_parameters,
             constraints,
+            inference,
         ),
         TypedExprKind::Binary { left, right, .. } => {
             collect_mode_constraints_expr(
@@ -3716,6 +3804,7 @@ fn collect_mode_constraints_expr(
                 headers,
                 binding_parameters,
                 constraints,
+                inference,
             );
             collect_mode_constraints_expr(
                 right,
@@ -3723,6 +3812,7 @@ fn collect_mode_constraints_expr(
                 headers,
                 binding_parameters,
                 constraints,
+                inference,
             );
         }
         TypedExprKind::Call {
@@ -3741,6 +3831,7 @@ fn collect_mode_constraints_expr(
                         headers,
                         binding_parameters,
                         constraints,
+                        inference,
                     ),
                     Some(ParameterMode::Borrow) => collect_mode_constraints_expr(
                         argument,
@@ -3748,6 +3839,7 @@ fn collect_mode_constraints_expr(
                         headers,
                         binding_parameters,
                         constraints,
+                        inference,
                     ),
                     Some(ParameterMode::MutBorrow | ParameterMode::Call) => unreachable!(
                         "unsupported parameter modes are rejected during header collection"
@@ -3759,9 +3851,15 @@ fn collect_mode_constraints_expr(
                             headers,
                             binding_parameters,
                             constraints,
+                            inference,
                         );
                         let mut consumed = BTreeSet::new();
-                        collect_consumed_parameters(argument, binding_parameters, &mut consumed);
+                        collect_consumed_parameters(
+                            argument,
+                            binding_parameters,
+                            &mut consumed,
+                            inference,
+                        );
                         for source in consumed {
                             constraints
                                 .implications
@@ -3777,6 +3875,7 @@ fn collect_mode_constraints_expr(
             headers,
             binding_parameters,
             constraints,
+            inference,
         ),
         TypedExprKind::Integer { .. }
         | TypedExprKind::Float(_)
@@ -3789,19 +3888,22 @@ fn collect_consumed_parameters(
     expression: &TypedExpr,
     binding_parameters: &BTreeMap<EntityId, ParameterKey>,
     consumed: &mut BTreeSet<ParameterKey>,
+    inference: &TypeInference,
 ) {
     match &expression.kind {
-        TypedExprKind::Reference { binding, .. } if !is_copy_type(&expression.ty) => {
+        TypedExprKind::Reference { binding, .. }
+            if !is_copy_type(&inference.resolve(&expression.ty)) =>
+        {
             if let Some(parameter) = binding_parameters.get(binding.as_ref()) {
                 consumed.insert(parameter.clone());
             }
         }
         TypedExprKind::Parenthesized(inner) => {
-            collect_consumed_parameters(inner, binding_parameters, consumed);
+            collect_consumed_parameters(inner, binding_parameters, consumed, inference);
         }
         TypedExprKind::Tuple(elements) => {
             for element in elements {
-                collect_consumed_parameters(element, binding_parameters, consumed);
+                collect_consumed_parameters(element, binding_parameters, consumed, inference);
             }
         }
         TypedExprKind::If {
@@ -3810,15 +3912,15 @@ fn collect_consumed_parameters(
             ..
         } => {
             if let Some(tail) = &then_branch.tail {
-                collect_consumed_parameters(tail, binding_parameters, consumed);
+                collect_consumed_parameters(tail, binding_parameters, consumed, inference);
             }
             if let Some(else_branch) = else_branch {
-                collect_consumed_parameters(else_branch, binding_parameters, consumed);
+                collect_consumed_parameters(else_branch, binding_parameters, consumed, inference);
             }
         }
         TypedExprKind::Block(block) => {
             if let Some(tail) = &block.tail {
-                collect_consumed_parameters(tail, binding_parameters, consumed);
+                collect_consumed_parameters(tail, binding_parameters, consumed, inference);
             }
         }
         _ => {}
@@ -3845,20 +3947,25 @@ struct BindingUsage {
     origin: OriginRef,
 }
 
-type UsageState = BTreeMap<EntityId, BindingUsage>;
+#[derive(Clone, Default)]
+struct UsageState {
+    bindings: BTreeMap<EntityId, BindingUsage>,
+    temporaries: Vec<OriginRef>,
+}
 
 fn validate_whole_value_use(
     function_order: &[EntityId],
     headers: &BTreeMap<EntityId, FunctionHeader>,
     bodies: &mut BTreeMap<EntityId, TypedBlock>,
+    inference: &TypeInference,
 ) -> Result<(), CheckDiagnostic> {
     for identity in function_order {
         let header = headers
             .get(identity)
             .expect("source-ordered function remains indexed");
-        let mut state = UsageState::new();
+        let mut state = UsageState::default();
         for parameter in &header.parameters {
-            if is_copy_type(&parameter.ty) {
+            if is_copy_type(&inference.resolve(&parameter.ty)) {
                 continue;
             }
             let mode = parameter
@@ -3866,7 +3973,7 @@ fn validate_whole_value_use(
                 .as_ref()
                 .expect("parameter modes are finalized before value-use validation")
                 .value;
-            state.insert(
+            state.bindings.insert(
                 parameter.binding.clone(),
                 BindingUsage {
                     ownership: if mode == ParameterMode::Move {
@@ -3883,10 +3990,11 @@ fn validate_whole_value_use(
             bodies
                 .get_mut(identity)
                 .expect("every checked function has one closed body"),
-            ValueContext::Consume,
+            ValueContext::Return,
             state,
             headers,
             header,
+            inference,
         )?;
         if let Some(state) = state {
             validate_normal_exit(&state, header)?;
@@ -3898,24 +4006,37 @@ fn validate_whole_value_use(
 fn validate_usage_block(
     block: &mut TypedBlock,
     tail_context: ValueContext,
-    mut state: UsageState,
+    state: UsageState,
     headers: &BTreeMap<EntityId, FunctionHeader>,
     function: &FunctionHeader,
+    inference: &TypeInference,
 ) -> Result<Option<UsageState>, CheckDiagnostic> {
     let mut locals = Vec::new();
+    let mut continuation = Some(state);
     for statement in &mut block.statements {
+        let Some(state) = continuation.take() else {
+            close_unreachable_statement(statement, headers, inference);
+            continue;
+        };
         match &mut statement.kind {
             TypedStatementKind::Let { binding, ty, value } => {
-                let Some(next) =
-                    validate_usage_expr(value, ValueContext::Consume, state, headers, function)?
-                else {
-                    return Ok(None);
-                };
-                state = next;
-                if !is_copy_type(ty) {
+                continuation = validate_usage_expr(
+                    value,
+                    ValueContext::Consume,
+                    state,
+                    headers,
+                    function,
+                    inference,
+                )?;
+                if let Some(next) = &mut continuation
+                    && !is_copy_type(&inference.resolve(ty))
+                {
+                    next.temporaries
+                        .pop()
+                        .expect("a completed non-Copy let value retains one owned temporary");
                     let identity = binding.as_ref().clone();
                     locals.push(identity.clone());
-                    state.insert(
+                    next.bindings.insert(
                         identity.clone(),
                         BindingUsage {
                             ownership: OwnershipKind::Owned,
@@ -3927,48 +4048,51 @@ fn validate_usage_block(
                 }
             }
             TypedStatementKind::Return(value) => {
-                if let Some(value) = value {
-                    let Some(next) = validate_usage_expr(
+                continuation = if let Some(value) = value {
+                    validate_usage_expr(
                         value,
-                        ValueContext::Consume,
+                        ValueContext::Return,
                         state,
                         headers,
                         function,
+                        inference,
                     )?
-                    else {
-                        return Ok(None);
-                    };
-                    state = next;
+                } else {
+                    Some(state)
+                };
+                if let Some(exit) = &continuation {
+                    validate_normal_exit(exit, function)?;
                 }
-                validate_normal_exit(&state, function)?;
-                return Ok(None);
+                continuation = None;
             }
             TypedStatementKind::Expression(expression) => {
-                let Some(next) = validate_usage_expr(
+                continuation = validate_usage_expr(
                     expression,
                     ValueContext::Discard,
                     state,
                     headers,
                     function,
-                )?
-                else {
-                    return Ok(None);
-                };
-                state = next;
+                    inference,
+                )?;
             }
         }
     }
-    if let Some(tail) = &mut block.tail {
-        let Some(next) = validate_usage_expr(tail, tail_context, state, headers, function)? else {
-            return Ok(None);
+    if let Some(state) = continuation.take() {
+        continuation = if let Some(tail) = &mut block.tail {
+            validate_usage_expr(tail, tail_context, state, headers, function, inference)?
+        } else {
+            Some(state)
         };
-        state = next;
+    } else if let Some(tail) = &mut block.tail {
+        close_unreachable_expr(tail, tail_context, headers, inference);
     }
-    validate_scope_cleanup(&state, &locals, function)?;
-    for local in locals {
-        state.remove(&local);
+    if let Some(state) = &mut continuation {
+        validate_scope_cleanup(state, &locals, function)?;
+        for local in locals {
+            state.bindings.remove(&local);
+        }
     }
-    Ok(Some(state))
+    Ok(continuation)
 }
 
 fn validate_usage_expr(
@@ -3977,15 +4101,17 @@ fn validate_usage_expr(
     mut state: UsageState,
     headers: &BTreeMap<EntityId, FunctionHeader>,
     function: &FunctionHeader,
+    inference: &TypeInference,
 ) -> Result<Option<UsageState>, CheckDiagnostic> {
     let expression_span = expression.span;
-    let expression_type = expression.ty.clone();
+    let expression_type = inference.resolve(&expression.ty);
+    let temporary_checkpoint = state.temporaries.len();
     match &mut expression.kind {
         TypedExprKind::Reference { binding, use_kind } => {
             if is_copy_type(&expression_type) {
                 *use_kind = Some(ValueUseKind::Copy);
             } else {
-                let usage = state.get_mut(binding.as_ref()).expect(
+                let usage = state.bindings.get_mut(binding.as_ref()).expect(
                     "every non-Copy typed reference names a tracked parameter or local owner",
                 );
                 match usage.availability {
@@ -4011,11 +4137,18 @@ fn validate_usage_expr(
                     ValueContext::Borrow => {
                         *use_kind = Some(ValueUseKind::Borrow);
                     }
-                    ValueContext::Consume if usage.ownership == OwnershipKind::Owned => {
+                    ValueContext::Consume | ValueContext::Return
+                        if usage.ownership == OwnershipKind::Owned =>
+                    {
                         usage.availability = Availability::Moved;
                         *use_kind = Some(ValueUseKind::Move);
+                        if matches!(context, ValueContext::Consume) {
+                            state
+                                .temporaries
+                                .push(function.context.origin(expression_span));
+                        }
                     }
-                    ValueContext::Consume => {
+                    ValueContext::Consume | ValueContext::Return => {
                         return Err(source_diagnostic(
                             CheckDiagnosticKind::Unsupported,
                             "a borrowed generic value cannot become an owned result without Copy evidence",
@@ -4038,31 +4171,54 @@ fn validate_usage_expr(
             }
         }
         TypedExprKind::Parenthesized(inner) => {
-            return validate_usage_expr(inner, context, state, headers, function);
+            return validate_usage_expr(inner, context, state, headers, function, inference);
         }
         TypedExprKind::Tuple(elements) => {
             for element in elements {
-                let Some(next) =
-                    validate_usage_expr(element, ValueContext::Consume, state, headers, function)?
+                let Some(next) = validate_usage_expr(
+                    element,
+                    ValueContext::Consume,
+                    state,
+                    headers,
+                    function,
+                    inference,
+                )?
                 else {
                     return Ok(None);
                 };
                 state = next;
             }
-            if !is_copy_type(&expression_type) && !matches!(context, ValueContext::Consume) {
-                return Err(temporary_cleanup_diagnostic(expression_span, function));
+            state.temporaries.truncate(temporary_checkpoint);
+            if !is_copy_type(&expression_type) {
+                match context {
+                    ValueContext::Consume => {
+                        state
+                            .temporaries
+                            .push(function.context.origin(expression_span));
+                    }
+                    ValueContext::Return => {}
+                    ValueContext::Borrow | ValueContext::Discard => {
+                        return Err(temporary_cleanup_diagnostic(expression_span, function));
+                    }
+                }
             }
         }
         TypedExprKind::Block(block) => {
-            return validate_usage_block(block, context, state, headers, function);
+            return validate_usage_block(block, context, state, headers, function, inference);
         }
         TypedExprKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            let Some(after_condition) =
-                validate_usage_expr(condition, ValueContext::Borrow, state, headers, function)?
+            let Some(after_condition) = validate_usage_expr(
+                condition,
+                ValueContext::Borrow,
+                state,
+                headers,
+                function,
+                inference,
+            )?
             else {
                 return Ok(None);
             };
@@ -4072,17 +4228,31 @@ fn validate_usage_expr(
                 after_condition.clone(),
                 headers,
                 function,
+                inference,
             )?;
             let else_state = if let Some(else_branch) = else_branch {
-                validate_usage_expr(else_branch, context, after_condition, headers, function)?
+                validate_usage_expr(
+                    else_branch,
+                    context,
+                    after_condition,
+                    headers,
+                    function,
+                    inference,
+                )?
             } else {
                 Some(after_condition)
             };
             return Ok(merge_usage_states(then_state, else_state));
         }
         TypedExprKind::Unary { operand, .. } => {
-            let Some(next) =
-                validate_usage_expr(operand, ValueContext::Borrow, state, headers, function)?
+            let Some(next) = validate_usage_expr(
+                operand,
+                ValueContext::Borrow,
+                state,
+                headers,
+                function,
+                inference,
+            )?
             else {
                 return Ok(None);
             };
@@ -4094,8 +4264,14 @@ fn validate_usage_expr(
             right,
             ..
         } => {
-            let Some(after_left) =
-                validate_usage_expr(left, ValueContext::Borrow, state, headers, function)?
+            let Some(after_left) = validate_usage_expr(
+                left,
+                ValueContext::Borrow,
+                state,
+                headers,
+                function,
+                inference,
+            )?
             else {
                 return Ok(None);
             };
@@ -4106,11 +4282,18 @@ fn validate_usage_expr(
                     after_left.clone(),
                     headers,
                     function,
+                    inference,
                 )?;
                 return Ok(merge_usage_states(Some(after_left), right_state));
             }
-            let Some(next) =
-                validate_usage_expr(right, ValueContext::Borrow, after_left, headers, function)?
+            let Some(next) = validate_usage_expr(
+                right,
+                ValueContext::Borrow,
+                after_left,
+                headers,
+                function,
+                inference,
+            )?
             else {
                 return Ok(None);
             };
@@ -4147,22 +4330,39 @@ fn validate_usage_expr(
                 } else {
                     ValueContext::Borrow
                 };
-                let Some(next) =
-                    validate_usage_expr(argument, argument_context, state, headers, function)?
+                let Some(next) = validate_usage_expr(
+                    argument,
+                    argument_context,
+                    state,
+                    headers,
+                    function,
+                    inference,
+                )?
                 else {
                     return Ok(None);
                 };
                 state = next;
             }
+            state.temporaries.truncate(temporary_checkpoint);
             if expression_type == CheckedType::Never {
                 return Ok(None);
             }
-            if !is_copy_type(&expression_type) && !matches!(context, ValueContext::Consume) {
-                return Err(temporary_cleanup_diagnostic(expression_span, function));
+            if !is_copy_type(&expression_type) {
+                match context {
+                    ValueContext::Consume => {
+                        state
+                            .temporaries
+                            .push(function.context.origin(expression_span));
+                    }
+                    ValueContext::Return => {}
+                    ValueContext::Borrow | ValueContext::Discard => {
+                        return Err(temporary_cleanup_diagnostic(expression_span, function));
+                    }
+                }
             }
         }
         TypedExprKind::TupleField { receiver, .. } => {
-            if !is_copy_type(&receiver.ty) {
+            if !is_copy_type(&inference.resolve(&receiver.ty)) {
                 return Err(source_diagnostic(
                     CheckDiagnosticKind::Unsupported,
                     "projecting a non-Copy generic tuple requires later partial-move and cleanup facts",
@@ -4170,7 +4370,14 @@ fn validate_usage_expr(
                     vec![function.context.origin(receiver.span)],
                 ));
             }
-            return validate_usage_expr(receiver, ValueContext::Borrow, state, headers, function);
+            return validate_usage_expr(
+                receiver,
+                ValueContext::Borrow,
+                state,
+                headers,
+                function,
+                inference,
+            );
         }
         TypedExprKind::Integer { .. }
         | TypedExprKind::Float(_)
@@ -4181,6 +4388,128 @@ fn validate_usage_expr(
         Ok(None)
     } else {
         Ok(Some(state))
+    }
+}
+
+fn close_unreachable_statement(
+    statement: &mut TypedStatement,
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    inference: &TypeInference,
+) {
+    match &mut statement.kind {
+        TypedStatementKind::Let { value, .. } => {
+            close_unreachable_expr(value, ValueContext::Consume, headers, inference);
+        }
+        TypedStatementKind::Return(Some(value)) => {
+            close_unreachable_expr(value, ValueContext::Return, headers, inference);
+        }
+        TypedStatementKind::Return(None) => {}
+        TypedStatementKind::Expression(expression) => {
+            close_unreachable_expr(expression, ValueContext::Discard, headers, inference);
+        }
+    }
+}
+
+fn close_unreachable_block(
+    block: &mut TypedBlock,
+    tail_context: ValueContext,
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    inference: &TypeInference,
+) {
+    for statement in &mut block.statements {
+        close_unreachable_statement(statement, headers, inference);
+    }
+    if let Some(tail) = &mut block.tail {
+        close_unreachable_expr(tail, tail_context, headers, inference);
+    }
+}
+
+fn close_unreachable_expr(
+    expression: &mut TypedExpr,
+    context: ValueContext,
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    inference: &TypeInference,
+) {
+    let expression_is_copy = is_copy_type(&inference.resolve(&expression.ty));
+    match &mut expression.kind {
+        TypedExprKind::Reference { use_kind, .. } => {
+            *use_kind = Some(if expression_is_copy {
+                ValueUseKind::Copy
+            } else if matches!(context, ValueContext::Consume | ValueContext::Return) {
+                ValueUseKind::Move
+            } else {
+                ValueUseKind::Borrow
+            });
+        }
+        TypedExprKind::Parenthesized(inner) => {
+            close_unreachable_expr(inner, context, headers, inference);
+        }
+        TypedExprKind::Tuple(elements) => {
+            for element in elements {
+                close_unreachable_expr(element, ValueContext::Consume, headers, inference);
+            }
+        }
+        TypedExprKind::Block(block) => {
+            close_unreachable_block(block, context, headers, inference);
+        }
+        TypedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            close_unreachable_expr(condition, ValueContext::Borrow, headers, inference);
+            close_unreachable_block(then_branch, context, headers, inference);
+            if let Some(else_branch) = else_branch {
+                close_unreachable_expr(else_branch, context, headers, inference);
+            }
+        }
+        TypedExprKind::Unary { operand, .. } => {
+            close_unreachable_expr(operand, ValueContext::Borrow, headers, inference);
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            close_unreachable_expr(left, ValueContext::Borrow, headers, inference);
+            close_unreachable_expr(right, ValueContext::Borrow, headers, inference);
+        }
+        TypedExprKind::Call {
+            callee,
+            arguments,
+            parameter_modes,
+            ..
+        } => {
+            let header = headers
+                .get(callee.as_ref())
+                .expect("every retained call has an exact checked callee");
+            *parameter_modes = header
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    parameter
+                        .mode
+                        .as_ref()
+                        .expect("callee modes close before retained facts")
+                        .value
+                })
+                .collect();
+            for (argument, mode) in arguments.iter_mut().zip(parameter_modes.iter().copied()) {
+                close_unreachable_expr(
+                    argument,
+                    if mode == ParameterMode::Move {
+                        ValueContext::Consume
+                    } else {
+                        ValueContext::Borrow
+                    },
+                    headers,
+                    inference,
+                );
+            }
+        }
+        TypedExprKind::TupleField { receiver, .. } => {
+            close_unreachable_expr(receiver, ValueContext::Borrow, headers, inference);
+        }
+        TypedExprKind::Integer { .. }
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Boolean(_)
+        | TypedExprKind::Unit => {}
     }
 }
 
@@ -4200,6 +4529,7 @@ fn validate_scope_cleanup(
 ) -> Result<(), CheckDiagnostic> {
     for local in locals.iter().rev() {
         let usage = state
+            .bindings
             .get(local)
             .expect("a tracked non-Copy local remains in its lexical scope state");
         if usage.availability != Availability::Moved {
@@ -4218,7 +4548,15 @@ fn validate_normal_exit(
     state: &UsageState,
     function: &FunctionHeader,
 ) -> Result<(), CheckDiagnostic> {
-    if let Some(usage) = state.values().find(|usage| {
+    if let Some(temporary) = state.temporaries.last() {
+        return Err(source_diagnostic(
+            CheckDiagnosticKind::Unsupported,
+            "a partially evaluated expression retains a generic temporary that requires D(T) cleanup",
+            temporary.clone(),
+            vec![function.origin.clone()],
+        ));
+    }
+    if let Some(usage) = state.bindings.values().find(|usage| {
         usage.ownership == OwnershipKind::Owned && usage.availability != Availability::Moved
     }) {
         return Err(source_diagnostic(
@@ -4236,8 +4574,10 @@ fn merge_usage_states(left: Option<UsageState>, right: Option<UsageState>) -> Op
         (None, None) => None,
         (Some(state), None) | (None, Some(state)) => Some(state),
         (Some(mut left), Some(right)) => {
-            for (identity, right_usage) in right {
+            debug_assert_eq!(left.temporaries.len(), right.temporaries.len());
+            for (identity, right_usage) in right.bindings {
                 let left_usage = left
+                    .bindings
                     .get_mut(&identity)
                     .expect("branch states retain the same outer binding set");
                 debug_assert_eq!(left_usage.ownership, right_usage.ownership);
@@ -4369,26 +4709,105 @@ struct ComparisonEvidence {
     result_carriers: Option<(EntityId, EntityId)>,
 }
 
+#[derive(Clone, Copy)]
+enum TypeObligationKind {
+    Numeric,
+    Equality,
+    Ordering,
+}
+
+struct TypeObligation {
+    kind: TypeObligationKind,
+    ty: CheckedType,
+    primary: OriginRef,
+    related: Vec<OriginRef>,
+}
+
+fn validate_type_obligations(
+    obligations: &[TypeObligation],
+    inference: &TypeInference,
+) -> Result<(), CheckDiagnostic> {
+    for obligation in obligations {
+        let ty = inference.resolve(&obligation.ty);
+        let result = match obligation.kind {
+            TypeObligationKind::Numeric => match ty {
+                CheckedType::Int | CheckedType::Float | CheckedType::Never => Ok(()),
+                CheckedType::Infer(_) | CheckedType::Formal(_) => Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "arithmetic on a generic value requires later numeric Trait selection",
+                    obligation.primary.clone(),
+                    obligation.related.clone(),
+                )),
+                other => Err(source_diagnostic(
+                    CheckDiagnosticKind::TypeMismatch,
+                    format!("numeric operation does not accept {}", display_type(&other)),
+                    obligation.primary.clone(),
+                    obligation.related.clone(),
+                )),
+            },
+            TypeObligationKind::Equality | TypeObligationKind::Ordering => match ty {
+                CheckedType::Int | CheckedType::Float | CheckedType::Bool | CheckedType::Unit => {
+                    Ok(())
+                }
+                CheckedType::Infer(_) | CheckedType::Formal(_) => {
+                    let trait_name = if matches!(obligation.kind, TypeObligationKind::Equality) {
+                        "PartialEq"
+                    } else {
+                        "PartialOrd"
+                    };
+                    Err(source_diagnostic(
+                        CheckDiagnosticKind::Unsupported,
+                        format!(
+                            "generic comparison requires later {trait_name} evidence selection"
+                        ),
+                        obligation.primary.clone(),
+                        obligation.related.clone(),
+                    ))
+                }
+                CheckedType::Tuple(_) => Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "tuple trait comparison is outside the current Checker subset",
+                    obligation.primary.clone(),
+                    obligation.related.clone(),
+                )),
+                other => Err(source_diagnostic(
+                    CheckDiagnosticKind::TypeMismatch,
+                    format!("comparison does not accept {}", display_type(&other)),
+                    obligation.primary.clone(),
+                    obligation.related.clone(),
+                )),
+            },
+        };
+        result?;
+    }
+    Ok(())
+}
+
 struct BodyChecker<'project, 'borrow> {
     project: &'project ResolvedProject,
-    headers: &'borrow BTreeMap<EntityId, FunctionHeader>,
-    schemes: &'borrow BTreeMap<EntityId, CallableScheme>,
-    group: &'borrow BTreeSet<EntityId>,
+    environment: BodyEnvironment<'borrow>,
     function: &'borrow FunctionHeader,
     normalizer: &'borrow mut SourceTypeNormalizer,
     inference: &'borrow mut TypeInference,
+    obligations: &'borrow mut Vec<TypeObligation>,
     values: BTreeMap<EntityId, CheckedType>,
+}
+
+#[derive(Clone, Copy)]
+struct BodyEnvironment<'a> {
+    headers: &'a BTreeMap<EntityId, FunctionHeader>,
+    schemes: &'a BTreeMap<EntityId, CallableScheme>,
+    group: &'a BTreeSet<EntityId>,
 }
 
 impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
     fn new(
         project: &'project ResolvedProject,
-        headers: &'borrow BTreeMap<EntityId, FunctionHeader>,
-        schemes: &'borrow BTreeMap<EntityId, CallableScheme>,
-        group: &'borrow BTreeSet<EntityId>,
+        environment: BodyEnvironment<'borrow>,
         function: &'borrow FunctionHeader,
         normalizer: &'borrow mut SourceTypeNormalizer,
         inference: &'borrow mut TypeInference,
+        obligations: &'borrow mut Vec<TypeObligation>,
     ) -> Self {
         let values = function
             .parameters
@@ -4397,12 +4816,11 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             .collect();
         Self {
             project,
-            headers,
-            schemes,
-            group,
+            environment,
             function,
             normalizer,
             inference,
+            obligations,
             values,
         }
     }
@@ -4801,12 +5219,12 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             UnaryOperator::Negate => match self.inference.resolve(&operand.ty) {
                 CheckedType::Int | CheckedType::Float | CheckedType::Never => {}
                 CheckedType::Infer(_) | CheckedType::Formal(_) => {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        "negating an unconstrained generic value requires later numeric Trait selection",
-                        self.origin(operator.0),
-                        vec![self.origin(operand.span)],
-                    ));
+                    self.obligations.push(TypeObligation {
+                        kind: TypeObligationKind::Numeric,
+                        ty: operand.ty.clone(),
+                        primary: self.origin(operator.0),
+                        related: vec![self.origin(operand.span)],
+                    });
                 }
                 other => {
                     return Err(source_diagnostic(
@@ -4871,12 +5289,12 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 match &operand_type {
                     CheckedType::Int | CheckedType::Float | CheckedType::Never => {}
                     CheckedType::Infer(_) | CheckedType::Formal(_) => {
-                        return Err(source_diagnostic(
-                            CheckDiagnosticKind::Unsupported,
-                            "arithmetic on an unconstrained generic value requires later numeric Trait selection",
-                            self.origin(operator.0),
-                            vec![self.origin(left.span), self.origin(right.span)],
-                        ));
+                        self.obligations.push(TypeObligation {
+                            kind: TypeObligationKind::Numeric,
+                            ty: operand_type.clone(),
+                            primary: self.origin(operator.0),
+                            related: vec![self.origin(left.span), self.origin(right.span)],
+                        });
                     }
                     _ => return Err(self.binary_type_diagnostic(operator.0, &left, &right)),
                 }
@@ -4907,24 +5325,28 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 let operand_type = join_inferred_types(self.inference, &left.ty, &right.ty)
                     .map_err(|_| self.binary_type_diagnostic(operator.0, &left, &right))?;
                 let operand_type = self.inference.resolve(&operand_type);
-                if matches!(&operand_type, CheckedType::Tuple(_)) {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        "tuple trait comparison is outside the initial Checker subset",
-                        self.origin(operator.0),
-                        Vec::new(),
-                    ));
-                }
-                if matches!(operand_type, CheckedType::Infer(_) | CheckedType::Formal(_)) {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        "generic equality requires later PartialEq evidence selection",
-                        self.origin(operator.0),
-                        vec![self.origin(left.span), self.origin(right.span)],
-                    ));
-                }
-                if !is_comparable_primitive(&operand_type) {
-                    return Err(self.binary_type_diagnostic(operator.0, &left, &right));
+                match &operand_type {
+                    CheckedType::Int
+                    | CheckedType::Float
+                    | CheckedType::Bool
+                    | CheckedType::Unit => {}
+                    CheckedType::Infer(_) | CheckedType::Formal(_) => {
+                        self.obligations.push(TypeObligation {
+                            kind: TypeObligationKind::Equality,
+                            ty: operand_type,
+                            primary: self.origin(operator.0),
+                            related: vec![self.origin(left.span), self.origin(right.span)],
+                        });
+                    }
+                    CheckedType::Tuple(_) => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::Unsupported,
+                            "tuple trait comparison is outside the current Checker subset",
+                            self.origin(operator.0),
+                            Vec::new(),
+                        ));
+                    }
+                    _ => return Err(self.binary_type_diagnostic(operator.0, &left, &right)),
                 }
                 let roles = &self.project.core_roles;
                 (
@@ -4947,24 +5369,28 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 let operand_type = join_inferred_types(self.inference, &left.ty, &right.ty)
                     .map_err(|_| self.binary_type_diagnostic(operator.0, &left, &right))?;
                 let operand_type = self.inference.resolve(&operand_type);
-                if matches!(&operand_type, CheckedType::Tuple(_)) {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        "tuple trait comparison is outside the initial Checker subset",
-                        self.origin(operator.0),
-                        Vec::new(),
-                    ));
-                }
-                if matches!(operand_type, CheckedType::Infer(_) | CheckedType::Formal(_)) {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        "generic ordering requires later PartialOrd evidence selection",
-                        self.origin(operator.0),
-                        vec![self.origin(left.span), self.origin(right.span)],
-                    ));
-                }
-                if !is_comparable_primitive(&operand_type) {
-                    return Err(self.binary_type_diagnostic(operator.0, &left, &right));
+                match &operand_type {
+                    CheckedType::Int
+                    | CheckedType::Float
+                    | CheckedType::Bool
+                    | CheckedType::Unit => {}
+                    CheckedType::Infer(_) | CheckedType::Formal(_) => {
+                        self.obligations.push(TypeObligation {
+                            kind: TypeObligationKind::Ordering,
+                            ty: operand_type,
+                            primary: self.origin(operator.0),
+                            related: vec![self.origin(left.span), self.origin(right.span)],
+                        });
+                    }
+                    CheckedType::Tuple(_) => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::Unsupported,
+                            "tuple trait comparison is outside the current Checker subset",
+                            self.origin(operator.0),
+                            Vec::new(),
+                        ));
+                    }
+                    _ => return Err(self.binary_type_diagnostic(operator.0, &left, &right)),
                 }
                 let roles = &self.project.core_roles;
                 (
@@ -5036,7 +5462,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 Vec::new(),
             )
         })?;
-        let header = self.headers.get(&target).ok_or_else(|| {
+        let header = self.environment.headers.get(&target).ok_or_else(|| {
             source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
                 "the direct callee is not a supported ordinary function declaration",
@@ -5050,40 +5476,41 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             .iter()
             .map(|parameter| parameter.type_origin.clone())
             .collect::<Vec<_>>();
-        let (parameter_types, return_type, instantiation) = if self.group.contains(&target) {
-            (
-                header
-                    .parameters
+        let (parameter_types, return_type, instantiation) =
+            if self.environment.group.contains(&target) {
+                (
+                    header
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.ty.clone())
+                        .collect::<Vec<_>>(),
+                    header.return_type.clone(),
+                    CallInstantiation::Provisional,
+                )
+            } else {
+                let scheme = self.environment.schemes.get(&target).expect(
+                    "callee-first SCC order publishes every function outside the current group",
+                );
+                let mapping = scheme
+                    .quantified
                     .iter()
-                    .map(|parameter| parameter.ty.clone())
-                    .collect::<Vec<_>>(),
-                header.return_type.clone(),
-                CallInstantiation::Provisional,
-            )
-        } else {
-            let scheme = self.schemes.get(&target).expect(
-                "callee-first SCC order publishes every function outside the current group",
-            );
-            let mapping = scheme
-                .quantified
-                .iter()
-                .cloned()
-                .map(|formal| {
-                    let actual = self.inference.fresh();
-                    (formal, actual)
-                })
-                .collect::<Vec<_>>();
-            let replacements = mapping.iter().cloned().collect::<BTreeMap<_, _>>();
-            (
-                scheme
-                    .parameters
-                    .iter()
-                    .map(|parameter| instantiate_type(parameter, &replacements))
-                    .collect::<Vec<_>>(),
-                instantiate_type(&scheme.return_type, &replacements),
-                CallInstantiation::Published(mapping),
-            )
-        };
+                    .cloned()
+                    .map(|formal| {
+                        let actual = self.inference.fresh();
+                        (formal, actual)
+                    })
+                    .collect::<Vec<_>>();
+                let replacements = mapping.iter().cloned().collect::<BTreeMap<_, _>>();
+                (
+                    scheme
+                        .parameters
+                        .iter()
+                        .map(|parameter| instantiate_type(parameter, &replacements))
+                        .collect::<Vec<_>>(),
+                    instantiate_type(&scheme.return_type, &replacements),
+                    CallInstantiation::Published(mapping),
+                )
+            };
         if arguments.len() != parameter_types.len() {
             return Err(source_diagnostic(
                 CheckDiagnosticKind::CallMismatch,
@@ -5245,13 +5672,6 @@ fn join_inferred_types(
     }
     inference.unify(&left, &right)?;
     Ok(inference.resolve(&left))
-}
-
-fn is_comparable_primitive(ty: &CheckedType) -> bool {
-    matches!(
-        ty,
-        CheckedType::Int | CheckedType::Float | CheckedType::Bool | CheckedType::Unit
-    )
 }
 
 fn direct_function_callee(expression: &ResolvedExpr) -> Option<EntityId> {
@@ -5595,6 +6015,40 @@ mod checking_tests {
             assert_closed_type(&function.return_type);
             assert_closed_block(&function.body);
         }
+    }
+
+    #[test]
+    fn unreachable_retained_calls_still_have_closed_mode_and_use_facts() {
+        let checked = check_project(
+            &sources(
+                "fn identity(value) { value } \
+                 fn f(value: Int) -> Int { return value; identity(value); }",
+            ),
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .expect("unreachable source remains a closed typed body fact");
+        let function = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "f")
+            .expect("f function");
+        let TypedStatementKind::Expression(call) = &function.body.statements[1].kind else {
+            panic!("second retained statement is the unreachable call")
+        };
+        let TypedExprKind::Call {
+            arguments,
+            parameter_modes,
+            ..
+        } = &call.kind
+        else {
+            panic!("retained expression is a call")
+        };
+        let TypedExprKind::Reference { use_kind, .. } = &arguments[0].kind else {
+            panic!("retained argument is the exact reference")
+        };
+        assert_eq!(parameter_modes, &[ParameterMode::Move]);
+        assert_eq!(*use_kind, Some(ValueUseKind::Copy));
     }
 
     #[test]
