@@ -2269,6 +2269,29 @@ impl ResolverState {
             return Err(diagnostic);
         }
         let modules = resolved_modules.into_iter().collect::<BTreeMap<_, _>>();
+        let name_bindings = self
+            .bindings
+            .iter()
+            .map(|(module, table)| {
+                let table = table
+                    .iter()
+                    .filter(|((namespace, _), _)| {
+                        matches!(namespace, Namespace::Type | Namespace::Value)
+                    })
+                    .map(|(name, deliveries)| {
+                        let bindings = deliveries
+                            .values()
+                            .map(|delivery| ResolvedNameBinding {
+                                target: delivery.target.clone(),
+                                public: delivery.public,
+                            })
+                            .collect();
+                        (name.clone(), bindings)
+                    })
+                    .collect();
+                (module.clone(), table)
+            })
+            .collect();
         let core_roles = self
             .core_roles
             .take()
@@ -2281,6 +2304,7 @@ impl ResolverState {
             modules,
             entities: self.entities,
             core_roles,
+            name_bindings,
         })
     }
 }
@@ -5011,7 +5035,9 @@ impl BodyResolver<'_> {
         let kind = match &statement.kind {
             StatementKind::Let { binding, value } => match binding {
                 LetBinding::Name {
-                    name, annotation, ..
+                    name,
+                    mutable,
+                    annotation,
                 } => {
                     let annotation = annotation
                         .as_ref()
@@ -5030,6 +5056,7 @@ impl BodyResolver<'_> {
                         .insert(name.text.clone(), binding.identity.clone());
                     ResolvedStatementKind::Let {
                         bindings: vec![binding],
+                        mutable: *mutable,
                         annotation,
                         value,
                     }
@@ -5051,6 +5078,7 @@ impl BodyResolver<'_> {
                         .extend(bindings);
                     ResolvedStatementKind::Let {
                         bindings: resolved_bindings,
+                        mutable: None,
                         annotation: None,
                         value,
                     }
