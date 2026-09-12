@@ -1,6 +1,6 @@
 # 类型系统
 
-Vorton 使用 Hindley-Milner 类型推断（let-polymorphism），扩展了 effect row 和 trait bound。
+Vorton 使用 Hindley-Milner 类型推断，并扩展 effect row 和 trait bound。具名函数声明可以泛化；普通局部 `let` 保持 monotype，同一次求值的结果不会因重新绑定而获得多态实例。
 
 类型表达式、参数和调用的唯一 source EBNF 见[语法](syntax.md)；本页的公式是名称解析后的类型规则，不是第二份 parser grammar。
 
@@ -19,13 +19,19 @@ Vorton 使用 Hindley-Milner 类型推断（let-polymorphism），扩展了 effe
 
 `Never` 与任何类型统一（它是类型格的底部元素）。它是永不返回的操作（如 `fail.raise`）的返回类型。
 
-### 初始 Checker API 支持边界
+### 当前 Checker API 支持边界
 
-当前 `vorton_compiler::check_project` 是完整类型系统的第一个窄闭环，不改变本页后续规则。它要求每个可达普通 module-level 函数具有显式单态参数类型和显式返回类型，并只接受 `Int`、`Float`、`Bool`、`Unit`、`Never`、由这些类型组成的 tuple，以及可展开到同一集合的非泛型 type alias。透明 source 分组和 alias 不产生新的类型 identity；已知 constructor arity 与 alias cycle 在 body 前检查。`Str`、container、用户 nominal、generic/formal、associated type 与 callable shape 仍返回稳定 `Unsupported`，不能以 placeholder 类型进入 opaque 结果。
+当前 `vorton_compiler::check_project` 闭合普通 module／inline-module 函数的第一段 HM 子集。类型限于 `Int`、`Float`、`Bool`、`Unit`、`Never`、这些类型或函数 formal 组成的 tuple，以及可展开到同一集合的非泛型 type alias。函数可声明无 bound 的 type parameters；内部函数可省略参数和返回类型并由 body 推断、泛化。Metavariable、声明 formal 和已发布 scheme 在内部保持不同身份，成功的 `CheckedProject` 不保留未解 metavariable。`Str`、container、用户 nominal、generic alias、associated type、callable shape、Trait bound 和 effect formal 仍稳定返回 `Unsupported`。
 
-这个入口支持 literal、参数／不可变 local 引用、顺序 shadowing、tuple 构造和 ordinal projection、block、if/else、简单 `let`、expression statement、return、本文定义的 primitive 运算与 exact ordinary-function direct call。完整显式 header 先闭合，因此 forward/self/mutual recursion 不需要临时 unknown scheme；每个 body 只形成一次 typed 结果。Borrow 与 Move source mode 保持原选择；受支持 Copy 值上的 private 省略 mode 形成 Borrow。只有 exact function identity 经 reachable library root 的连续 public module／export path 实际进入对外接口时，其输入 mode 才必须由 source 或受支持 contract 明确选择；被 private module 阻断的 `pub fn` 仍按内部函数处理。实际对外 signature 引用的透明 alias identity 也必须经这样的 public path 可达，声明位置单独写 `pub` 不能越过 private module。其余已解析 carrier 明确 `Unsupported`，而不是完整语言中的非法语义或已经通过检查的程序。
+直接调用对已发布 scheme 每次产生一份 fresh mapping，参数与返回关系共同消费该 mapping。同一强连通递归组在未发布状态下共享 monomorphic provisional 类型；每个 body 只形成一次 typed draft，callee 的实际类型需求沿递归调用共同闭合后，才 final-zonk、泛化并原子发布。递归调用保留由原始 shared type 关联形成的 actual mapping，包括 callee body 实际使用的 formal。组外调用可分别实例化为不同 concrete 类型，组内 polymorphic recursion 和 occurs-check 无限类型拒绝。函数只泛化签名中的自由变量；body 及其调用 actual 中的 formal 必须绑定到本函数的 scheme，未闭合的 body 类型不能增加公开 formal。未被签名或 body 使用的显式 formal 保留声明身份，但不创建无用途的调用 actual；实际需要而无法推断的 body 类型明确诊断。
 
-省略 source effect header 或显式 `with {}` 只有在 body operation 和 exact direct-call graph 都落在上述纯子集时才形成 empty row。`CheckedProject` 内部保留 normalized type、数值、exact callee、mode、empty effect 和 typed body，但不公开可编辑 identity／通用查询接口，也不表示完整接口 S 或最终 `TypedHIR`。
+普通局部绑定保持同一个 monotype。这个入口继续支持 literal、参数／不可变 local 引用、顺序 shadowing、tuple 构造和 concrete ordinal projection、block、if/else、简单 `let`、expression statement、return、本文定义的 primitive 运算与 exact ordinary-function direct call。已解析但不在这组 expression／statement carrier 内的表面仍返回 `Unsupported`。
+
+无 bound 的 generic formal 不默认具有 `Copy`。Checker 对当前子集保留 whole-binding 的 live／moved 状态：完整返回、`let` 转移和 Move 参数调用会转移 owner；互斥分支可各自完整转移一次，顺序重复转移、移交后使用和借入值变成 owned 结果会拒绝。只借用或所有正常出口都已完整移交的 generic owner 可形成 Pure 结果；需要 `D(T)` cleanup、generic partial projection 或 Copy evidence 的路径返回 `Unsupported`。现有 concrete scalar 及全元素 concrete-Copy tuple 保持 Copy 行为。
+
+Source 与 format-1 contract 的 generic function 必须都显式声明同一 formal 数量；已选择的参数／返回条款通过 exact target、declaration binder、type kind、ordinal 和使用关系对齐，未选择的条款无需重复整份 signature。Formal 显示名可以 alpha 改名。Contract 不能把源码推断出的 generic 关系用 concrete type 单态化。`generic_requirements` 未选择和显式 `[]` 继续保持不同输入事实，非空 requirement 尚未支持。实际导出的 public 输入类型和 mode 逐 position 由 source 或所属 contract 明确；private 输入、返回类型和 empty effect 可继续推断。
+
+省略 source effect header 或显式 `with {}` 只有在 body operation 和 exact direct-call graph 都落在上述纯子集，且所有正常出口没有待清理 generic owner 时才形成 empty row。`CheckedProject` 内部保留 closed scheme、调用 mapping、normalized type、数值、exact callee、mode、empty effect、binding/use origin 和每个函数唯一的 typed body，但不公开可编辑 identity／通用查询接口，也不表示完整接口 S 或最终 `TypedHIR`。
 
 ## 数值语义
 
@@ -172,11 +178,11 @@ CallableScheme = ∀α₁, ..., αₙ; E₁, ..., Eₘ. CallableType
                  [trait bounds, finite row-merge obligations]
 ```
 
-Type scheme 量化类型变量，并可选地用 trait bound 约束它们。Callable scheme 还可以量化由具名 header 显式声明、或由 trait signature 合法结构位置产生的 effect formals。每个 formal 都有 owner 与 ordinal；普通推断 metavariable 不能冒充 formal。Scheme 被赋予 `let` 绑定、函数声明和方法声明，method 的按 impl effect 关系见 [Trait 系统](traits.md#按-impl-关联的-effect-scheme)。
+Type scheme 量化类型变量，并可选地用 trait bound 约束它们。Callable scheme 还可以量化由具名 header 显式声明、或由 trait signature 合法结构位置产生的 effect formals。每个 formal 都有 owner 与 ordinal；普通推断 metavariable 不能冒充 formal。Scheme 被赋予函数声明和方法声明；普通局部 `let` 只保存 monotype。Method 的按 impl effect 关系见 [Trait 系统](traits.md#按-impl-关联的-effect-scheme)。
 
 ### 泛化（Generalization）
 
-推断 `let` 或 `fn` 体的类型后：
+推断具名 `fn` 绑定组的类型后：
 
 ```
 generalize(τ, Γ):
@@ -475,9 +481,8 @@ apply(subst, τ):
 ```
 ── Let 绑定 ──
   Γ ⊢ e : τ / ε
-  σ = generalize(τ, Γ)
   ─────────────────────────
-  Γ ⊢ let x = e ⇒ (Γ[x ↦ σ], ε)     x 不可变
+  Γ ⊢ let x = e ⇒ (Γ[x ↦ τ], ε)     x 不可变且保持 monotype
 
 ── Let Mut 绑定 ──
   Γ ⊢ e : τ / ε
