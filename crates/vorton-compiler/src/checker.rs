@@ -636,10 +636,16 @@ fn check_prepared_project(
             if used_variables
                 .iter()
                 .any(|variable| !generalized.variables.contains_key(variable))
+                || used_formals.iter().any(|formal| {
+                    !generalized
+                        .local_formals
+                        .iter()
+                        .any(|local| inference.formals_equivalent(formal, local))
+                })
             {
                 return Err(source_diagnostic(
                     CheckDiagnosticKind::Unsupported,
-                    "a body type cannot be inferred from its use; unresolved call actuals cannot add callable type parameters",
+                    "a body type cannot be inferred in this callable scope; unresolved or foreign call actuals cannot add callable type parameters",
                     header.context.origin(body.span),
                     Vec::new(),
                 ));
@@ -1564,8 +1570,8 @@ impl TypeInference {
                 local_formals
                     .iter()
                     .find(|local| self.formals_equivalent(formal.as_ref(), local))
-                    .cloned()
-                    .unwrap_or(*formal),
+                    .expect("every published formal has a binder in this callable scheme")
+                    .clone(),
             )),
             CheckedType::Tuple(elements) => CheckedType::Tuple(
                 elements
@@ -5934,67 +5940,73 @@ mod checking_tests {
         evidence
     }
 
-    fn assert_closed_type(ty: &CheckedType) {
+    fn assert_closed_type(ty: &CheckedType, scheme: &[TypeFormal]) {
         match ty {
             CheckedType::Infer(variable) => {
                 panic!("published Checker result retained ?{}", variable.0)
             }
             CheckedType::Tuple(elements) => {
                 for element in elements {
-                    assert_closed_type(element);
+                    assert_closed_type(element, scheme);
                 }
             }
+            CheckedType::Formal(formal) => assert!(
+                scheme.contains(formal.as_ref()),
+                "published type has free formal {}::{}",
+                formal.owner.name,
+                formal.name,
+            ),
             _ => {}
         }
     }
 
-    fn assert_closed_block(block: &TypedBlock) {
-        assert_closed_type(&block.ty);
+    fn assert_closed_block(block: &TypedBlock, scheme: &[TypeFormal]) {
+        assert_closed_type(&block.ty, scheme);
         for statement in &block.statements {
             match &statement.kind {
                 TypedStatementKind::Let { ty, value, .. } => {
-                    assert_closed_type(ty);
-                    assert_closed_expr(value);
+                    assert_closed_type(ty, scheme);
+                    assert_closed_expr(value, scheme);
                 }
                 TypedStatementKind::Return(Some(value)) | TypedStatementKind::Expression(value) => {
-                    assert_closed_expr(value)
+                    assert_closed_expr(value, scheme)
                 }
                 TypedStatementKind::Return(None) => {}
             }
         }
         if let Some(tail) = &block.tail {
-            assert_closed_expr(tail);
+            assert_closed_expr(tail, scheme);
         }
     }
 
-    fn assert_closed_expr(expression: &TypedExpr) {
-        assert_closed_type(&expression.ty);
+    fn assert_closed_expr(expression: &TypedExpr, scheme: &[TypeFormal]) {
+        assert_closed_type(&expression.ty, scheme);
         match &expression.kind {
             TypedExprKind::Parenthesized(inner)
             | TypedExprKind::Unary { operand: inner, .. }
             | TypedExprKind::TupleField {
                 receiver: inner, ..
-            } => assert_closed_expr(inner),
+            } => assert_closed_expr(inner, scheme),
             TypedExprKind::Tuple(elements) => {
                 for element in elements {
-                    assert_closed_expr(element);
+                    assert_closed_expr(element, scheme);
                 }
             }
-            TypedExprKind::Block(block) => assert_closed_block(block),
+            TypedExprKind::Block(block) => assert_closed_block(block, scheme),
             TypedExprKind::If {
                 condition,
                 then_branch,
                 else_branch,
             } => {
-                assert_closed_expr(condition);
-                assert_closed_block(then_branch);
+                assert_closed_expr(condition, scheme);
+                assert_closed_block(then_branch, scheme);
                 if let Some(else_branch) = else_branch {
-                    assert_closed_expr(else_branch);
+                    assert_closed_expr(else_branch, scheme);
                 }
             }
             TypedExprKind::Binary { left, right, .. } => {
-                assert_closed_expr(left);
-                assert_closed_expr(right);
+                assert_closed_expr(left, scheme);
+                assert_closed_expr(right, scheme);
             }
             TypedExprKind::Call {
                 arguments,
@@ -6004,11 +6016,11 @@ mod checking_tests {
             } => {
                 assert_eq!(parameter_modes.len(), arguments.len());
                 for argument in arguments {
-                    assert_closed_expr(argument);
+                    assert_closed_expr(argument, scheme);
                 }
                 if let CallInstantiation::Published(mapping) = instantiation {
                     for (_, actual) in mapping {
-                        assert_closed_type(actual);
+                        assert_closed_type(actual, scheme);
                     }
                 }
             }
@@ -6210,10 +6222,10 @@ mod checking_tests {
 
         for function in checked.functions.values() {
             for parameter in &function.parameters {
-                assert_closed_type(&parameter.ty);
+                assert_closed_type(&parameter.ty, &function.scheme);
             }
-            assert_closed_type(&function.return_type);
-            assert_closed_block(&function.body);
+            assert_closed_type(&function.return_type, &function.scheme);
+            assert_closed_block(&function.body, &function.scheme);
         }
     }
 
@@ -6271,7 +6283,7 @@ mod checking_tests {
             )
             .expect("nested divergence still retains closed typed facts");
             for function in checked.functions.values() {
-                assert_closed_block(&function.body);
+                assert_closed_block(&function.body, &function.scheme);
             }
         }
     }
@@ -6298,7 +6310,7 @@ mod checking_tests {
                 .find(|function| function.identity.name == "f")
                 .unwrap();
             assert_eq!(function.parameters[0].mode, ParameterMode::Borrow);
-            assert_closed_block(&function.body);
+            assert_closed_block(&function.body, &function.scheme);
         }
     }
 
@@ -6336,7 +6348,7 @@ mod checking_tests {
                 mapping.is_empty(),
                 "no type relation consumes the vacuous formal"
             );
-            assert_closed_block(&caller.body);
+            assert_closed_block(&caller.body, &caller.scheme);
         }
 
         let diagnostic = check_project(
@@ -6352,6 +6364,34 @@ mod checking_tests {
         .expect_err("a formal consumed only by the callee body still needs a real call actual");
         assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
         assert!(diagnostic.message.contains("body type cannot be inferred"));
+    }
+
+    #[test]
+    fn scc_body_formals_must_be_bound_by_the_published_callable() {
+        let make = "fn make<T>() -> T { make() }";
+        let a = "fn a<U>(x: move U) -> Unit { b(); a(x) }";
+        for declaration in ["fn b()", "pub fn b()", "fn b<U>()"] {
+            let b = format!("{declaration} -> Unit {{ a(make()) }}");
+            for source in [format!("{make} {a} {b}"), format!("{make} {b} {a}")] {
+                let diagnostic = check_project(&sources(&source), &BTreeMap::new(), Vec::new())
+                    .expect_err("b cannot borrow a peer binder to close its own body actual");
+                assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
+                let Some(CheckOrigin::Source(origin)) = diagnostic.primary else {
+                    panic!("an unbound body type has a real source origin");
+                };
+                assert!(source[origin.span.start..origin.span.end].contains("a(make())"));
+            }
+        }
+
+        let a = "fn a<U>(x: move U) -> Unit { b(x) }";
+        let b = "fn b<V>(x: move V) -> Unit { a(make()); b(x) }";
+        for source in [format!("{make} {a} {b}"), format!("{make} {b} {a}")] {
+            let checked = check_project(&sources(&source), &BTreeMap::new(), Vec::new())
+                .expect("the shared SCC formal is bound by each member's own signature");
+            for function in checked.functions.values() {
+                assert_closed_block(&function.body, &function.scheme);
+            }
+        }
     }
 
     #[test]
