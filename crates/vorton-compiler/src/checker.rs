@@ -28,10 +28,11 @@ pub struct PreparedProject(ResolvedProject);
 /// been checked together.
 ///
 /// The result is intentionally opaque. It retains the exact resolved project,
-/// normalized types, parameter conventions, pure-effect facts, interpreted
+/// closed callable schemes, normalized types, call mappings, parameter
+/// conventions, whole-binding use facts, pure-effect facts, interpreted
 /// literals, exact direct callees, and one typed body for every supported
-/// reachable function. It is the first narrow Checker result; it is not the
-/// complete 0.1 interface, general-purpose query surface, or final `TypedHIR`.
+/// reachable function. It is a narrow Checker result; it is not the complete
+/// 0.1 interface, general-purpose query surface, or final `TypedHIR`.
 #[allow(
     dead_code,
     reason = "the opaque checked result retains the complete narrow checker carrier"
@@ -69,7 +70,7 @@ pub enum CheckOrigin {
     },
 }
 
-/// Stable high-level categories for the initial Checker surface.
+/// Stable high-level categories for the current Checker surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckDiagnosticKind {
     /// An unchanged failure from the existing project pipeline.
@@ -543,31 +544,136 @@ fn check_prepared_project(
     documents: Vec<ContractDocument>,
 ) -> Result<CheckedProject, CheckDiagnostic> {
     let project = &prepared.0;
+    let mut inference = TypeInference::default();
     let mut normalizer = SourceTypeNormalizer::new(project);
-    let (function_order, mut headers) = collect_supported_headers(project, &mut normalizer)?;
+    let (function_order, mut headers) =
+        collect_supported_headers(project, &mut normalizer, &mut inference)?;
     let contract_selections =
         apply_contract_documents(project, owners, &documents, &mut headers, &normalizer)?;
-    finalize_parameter_modes(&function_order, &mut headers)?;
+    apply_contract_type_constraints(
+        &function_order,
+        &mut headers,
+        &contract_selections,
+        &mut inference,
+    )?;
+    validate_public_inputs(&function_order, &headers, &contract_selections)?;
+
+    let groups = function_binding_groups(&function_order, &headers);
+    let mut schemes = BTreeMap::new();
+    let mut draft_bodies = BTreeMap::new();
+    let mut generalizations = BTreeMap::new();
+
+    for group in groups {
+        let members = group.iter().cloned().collect::<BTreeSet<_>>();
+        for identity in &group {
+            let header = headers
+                .get(identity)
+                .expect("a binding-group member remains in the header table");
+            let mut checker = BodyChecker::new(
+                project,
+                &headers,
+                &schemes,
+                &members,
+                header,
+                &mut normalizer,
+                &mut inference,
+            );
+            let body = checker.check_block(&header.body)?;
+            inference
+                .satisfy(&body.ty, &header.return_type)
+                .map_err(|failure| {
+                    source_diagnostic(
+                        CheckDiagnosticKind::ReturnMismatch,
+                        format!(
+                            "function body cannot satisfy its return type: {}",
+                            display_unification_failure(&failure)
+                        ),
+                        header.context.origin(header.body.span),
+                        vec![origin_as_source(&header.return_origin, &header.origin)],
+                    )
+                })?;
+            draft_bodies.insert(identity.clone(), body);
+        }
+
+        for identity in &group {
+            let header = headers
+                .get(identity)
+                .expect("a generalized function remains in the header table");
+            let body = draft_bodies
+                .get(identity)
+                .expect("every generalized function has one typed draft");
+            let generalized = function_generalization(identity, header, body, &mut inference);
+            let parameters = header
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    inference.close_type(
+                        &parameter.ty,
+                        &generalized.variables,
+                        &generalized.local_formals,
+                    )
+                })
+                .collect();
+            let return_type = inference.close_type(
+                &header.return_type,
+                &generalized.variables,
+                &generalized.local_formals,
+            );
+            schemes.insert(
+                identity.clone(),
+                CallableScheme {
+                    quantified: generalized.local_formals.clone(),
+                    parameters,
+                    return_type,
+                },
+            );
+            generalizations.insert(identity.clone(), generalized);
+        }
+    }
+
+    for (identity, scheme) in &schemes {
+        let header = headers
+            .get_mut(identity)
+            .expect("every published scheme retains its source header");
+        for (parameter, closed) in header.parameters.iter_mut().zip(&scheme.parameters) {
+            parameter.ty = closed.clone();
+        }
+        header.return_type = scheme.return_type.clone();
+    }
+
+    let mut closed_bodies = BTreeMap::new();
+    for identity in &function_order {
+        let body = draft_bodies
+            .remove(identity)
+            .expect("every supported function has exactly one typed draft");
+        let generalized = generalizations
+            .get(identity)
+            .expect("every supported function has a generalization mapping");
+        closed_bodies.insert(
+            identity.clone(),
+            close_typed_block(
+                body,
+                &inference,
+                &generalized.variables,
+                &generalized.local_formals,
+            ),
+        );
+    }
+
+    infer_parameter_modes(&function_order, &mut headers, &closed_bodies)?;
+    validate_whole_value_use(&function_order, &headers, &mut closed_bodies)?;
 
     let mut functions = BTreeMap::new();
     for identity in function_order {
         let header = headers
             .get(&identity)
             .expect("source-ordered supported function remains indexed");
-        let mut checker = BodyChecker::new(project, &headers, header, &mut normalizer);
-        let body = checker.check_block(&header.body)?;
-        if !type_satisfies(&body.ty, &header.return_type) {
-            return Err(source_diagnostic(
-                CheckDiagnosticKind::ReturnMismatch,
-                format!(
-                    "function body has type {} but the declared return type is {}",
-                    display_type(&body.ty),
-                    display_type(&header.return_type)
-                ),
-                header.context.origin(header.body.span),
-                vec![header.return_origin.clone()],
-            ));
-        }
+        let scheme = schemes
+            .remove(&identity)
+            .expect("every checked function has one published callable scheme");
+        let body = closed_bodies
+            .remove(&identity)
+            .expect("every checked function has one closed typed body");
         functions.insert(
             identity.clone(),
             CheckedFunction {
@@ -576,17 +682,19 @@ fn check_prepared_project(
                 parameters: header
                     .parameters
                     .iter()
-                    .map(|parameter| CheckedParameter {
+                    .zip(&scheme.parameters)
+                    .map(|(parameter, ty)| CheckedParameter {
                         binding: parameter.binding.clone(),
-                        ty: parameter.ty.clone(),
+                        ty: ty.clone(),
                         mode: parameter
                             .mode
                             .as_ref()
-                            .expect("parameter modes are finalized before body checking")
+                            .expect("parameter modes are finalized after typed drafts close")
                             .value,
                     })
                     .collect(),
-                return_type: header.return_type.clone(),
+                scheme: scheme.quantified,
+                return_type: scheme.return_type,
                 effect: CheckedEffect::Pure,
                 body,
             },
@@ -614,6 +722,558 @@ fn check_prepared_project(
         aliases,
         functions,
     })
+}
+
+fn origin_as_source(origin: &CheckOrigin, fallback: &OriginRef) -> OriginRef {
+    match origin {
+        CheckOrigin::Source(origin) => origin.clone(),
+        CheckOrigin::Contract { .. } => fallback.clone(),
+    }
+}
+
+fn display_unification_failure(failure: &UnificationFailure) -> String {
+    match failure {
+        UnificationFailure::Mismatch(left, right) => format!(
+            "{} and {} are incompatible",
+            display_type(left),
+            display_type(right)
+        ),
+        UnificationFailure::Infinite(variable, ty) => format!(
+            "?{} would contain itself through {}",
+            variable.0,
+            display_type(ty)
+        ),
+    }
+}
+
+#[derive(Clone)]
+struct CallableScheme {
+    quantified: Vec<TypeFormal>,
+    parameters: Vec<CheckedType>,
+    return_type: CheckedType,
+}
+
+fn instantiate_type(
+    ty: &CheckedType,
+    replacements: &BTreeMap<TypeFormal, CheckedType>,
+) -> CheckedType {
+    match ty {
+        CheckedType::Formal(formal) => replacements
+            .get(formal.as_ref())
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        CheckedType::Tuple(elements) => CheckedType::Tuple(
+            elements
+                .iter()
+                .map(|element| instantiate_type(element, replacements))
+                .collect(),
+        ),
+        _ => ty.clone(),
+    }
+}
+
+struct FunctionGeneralization {
+    variables: BTreeMap<TypeVariable, TypeFormal>,
+    local_formals: Vec<TypeFormal>,
+}
+
+fn function_generalization(
+    identity: &EntityId,
+    header: &FunctionHeader,
+    body: &TypedBlock,
+    inference: &mut TypeInference,
+) -> FunctionGeneralization {
+    let mut variables = BTreeSet::new();
+    let mut referenced_formals = BTreeSet::new();
+    for parameter in &header.parameters {
+        collect_inference_inputs(
+            inference,
+            &parameter.ty,
+            &mut variables,
+            &mut referenced_formals,
+        );
+    }
+    collect_inference_inputs(
+        inference,
+        &header.return_type,
+        &mut variables,
+        &mut referenced_formals,
+    );
+    collect_typed_variables(body, inference, &mut variables, &mut referenced_formals);
+    let variables = variables
+        .into_iter()
+        .enumerate()
+        .map(|(offset, variable)| {
+            let ordinal = header.declared_formals.len() + offset;
+            (
+                variable,
+                TypeFormal {
+                    owner: identity.clone(),
+                    ordinal,
+                    name: format!("T{ordinal}"),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut local_formals = header.declared_formals.clone();
+    local_formals.extend(variables.values().cloned());
+    let mut foreign_roots = referenced_formals
+        .into_iter()
+        .filter(|formal| {
+            !local_formals
+                .iter()
+                .any(|local| inference.formals_equivalent(formal, local))
+        })
+        .map(|formal| inference.formal_root(&formal))
+        .collect::<BTreeSet<_>>();
+    while let Some(foreign) = foreign_roots.pop_first() {
+        if local_formals
+            .iter()
+            .any(|local| inference.formals_equivalent(&foreign, local))
+        {
+            continue;
+        }
+        let ordinal = local_formals.len();
+        let local = TypeFormal {
+            owner: identity.clone(),
+            ordinal,
+            name: format!("T{ordinal}"),
+        };
+        inference
+            .unify_formals(foreign, local.clone())
+            .expect("a foreign formal class has no formal owned by this function");
+        local_formals.push(local);
+    }
+    FunctionGeneralization {
+        variables,
+        local_formals,
+    }
+}
+
+fn collect_inference_inputs(
+    inference: &TypeInference,
+    ty: &CheckedType,
+    variables: &mut BTreeSet<TypeVariable>,
+    formals: &mut BTreeSet<TypeFormal>,
+) {
+    inference.unresolved_variables(ty, variables);
+    inference.referenced_formals(ty, formals);
+}
+
+fn collect_typed_variables(
+    block: &TypedBlock,
+    inference: &TypeInference,
+    variables: &mut BTreeSet<TypeVariable>,
+    formals: &mut BTreeSet<TypeFormal>,
+) {
+    collect_inference_inputs(inference, &block.ty, variables, formals);
+    for statement in &block.statements {
+        match &statement.kind {
+            TypedStatementKind::Let { ty, value, .. } => {
+                collect_inference_inputs(inference, ty, variables, formals);
+                collect_expr_variables(value, inference, variables, formals);
+            }
+            TypedStatementKind::Return(Some(value)) | TypedStatementKind::Expression(value) => {
+                collect_expr_variables(value, inference, variables, formals);
+            }
+            TypedStatementKind::Return(None) => {}
+        }
+    }
+    if let Some(tail) = &block.tail {
+        collect_expr_variables(tail, inference, variables, formals);
+    }
+}
+
+fn collect_expr_variables(
+    expression: &TypedExpr,
+    inference: &TypeInference,
+    variables: &mut BTreeSet<TypeVariable>,
+    formals: &mut BTreeSet<TypeFormal>,
+) {
+    collect_inference_inputs(inference, &expression.ty, variables, formals);
+    match &expression.kind {
+        TypedExprKind::Parenthesized(inner)
+        | TypedExprKind::Unary { operand: inner, .. }
+        | TypedExprKind::TupleField {
+            receiver: inner, ..
+        } => collect_expr_variables(inner, inference, variables, formals),
+        TypedExprKind::Tuple(elements) => {
+            for element in elements {
+                collect_expr_variables(element, inference, variables, formals);
+            }
+        }
+        TypedExprKind::Block(block) => {
+            collect_typed_variables(block, inference, variables, formals);
+        }
+        TypedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_expr_variables(condition, inference, variables, formals);
+            collect_typed_variables(then_branch, inference, variables, formals);
+            if let Some(else_branch) = else_branch {
+                collect_expr_variables(else_branch, inference, variables, formals);
+            }
+        }
+        TypedExprKind::Binary { left, right, .. } => {
+            collect_expr_variables(left, inference, variables, formals);
+            collect_expr_variables(right, inference, variables, formals);
+        }
+        TypedExprKind::Call {
+            arguments,
+            instantiation,
+            ..
+        } => {
+            for argument in arguments {
+                collect_expr_variables(argument, inference, variables, formals);
+            }
+            if let CallInstantiation::Published(mapping) = instantiation {
+                for (_, actual) in mapping {
+                    collect_inference_inputs(inference, actual, variables, formals);
+                }
+            }
+        }
+        TypedExprKind::Integer { .. }
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Boolean(_)
+        | TypedExprKind::Unit
+        | TypedExprKind::Reference { .. } => {}
+    }
+}
+
+fn close_typed_block(
+    block: TypedBlock,
+    inference: &TypeInference,
+    generalized: &BTreeMap<TypeVariable, TypeFormal>,
+    local_formals: &[TypeFormal],
+) -> TypedBlock {
+    TypedBlock {
+        span: block.span,
+        statements: block
+            .statements
+            .into_iter()
+            .map(|statement| {
+                close_typed_statement(statement, inference, generalized, local_formals)
+            })
+            .collect(),
+        tail: block.tail.map(|tail| {
+            Box::new(close_typed_expr(
+                *tail,
+                inference,
+                generalized,
+                local_formals,
+            ))
+        }),
+        ty: inference.close_type(&block.ty, generalized, local_formals),
+    }
+}
+
+fn close_typed_statement(
+    statement: TypedStatement,
+    inference: &TypeInference,
+    generalized: &BTreeMap<TypeVariable, TypeFormal>,
+    local_formals: &[TypeFormal],
+) -> TypedStatement {
+    let kind = match statement.kind {
+        TypedStatementKind::Let { binding, ty, value } => TypedStatementKind::Let {
+            binding,
+            ty: inference.close_type(&ty, generalized, local_formals),
+            value: Box::new(close_typed_expr(
+                *value,
+                inference,
+                generalized,
+                local_formals,
+            )),
+        },
+        TypedStatementKind::Return(value) => TypedStatementKind::Return(value.map(|value| {
+            Box::new(close_typed_expr(
+                *value,
+                inference,
+                generalized,
+                local_formals,
+            ))
+        })),
+        TypedStatementKind::Expression(expression) => TypedStatementKind::Expression(Box::new(
+            close_typed_expr(*expression, inference, generalized, local_formals),
+        )),
+    };
+    TypedStatement {
+        span: statement.span,
+        kind,
+    }
+}
+
+fn close_typed_expr(
+    expression: TypedExpr,
+    inference: &TypeInference,
+    generalized: &BTreeMap<TypeVariable, TypeFormal>,
+    local_formals: &[TypeFormal],
+) -> TypedExpr {
+    let kind = match expression.kind {
+        TypedExprKind::Parenthesized(inner) => TypedExprKind::Parenthesized(Box::new(
+            close_typed_expr(*inner, inference, generalized, local_formals),
+        )),
+        TypedExprKind::Tuple(elements) => TypedExprKind::Tuple(
+            elements
+                .into_iter()
+                .map(|element| close_typed_expr(element, inference, generalized, local_formals))
+                .collect(),
+        ),
+        TypedExprKind::Block(block) => TypedExprKind::Block(Box::new(close_typed_block(
+            *block,
+            inference,
+            generalized,
+            local_formals,
+        ))),
+        TypedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => TypedExprKind::If {
+            condition: Box::new(close_typed_expr(
+                *condition,
+                inference,
+                generalized,
+                local_formals,
+            )),
+            then_branch: Box::new(close_typed_block(
+                *then_branch,
+                inference,
+                generalized,
+                local_formals,
+            )),
+            else_branch: else_branch.map(|branch| {
+                Box::new(close_typed_expr(
+                    *branch,
+                    inference,
+                    generalized,
+                    local_formals,
+                ))
+            }),
+        },
+        TypedExprKind::Unary { operator, operand } => TypedExprKind::Unary {
+            operator,
+            operand: Box::new(close_typed_expr(
+                *operand,
+                inference,
+                generalized,
+                local_formals,
+            )),
+        },
+        TypedExprKind::Binary {
+            operator,
+            left,
+            right,
+            comparison,
+        } => TypedExprKind::Binary {
+            operator,
+            left: Box::new(close_typed_expr(
+                *left,
+                inference,
+                generalized,
+                local_formals,
+            )),
+            right: Box::new(close_typed_expr(
+                *right,
+                inference,
+                generalized,
+                local_formals,
+            )),
+            comparison,
+        },
+        TypedExprKind::Call {
+            callee,
+            arguments,
+            parameter_modes,
+            instantiation,
+        } => TypedExprKind::Call {
+            callee,
+            arguments: arguments
+                .into_iter()
+                .map(|argument| close_typed_expr(argument, inference, generalized, local_formals))
+                .collect(),
+            parameter_modes,
+            instantiation: match instantiation {
+                CallInstantiation::Published(mapping) => CallInstantiation::Published(
+                    mapping
+                        .into_iter()
+                        .map(|(formal, actual)| {
+                            (
+                                formal,
+                                inference.close_type(&actual, generalized, local_formals),
+                            )
+                        })
+                        .collect(),
+                ),
+                CallInstantiation::Provisional => CallInstantiation::Provisional,
+            },
+        },
+        TypedExprKind::TupleField { receiver, index } => TypedExprKind::TupleField {
+            receiver: Box::new(close_typed_expr(
+                *receiver,
+                inference,
+                generalized,
+                local_formals,
+            )),
+            index,
+        },
+        other => other,
+    };
+    TypedExpr {
+        span: expression.span,
+        ty: inference.close_type(&expression.ty, generalized, local_formals),
+        kind,
+    }
+}
+
+fn function_binding_groups(
+    function_order: &[EntityId],
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+) -> Vec<Vec<EntityId>> {
+    let indices = function_order
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| (identity.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let adjacency = function_order
+        .iter()
+        .map(|identity| {
+            let mut calls = BTreeSet::new();
+            collect_function_calls_block(
+                &headers
+                    .get(identity)
+                    .expect("source-ordered function remains indexed")
+                    .body,
+                &mut calls,
+            );
+            calls
+                .into_iter()
+                .filter_map(|callee| indices.get(&callee).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut visited = vec![false; function_order.len()];
+    let mut finish = Vec::with_capacity(function_order.len());
+    for root in 0..function_order.len() {
+        if visited[root] {
+            continue;
+        }
+        visited[root] = true;
+        let mut stack = vec![(root, 0_usize)];
+        while let Some((node, next)) = stack.last_mut() {
+            if let Some(target) = adjacency[*node].get(*next).copied() {
+                *next += 1;
+                if !visited[target] {
+                    visited[target] = true;
+                    stack.push((target, 0));
+                }
+            } else {
+                finish.push(*node);
+                stack.pop();
+            }
+        }
+    }
+
+    let mut reverse = vec![Vec::new(); function_order.len()];
+    for (source, targets) in adjacency.iter().enumerate() {
+        for target in targets {
+            reverse[*target].push(source);
+        }
+    }
+    for sources in &mut reverse {
+        sources.sort_unstable();
+        sources.dedup();
+    }
+
+    visited.fill(false);
+    let mut groups = Vec::new();
+    for root in finish.into_iter().rev() {
+        if visited[root] {
+            continue;
+        }
+        visited[root] = true;
+        let mut pending = vec![root];
+        let mut group = Vec::new();
+        while let Some(node) = pending.pop() {
+            group.push(node);
+            for source in reverse[node].iter().rev() {
+                if !visited[*source] {
+                    visited[*source] = true;
+                    pending.push(*source);
+                }
+            }
+        }
+        group.sort_unstable();
+        groups.push(
+            group
+                .into_iter()
+                .map(|index| function_order[index].clone())
+                .collect::<Vec<_>>(),
+        );
+    }
+    groups.reverse();
+    groups
+}
+
+fn collect_function_calls_block(block: &ResolvedBlock, calls: &mut BTreeSet<EntityId>) {
+    for statement in &block.statements {
+        match &statement.kind {
+            ResolvedStatementKind::Let { value, .. } | ResolvedStatementKind::Expression(value) => {
+                collect_function_calls_expr(value, calls)
+            }
+            ResolvedStatementKind::Return(Some(value)) => collect_function_calls_expr(value, calls),
+            ResolvedStatementKind::Return(None) => {}
+            _ => {}
+        }
+    }
+    if let Some(tail) = &block.tail {
+        collect_function_calls_expr(tail, calls);
+    }
+}
+
+fn collect_function_calls_expr(expression: &ResolvedExpr, calls: &mut BTreeSet<EntityId>) {
+    match &expression.kind {
+        ResolvedExprKind::Parenthesized(inner)
+        | ResolvedExprKind::Unary { operand: inner, .. }
+        | ResolvedExprKind::TupleField {
+            receiver: inner, ..
+        } => collect_function_calls_expr(inner, calls),
+        ResolvedExprKind::Tuple(elements) => {
+            for element in elements {
+                collect_function_calls_expr(element, calls);
+            }
+        }
+        ResolvedExprKind::Block(block) => collect_function_calls_block(block, calls),
+        ResolvedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_function_calls_expr(condition, calls);
+            collect_function_calls_block(then_branch, calls);
+            if let Some(else_branch) = else_branch {
+                collect_function_calls_expr(else_branch, calls);
+            }
+        }
+        ResolvedExprKind::Binary { left, right, .. } => {
+            collect_function_calls_expr(left, calls);
+            collect_function_calls_expr(right, calls);
+        }
+        ResolvedExprKind::Call { callee, arguments } => {
+            if let Some(target) = direct_function_callee(callee) {
+                calls.insert(target);
+            }
+            collect_function_calls_expr(callee, calls);
+            for argument in arguments {
+                if let ResolvedCallArgument::Expression(argument) = argument {
+                    collect_function_calls_expr(argument, calls);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Clone)]
@@ -646,7 +1306,238 @@ enum CheckedType {
     Bool,
     Unit,
     Never,
+    Infer(TypeVariable),
+    Formal(Box<TypeFormal>),
     Tuple(Vec<CheckedType>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TypeVariable(u32);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TypeFormal {
+    owner: EntityId,
+    ordinal: usize,
+    name: String,
+}
+
+#[derive(Default)]
+struct TypeInference {
+    next_variable: u32,
+    substitutions: BTreeMap<TypeVariable, CheckedType>,
+    formal_parents: BTreeMap<TypeFormal, TypeFormal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UnificationFailure {
+    Mismatch(Box<CheckedType>, Box<CheckedType>),
+    Infinite(TypeVariable, Box<CheckedType>),
+}
+
+impl TypeInference {
+    fn fresh(&mut self) -> CheckedType {
+        let variable = TypeVariable(self.next_variable);
+        self.next_variable = self
+            .next_variable
+            .checked_add(1)
+            .expect("one Checker invocation cannot exhaust type-variable identities");
+        CheckedType::Infer(variable)
+    }
+
+    fn resolve(&self, ty: &CheckedType) -> CheckedType {
+        match ty {
+            CheckedType::Infer(variable) => self
+                .substitutions
+                .get(variable)
+                .map_or_else(|| ty.clone(), |bound| self.resolve(bound)),
+            CheckedType::Tuple(elements) => CheckedType::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.resolve(element))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
+    }
+
+    fn register_formal(&mut self, formal: &TypeFormal) {
+        self.formal_parents
+            .entry(formal.clone())
+            .or_insert_with(|| formal.clone());
+    }
+
+    fn formal_root(&self, formal: &TypeFormal) -> TypeFormal {
+        let mut current = formal.clone();
+        while let Some(parent) = self.formal_parents.get(&current)
+            && parent != &current
+        {
+            current = parent.clone();
+        }
+        current
+    }
+
+    fn formals_equivalent(&self, left: &TypeFormal, right: &TypeFormal) -> bool {
+        left == right || self.formal_root(left) == self.formal_root(right)
+    }
+
+    fn unify_formals(
+        &mut self,
+        left: TypeFormal,
+        right: TypeFormal,
+    ) -> Result<(), UnificationFailure> {
+        self.register_formal(&left);
+        self.register_formal(&right);
+        let left_root = self.formal_root(&left);
+        let right_root = self.formal_root(&right);
+        if left_root == right_root {
+            return Ok(());
+        }
+        let known = self.formal_parents.keys().cloned().collect::<Vec<_>>();
+        let left_members = known
+            .iter()
+            .filter(|formal| self.formal_root(formal) == left_root)
+            .collect::<Vec<_>>();
+        let right_members = known
+            .iter()
+            .filter(|formal| self.formal_root(formal) == right_root)
+            .collect::<Vec<_>>();
+        if left_members
+            .iter()
+            .any(|left| right_members.iter().any(|right| left.owner == right.owner))
+        {
+            return Err(UnificationFailure::Mismatch(
+                Box::new(CheckedType::Formal(Box::new(left))),
+                Box::new(CheckedType::Formal(Box::new(right))),
+            ));
+        }
+        let (root, child) = if left_root <= right_root {
+            (left_root, right_root)
+        } else {
+            (right_root, left_root)
+        };
+        self.formal_parents.insert(child, root);
+        Ok(())
+    }
+
+    fn unify(&mut self, left: &CheckedType, right: &CheckedType) -> Result<(), UnificationFailure> {
+        let left = self.resolve(left);
+        let right = self.resolve(right);
+        if left == right {
+            return Ok(());
+        }
+        match (left, right) {
+            (CheckedType::Infer(variable), ty) | (ty, CheckedType::Infer(variable)) => {
+                if contains_variable(&ty, variable, self) {
+                    return Err(UnificationFailure::Infinite(variable, Box::new(ty)));
+                }
+                self.substitutions.insert(variable, ty);
+                Ok(())
+            }
+            (CheckedType::Tuple(left), CheckedType::Tuple(right)) if left.len() == right.len() => {
+                for (left, right) in left.iter().zip(&right) {
+                    self.unify(left, right)?;
+                }
+                Ok(())
+            }
+            (CheckedType::Formal(left), CheckedType::Formal(right)) => {
+                self.unify_formals(*left, *right)
+            }
+            (left, right) => Err(UnificationFailure::Mismatch(
+                Box::new(left),
+                Box::new(right),
+            )),
+        }
+    }
+
+    fn satisfy(
+        &mut self,
+        actual: &CheckedType,
+        expected: &CheckedType,
+    ) -> Result<(), UnificationFailure> {
+        let actual = self.resolve(actual);
+        let expected = self.resolve(expected);
+        if actual == CheckedType::Never {
+            return Ok(());
+        }
+        if let (CheckedType::Tuple(actual), CheckedType::Tuple(expected)) = (&actual, &expected)
+            && actual.len() == expected.len()
+        {
+            for (actual, expected) in actual.iter().zip(expected) {
+                self.satisfy(actual, expected)?;
+            }
+            Ok(())
+        } else {
+            self.unify(&actual, &expected)
+        }
+    }
+
+    fn unresolved_variables(&self, ty: &CheckedType, variables: &mut BTreeSet<TypeVariable>) {
+        match self.resolve(ty) {
+            CheckedType::Infer(variable) => {
+                variables.insert(variable);
+            }
+            CheckedType::Tuple(elements) => {
+                for element in &elements {
+                    self.unresolved_variables(element, variables);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn referenced_formals(&self, ty: &CheckedType, formals: &mut BTreeSet<TypeFormal>) {
+        match self.resolve(ty) {
+            CheckedType::Formal(formal) => {
+                formals.insert(*formal);
+            }
+            CheckedType::Tuple(elements) => {
+                for element in &elements {
+                    self.referenced_formals(element, formals);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn close_type(
+        &self,
+        ty: &CheckedType,
+        generalized: &BTreeMap<TypeVariable, TypeFormal>,
+        local_formals: &[TypeFormal],
+    ) -> CheckedType {
+        match self.resolve(ty) {
+            CheckedType::Infer(variable) => CheckedType::Formal(Box::new(
+                generalized
+                    .get(&variable)
+                    .expect("every unresolved draft variable is generalized")
+                    .clone(),
+            )),
+            CheckedType::Formal(formal) => CheckedType::Formal(Box::new(
+                local_formals
+                    .iter()
+                    .find(|local| self.formals_equivalent(formal.as_ref(), local))
+                    .cloned()
+                    .unwrap_or(*formal),
+            )),
+            CheckedType::Tuple(elements) => CheckedType::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.close_type(element, generalized, local_formals))
+                    .collect(),
+            ),
+            resolved => resolved,
+        }
+    }
+}
+
+fn contains_variable(ty: &CheckedType, needle: TypeVariable, inference: &TypeInference) -> bool {
+    match inference.resolve(ty) {
+        CheckedType::Infer(variable) => variable == needle,
+        CheckedType::Tuple(elements) => elements
+            .iter()
+            .any(|element| contains_variable(element, needle, inference)),
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -660,7 +1551,8 @@ struct HeaderParameter {
     binding: EntityId,
     span: Span,
     ty: CheckedType,
-    type_origin: OriginRef,
+    type_origin: CheckOrigin,
+    source_type_explicit: bool,
     mode: Option<SelectedMode>,
 }
 
@@ -669,9 +1561,12 @@ struct FunctionHeader {
     context: SourceContext,
     origin: OriginRef,
     public_export: bool,
+    declared_formals: Vec<TypeFormal>,
+    formal_by_identity: BTreeMap<EntityId, TypeFormal>,
     parameters: Vec<HeaderParameter>,
     return_type: CheckedType,
-    return_origin: OriginRef,
+    return_origin: CheckOrigin,
+    source_return_explicit: bool,
     body: ResolvedBlock,
 }
 
@@ -766,6 +1661,14 @@ impl SourceTypeNormalizer {
     }
 
     fn normalize(&mut self, ty: &ResolvedType) -> Result<CheckedType, CheckDiagnostic> {
+        self.normalize_with_formals(ty, &BTreeMap::new())
+    }
+
+    fn normalize_with_formals(
+        &mut self,
+        ty: &ResolvedType,
+        formals: &BTreeMap<EntityId, TypeFormal>,
+    ) -> Result<CheckedType, CheckDiagnostic> {
         let mut frames = vec![NormalizeFrame::Type(ty.clone())];
         let mut values = Vec::new();
         let mut active_aliases = Vec::new();
@@ -843,6 +1746,27 @@ impl SourceTypeNormalizer {
                                 }
                             };
                             values.push(normalized);
+                            continue;
+                        }
+
+                        if target.kind == EntityKind::TypeParameter {
+                            if positional_count != 0 {
+                                return Err(source_diagnostic(
+                                    CheckDiagnosticKind::TypeMismatch,
+                                    "a type formal does not accept type arguments",
+                                    occurrence,
+                                    entity_origin(&target).into_iter().collect(),
+                                ));
+                            }
+                            let Some(formal) = formals.get(&target) else {
+                                return Err(source_diagnostic(
+                                    CheckDiagnosticKind::Unsupported,
+                                    "a type formal outside the checked function is not supported",
+                                    occurrence,
+                                    entity_origin(&target).into_iter().collect(),
+                                ));
+                            };
+                            values.push(CheckedType::Formal(Box::new(formal.clone())));
                             continue;
                         }
 
@@ -955,6 +1879,7 @@ fn actual_public_exports(project: &ResolvedProject) -> BTreeSet<EntityId> {
 fn collect_supported_headers(
     project: &ResolvedProject,
     normalizer: &mut SourceTypeNormalizer,
+    inference: &mut TypeInference,
 ) -> Result<(Vec<EntityId>, BTreeMap<EntityId, FunctionHeader>), CheckDiagnostic> {
     let core_declarations = core_role_declarations(&project.core_roles);
     let public_exports = actual_public_exports(project);
@@ -1058,6 +1983,7 @@ fn collect_supported_headers(
                         function,
                         &context,
                         normalizer,
+                        inference,
                         public_export,
                         &public_exports,
                     ) {
@@ -1204,6 +2130,7 @@ fn collect_function_header(
     function: &crate::project::ResolvedFunction,
     context: &SourceContext,
     normalizer: &mut SourceTypeNormalizer,
+    inference: &mut TypeInference,
     public_export: bool,
     public_exports: &BTreeSet<EntityId>,
 ) -> Result<FunctionHeader, Vec<CheckDiagnostic>> {
@@ -1215,25 +2142,49 @@ fn collect_function_header(
             Vec::new(),
         )]);
     }
-    let first_generic = function
-        .type_parameters
-        .iter()
-        .map(|parameter| parameter.binding.origin.clone())
-        .chain(
-            function
-                .effect_parameters
-                .iter()
-                .map(|parameter| parameter.binding.origin.clone()),
-        )
-        .min_by_key(|origin| origin.span);
-    if let Some(origin) = first_generic {
+    if let Some(parameter) = function.effect_parameters.first() {
         return Err(vec![source_diagnostic(
             CheckDiagnosticKind::Unsupported,
-            "generic or effect-parameterized functions are outside the initial Checker subset",
-            origin,
+            "effect-parameterized functions are outside the current Checker subset",
+            parameter.binding.origin.clone(),
             Vec::new(),
         )]);
     }
+
+    if let Some(parameter) = function
+        .type_parameters
+        .iter()
+        .find(|parameter| !parameter.bounds.is_empty())
+    {
+        return Err(vec![source_diagnostic(
+            CheckDiagnosticKind::Unsupported,
+            "non-empty generic bounds require the later Trait Checker",
+            parameter.binding.origin.clone(),
+            Vec::new(),
+        )]);
+    }
+
+    let function_identity = declaration
+        .identity
+        .as_ref()
+        .expect("every resolved function has an exact identity")
+        .clone();
+    let declared_formals = function
+        .type_parameters
+        .iter()
+        .enumerate()
+        .map(|(ordinal, parameter)| TypeFormal {
+            owner: function_identity.clone(),
+            ordinal,
+            name: parameter.binding.identity.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let formal_by_identity = function
+        .type_parameters
+        .iter()
+        .zip(&declared_formals)
+        .map(|(parameter, formal)| (parameter.binding.identity.clone(), formal.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let mut diagnostics = Vec::new();
     let mut parameters = Vec::with_capacity(function.parameters.len());
@@ -1285,15 +2236,7 @@ fn collect_function_header(
                 ));
                 None
             }
-            None => {
-                diagnostics.push(source_diagnostic(
-                    CheckDiagnosticKind::Unsupported,
-                    "every parameter needs an explicit type annotation in the initial Checker subset",
-                    parameter.binding.origin.clone(),
-                    Vec::new(),
-                ));
-                None
-            }
+            None => None,
         };
         if let Some(annotation) = annotation {
             if public_export
@@ -1302,16 +2245,29 @@ fn collect_function_header(
             {
                 diagnostics.push(diagnostic);
             }
-            match normalizer.normalize(annotation) {
+            match normalizer.normalize_with_formals(annotation, &formal_by_identity) {
                 Ok(ty) => parameters.push(HeaderParameter {
                     binding: parameter.binding.identity.clone(),
                     span: parameter.span,
                     ty,
-                    type_origin: context.origin(annotation.span),
+                    type_origin: CheckOrigin::Source(context.origin(annotation.span)),
+                    source_type_explicit: true,
                     mode,
                 }),
                 Err(diagnostic) => diagnostics.push(diagnostic),
             }
+        } else if !matches!(
+            parameter.annotation.as_ref(),
+            Some(ResolvedParameterAnnotation::Shape(_))
+        ) {
+            parameters.push(HeaderParameter {
+                binding: parameter.binding.identity.clone(),
+                span: parameter.span,
+                ty: inference.fresh(),
+                type_origin: CheckOrigin::Source(parameter.binding.origin.clone()),
+                source_type_explicit: false,
+                mode,
+            });
         }
     }
 
@@ -1326,15 +2282,7 @@ fn collect_function_header(
             ));
             None
         }
-        None => {
-            diagnostics.push(source_diagnostic(
-                CheckDiagnosticKind::Unsupported,
-                "every function needs an explicit return type in the initial Checker subset",
-                context.origin(function.body.span),
-                Vec::new(),
-            ));
-            None
-        }
+        None => None,
     };
     if let Some(effects) = &function.effects
         && !effects.effects.is_empty()
@@ -1354,8 +2302,12 @@ fn collect_function_header(
         {
             diagnostics.push(diagnostic);
         }
-        match normalizer.normalize(annotation) {
-            Ok(ty) => Some((ty, context.origin(annotation.span))),
+        match normalizer.normalize_with_formals(annotation, &formal_by_identity) {
+            Ok(ty) => Some((
+                ty,
+                CheckOrigin::Source(context.origin(annotation.span)),
+                true,
+            )),
             Err(diagnostic) => {
                 diagnostics.push(diagnostic);
                 None
@@ -1365,16 +2317,24 @@ fn collect_function_header(
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
-    let (return_type, return_origin) =
-        return_type.expect("a diagnostic is retained when the return type is unavailable");
+    let (return_type, return_origin, source_return_explicit) = return_type.unwrap_or_else(|| {
+        (
+            inference.fresh(),
+            CheckOrigin::Source(context.origin(function.body.span)),
+            false,
+        )
+    });
 
     Ok(FunctionHeader {
         context: context.clone(),
         origin: declaration.origin.clone(),
         public_export,
+        declared_formals,
+        formal_by_identity,
         parameters,
         return_type,
         return_origin,
+        source_return_explicit,
         body: function.body.clone(),
     })
 }
@@ -1443,6 +2403,8 @@ fn display_type(ty: &CheckedType) -> String {
         CheckedType::Bool => "Bool".to_owned(),
         CheckedType::Unit => "Unit".to_owned(),
         CheckedType::Never => "Never".to_owned(),
+        CheckedType::Infer(variable) => format!("?{}", variable.0),
+        CheckedType::Formal(formal) => formal.name.clone(),
         CheckedType::Tuple(elements) => format!(
             "({})",
             elements
@@ -1454,24 +2416,23 @@ fn display_type(ty: &CheckedType) -> String {
     }
 }
 
-fn type_satisfies(actual: &CheckedType, expected: &CheckedType) -> bool {
-    match (actual, expected) {
-        (CheckedType::Never, _) => true,
-        (CheckedType::Tuple(actual), CheckedType::Tuple(expected))
-            if actual.len() == expected.len() =>
-        {
-            actual
-                .iter()
-                .zip(expected)
-                .all(|(actual, expected)| type_satisfies(actual, expected))
-        }
-        _ => actual == expected,
+fn is_copy_type(ty: &CheckedType) -> bool {
+    match ty {
+        CheckedType::Int
+        | CheckedType::Float
+        | CheckedType::Bool
+        | CheckedType::Unit
+        | CheckedType::Never => true,
+        CheckedType::Tuple(elements) => elements.iter().all(is_copy_type),
+        CheckedType::Infer(_) | CheckedType::Formal(_) => false,
     }
 }
 
 #[allow(dead_code)]
 #[derive(Default)]
 struct ContractSelections {
+    targets: BTreeMap<EntityId, CheckOrigin>,
+    type_parameters: BTreeMap<EntityId, CheckOrigin>,
     parameter_types: BTreeMap<(EntityId, usize), (CheckedType, CheckOrigin)>,
     return_types: BTreeMap<EntityId, (CheckedType, CheckOrigin)>,
     parameter_modes: BTreeMap<(EntityId, usize), (ParameterMode, CheckOrigin)>,
@@ -1486,6 +2447,8 @@ struct ContractValue<T> {
 
 struct ContractRecordUpdate {
     target: EntityId,
+    target_path: String,
+    type_parameters: Option<String>,
     parameter_types: Vec<(usize, ContractValue<CheckedType>)>,
     return_type: Option<ContractValue<CheckedType>>,
     parameter_modes: Vec<(usize, ContractValue<ParameterMode>)>,
@@ -1541,7 +2504,46 @@ fn apply_contract_documents(
             apply_contract_record_update(document_index, update, headers, &mut selections)?;
         }
     }
+    validate_contract_generic_structure(headers, &selections)?;
     Ok(selections)
+}
+
+fn validate_contract_generic_structure(
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    selections: &ContractSelections,
+) -> Result<(), CheckDiagnostic> {
+    for (target, target_origin) in &selections.targets {
+        let header = headers
+            .get(target)
+            .expect("every selected contract target remains a checked function");
+        if header.declared_formals.is_empty() {
+            continue;
+        }
+        let Some(type_parameter_origin) = selections.type_parameters.get(target) else {
+            return Err(CheckDiagnostic {
+                kind: CheckDiagnosticKind::ContractConflict,
+                message: "a generic source function requires an explicit matching contract type-parameter list"
+                    .to_owned(),
+                primary: Some(target_origin.clone()),
+                related: vec![CheckOrigin::Source(header.origin.clone())],
+            });
+        };
+        let complete_parameters = header.parameters.iter().enumerate().all(|(index, _)| {
+            selections
+                .parameter_types
+                .contains_key(&(target.clone(), index))
+        });
+        if !complete_parameters || !selections.return_types.contains_key(target) {
+            return Err(CheckDiagnostic {
+                kind: CheckDiagnosticKind::ContractConflict,
+                message: "a generic contract must state every parameter type and the return type so formal use relationships are complete"
+                    .to_owned(),
+                primary: Some(type_parameter_origin.clone()),
+                related: vec![CheckOrigin::Source(header.origin.clone())],
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_contract_record(
@@ -1618,19 +2620,6 @@ fn validate_contract_record(
         "declaration/header validation completes before contracts bind an ordinary function",
     );
 
-    if record
-        .type_parameters
-        .as_ref()
-        .is_some_and(|parameters| !parameters.is_empty())
-    {
-        return Err(contract_diagnostic(
-            CheckDiagnosticKind::Unsupported,
-            "non-empty record type parameters are outside the initial Checker subset",
-            document_index,
-            format!("{record_path}.type_parameters"),
-            Vec::new(),
-        ));
-    }
     if let Some((path, message)) = first_unsupported_record_clause(record, &record_path) {
         return Err(contract_diagnostic(
             CheckDiagnosticKind::Unsupported,
@@ -1643,11 +2632,51 @@ fn validate_contract_record(
 
     let mut update = ContractRecordUpdate {
         target,
+        target_path: target_path.clone(),
+        type_parameters: None,
         parameter_types: Vec::new(),
         return_type: None,
         parameter_modes: Vec::new(),
         effect_upper: None,
         generic_requirements: None,
+    };
+    if let Some(parameters) = &record.type_parameters {
+        let path = format!("{record_path}.type_parameters");
+        let unique = parameters
+            .iter()
+            .map(|parameter| parameter.0.as_str())
+            .collect::<BTreeSet<_>>();
+        if unique.len() != parameters.len() {
+            return Err(contract_diagnostic(
+                CheckDiagnosticKind::ContractConflict,
+                "a contract type-parameter list cannot contain duplicate binders",
+                document_index,
+                path,
+                vec![CheckOrigin::Source(header.origin.clone())],
+            ));
+        }
+        if parameters.len() != header.declared_formals.len() {
+            return Err(contract_diagnostic(
+                CheckDiagnosticKind::ContractConflict,
+                format!(
+                    "contract declares {} type parameter(s) but source declares {}",
+                    parameters.len(),
+                    header.declared_formals.len()
+                ),
+                document_index,
+                path,
+                vec![CheckOrigin::Source(header.origin.clone())],
+            ));
+        }
+        update.type_parameters = Some(format!("{record_path}.type_parameters"));
+    }
+    let type_context = ContractTypeContext {
+        project,
+        owner,
+        target: &update.target,
+        header,
+        document_index,
+        normalizer,
     };
     if let Some(set) = &record.set {
         if let Some(parameter_types) = &set.parameter_types {
@@ -1660,12 +2689,9 @@ fn validate_contract_record(
                     &format!("{clause_path}.parameter"),
                 )?;
                 let ty = normalize_contract_type(
-                    project,
-                    owner,
-                    document_index,
+                    &type_context,
                     &format!("{clause_path}.type"),
                     &clause.value_type,
-                    normalizer,
                 )?;
                 update.parameter_types.push((
                     parameter_index,
@@ -1679,14 +2705,7 @@ fn validate_contract_record(
         if let Some(return_type) = &set.return_type {
             let path = format!("{record_path}.set.return_type");
             update.return_type = Some(ContractValue {
-                value: normalize_contract_type(
-                    project,
-                    owner,
-                    document_index,
-                    &path,
-                    return_type,
-                    normalizer,
-                )?,
+                value: normalize_contract_type(&type_context, &path, return_type)?,
                 path,
             });
         }
@@ -1895,6 +2914,7 @@ fn unsupported_contract_type_path(ty: &contract::Type, path: &str) -> Option<Str
                 | contract::PrimitiveType::Unit
                 | contract::PrimitiveType::Never,
         } => None,
+        contract::Type::Formal { .. } => None,
         contract::Type::Tuple { elements } => {
             elements.0.iter().enumerate().find_map(|(index, element)| {
                 unsupported_contract_type_path(element, &format!("{path}.elements[{index}]"))
@@ -1941,13 +2961,19 @@ fn contract_parameter_index(
     }
 }
 
-fn normalize_contract_type(
-    project: &ResolvedProject,
+struct ContractTypeContext<'a> {
+    project: &'a ResolvedProject,
     owner: LibraryId,
+    target: &'a EntityId,
+    header: &'a FunctionHeader,
     document_index: usize,
+    normalizer: &'a SourceTypeNormalizer,
+}
+
+fn normalize_contract_type(
+    context: &ContractTypeContext<'_>,
     path: &str,
     ty: &contract::Type,
-    normalizer: &SourceTypeNormalizer,
 ) -> Result<CheckedType, CheckDiagnostic> {
     match ty {
         contract::Type::Primitive { name } => match name {
@@ -1959,7 +2985,7 @@ fn normalize_contract_type(
             contract::PrimitiveType::Str => Err(contract_diagnostic(
                 CheckDiagnosticKind::Unsupported,
                 "contract type Str is outside the initial Checker subset",
-                document_index,
+                context.document_index,
                 path,
                 Vec::new(),
             )),
@@ -1968,15 +2994,65 @@ fn normalize_contract_type(
             let mut normalized = Vec::with_capacity(elements.0.len());
             for (index, element) in elements.0.iter().enumerate() {
                 normalized.push(normalize_contract_type(
-                    project,
-                    owner,
-                    document_index,
+                    context,
                     &format!("{path}.elements[{index}]"),
                     element,
-                    normalizer,
                 )?);
             }
             Ok(CheckedType::Tuple(normalized))
+        }
+        contract::Type::Formal { formal } => {
+            if !matches!(formal.binder, contract::Binder::Declaration) {
+                return Err(contract_diagnostic(
+                    CheckDiagnosticKind::ContractBinding,
+                    "a function contract type formal must use the declaration binder",
+                    context.document_index,
+                    path,
+                    Vec::new(),
+                ));
+            }
+            let formal_owner =
+                lookup_contract_formal_owner(context.project, context.owner, &formal.owner)
+                    .map_err(|message| {
+                        contract_diagnostic(
+                            CheckDiagnosticKind::ContractBinding,
+                            message,
+                            context.document_index,
+                            path,
+                            Vec::new(),
+                        )
+                    })?;
+            if &formal_owner != context.target {
+                return Err(contract_diagnostic(
+                    CheckDiagnosticKind::ContractConflict,
+                    "contract type formal belongs to a different declaration",
+                    context.document_index,
+                    path,
+                    entity_origin(&formal_owner)
+                        .map(CheckOrigin::Source)
+                        .into_iter()
+                        .chain(std::iter::once(CheckOrigin::Source(
+                            context.header.origin.clone(),
+                        )))
+                        .collect(),
+                ));
+            }
+            let index = usize::try_from(formal.index.0).ok();
+            let Some(formal) = index.and_then(|index| context.header.declared_formals.get(index))
+            else {
+                return Err(contract_diagnostic(
+                    CheckDiagnosticKind::ContractConflict,
+                    format!(
+                        "contract type formal index {} does not name one of the source function's {} formal(s)",
+                        formal.index.0,
+                        context.header.declared_formals.len()
+                    ),
+                    context.document_index,
+                    path,
+                    vec![CheckOrigin::Source(context.header.origin.clone())],
+                ));
+            };
+            Ok(CheckedType::Formal(Box::new(formal.clone())))
         }
         contract::Type::Nominal {
             declaration,
@@ -1986,14 +3062,14 @@ fn normalize_contract_type(
                 return Err(contract_diagnostic(
                     CheckDiagnosticKind::Unsupported,
                     "only non-generic type aliases are supported as nominal contract types",
-                    document_index,
+                    context.document_index,
                     path,
                     Vec::new(),
                 ));
             }
             let target = lookup_contract_path(
-                project,
-                owner,
+                context.project,
+                context.owner,
                 &declaration.library,
                 &declaration.path,
                 Namespace::Type,
@@ -2002,7 +3078,7 @@ fn normalize_contract_type(
                 contract_diagnostic(
                     CheckDiagnosticKind::ContractBinding,
                     message,
-                    document_index,
+                    context.document_index,
                     path,
                     Vec::new(),
                 )
@@ -2011,7 +3087,7 @@ fn normalize_contract_type(
                 return Err(contract_diagnostic(
                     CheckDiagnosticKind::ContractBinding,
                     "nominal contract type does not resolve to a type alias",
-                    document_index,
+                    context.document_index,
                     path,
                     entity_origin(&target)
                         .map(CheckOrigin::Source)
@@ -2019,7 +3095,7 @@ fn normalize_contract_type(
                         .collect(),
                 ));
             }
-            let Some(definition) = normalizer.aliases.get(&target) else {
+            let Some(definition) = context.normalizer.aliases.get(&target) else {
                 unreachable!("every resolved type alias is indexed by the source normalizer")
             };
             if definition.type_parameter_count != arguments.len() {
@@ -2030,7 +3106,7 @@ fn normalize_contract_type(
                         definition.type_parameter_count,
                         arguments.len()
                     ),
-                    document_index,
+                    context.document_index,
                     path,
                     vec![CheckOrigin::Source(definition.origin.clone())],
                 ));
@@ -2039,12 +3115,13 @@ fn normalize_contract_type(
                 return Err(contract_diagnostic(
                     CheckDiagnosticKind::Unsupported,
                     "generic type aliases are outside the initial Checker subset",
-                    document_index,
+                    context.document_index,
                     path,
                     vec![CheckOrigin::Source(definition.origin.clone())],
                 ));
             }
-            Ok(normalizer
+            Ok(context
+                .normalizer
                 .normalized_aliases
                 .get(&target)
                 .expect("every supported alias is normalized during declaration checking")
@@ -2053,11 +3130,35 @@ fn normalize_contract_type(
         _ => Err(contract_diagnostic(
             CheckDiagnosticKind::Unsupported,
             "contract type is outside the initial Checker subset",
-            document_index,
+            context.document_index,
             path,
             Vec::new(),
         )),
     }
+}
+
+fn lookup_contract_formal_owner(
+    project: &ResolvedProject,
+    owner: LibraryId,
+    formal_owner: &contract::EntityRef,
+) -> Result<EntityId, String> {
+    let contract::EntityRef::Declaration { declaration } = formal_owner else {
+        return Err("a declaration type formal must be owned by a function declaration".to_owned());
+    };
+    if !matches!(declaration.kind, contract::DeclarationKind::Function) {
+        return Err("a declaration type formal owner must have function kind".to_owned());
+    }
+    let target = lookup_contract_path(
+        project,
+        owner,
+        &declaration.library,
+        &declaration.path,
+        Namespace::Value,
+    )?;
+    if target.kind != EntityKind::Function {
+        return Err("a declaration type formal owner did not resolve to a function".to_owned());
+    }
+    Ok(target)
 }
 
 fn lookup_contract_path(
@@ -2143,6 +3244,22 @@ fn apply_contract_record_update(
     let header = headers
         .get_mut(&update.target)
         .expect("validated contract targets remain in the supported header set");
+    selections
+        .targets
+        .entry(update.target.clone())
+        .or_insert(CheckOrigin::Contract {
+            document_index,
+            json_path: update.target_path,
+        });
+    if let Some(path) = update.type_parameters {
+        selections
+            .type_parameters
+            .entry(update.target.clone())
+            .or_insert(CheckOrigin::Contract {
+                document_index,
+                json_path: path,
+            });
+    }
 
     for (parameter_index, selected) in update.parameter_types {
         let origin = CheckOrigin::Contract {
@@ -2159,20 +3276,6 @@ fn apply_contract_record_update(
                 document_index,
                 selected.path,
                 vec![previous_origin.clone()],
-            ));
-        }
-        let source = &header.parameters[parameter_index];
-        if source.ty != selected.value {
-            return Err(contract_diagnostic(
-                CheckDiagnosticKind::ContractConflict,
-                format!(
-                    "contract parameter type {} conflicts with source type {}",
-                    display_type(&selected.value),
-                    display_type(&source.ty)
-                ),
-                document_index,
-                selected.path,
-                vec![CheckOrigin::Source(source.type_origin.clone())],
             ));
         }
         selections
@@ -2195,19 +3298,6 @@ fn apply_contract_record_update(
                 document_index,
                 selected.path,
                 vec![previous_origin.clone()],
-            ));
-        }
-        if header.return_type != selected.value {
-            return Err(contract_diagnostic(
-                CheckDiagnosticKind::ContractConflict,
-                format!(
-                    "contract return type {} conflicts with source type {}",
-                    display_type(&selected.value),
-                    display_type(&header.return_type)
-                ),
-                document_index,
-                selected.path,
-                vec![CheckOrigin::Source(header.return_origin.clone())],
             ));
         }
         selections
@@ -2277,26 +3367,233 @@ fn apply_contract_record_update(
     Ok(())
 }
 
-fn finalize_parameter_modes(
+fn validate_public_inputs(
+    function_order: &[EntityId],
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    selections: &ContractSelections,
+) -> Result<(), CheckDiagnostic> {
+    for identity in function_order {
+        let header = headers
+            .get(identity)
+            .expect("source-ordered function remains indexed");
+        if !header.public_export {
+            continue;
+        }
+        for (index, parameter) in header.parameters.iter().enumerate() {
+            if !parameter.source_type_explicit
+                && !selections
+                    .parameter_types
+                    .contains_key(&(identity.clone(), index))
+            {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "every actually exported public input type must be explicit in source or its contract",
+                    header.context.origin(parameter.span),
+                    Vec::new(),
+                ));
+            }
+            if parameter.mode.is_none() {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "every actually exported public input mode must be explicit in source or a supported contract",
+                    header.context.origin(parameter.span),
+                    Vec::new(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_contract_type_constraints(
+    group: &[EntityId],
+    headers: &mut BTreeMap<EntityId, FunctionHeader>,
+    selections: &ContractSelections,
+    inference: &mut TypeInference,
+) -> Result<(), CheckDiagnostic> {
+    for identity in group {
+        let header = headers
+            .get_mut(identity)
+            .expect("a binding-group member remains indexed");
+        for (index, parameter) in header.parameters.iter_mut().enumerate() {
+            let Some((selected, selected_origin)) =
+                selections.parameter_types.get(&(identity.clone(), index))
+            else {
+                continue;
+            };
+            reject_contract_specialization(
+                parameter.source_type_explicit,
+                selected,
+                &parameter.type_origin,
+                selected_origin,
+            )?;
+            inference
+                .unify(&parameter.ty, selected)
+                .map_err(|failure| {
+                    contract_type_conflict(
+                        "parameter",
+                        &failure,
+                        selected_origin,
+                        &parameter.type_origin,
+                    )
+                })?;
+            if !parameter.source_type_explicit {
+                parameter.type_origin = selected_origin.clone();
+            }
+        }
+        if let Some((selected, selected_origin)) = selections.return_types.get(identity) {
+            reject_contract_specialization(
+                header.source_return_explicit,
+                selected,
+                &header.return_origin,
+                selected_origin,
+            )?;
+            inference
+                .unify(&header.return_type, selected)
+                .map_err(|failure| {
+                    contract_type_conflict(
+                        "return",
+                        &failure,
+                        selected_origin,
+                        &header.return_origin,
+                    )
+                })?;
+            if !header.source_return_explicit {
+                header.return_origin = selected_origin.clone();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_contract_specialization(
+    source_explicit: bool,
+    selected: &CheckedType,
+    source_origin: &CheckOrigin,
+    selected_origin: &CheckOrigin,
+) -> Result<(), CheckDiagnostic> {
+    if !source_explicit && !type_contains_formal(selected) {
+        return Err(CheckDiagnostic {
+            kind: CheckDiagnosticKind::ContractConflict,
+            message: "a concrete contract type cannot specialize an otherwise inferred generic source type; write the concrete source type explicitly"
+                .to_owned(),
+            primary: Some(selected_origin.clone()),
+            related: vec![source_origin.clone()],
+        });
+    }
+    Ok(())
+}
+
+fn type_contains_formal(ty: &CheckedType) -> bool {
+    match ty {
+        CheckedType::Formal(_) => true,
+        CheckedType::Tuple(elements) => elements.iter().any(type_contains_formal),
+        _ => false,
+    }
+}
+
+fn contract_type_conflict(
+    position: &str,
+    failure: &UnificationFailure,
+    selected_origin: &CheckOrigin,
+    source_origin: &CheckOrigin,
+) -> CheckDiagnostic {
+    CheckDiagnostic {
+        kind: CheckDiagnosticKind::ContractConflict,
+        message: format!(
+            "contract {position} type conflicts with source inference: {}",
+            display_unification_failure(failure)
+        ),
+        primary: Some(selected_origin.clone()),
+        related: vec![source_origin.clone()],
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ValueContext {
+    Borrow,
+    Consume,
+    Discard,
+}
+
+type ParameterKey = (EntityId, usize);
+
+#[derive(Default)]
+struct ModeConstraints {
+    required_move: BTreeSet<ParameterKey>,
+    implications: BTreeSet<(ParameterKey, ParameterKey)>,
+}
+
+fn infer_parameter_modes(
     function_order: &[EntityId],
     headers: &mut BTreeMap<EntityId, FunctionHeader>,
+    bodies: &BTreeMap<EntityId, TypedBlock>,
 ) -> Result<(), CheckDiagnostic> {
+    let binding_parameters = headers
+        .iter()
+        .flat_map(|(function, header)| {
+            header
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| (parameter.binding.clone(), (function.clone(), index)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut constraints = ModeConstraints::default();
+    for identity in function_order {
+        collect_mode_constraints_block(
+            bodies
+                .get(identity)
+                .expect("every checked function has one closed body"),
+            ValueContext::Consume,
+            headers,
+            &binding_parameters,
+            &mut constraints,
+        );
+    }
+
+    let mut move_parameters = headers
+        .iter()
+        .flat_map(|(identity, header)| {
+            header
+                .parameters
+                .iter()
+                .enumerate()
+                .filter(|(_, parameter)| {
+                    parameter
+                        .mode
+                        .as_ref()
+                        .is_some_and(|mode| mode.value == ParameterMode::Move)
+                })
+                .map(|(index, _)| (identity.clone(), index))
+        })
+        .chain(constraints.required_move.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let mut changed = false;
+        for (condition, consequence) in &constraints.implications {
+            if move_parameters.contains(condition) {
+                changed |= move_parameters.insert(consequence.clone());
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     for identity in function_order {
         let header = headers
             .get_mut(identity)
             .expect("source-ordered function remains indexed");
-        for parameter in &mut header.parameters {
+        for (index, parameter) in header.parameters.iter_mut().enumerate() {
             if parameter.mode.is_none() {
-                if header.public_export {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        "every actually exported public input mode must be explicit in source or a supported contract",
-                        header.context.origin(parameter.span),
-                        Vec::new(),
-                    ));
-                }
+                let value = if move_parameters.contains(&(identity.clone(), index)) {
+                    ParameterMode::Move
+                } else {
+                    ParameterMode::Borrow
+                };
                 parameter.mode = Some(SelectedMode {
-                    value: ParameterMode::Borrow,
+                    value,
                     origin: CheckOrigin::Source(header.context.origin(parameter.span)),
                 });
             }
@@ -2305,11 +3602,660 @@ fn finalize_parameter_modes(
     Ok(())
 }
 
+fn collect_mode_constraints_block(
+    block: &TypedBlock,
+    tail_context: ValueContext,
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    binding_parameters: &BTreeMap<EntityId, ParameterKey>,
+    constraints: &mut ModeConstraints,
+) {
+    for statement in &block.statements {
+        match &statement.kind {
+            TypedStatementKind::Let { value, .. } => collect_mode_constraints_expr(
+                value,
+                ValueContext::Consume,
+                headers,
+                binding_parameters,
+                constraints,
+            ),
+            TypedStatementKind::Return(Some(value)) => collect_mode_constraints_expr(
+                value,
+                ValueContext::Consume,
+                headers,
+                binding_parameters,
+                constraints,
+            ),
+            TypedStatementKind::Expression(expression) => collect_mode_constraints_expr(
+                expression,
+                ValueContext::Discard,
+                headers,
+                binding_parameters,
+                constraints,
+            ),
+            TypedStatementKind::Return(None) => {}
+        }
+    }
+    if let Some(tail) = &block.tail {
+        collect_mode_constraints_expr(tail, tail_context, headers, binding_parameters, constraints);
+    }
+}
+
+fn collect_mode_constraints_expr(
+    expression: &TypedExpr,
+    context: ValueContext,
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    binding_parameters: &BTreeMap<EntityId, ParameterKey>,
+    constraints: &mut ModeConstraints,
+) {
+    match &expression.kind {
+        TypedExprKind::Reference { binding, .. } => {
+            if matches!(context, ValueContext::Consume)
+                && !is_copy_type(&expression.ty)
+                && let Some(parameter) = binding_parameters.get(binding.as_ref())
+            {
+                constraints.required_move.insert(parameter.clone());
+            }
+        }
+        TypedExprKind::Parenthesized(inner) => {
+            collect_mode_constraints_expr(inner, context, headers, binding_parameters, constraints)
+        }
+        TypedExprKind::Tuple(elements) => {
+            for element in elements {
+                collect_mode_constraints_expr(
+                    element,
+                    ValueContext::Consume,
+                    headers,
+                    binding_parameters,
+                    constraints,
+                );
+            }
+        }
+        TypedExprKind::Block(block) => {
+            collect_mode_constraints_block(block, context, headers, binding_parameters, constraints)
+        }
+        TypedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_mode_constraints_expr(
+                condition,
+                ValueContext::Borrow,
+                headers,
+                binding_parameters,
+                constraints,
+            );
+            collect_mode_constraints_block(
+                then_branch,
+                context,
+                headers,
+                binding_parameters,
+                constraints,
+            );
+            if let Some(else_branch) = else_branch {
+                collect_mode_constraints_expr(
+                    else_branch,
+                    context,
+                    headers,
+                    binding_parameters,
+                    constraints,
+                );
+            }
+        }
+        TypedExprKind::Unary { operand, .. } => collect_mode_constraints_expr(
+            operand,
+            ValueContext::Borrow,
+            headers,
+            binding_parameters,
+            constraints,
+        ),
+        TypedExprKind::Binary { left, right, .. } => {
+            collect_mode_constraints_expr(
+                left,
+                ValueContext::Borrow,
+                headers,
+                binding_parameters,
+                constraints,
+            );
+            collect_mode_constraints_expr(
+                right,
+                ValueContext::Borrow,
+                headers,
+                binding_parameters,
+                constraints,
+            );
+        }
+        TypedExprKind::Call {
+            callee, arguments, ..
+        } => {
+            let callee_header = headers
+                .get(callee.as_ref())
+                .expect("every typed direct call retains a checked function target");
+            for (index, (argument, parameter)) in
+                arguments.iter().zip(&callee_header.parameters).enumerate()
+            {
+                match parameter.mode.as_ref().map(|mode| mode.value) {
+                    Some(ParameterMode::Move) => collect_mode_constraints_expr(
+                        argument,
+                        ValueContext::Consume,
+                        headers,
+                        binding_parameters,
+                        constraints,
+                    ),
+                    Some(ParameterMode::Borrow) => collect_mode_constraints_expr(
+                        argument,
+                        ValueContext::Borrow,
+                        headers,
+                        binding_parameters,
+                        constraints,
+                    ),
+                    Some(ParameterMode::MutBorrow | ParameterMode::Call) => unreachable!(
+                        "unsupported parameter modes are rejected during header collection"
+                    ),
+                    None => {
+                        collect_mode_constraints_expr(
+                            argument,
+                            ValueContext::Borrow,
+                            headers,
+                            binding_parameters,
+                            constraints,
+                        );
+                        let mut consumed = BTreeSet::new();
+                        collect_consumed_parameters(argument, binding_parameters, &mut consumed);
+                        for source in consumed {
+                            constraints
+                                .implications
+                                .insert(((callee.as_ref().clone(), index), source));
+                        }
+                    }
+                }
+            }
+        }
+        TypedExprKind::TupleField { receiver, .. } => collect_mode_constraints_expr(
+            receiver,
+            ValueContext::Borrow,
+            headers,
+            binding_parameters,
+            constraints,
+        ),
+        TypedExprKind::Integer { .. }
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Boolean(_)
+        | TypedExprKind::Unit => {}
+    }
+}
+
+fn collect_consumed_parameters(
+    expression: &TypedExpr,
+    binding_parameters: &BTreeMap<EntityId, ParameterKey>,
+    consumed: &mut BTreeSet<ParameterKey>,
+) {
+    match &expression.kind {
+        TypedExprKind::Reference { binding, .. } if !is_copy_type(&expression.ty) => {
+            if let Some(parameter) = binding_parameters.get(binding.as_ref()) {
+                consumed.insert(parameter.clone());
+            }
+        }
+        TypedExprKind::Parenthesized(inner) => {
+            collect_consumed_parameters(inner, binding_parameters, consumed);
+        }
+        TypedExprKind::Tuple(elements) => {
+            for element in elements {
+                collect_consumed_parameters(element, binding_parameters, consumed);
+            }
+        }
+        TypedExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            if let Some(tail) = &then_branch.tail {
+                collect_consumed_parameters(tail, binding_parameters, consumed);
+            }
+            if let Some(else_branch) = else_branch {
+                collect_consumed_parameters(else_branch, binding_parameters, consumed);
+            }
+        }
+        TypedExprKind::Block(block) => {
+            if let Some(tail) = &block.tail {
+                collect_consumed_parameters(tail, binding_parameters, consumed);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnershipKind {
+    Borrowed,
+    Owned,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Availability {
+    Live,
+    Moved,
+    MaybeMoved,
+}
+
+#[derive(Clone)]
+struct BindingUsage {
+    ownership: OwnershipKind,
+    availability: Availability,
+    origin: OriginRef,
+}
+
+type UsageState = BTreeMap<EntityId, BindingUsage>;
+
+fn validate_whole_value_use(
+    function_order: &[EntityId],
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    bodies: &mut BTreeMap<EntityId, TypedBlock>,
+) -> Result<(), CheckDiagnostic> {
+    for identity in function_order {
+        let header = headers
+            .get(identity)
+            .expect("source-ordered function remains indexed");
+        let mut state = UsageState::new();
+        for parameter in &header.parameters {
+            if is_copy_type(&parameter.ty) {
+                continue;
+            }
+            let mode = parameter
+                .mode
+                .as_ref()
+                .expect("parameter modes are finalized before value-use validation")
+                .value;
+            state.insert(
+                parameter.binding.clone(),
+                BindingUsage {
+                    ownership: if mode == ParameterMode::Move {
+                        OwnershipKind::Owned
+                    } else {
+                        OwnershipKind::Borrowed
+                    },
+                    availability: Availability::Live,
+                    origin: header.context.origin(parameter.span),
+                },
+            );
+        }
+        let state = validate_usage_block(
+            bodies
+                .get_mut(identity)
+                .expect("every checked function has one closed body"),
+            ValueContext::Consume,
+            state,
+            headers,
+            header,
+        )?;
+        if let Some(state) = state {
+            validate_normal_exit(&state, header)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_usage_block(
+    block: &mut TypedBlock,
+    tail_context: ValueContext,
+    mut state: UsageState,
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    function: &FunctionHeader,
+) -> Result<Option<UsageState>, CheckDiagnostic> {
+    let mut locals = Vec::new();
+    for statement in &mut block.statements {
+        match &mut statement.kind {
+            TypedStatementKind::Let { binding, ty, value } => {
+                let Some(next) =
+                    validate_usage_expr(value, ValueContext::Consume, state, headers, function)?
+                else {
+                    return Ok(None);
+                };
+                state = next;
+                if !is_copy_type(ty) {
+                    let identity = binding.as_ref().clone();
+                    locals.push(identity.clone());
+                    state.insert(
+                        identity.clone(),
+                        BindingUsage {
+                            ownership: OwnershipKind::Owned,
+                            availability: Availability::Live,
+                            origin: entity_origin(&identity)
+                                .unwrap_or_else(|| function.context.origin(statement.span)),
+                        },
+                    );
+                }
+            }
+            TypedStatementKind::Return(value) => {
+                if let Some(value) = value {
+                    let Some(next) = validate_usage_expr(
+                        value,
+                        ValueContext::Consume,
+                        state,
+                        headers,
+                        function,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    state = next;
+                }
+                validate_normal_exit(&state, function)?;
+                return Ok(None);
+            }
+            TypedStatementKind::Expression(expression) => {
+                let Some(next) = validate_usage_expr(
+                    expression,
+                    ValueContext::Discard,
+                    state,
+                    headers,
+                    function,
+                )?
+                else {
+                    return Ok(None);
+                };
+                state = next;
+            }
+        }
+    }
+    if let Some(tail) = &mut block.tail {
+        let Some(next) = validate_usage_expr(tail, tail_context, state, headers, function)? else {
+            return Ok(None);
+        };
+        state = next;
+    }
+    validate_scope_cleanup(&state, &locals, function)?;
+    for local in locals {
+        state.remove(&local);
+    }
+    Ok(Some(state))
+}
+
+fn validate_usage_expr(
+    expression: &mut TypedExpr,
+    context: ValueContext,
+    mut state: UsageState,
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    function: &FunctionHeader,
+) -> Result<Option<UsageState>, CheckDiagnostic> {
+    let expression_span = expression.span;
+    let expression_type = expression.ty.clone();
+    match &mut expression.kind {
+        TypedExprKind::Reference { binding, use_kind } => {
+            if is_copy_type(&expression_type) {
+                *use_kind = Some(ValueUseKind::Copy);
+            } else {
+                let usage = state.get_mut(binding.as_ref()).expect(
+                    "every non-Copy typed reference names a tracked parameter or local owner",
+                );
+                match usage.availability {
+                    Availability::Moved => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::Unsupported,
+                            "reusing a moved generic value requires later Copy evidence",
+                            function.context.origin(expression_span),
+                            vec![usage.origin.clone()],
+                        ));
+                    }
+                    Availability::MaybeMoved => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::Unsupported,
+                            "using a maybe-moved generic value requires later Copy and control-flow ownership facts",
+                            function.context.origin(expression_span),
+                            vec![usage.origin.clone()],
+                        ));
+                    }
+                    Availability::Live => {}
+                }
+                match context {
+                    ValueContext::Borrow => {
+                        *use_kind = Some(ValueUseKind::Borrow);
+                    }
+                    ValueContext::Consume if usage.ownership == OwnershipKind::Owned => {
+                        usage.availability = Availability::Moved;
+                        *use_kind = Some(ValueUseKind::Move);
+                    }
+                    ValueContext::Consume => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::Unsupported,
+                            "a borrowed generic value cannot become an owned result without Copy evidence",
+                            function.context.origin(expression_span),
+                            vec![usage.origin.clone()],
+                        ));
+                    }
+                    ValueContext::Discard if usage.ownership == OwnershipKind::Owned => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::Unsupported,
+                            "discarding an owned generic value requires the later D(T) cleanup solver",
+                            function.context.origin(expression_span),
+                            vec![usage.origin.clone()],
+                        ));
+                    }
+                    ValueContext::Discard => {
+                        *use_kind = Some(ValueUseKind::Borrow);
+                    }
+                }
+            }
+        }
+        TypedExprKind::Parenthesized(inner) => {
+            return validate_usage_expr(inner, context, state, headers, function);
+        }
+        TypedExprKind::Tuple(elements) => {
+            for element in elements {
+                let Some(next) =
+                    validate_usage_expr(element, ValueContext::Consume, state, headers, function)?
+                else {
+                    return Ok(None);
+                };
+                state = next;
+            }
+            if !is_copy_type(&expression_type) && !matches!(context, ValueContext::Consume) {
+                return Err(temporary_cleanup_diagnostic(expression_span, function));
+            }
+        }
+        TypedExprKind::Block(block) => {
+            return validate_usage_block(block, context, state, headers, function);
+        }
+        TypedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let Some(after_condition) =
+                validate_usage_expr(condition, ValueContext::Borrow, state, headers, function)?
+            else {
+                return Ok(None);
+            };
+            let then_state = validate_usage_block(
+                then_branch,
+                context,
+                after_condition.clone(),
+                headers,
+                function,
+            )?;
+            let else_state = if let Some(else_branch) = else_branch {
+                validate_usage_expr(else_branch, context, after_condition, headers, function)?
+            } else {
+                Some(after_condition)
+            };
+            return Ok(merge_usage_states(then_state, else_state));
+        }
+        TypedExprKind::Unary { operand, .. } => {
+            let Some(next) =
+                validate_usage_expr(operand, ValueContext::Borrow, state, headers, function)?
+            else {
+                return Ok(None);
+            };
+            state = next;
+        }
+        TypedExprKind::Binary {
+            operator,
+            left,
+            right,
+            ..
+        } => {
+            let Some(after_left) =
+                validate_usage_expr(left, ValueContext::Borrow, state, headers, function)?
+            else {
+                return Ok(None);
+            };
+            if matches!(operator, BinaryOperator::LogicAnd | BinaryOperator::LogicOr) {
+                let right_state = validate_usage_expr(
+                    right,
+                    ValueContext::Borrow,
+                    after_left.clone(),
+                    headers,
+                    function,
+                )?;
+                return Ok(merge_usage_states(Some(after_left), right_state));
+            }
+            let Some(next) =
+                validate_usage_expr(right, ValueContext::Borrow, after_left, headers, function)?
+            else {
+                return Ok(None);
+            };
+            state = next;
+        }
+        TypedExprKind::Call {
+            callee,
+            arguments,
+            parameter_modes,
+            ..
+        } => {
+            let header = headers
+                .get(callee.as_ref())
+                .expect("every typed call retains an exact checked callee");
+            *parameter_modes = header
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    parameter
+                        .mode
+                        .as_ref()
+                        .expect("callee modes are finalized before usage validation")
+                        .value
+                })
+                .collect();
+            for (argument, parameter) in arguments.iter_mut().zip(&header.parameters) {
+                let mode = parameter
+                    .mode
+                    .as_ref()
+                    .expect("callee modes are finalized before usage validation")
+                    .value;
+                let argument_context = if mode == ParameterMode::Move {
+                    ValueContext::Consume
+                } else {
+                    ValueContext::Borrow
+                };
+                let Some(next) =
+                    validate_usage_expr(argument, argument_context, state, headers, function)?
+                else {
+                    return Ok(None);
+                };
+                state = next;
+            }
+            if expression_type == CheckedType::Never {
+                return Ok(None);
+            }
+            if !is_copy_type(&expression_type) && !matches!(context, ValueContext::Consume) {
+                return Err(temporary_cleanup_diagnostic(expression_span, function));
+            }
+        }
+        TypedExprKind::TupleField { receiver, .. } => {
+            if !is_copy_type(&receiver.ty) {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "projecting a non-Copy generic tuple requires later partial-move and cleanup facts",
+                    function.context.origin(expression_span),
+                    vec![function.context.origin(receiver.span)],
+                ));
+            }
+            return validate_usage_expr(receiver, ValueContext::Borrow, state, headers, function);
+        }
+        TypedExprKind::Integer { .. }
+        | TypedExprKind::Float(_)
+        | TypedExprKind::Boolean(_)
+        | TypedExprKind::Unit => {}
+    }
+    if expression_type == CheckedType::Never {
+        Ok(None)
+    } else {
+        Ok(Some(state))
+    }
+}
+
+fn temporary_cleanup_diagnostic(span: Span, function: &FunctionHeader) -> CheckDiagnostic {
+    source_diagnostic(
+        CheckDiagnosticKind::Unsupported,
+        "a temporary generic owner would require the later D(T) cleanup solver",
+        function.context.origin(span),
+        Vec::new(),
+    )
+}
+
+fn validate_scope_cleanup(
+    state: &UsageState,
+    locals: &[EntityId],
+    function: &FunctionHeader,
+) -> Result<(), CheckDiagnostic> {
+    for local in locals.iter().rev() {
+        let usage = state
+            .get(local)
+            .expect("a tracked non-Copy local remains in its lexical scope state");
+        if usage.availability != Availability::Moved {
+            return Err(source_diagnostic(
+                CheckDiagnosticKind::Unsupported,
+                "a generic local owner remains at scope exit and requires D(T) cleanup",
+                usage.origin.clone(),
+                vec![function.origin.clone()],
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_normal_exit(
+    state: &UsageState,
+    function: &FunctionHeader,
+) -> Result<(), CheckDiagnostic> {
+    if let Some(usage) = state.values().find(|usage| {
+        usage.ownership == OwnershipKind::Owned && usage.availability != Availability::Moved
+    }) {
+        return Err(source_diagnostic(
+            CheckDiagnosticKind::Unsupported,
+            "a generic owner remains on a normal exit and requires D(T) cleanup",
+            usage.origin.clone(),
+            vec![function.origin.clone()],
+        ));
+    }
+    Ok(())
+}
+
+fn merge_usage_states(left: Option<UsageState>, right: Option<UsageState>) -> Option<UsageState> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(state), None) | (None, Some(state)) => Some(state),
+        (Some(mut left), Some(right)) => {
+            for (identity, right_usage) in right {
+                let left_usage = left
+                    .get_mut(&identity)
+                    .expect("branch states retain the same outer binding set");
+                debug_assert_eq!(left_usage.ownership, right_usage.ownership);
+                if left_usage.availability != right_usage.availability {
+                    left_usage.availability = Availability::MaybeMoved;
+                }
+            }
+            Some(left)
+        }
+    }
+}
+
 #[allow(dead_code)]
 struct CheckedFunction {
     identity: EntityId,
     origin: OriginRef,
     parameters: Vec<CheckedParameter>,
+    scheme: Vec<TypeFormal>,
     return_type: CheckedType,
     effect: CheckedEffect,
     body: TypedBlock,
@@ -2368,7 +4314,10 @@ enum TypedExprKind {
     Float(u64),
     Boolean(bool),
     Unit,
-    Reference(Box<EntityId>),
+    Reference {
+        binding: Box<EntityId>,
+        use_kind: Option<ValueUseKind>,
+    },
     Parenthesized(Box<TypedExpr>),
     Tuple(Vec<TypedExpr>),
     Block(Box<TypedBlock>),
@@ -2391,11 +4340,26 @@ enum TypedExprKind {
         callee: Box<EntityId>,
         arguments: Vec<TypedExpr>,
         parameter_modes: Vec<ParameterMode>,
+        instantiation: CallInstantiation,
     },
     TupleField {
         receiver: Box<TypedExpr>,
         index: usize,
     },
+}
+
+#[allow(dead_code)]
+enum CallInstantiation {
+    Published(Vec<(TypeFormal, CheckedType)>),
+    Provisional,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueUseKind {
+    Borrow,
+    Copy,
+    Move,
 }
 
 #[allow(dead_code)]
@@ -2408,8 +4372,11 @@ struct ComparisonEvidence {
 struct BodyChecker<'project, 'borrow> {
     project: &'project ResolvedProject,
     headers: &'borrow BTreeMap<EntityId, FunctionHeader>,
+    schemes: &'borrow BTreeMap<EntityId, CallableScheme>,
+    group: &'borrow BTreeSet<EntityId>,
     function: &'borrow FunctionHeader,
     normalizer: &'borrow mut SourceTypeNormalizer,
+    inference: &'borrow mut TypeInference,
     values: BTreeMap<EntityId, CheckedType>,
 }
 
@@ -2417,8 +4384,11 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
     fn new(
         project: &'project ResolvedProject,
         headers: &'borrow BTreeMap<EntityId, FunctionHeader>,
+        schemes: &'borrow BTreeMap<EntityId, CallableScheme>,
+        group: &'borrow BTreeSet<EntityId>,
         function: &'borrow FunctionHeader,
         normalizer: &'borrow mut SourceTypeNormalizer,
+        inference: &'borrow mut TypeInference,
     ) -> Self {
         let values = function
             .parameters
@@ -2428,14 +4398,21 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
         Self {
             project,
             headers,
+            schemes,
+            group,
             function,
             normalizer,
+            inference,
             values,
         }
     }
 
     fn origin(&self, span: Span) -> OriginRef {
         self.function.context.origin(span)
+    }
+
+    fn is_never(&self, ty: &CheckedType) -> bool {
+        self.inference.resolve(ty) == CheckedType::Never
     }
 
     fn check_block(&mut self, block: &ResolvedBlock) -> Result<TypedBlock, CheckDiagnostic> {
@@ -2506,25 +4483,28 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 }
                 let value = self.check_expr(value)?;
                 let ty = if let Some(annotation) = annotation {
-                    let annotated = self.normalizer.normalize(annotation)?;
-                    if !type_satisfies(&value.ty, &annotated) {
-                        return Err(source_diagnostic(
-                            CheckDiagnosticKind::TypeMismatch,
-                            format!(
-                                "let annotation {} does not match value type {}",
-                                display_type(&annotated),
-                                display_type(&value.ty)
-                            ),
-                            self.origin(annotation.span),
-                            vec![self.origin(value.span)],
-                        ));
-                    }
+                    let annotated = self
+                        .normalizer
+                        .normalize_with_formals(annotation, &self.function.formal_by_identity)?;
+                    self.inference
+                        .satisfy(&value.ty, &annotated)
+                        .map_err(|failure| {
+                            source_diagnostic(
+                                CheckDiagnosticKind::TypeMismatch,
+                                format!(
+                                    "let annotation cannot match its value: {}",
+                                    display_unification_failure(&failure)
+                                ),
+                                self.origin(annotation.span),
+                                vec![self.origin(value.span)],
+                            )
+                        })?;
                     annotated
                 } else {
                     value.ty.clone()
                 };
                 self.values.insert(binding.identity.clone(), ty.clone());
-                let continues = value.ty != CheckedType::Never;
+                let continues = !self.is_never(&value.ty);
                 Ok((
                     TypedStatement {
                         span: statement.span,
@@ -2545,19 +4525,21 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 let actual = value
                     .as_ref()
                     .map_or(CheckedType::Unit, |value| value.ty.clone());
-                if !type_satisfies(&actual, &self.function.return_type) {
+                if let Err(failure) = self.inference.satisfy(&actual, &self.function.return_type) {
                     let primary = value
                         .as_ref()
                         .map_or_else(|| origin.clone(), |value| self.origin(value.span));
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::ReturnMismatch,
                         format!(
-                            "return has type {} but the function declares {}",
-                            display_type(&actual),
-                            display_type(&self.function.return_type)
+                            "return cannot satisfy the function result: {}",
+                            display_unification_failure(&failure)
                         ),
                         primary,
-                        vec![self.function.return_origin.clone()],
+                        vec![origin_as_source(
+                            &self.function.return_origin,
+                            &self.function.origin,
+                        )],
                     ));
                 }
                 Ok((
@@ -2570,7 +4552,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             }
             ResolvedStatementKind::Expression(expression) => {
                 let expression = self.check_expr(expression)?;
-                let continues = expression.ty != CheckedType::Never;
+                let continues = !self.is_never(&expression.ty);
                 Ok((
                     TypedStatement {
                         span: statement.span,
@@ -2655,7 +4637,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 let mut diverges = false;
                 for element in elements {
                     let element = self.check_expr(element)?;
-                    diverges |= element.ty == CheckedType::Never;
+                    diverges |= self.is_never(&element.ty);
                     typed.push(element);
                 }
                 let ty = if diverges {
@@ -2731,7 +4713,10 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
         Ok(TypedExpr {
             span: origin.span,
             ty: ty.clone(),
-            kind: TypedExprKind::Reference(Box::new(target.clone())),
+            kind: TypedExprKind::Reference {
+                binding: Box::new(target.clone()),
+                use_kind: None,
+            },
         })
     }
 
@@ -2743,12 +4728,12 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
         else_branch: Option<&ResolvedExpr>,
     ) -> Result<TypedExpr, CheckDiagnostic> {
         let condition = self.check_expr(condition)?;
-        if !type_satisfies(&condition.ty, &CheckedType::Bool) {
+        if let Err(failure) = self.inference.satisfy(&condition.ty, &CheckedType::Bool) {
             return Err(source_diagnostic(
                 CheckDiagnosticKind::TypeMismatch,
                 format!(
-                    "if condition has type {}, expected Bool",
-                    display_type(&condition.ty)
+                    "if condition must be Bool: {}",
+                    display_unification_failure(&failure)
                 ),
                 self.origin(condition.span),
                 Vec::new(),
@@ -2761,22 +4746,23 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             .map(Box::new);
 
         let branch_type = if let Some(else_branch) = &else_branch {
-            join_types(&then_branch.ty, &else_branch.ty).map_err(|()| {
-                source_diagnostic(
-                    CheckDiagnosticKind::TypeMismatch,
-                    format!(
-                        "if branches have incompatible types {} and {}",
-                        display_type(&then_branch.ty),
-                        display_type(&else_branch.ty)
-                    ),
-                    self.origin(else_branch.span),
-                    vec![self.origin(then_branch.span)],
-                )
-            })?
+            join_inferred_types(self.inference, &then_branch.ty, &else_branch.ty).map_err(
+                |failure| {
+                    source_diagnostic(
+                        CheckDiagnosticKind::TypeMismatch,
+                        format!(
+                            "if branches have incompatible types: {}",
+                            display_unification_failure(&failure)
+                        ),
+                        self.origin(else_branch.span),
+                        vec![self.origin(then_branch.span)],
+                    )
+                },
+            )?
         } else {
             CheckedType::Unit
         };
-        let ty = if condition.ty == CheckedType::Never {
+        let ty = if self.is_never(&condition.ty) {
             CheckedType::Never
         } else {
             branch_type
@@ -2811,30 +4797,49 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             });
         }
         let operand = self.check_expr(operand)?;
-        let valid = match operator.1 {
-            UnaryOperator::Negate => matches!(
-                operand.ty,
-                CheckedType::Int | CheckedType::Float | CheckedType::Never
-            ),
+        match operator.1 {
+            UnaryOperator::Negate => match self.inference.resolve(&operand.ty) {
+                CheckedType::Int | CheckedType::Float | CheckedType::Never => {}
+                CheckedType::Infer(_) | CheckedType::Formal(_) => {
+                    return Err(source_diagnostic(
+                        CheckDiagnosticKind::Unsupported,
+                        "negating an unconstrained generic value requires later numeric Trait selection",
+                        self.origin(operator.0),
+                        vec![self.origin(operand.span)],
+                    ));
+                }
+                other => {
+                    return Err(source_diagnostic(
+                        CheckDiagnosticKind::TypeMismatch,
+                        format!(
+                            "unary operator {:?} does not accept {}",
+                            operator.1,
+                            display_type(&other)
+                        ),
+                        self.origin(operator.0),
+                        vec![self.origin(operand.span)],
+                    ));
+                }
+            },
             UnaryOperator::Not => {
-                matches!(operand.ty, CheckedType::Bool | CheckedType::Never)
+                self.inference
+                    .satisfy(&operand.ty, &CheckedType::Bool)
+                    .map_err(|failure| {
+                        source_diagnostic(
+                            CheckDiagnosticKind::TypeMismatch,
+                            format!(
+                                "logical negation requires Bool: {}",
+                                display_unification_failure(&failure)
+                            ),
+                            self.origin(operator.0),
+                            vec![self.origin(operand.span)],
+                        )
+                    })?;
             }
-        };
-        if !valid {
-            return Err(source_diagnostic(
-                CheckDiagnosticKind::TypeMismatch,
-                format!(
-                    "unary operator {:?} does not accept {}",
-                    operator.1,
-                    display_type(&operand.ty)
-                ),
-                self.origin(operator.0),
-                vec![self.origin(operand.span)],
-            ));
         }
         Ok(TypedExpr {
             span: origin.span,
-            ty: operand.ty.clone(),
+            ty: self.inference.resolve(&operand.ty),
             kind: TypedExprKind::Unary {
                 operator: operator.1,
                 operand: Box::new(operand),
@@ -2851,40 +4856,46 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
     ) -> Result<TypedExpr, CheckDiagnostic> {
         let left = self.check_expr(left)?;
         let right = self.check_expr(right)?;
-        let operand_type = common_non_never_type(&left.ty, &right.ty);
-        let diverges = left.ty == CheckedType::Never || right.ty == CheckedType::Never;
+        let left_never = self.is_never(&left.ty);
+        let right_never = self.is_never(&right.ty);
+        let diverges = left_never || right_never;
         let (ty, comparison) = match operator.1 {
             BinaryOperator::Add
             | BinaryOperator::Subtract
             | BinaryOperator::Multiply
             | BinaryOperator::Divide
             | BinaryOperator::Remainder => {
-                let valid = operand_type
-                    .as_ref()
-                    .is_some_and(|ty| matches!(ty, CheckedType::Int | CheckedType::Float))
-                    || (left.ty == CheckedType::Never && right.ty == CheckedType::Never);
-                if !valid {
-                    return Err(self.binary_type_diagnostic(operator.0, &left, &right));
+                let operand_type = join_inferred_types(self.inference, &left.ty, &right.ty)
+                    .map_err(|_| self.binary_type_diagnostic(operator.0, &left, &right))?;
+                let operand_type = self.inference.resolve(&operand_type);
+                match &operand_type {
+                    CheckedType::Int | CheckedType::Float | CheckedType::Never => {}
+                    CheckedType::Infer(_) | CheckedType::Formal(_) => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::Unsupported,
+                            "arithmetic on an unconstrained generic value requires later numeric Trait selection",
+                            self.origin(operator.0),
+                            vec![self.origin(left.span), self.origin(right.span)],
+                        ));
+                    }
+                    _ => return Err(self.binary_type_diagnostic(operator.0, &left, &right)),
                 }
                 (
                     if diverges {
                         CheckedType::Never
                     } else {
-                        operand_type.expect("normal arithmetic operands have one common type")
+                        operand_type
                     },
                     None,
                 )
             }
             BinaryOperator::LogicAnd | BinaryOperator::LogicOr => {
-                let valid = operand_type
-                    .as_ref()
-                    .is_some_and(|ty| ty == &CheckedType::Bool)
-                    || (left.ty == CheckedType::Never && right.ty == CheckedType::Never);
-                if !valid {
-                    return Err(self.binary_type_diagnostic(operator.0, &left, &right));
-                }
+                self.inference
+                    .satisfy(&left.ty, &CheckedType::Bool)
+                    .and_then(|()| self.inference.satisfy(&right.ty, &CheckedType::Bool))
+                    .map_err(|_| self.binary_type_diagnostic(operator.0, &left, &right))?;
                 (
-                    if left.ty == CheckedType::Never {
+                    if left_never {
                         CheckedType::Never
                     } else {
                         CheckedType::Bool
@@ -2893,7 +4904,10 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 )
             }
             BinaryOperator::Equal | BinaryOperator::NotEqual => {
-                if matches!(&operand_type, Some(CheckedType::Tuple(_))) {
+                let operand_type = join_inferred_types(self.inference, &left.ty, &right.ty)
+                    .map_err(|_| self.binary_type_diagnostic(operator.0, &left, &right))?;
+                let operand_type = self.inference.resolve(&operand_type);
+                if matches!(&operand_type, CheckedType::Tuple(_)) {
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::Unsupported,
                         "tuple trait comparison is outside the initial Checker subset",
@@ -2901,9 +4915,17 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                         Vec::new(),
                     ));
                 }
-                let Some(_) = operand_type.filter(is_comparable_primitive) else {
+                if matches!(operand_type, CheckedType::Infer(_) | CheckedType::Formal(_)) {
+                    return Err(source_diagnostic(
+                        CheckDiagnosticKind::Unsupported,
+                        "generic equality requires later PartialEq evidence selection",
+                        self.origin(operator.0),
+                        vec![self.origin(left.span), self.origin(right.span)],
+                    ));
+                }
+                if !is_comparable_primitive(&operand_type) {
                     return Err(self.binary_type_diagnostic(operator.0, &left, &right));
-                };
+                }
                 let roles = &self.project.core_roles;
                 (
                     if diverges {
@@ -2922,7 +4944,10 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             | BinaryOperator::Greater
             | BinaryOperator::LessEqual
             | BinaryOperator::GreaterEqual => {
-                if matches!(&operand_type, Some(CheckedType::Tuple(_))) {
+                let operand_type = join_inferred_types(self.inference, &left.ty, &right.ty)
+                    .map_err(|_| self.binary_type_diagnostic(operator.0, &left, &right))?;
+                let operand_type = self.inference.resolve(&operand_type);
+                if matches!(&operand_type, CheckedType::Tuple(_)) {
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::Unsupported,
                         "tuple trait comparison is outside the initial Checker subset",
@@ -2930,9 +4955,17 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                         Vec::new(),
                     ));
                 }
-                let Some(_) = operand_type.filter(is_comparable_primitive) else {
+                if matches!(operand_type, CheckedType::Infer(_) | CheckedType::Formal(_)) {
+                    return Err(source_diagnostic(
+                        CheckDiagnosticKind::Unsupported,
+                        "generic ordering requires later PartialOrd evidence selection",
+                        self.origin(operator.0),
+                        vec![self.origin(left.span), self.origin(right.span)],
+                    ));
+                }
+                if !is_comparable_primitive(&operand_type) {
                     return Err(self.binary_type_diagnostic(operator.0, &left, &right));
-                };
+                }
                 let roles = &self.project.core_roles;
                 (
                     if diverges {
@@ -3003,7 +5036,7 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 Vec::new(),
             )
         })?;
-        let signature = self.headers.get(&target).ok_or_else(|| {
+        let header = self.headers.get(&target).ok_or_else(|| {
             source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
                 "the direct callee is not a supported ordinary function declaration",
@@ -3011,54 +5044,95 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                 entity_origin(&target).into_iter().collect(),
             )
         })?;
-        if arguments.len() != signature.parameters.len() {
+        let signature_origin = header.origin.clone();
+        let parameter_origins = header
+            .parameters
+            .iter()
+            .map(|parameter| parameter.type_origin.clone())
+            .collect::<Vec<_>>();
+        let (parameter_types, return_type, instantiation) = if self.group.contains(&target) {
+            (
+                header
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.ty.clone())
+                    .collect::<Vec<_>>(),
+                header.return_type.clone(),
+                CallInstantiation::Provisional,
+            )
+        } else {
+            let scheme = self.schemes.get(&target).expect(
+                "callee-first SCC order publishes every function outside the current group",
+            );
+            let mapping = scheme
+                .quantified
+                .iter()
+                .cloned()
+                .map(|formal| {
+                    let actual = self.inference.fresh();
+                    (formal, actual)
+                })
+                .collect::<Vec<_>>();
+            let replacements = mapping.iter().cloned().collect::<BTreeMap<_, _>>();
+            (
+                scheme
+                    .parameters
+                    .iter()
+                    .map(|parameter| instantiate_type(parameter, &replacements))
+                    .collect::<Vec<_>>(),
+                instantiate_type(&scheme.return_type, &replacements),
+                CallInstantiation::Published(mapping),
+            )
+        };
+        if arguments.len() != parameter_types.len() {
             return Err(source_diagnostic(
                 CheckDiagnosticKind::CallMismatch,
                 format!(
                     "direct call supplies {} argument(s) but the callee expects {}",
                     arguments.len(),
-                    signature.parameters.len()
+                    parameter_types.len()
                 ),
                 origin,
-                vec![signature.origin.clone()],
+                vec![signature_origin],
             ));
         }
 
         let mut typed_arguments = Vec::with_capacity(arguments.len());
         let mut diverges = false;
-        for (index, (argument, parameter)) in
-            arguments.iter().zip(&signature.parameters).enumerate()
-        {
+        for (index, (argument, parameter)) in arguments.iter().zip(&parameter_types).enumerate() {
             let ResolvedCallArgument::Expression(argument) = argument else {
                 let span = match argument {
-                    ResolvedCallArgument::Mode { span, .. } => *span,
+                    ResolvedCallArgument::Mode { span, .. } => span,
                     ResolvedCallArgument::Expression(_) => unreachable!(),
                 };
                 return Err(source_diagnostic(
                     CheckDiagnosticKind::Unsupported,
                     "call-site mut/move assertions are outside the initial Checker subset",
-                    self.origin(span),
+                    self.origin(*span),
                     Vec::new(),
                 ));
             };
             let argument = self.check_expr(argument)?;
-            if !type_satisfies(&argument.ty, &parameter.ty) {
-                return Err(source_diagnostic(
-                    CheckDiagnosticKind::CallMismatch,
-                    format!(
-                        "argument {index} has type {} but the callee expects {}",
-                        display_type(&argument.ty),
-                        display_type(&parameter.ty)
-                    ),
-                    self.origin(argument.span),
-                    vec![parameter.type_origin.clone(), signature.origin.clone()],
-                ));
-            }
-            diverges |= argument.ty == CheckedType::Never;
+            self.inference
+                .satisfy(&argument.ty, parameter)
+                .map_err(|failure| {
+                    source_diagnostic(
+                        CheckDiagnosticKind::CallMismatch,
+                        format!(
+                            "argument {index} cannot satisfy the callee parameter: {}",
+                            display_unification_failure(&failure)
+                        ),
+                        self.origin(argument.span),
+                        vec![
+                            origin_as_source(&parameter_origins[index], &header.origin),
+                            header.origin.clone(),
+                        ],
+                    )
+                })?;
+            diverges |= self.is_never(&argument.ty);
             typed_arguments.push(argument);
         }
-        let return_type = signature.return_type.clone();
-        let ty = if diverges || return_type == CheckedType::Never {
+        let ty = if diverges || self.is_never(&return_type) {
             CheckedType::Never
         } else {
             return_type
@@ -3069,17 +5143,8 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
             kind: TypedExprKind::Call {
                 callee: Box::new(target),
                 arguments: typed_arguments,
-                parameter_modes: signature
-                    .parameters
-                    .iter()
-                    .map(|parameter| {
-                        parameter
-                            .mode
-                            .as_ref()
-                            .expect("direct callees have finalized parameter modes")
-                            .value
-                    })
-                    .collect(),
+                parameter_modes: Vec::new(),
+                instantiation,
             },
         })
     }
@@ -3104,7 +5169,8 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
                     Vec::new(),
                 )
             })?;
-        let ty = match &receiver.ty {
+        let receiver_type = self.inference.resolve(&receiver.ty);
+        let ty = match &receiver_type {
             CheckedType::Tuple(elements) => elements.get(index).cloned().ok_or_else(|| {
                 source_diagnostic(
                     CheckDiagnosticKind::TypeMismatch,
@@ -3154,28 +5220,31 @@ fn minimum_integer_literal(expression: &ResolvedExpr) -> Option<Span> {
     }
 }
 
-fn join_types(left: &CheckedType, right: &CheckedType) -> Result<CheckedType, ()> {
-    if left == &CheckedType::Never {
-        Ok(right.clone())
-    } else if right == &CheckedType::Never || left == right {
-        Ok(left.clone())
-    } else if let (CheckedType::Tuple(left), CheckedType::Tuple(right)) = (left, right)
+fn join_inferred_types(
+    inference: &mut TypeInference,
+    left: &CheckedType,
+    right: &CheckedType,
+) -> Result<CheckedType, UnificationFailure> {
+    let left = inference.resolve(left);
+    let right = inference.resolve(right);
+    if left == CheckedType::Never {
+        return Ok(right);
+    }
+    if right == CheckedType::Never {
+        return Ok(left);
+    }
+    if let (CheckedType::Tuple(left), CheckedType::Tuple(right)) = (&left, &right)
         && left.len() == right.len()
     {
-        left.iter()
+        return left
+            .iter()
             .zip(right)
-            .map(|(left, right)| join_types(left, right))
+            .map(|(left, right)| join_inferred_types(inference, left, right))
             .collect::<Result<Vec<_>, _>>()
-            .map(CheckedType::Tuple)
-    } else {
-        Err(())
+            .map(CheckedType::Tuple);
     }
-}
-
-fn common_non_never_type(left: &CheckedType, right: &CheckedType) -> Option<CheckedType> {
-    join_types(left, right)
-        .ok()
-        .filter(|ty| ty != &CheckedType::Never)
+    inference.unify(&left, &right)?;
+    Ok(inference.resolve(&left))
 }
 
 fn is_comparable_primitive(ty: &CheckedType) -> bool {
@@ -3247,6 +5316,95 @@ mod checking_tests {
         evidence
     }
 
+    fn assert_closed_type(ty: &CheckedType) {
+        match ty {
+            CheckedType::Infer(variable) => {
+                panic!("published Checker result retained ?{}", variable.0)
+            }
+            CheckedType::Tuple(elements) => {
+                for element in elements {
+                    assert_closed_type(element);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_closed_block(block: &TypedBlock) {
+        assert_closed_type(&block.ty);
+        for statement in &block.statements {
+            match &statement.kind {
+                TypedStatementKind::Let { ty, value, .. } => {
+                    assert_closed_type(ty);
+                    assert_closed_expr(value);
+                }
+                TypedStatementKind::Return(Some(value)) | TypedStatementKind::Expression(value) => {
+                    assert_closed_expr(value)
+                }
+                TypedStatementKind::Return(None) => {}
+            }
+        }
+        if let Some(tail) = &block.tail {
+            assert_closed_expr(tail);
+        }
+    }
+
+    fn assert_closed_expr(expression: &TypedExpr) {
+        assert_closed_type(&expression.ty);
+        match &expression.kind {
+            TypedExprKind::Parenthesized(inner)
+            | TypedExprKind::Unary { operand: inner, .. }
+            | TypedExprKind::TupleField {
+                receiver: inner, ..
+            } => assert_closed_expr(inner),
+            TypedExprKind::Tuple(elements) => {
+                for element in elements {
+                    assert_closed_expr(element);
+                }
+            }
+            TypedExprKind::Block(block) => assert_closed_block(block),
+            TypedExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                assert_closed_expr(condition);
+                assert_closed_block(then_branch);
+                if let Some(else_branch) = else_branch {
+                    assert_closed_expr(else_branch);
+                }
+            }
+            TypedExprKind::Binary { left, right, .. } => {
+                assert_closed_expr(left);
+                assert_closed_expr(right);
+            }
+            TypedExprKind::Call {
+                arguments,
+                instantiation,
+                ..
+            } => {
+                for argument in arguments {
+                    assert_closed_expr(argument);
+                }
+                if let CallInstantiation::Published(mapping) = instantiation {
+                    for (_, actual) in mapping {
+                        assert_closed_type(actual);
+                    }
+                }
+            }
+            TypedExprKind::Integer { .. }
+            | TypedExprKind::Float(_)
+            | TypedExprKind::Boolean(_)
+            | TypedExprKind::Unit => {}
+            TypedExprKind::Reference { use_kind, .. } => {
+                assert!(
+                    use_kind.is_some(),
+                    "every retained reference has an actual use kind"
+                );
+            }
+        }
+    }
+
     #[test]
     fn opaque_result_retains_real_typed_literal_callee_mode_and_origin_facts() {
         let source = "type Number = Int; type Standalone = Bool; \
@@ -3285,6 +5443,7 @@ mod checking_tests {
             callee: exact_callee,
             arguments,
             parameter_modes,
+            ..
         } = &tail.kind
         else {
             panic!("caller tail should be a typed direct call")
@@ -3352,6 +5511,90 @@ mod checking_tests {
                 .return_types
                 .contains_key(&function.identity)
         );
+    }
+
+    #[test]
+    fn hm_result_retains_one_closed_scheme_mapping_and_provisional_recursive_call() {
+        let checked = check_project(
+            &sources(
+                "fn identity(value) { value } \
+                 fn repeat<T>(value: T, depth: Int) -> T { \
+                     if depth == 0 { value } else { repeat(value, depth - 1) } \
+                 } \
+                 fn main() -> (Int, Bool) { (identity(1), identity(true)) }",
+            ),
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .expect("HM source checks");
+
+        let identity = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "identity")
+            .expect("identity function");
+        assert_eq!(identity.scheme.len(), 1);
+        assert_eq!(
+            identity.parameters[0].ty,
+            CheckedType::Formal(Box::new(identity.scheme[0].clone()))
+        );
+        assert_eq!(identity.return_type, identity.parameters[0].ty);
+        assert_eq!(identity.parameters[0].mode, ParameterMode::Move);
+
+        let main = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "main")
+            .expect("main function");
+        let TypedExprKind::Tuple(calls) = &main.body.tail.as_deref().expect("main tail").kind
+        else {
+            panic!("main returns the two calls")
+        };
+        for (call, expected) in calls.iter().zip([CheckedType::Int, CheckedType::Bool]) {
+            let TypedExprKind::Call { instantiation, .. } = &call.kind else {
+                panic!("tuple element is a direct call")
+            };
+            let CallInstantiation::Published(mapping) = instantiation else {
+                panic!("group-external use instantiates the published scheme")
+            };
+            assert_eq!(mapping.len(), 1);
+            assert_eq!(mapping[0].0, identity.scheme[0]);
+            assert_eq!(mapping[0].1, expected);
+        }
+
+        let repeat = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "repeat")
+            .expect("repeat function");
+        let TypedExprKind::If {
+            else_branch: Some(else_branch),
+            ..
+        } = &repeat.body.tail.as_deref().expect("repeat tail").kind
+        else {
+            panic!("repeat body is the recursive conditional")
+        };
+        let recursive = match &else_branch.kind {
+            TypedExprKind::Call { instantiation, .. } => instantiation,
+            TypedExprKind::Block(block) => {
+                let TypedExprKind::Call { instantiation, .. } =
+                    &block.tail.as_deref().expect("recursive block tail").kind
+                else {
+                    panic!("repeat else block ends in its direct recursive call")
+                };
+                instantiation
+            }
+            _ => panic!("repeat else branch is its direct recursive call"),
+        };
+        assert!(matches!(recursive, CallInstantiation::Provisional));
+
+        for function in checked.functions.values() {
+            for parameter in &function.parameters {
+                assert_closed_type(&parameter.ty);
+            }
+            assert_closed_type(&function.return_type);
+            assert_closed_block(&function.body);
+        }
     }
 
     #[test]
