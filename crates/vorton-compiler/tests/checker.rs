@@ -731,12 +731,10 @@ fn header_diagnostics_use_logical_source_order_even_when_alias_expansion_reaches
 }
 
 #[test]
-fn source_shapes_core_constructors_methods_and_non_function_declarations_are_unsupported() {
+fn source_shapes_methods_and_other_declarations_remain_unsupported() {
     let cases = [
         "fn apply(callback: fn(Int) -> Int) -> Int { 1 }",
         "fn bad(value: Int) -> Bool { value.eq(value) }",
-        "use vorton_core::Option::Some; fn bad() -> Int { Some(1); 1 }",
-        "struct Value {} fn good() -> Int { 1 }",
         "trait Value {} fn good() -> Int { 1 }",
         "extern fn host() -> Int with {}; fn good() -> Int { 1 }",
         "impl Int { fn value(self: &Self) -> Int { 1 } } fn good() -> Int { 1 }",
@@ -1475,5 +1473,300 @@ fn tracks_whole_generic_owners_across_moves_aliases_branches_and_cleanup() {
     ];
     for (source, expected) in cases {
         assert_eq!(error(source).kind, expected, "source: {source}");
+    }
+}
+
+#[test]
+fn nominal_actuals_constructions_copy_fields_and_borrow_consumers_check_together() {
+    check(
+        r#"
+use vorton_core::Option::Some;
+struct Box<T> { value: T }
+struct Point { x: Int, y: Int }
+struct Empty<T> {}
+enum Choice<T> { Empty, Pos(T), Named { count: Int, value: T } }
+type IntBox = Box<Int>;
+fn wrap<T>(value: T) -> Box<T> { Box { value } }
+fn forward<T>(value: Box<T>) -> Box<T> { let next = value; next }
+fn borrow<T>(value: &T) {}
+fn borrow_field<T>(value: &Box<T>) { borrow(value.value); borrow(value.value); }
+fn read(value: &Point) -> Int { value.x + value.x + value.y }
+fn integer() -> Int { let value: IntBox = forward(wrap(1)); value.value }
+fn boolean() -> Bool { let value = forward(wrap(true)); value.value }
+fn point() -> Point { Point { y: 2, x: 1 } }
+fn empty<T>() -> Empty<T> { Empty {} }
+fn unused<T>(value: move Empty<T>) {}
+fn unit<T>() -> Choice<T> { Choice::Empty }
+fn positional<T>(value: T) -> Choice<T> { Choice::Pos(value) }
+fn named<T>(value: T) -> Choice<T> { Choice::Named { value, count: 1 } }
+fn option<T>(value: T) -> Option<T> { Option::Some(value) }
+fn ordering() -> Ordering { Ordering::Less }
+fn pure<T>() {
+    let empty: Option<T> = Option::None;
+    let next = empty;
+    let pair = (Point { x: 1, y: 2 }, true);
+    let phantom: Empty<T> = Empty {};
+    Choice::Pos(1);
+    Choice::Named { value: true, count: 2 };
+}
+fn imported() -> Option<Int> { Some(1) }
+"#,
+    )
+    .expect("nominal owners, actuals, constructors and real core roles check together");
+}
+
+#[test]
+fn nominal_identity_arity_members_and_payload_types_are_checked() {
+    for source in [
+        "struct A { x: Int } struct B { x: Int } fn bad(value: A) -> B { value }",
+        "struct Box<T> { value: T } fn bad(value: Box<Int>) -> Box<Bool> { value }",
+        "struct Box<T> { value: T } fn bad(value: Box<Int, Bool>) {}",
+        "struct Point { x: Int, y: Int } fn bad() -> Point { Point { x: 1 } }",
+        "struct Point { x: Int } fn bad() -> Point { Point { x: true } }",
+        "struct Point { x: Int } fn bad() -> Point { Point { x: 1, x: 2 } }",
+        "struct Point { x: Int } fn bad(value: &Point) -> Bool { value.x }",
+        "enum E { V(Int, Bool) } fn bad() -> E { E::V(1) }",
+        "enum E { V { x: Int } } fn bad() -> E { E::V { x: true } }",
+    ] {
+        let diagnostic = error(source);
+        assert!(
+            matches!(
+                diagnostic.kind,
+                CheckDiagnosticKind::TypeMismatch
+                    | CheckDiagnosticKind::ReturnMismatch
+                    | CheckDiagnosticKind::CallMismatch
+            ),
+            "{source}: {diagnostic:?}"
+        );
+        assert!(matches!(diagnostic.primary, Some(CheckOrigin::Source(_))));
+    }
+    for source in [
+        "struct Point { x: Int } fn bad() { Point { extra: 1 }; }",
+        "enum E { V } fn bad() { E::Missing; }",
+        "struct Point { x: Int } fn bad(value: &Point) { value.missing; }",
+    ] {
+        error(source);
+    }
+}
+
+#[test]
+fn nominal_whole_moves_do_not_grant_copy_or_field_ownership() {
+    check("struct Box<T> { value: T } fn choose<T>(flag: Bool, value: Box<T>) -> Box<T> { if flag { value } else { value } }")
+        .expect("mutually exclusive whole moves remain legal");
+    for source in [
+        "struct Empty {} fn bad(value: Empty) -> (Empty, Empty) { (value, value) }",
+        "struct Point { x: Int } fn bad(value: Point) -> Point { let next = value; value.x; next }",
+        "struct Box<T> { value: T } fn bad<T>(value: &Box<T>) -> Box<T> { value }",
+        "struct Box<T> { value: T } fn bad<T>(value: &Box<T>) -> T { value.value }",
+        "struct Box<T> { value: T } fn bad<T>(value: Box<T>) -> T { value.value }",
+        "struct Box<T> { value: T } fn take<T>(value: T) -> T { value } fn bad<T>(value: &Box<T>) -> T { take(value.value) }",
+        "struct Box<T> { value: T } fn bad<T>(value: &Box<T>) { let owned = value.value; }",
+        "struct Box<T> { value: T } fn bad<T>(value: move Box<T>) {}",
+        "struct Box<T> { value: T } fn bad<T>(value: T) { let owner = Box { value }; }",
+    ] {
+        assert_eq!(
+            error(source).kind,
+            CheckDiagnosticKind::Unsupported,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn nominal_construction_preserves_source_order_and_partial_temporary_cleanup() {
+    for construction in [
+        "Pair { first: value, last: { return; } }",
+        "Choice::Named { first: value, last: { return; } }",
+        "Choice::Pos(value, { return; })",
+    ] {
+        let source = format!(
+            "struct Pair<T> {{ last: Unit, first: T }} enum Choice<T> {{ Named {{ last: Unit, first: T }}, Pos(T, Unit) }} fn bad<T>(value: T) {{ let pending = {construction}; }}"
+        );
+        let diagnostic = error(&source);
+        assert_eq!(diagnostic.kind, CheckDiagnosticKind::Unsupported);
+        assert!(diagnostic.message.contains("temporary"), "{diagnostic:?}");
+    }
+    check(r#"
+struct Pair<T> { first: T, last: Unit }
+fn early<T>(value: T) -> T {
+    let pending = Pair { last: { return value; }, first: value };
+    early(value)
+}
+fn pure_temporary() { let pending = Pair { first: 1, last: { return; } }; }
+"#).expect("actual source order transfers the generic owner before unreachable later fields; pure temporaries may clean up");
+}
+
+#[test]
+fn recursive_nominal_edges_and_nominal_function_groups_close_without_unfolding() {
+    let declarations =
+        "struct Node<T> { value: T, next: Self } struct Grow<T> { next: Grow<(T, T)> }";
+    let first = "fn left<T>(value: Node<T>) -> Node<T> { right(value) }";
+    let second =
+        "fn right<T>(value: Node<T>) -> Node<T> { if true { left(value) } else { value } }";
+    for functions in [format!("{first} {second}"), format!("{second} {first}")] {
+        check(&format!("{declarations} {functions} fn borrow<T>(value: &T) {{}} fn inspect<T>(value: &Grow<T>) {{ borrow(value.next); }}"))
+            .expect("recursive nominal edges remain finite and SCC declaration order does not change checking");
+    }
+    assert_eq!(
+        error("struct Box<T> { value: T } fn bad(value) { bad(Box { value }) }").kind,
+        CheckDiagnosticKind::CallMismatch
+    );
+    check("struct Box<T> { value: T } fn first(value) { second(value).value } fn second(value: Box<Int>) -> Box<Int> { if true { Box { value: first(value) } } else { value } }")
+        .expect("field selection waits for the same SCC constraints and construction fields contribute call edges");
+}
+
+#[test]
+fn nominal_visibility_distinguishes_public_surface_from_private_representation() {
+    check("struct Hidden {} pub struct Wrapper { inner: Hidden } pub fn make() -> Wrapper { Wrapper { inner: Hidden {} } }")
+        .expect("public values may retain private representation fields");
+    for source in [
+        "struct Hidden {} pub fn expose(value: &Hidden) {}",
+        "struct Hidden {} pub fn expose() -> Hidden { Hidden {} }",
+        "struct Hidden {} pub fn expose() { Hidden {} }",
+        "struct Hidden {} pub struct Wrapper { pub inner: Hidden }",
+        "struct Hidden {} pub enum Wrapper { Inner(Hidden) }",
+        "struct Hidden {} pub enum Wrapper { Inner { value: Hidden } }",
+        "struct Hidden {} pub struct Box<T> { pub value: T } pub fn expose(value: &Box<Hidden>) {}",
+        "mod model { pub struct Point { x: Int } } fn bad(value: &model::Point) -> Int { value.x }",
+    ] {
+        assert_eq!(
+            error(source).kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{source}"
+        );
+    }
+    error("mod model { pub struct Point { x: Int } } fn bad() { model::Point { x: 1 }; }");
+}
+
+#[test]
+fn nominal_contract_actuals_match_alpha_formals_and_reject_kind_arity_and_conflicts() {
+    let sources =
+        project("struct Box<T> { value: T } fn forward<T>(value: move Box<T>) -> Box<T> { value }");
+    let formal = function_formal("forward", 0);
+    let nominal = format!(
+        r#"{{"tag":"nominal","declaration":{{"library":{{"tag":"self"}},"path":["Box"],"kind":"struct"}},"arguments":[{formal}]}}"#
+    );
+    let record = |ty: &str| {
+        format!(
+            r#"{{"target":{},"type_parameters":["Alpha"],"set":{{"parameter_types":[{{"parameter":{{"tag":"position","index":0}},"type":{ty}}}],"return_type":{ty},"generic_requirements":[]}}}}"#,
+            function_target("forward")
+        )
+    };
+    let owners = BTreeMap::from([("app".to_owned(), APP)]);
+    check_project(
+        &sources,
+        &owners,
+        vec![contract(&document(&record(&nominal)))],
+    )
+    .expect("contract nominal actuals consume the same function formal relation");
+    for (ty, kind) in [
+        (
+            nominal.replace("\"kind\":\"struct\"", "\"kind\":\"enum\""),
+            CheckDiagnosticKind::ContractBinding,
+        ),
+        (
+            nominal.replace(&format!("[{formal}]"), "[]"),
+            CheckDiagnosticKind::ContractBinding,
+        ),
+        (
+            nominal.replace(&formal, r#"{"tag":"primitive","name":"Int"}"#),
+            CheckDiagnosticKind::ContractConflict,
+        ),
+    ] {
+        let diagnostic = check_project(&sources, &owners, vec![contract(&document(&record(&ty)))])
+            .expect_err("wrong nominal kind, arity or source relationship cannot bind");
+        assert_eq!(diagnostic.kind, kind, "{diagnostic:?}");
+        assert!(matches!(
+            diagnostic.primary,
+            Some(CheckOrigin::Contract { .. })
+        ));
+        assert!(
+            diagnostic
+                .related
+                .iter()
+                .any(|origin| matches!(origin, CheckOrigin::Source(_)))
+        );
+    }
+}
+
+#[test]
+fn nominal_cross_library_contracts_and_reexports_keep_original_identity_and_privacy() {
+    let mut sources = ProjectSources {
+        entry: APP,
+        core: CORE,
+        libraries: with_core(BTreeMap::from([
+            (APP, LibrarySources {
+                root: "use facade::Parcel; pub fn forward<T>(value: move Parcel<T>) -> Parcel<T> { value } fn read(value: &Parcel<Int>) -> Int { value.value }".to_owned(),
+                modules: BTreeMap::new(),
+                dependencies: BTreeMap::from([("facade".to_owned(), DEPENDENCY), ("original".to_owned(), OTHER)]),
+            }),
+            (DEPENDENCY, LibrarySources {
+                root: "pub use model::Box as Parcel; pub type NumberBox = Parcel<Int>;".to_owned(),
+                modules: BTreeMap::new(),
+                dependencies: BTreeMap::from([("model".to_owned(), OTHER)]),
+            }),
+            (OTHER, LibrarySources {
+                root: "pub struct Box<T> { pub value: T }".to_owned(),
+                modules: BTreeMap::new(),
+                dependencies: BTreeMap::new(),
+            }),
+        ])),
+    };
+    let formal = function_formal("forward", 0);
+    let nominal = format!(
+        r#"{{"tag":"nominal","declaration":{{"library":{{"tag":"dependency","alias":"facade"}},"path":["Parcel"],"kind":"struct"}},"arguments":[{formal}]}}"#
+    );
+    let record = format!(
+        r#"{{"target":{},"type_parameters":["Renamed"],"set":{{"return_type":{nominal}}}}}"#,
+        function_target("forward")
+    );
+    let owners = BTreeMap::from([("app".to_owned(), APP)]);
+    check_project(&sources, &owners, vec![contract(&document(&record))])
+        .expect("a contract and source facade consume the same original nominal declaration");
+    sources.libraries.get_mut(&APP).unwrap().root =
+        "use facade::NumberBox; fn forward(value: NumberBox) -> original::Box<Int> { value }"
+            .to_owned();
+    check_project(&sources, &BTreeMap::new(), Vec::new())
+        .expect("transparent aliases preserve nominal actuals and origin");
+    sources.libraries.get_mut(&DEPENDENCY).unwrap().root =
+        "pub struct Box<T> { pub value: T }".to_owned();
+    sources.libraries.get_mut(&APP).unwrap().root =
+        "fn wrong(value: facade::Box<Int>) -> original::Box<Int> { value }".to_owned();
+    let diagnostic = check_project(&sources, &BTreeMap::new(), Vec::new())
+        .expect_err("same spelling and structure in different libraries cannot unify");
+    assert_eq!(diagnostic.kind, CheckDiagnosticKind::ReturnMismatch);
+    sources.libraries.get_mut(&OTHER).unwrap().root = "pub struct Box<T> { value: T }".to_owned();
+    sources.libraries.get_mut(&APP).unwrap().root =
+        "fn wrong(value: &original::Box<Int>) -> Int { value.value }".to_owned();
+    let diagnostic = check_project(&sources, &BTreeMap::new(), Vec::new())
+        .expect_err("cross-library private fields remain inaccessible");
+    assert_eq!(diagnostic.kind, CheckDiagnosticKind::TypeMismatch);
+    assert!(
+        diagnostic
+            .related
+            .iter()
+            .any(|origin| matches!(origin, CheckOrigin::Source(origin) if origin.library == OTHER))
+    );
+}
+
+#[test]
+fn nominal_support_does_not_ignore_bounds_impls_or_open_adjacent_capabilities() {
+    for source in [
+        "struct Box<T: Copy> { value: T }",
+        "enum Choice<T: Clone> { Value(T) }",
+        "struct Value {} impl Value { fn get(self: &Self) -> Int { 1 } }",
+        "struct Value {} impl Drop for Value { fn drop(self: &mut Self) -> Unit {} }",
+        "struct Box<T> { value: T } type Alias<T> = Box<T>;",
+        "struct Value { text: Str }",
+        "struct Value { items: List<Int> }",
+        "struct Point { x: Int } fn bad(value: Point) -> Point { Point { ..value, x: 2 } }",
+        "struct Point { x: Int } fn bad(value: &Point) -> Int { value.method() }",
+        "struct Point { x: Int } fn bad(value: &Point) -> Bool { value == value }",
+    ] {
+        assert_eq!(
+            error(source).kind,
+            CheckDiagnosticKind::Unsupported,
+            "{source}"
+        );
     }
 }
