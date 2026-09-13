@@ -44,7 +44,7 @@ Annotated tag `canonical-clean-tree` 只标记第一份完成 current-tree clean
 
 可读取不等于具有规范或验收效力。当前 repository 事实必须从 remote default-branch exact head 的 current authority 取得，当前范围只由采用的 immutable Issue 原生正文修订冻结，candidate 与 gate 证据只绑定 PR head exact SHA。历史源码、测试、文档、PR、评论与结论可以辅助调查，但除非 current authority 或当前 Issue 明确把某个历史对象列为输入，否则不得替代当前实现、contract 或验证证据。
 
-Task、chat、摘要与阶段输出可以用于编排和定位，但仍受本 skill 各角色的输入与独立取证规则约束，不能把前一阶段的判断直接升级为后一阶段证据。发现来源冲突、stale snapshot 或证据缺口时，阶段 task 按其固定 status 返回，主 Planning 会话报告风险并继续履行路由职责。只有用户可以判定主 Planning 会话失效、重置或更换，并主动开启新的主会话；agent 与阶段 task 不得自行替换主会话。
+Task、chat、摘要与阶段输出可以用于编排和定位，但仍受本 skill 各角色的输入与独立取证规则约束，不能把前一阶段的判断直接升级为后一阶段证据。发现来源冲突、stale snapshot 或证据缺口时，阶段 task 按其固定 status 返回，主 Planning 会话报告风险并继续履行路由职责。普通流程下，只有用户可以决定更换主 Planning 会话；达到下文用户已批准的 unwind 条件时，必须更换全部会话，旧尝试的历史读取与输入传递改按 [unwind](references/unwind.md) 执行。
 
 ## 范围防火墙
 
@@ -59,7 +59,7 @@ Issue 只冻结可观察结果、必要边界与最小充分 gate，不预先加
 
 ### Planning 与 Readiness
 
-Planning 把当前 Milestone 的现实缺口收敛为 Issue。Planning 只向 fresh Readiness 提供 repository full name、当前 Milestone 编号或 URL、当前 Issue 编号或 URL、默认分支名称这些稳定标识符；不得提供或转述 Milestone/Issue body、正文修订、评论、PR 状态、default-branch SHA、repository 内容、diff、摘要、旧任务结论或其它事实 snapshot。
+Planning 把当前 Milestone 的现实缺口收敛为 Issue。Planning 只向 fresh Readiness 提供 repository full name、当前 Milestone 编号或 URL、当前 Issue 编号或 URL、默认分支名称这些稳定标识符；不得提供或转述 Milestone/Issue body、正文修订、评论、PR 状态、default-branch SHA、repository 内容、diff、摘要、旧任务结论或其它事实 snapshot。Unwind 后须另传“unwind 后的新尝试”这一工作模式，使 fresh 角色在查询前采用 [unwind 读取边界](references/unwind.md)；该模式不携带旧对象标识或结论。
 
 Readiness 必须是以 Full access（`danger-full-access` 或宿主等价模式）启动的 fresh、只读 task。Full access 只提供独立访问 GitHub、网络与本机 Git objects 的能力，不扩大角色授权；任何 repository、GitHub 或外部状态写入都会使该 Readiness 无效。
 
@@ -106,10 +106,12 @@ Verification 必须是 fresh、read-only task，在 PR head SHA 对应的 clean 
 
 - 不静默重跑失败命令，先保留 exact failure。`NEEDS_CLARIFICATION` 只在 Issue 不变时由同一 Execution task 续接。
 - Issue 出现新正文编辑时，阶段先核对原生修订与实际变化：Execution 在合同不变但只缺精确事实时可按 `NEEDS_CLARIFICATION` 续接，范围、设计、验收、依赖或用户保留决定变化时立即 `NEEDS_DECISION`；修订身份或变化无法核对时，Readiness 使用 `BLOCKED`、Execution 使用 `FAILED`、Verification 使用 `EVIDENCE_GAP` 报告实际证据缺口。任何路径都不得在原阶段静默替换采用的修订。
-- 同一 Issue 连续两轮独立 Verification 未通过后，立即暂停返修并保留原 task、branch、PR 与 worktree；非 `PASS` 裁决及未形成有效终态的中断均计入，开发阶段的单次命令失败不计为独立轮次。Planning 先做只读评估，向用户报告问题是否源于架构或实现路线、初始实现是否已偏离合同、已确认的共同根因与证据缺口，以及继续修复、替换相关机制或重做分支的建议。须区分产品缺陷与证据/基础设施问题，不能仅因检查未过就断言架构错误。
-- 触发两轮暂停后，必须取得用户针对本次评估的明确批准，才可按批准的路线和范围恢复；此前的开工、继续推进或自动返修授权不能代替这次批准。批准前不得继续小修、重写，或启动新实现/验证来试错。计数在用户明确批准后续执行时重新开始，不能由 agent 自行归零。
-- 未触发上述暂停门，且合同及用户保留决定不变时，局部实现缺陷与 `PRODUCT_FAIL` 均由原 Execution task 续接修复，沿用该 Issue 的唯一 branch、PR 与 worktree，不因该 verdict 重启。Planning 只转交绑定 candidate SHA 的 Verifier findings 与原始证据；Execution 自行复核触发条件，不将 Verifier 判断当作新的合同。任一修复产生新 SHA 后重开 fresh Verification。
-- 合同不变但实现路线失败时，也须先遵守上述暂停与批准要求，再由原 Execution 删除失败路径并重做，不得建立 compatibility bridge、双实现或临时第二 authority。
+- 每次实现尝试最多容许两轮初始 Verification，以及一次人工架构审核批准后的两轮恢复 Verification。任意非 `PASS` 裁决及未形成有效终态的中断均消耗一轮；开发命令失败不计入。Planning 在既有 PR 验证区记录尝试内累计失败数、当前处于初始还是恢复阶段及剩余机会，不另建状态系统。普通“继续”、换 SHA、换 agent、改写实现或重新批准小修均不能归零或增加机会。
+- 初始第 1 轮失败：合同及用户保留决定不变时，允许原 Execution 返修一次；Planning 只转交绑定 candidate SHA 的 findings 与原始证据，由 Execution 独立复核。同一 Issue 仍只保留一个 writer、branch 和 active PR；修复产生新 SHA 后必须 fresh Verification。
+- 初始第 2 轮失败：立即暂停全部返修并保留原 task、branch、PR 与 worktree，进入只读架构复审。复审以“路线或初始实现可能已经跑偏”为默认假设，主动找反证，不以已有投入、局部测试通过或前轮修复成功证明原路线成立。报告合同要求与实际行为的差距、失败是否共享根因、初始实现是否偏离、已被证据反驳的假设、实际未解决的困难与证据缺口，以及保留、替换相关机制或丢弃实现的建议。区分产品缺陷与证据/基础设施问题，不把默认怀疑写成未经证明的产品结论。
+- 必须取得用户针对这次架构复审的明确批准，才可按批准路线进入恢复阶段；批准前不得小修、重写或启动实现/验证试错。恢复阶段总共只给两轮 Verification：第 1 轮失败仍可由原 Execution 返修，第 2 轮失败立即触发 [unwind](references/unwind.md)，不得再以一次架构复审或普通批准开启第五轮。累计失败数保留，不把人工批准解释成无限重置。
+- 恢复机会耗尽时，默认本次路线有重大偏差且当前 agent 团队未能纠正，终止本次尝试。该停止规则同样适用于证据/基础设施导致的机会耗尽；报告仍须如实区分原因，不能捏造架构缺陷。除完成 unwind 外，旧主会话和全部阶段 agent 均不得继续设计、实现或验证；只有完成清理与全体 fresh 重开后，新尝试才重新计数。
+- 合同不变但实现路线失败时，只能在上述额度和人工批准内按批准路线重做，不得建立 compatibility bridge、双实现或临时第二 authority。用户明确指定不同恢复流程时按其新决定执行，不得由 agent 自行推定例外。
 - `NEEDS_DECISION`，或发现规范、公开语义、保证、依赖、抽象边界、验收需要改变时，第一次即停止并返回 Planning；由用户决定并更新 Issue body 后重开 fresh Readiness，不得边实现边追加 Issue 评论。
 - `EVIDENCE_GAP` 回到 Planning；`INFRA_BLOCKED` 只处理已确认且与 candidate 行为无关的基础设施阻塞。Execution `FAILED` 按已确认原因进入上述对应路由，不得自动重跑。
 - 默认不设置 task-local 资源限制。只有实测失败、实测超时或相同且已记录的 case 才能按证据设置限制；未知时长不能用预测式 wall timeout。
@@ -120,9 +122,10 @@ Verification 必须是 fresh、read-only task，在 PR head SHA 对应的 clean 
 - Planning 将 Readiness、Execution、每轮 Verification 的载体、可追查标识与对应 SHA、裁决保留在 `验证` 区的 `<details>` 折叠区域：用户级 session 记录 `threadId`，subagent 记录所属主会话 `threadId` 与 agent ID。
 - Execution 发布开发检查与净新增责任的报告评论，并在正文提供摘要与链接。Verifier 保持只读，在固定终态中向 Planning 提供裁决和必要原始证据；Planning 发布每轮 Verification 报告评论并更新正文摘要。
 - 同一 candidate 的同一轮阶段证据汇总为一条报告评论，明确阶段、SHA 与采用的原生修订；新候选或新轮次追加报告并保留旧证据。报告评论不追加或覆盖 Issue contract，也不替代后续阶段的独立取证；普通命令流水不写 Issue 评论。
+- 以上记录保留规则适用于正常执行与两轮暂停；触发 unwind 后按其清理规则处理，旧执行记录不得成为新尝试的输入。
 
 ## Merge 与归档
 
 - 归档或释放 task 可能使会话或 worktree 不可恢复；Planning 只有确认 task 不可能再被合法恢复时才可执行。Executor 与 Verifier 的 exact 可恢复边界分别见对应角色模板。
 - 归档不是 merge 前置条件。只有未变化 SHA 的 canonical gates、Debt Gate `PASS`、Verifier `PASS` 和已有 merge 预授权同时成立时，Planning 才可 merge。
-- Merge 后，Planning 归档或释放该 Issue 剩余的 Executor 与后台 task。只有用户能决定主 Planning 会话失效、重置或更换并主动开启新的主会话；agent 只能凭具体证据建议，不得自行创建 replacement Planning。
+- Merge 后，Planning 归档或释放该 Issue 剩余的 Executor 与后台 task。普通流程不得自行创建 replacement Planning；用户已批准的 unwind 是必须替换主会话及全部阶段 agent 的独立终止路径，不以 merge 为前提。

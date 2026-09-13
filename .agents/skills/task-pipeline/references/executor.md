@@ -4,6 +4,7 @@
 
 ## 输入
 
+- 工作模式：`<普通尝试 | unwind 后的新尝试>`；后者先采用主 skill 的 unwind 读取边界。
 - Issue：`<Issue URL / #N>`，唯一 immutable contract
 - Contract revision：`<Readiness 采用的 UserContentEdit ID、lastEditedAt/editedAt、editor；或创建时正文及 Issue createdAt>`
 - Start SHA：`<默认分支 40-hex commit>`
@@ -28,7 +29,7 @@
 
 ## 共享规则
 
-Candidate/证据、Debt Gate、PR 记录与报告、重试与资源、task 归档只按主 skill 的对应章节执行，不在本模板复述。Executor 的报告评论记录采用的 Contract revision、开发检查，以及每项净新增的当前 consumer、承担的责任及更小替代为何不足，但不裁定 Debt Gate；Local whitespace 开发检查展开并记录 PR base、merge-base 与 exact candidate SHA。正文保留主 skill 要求的验证摘要、阶段身份与报告链接。输出 `READY_FOR_VERIFICATION` 后仍须保持 task/worktree 可恢复，直到 PR merge。
+Candidate/证据、Debt Gate、PR 记录与报告、重试与资源、task 归档只按主 skill 的对应章节执行，不在本模板复述。Executor 的报告评论记录采用的 Contract revision、开发检查，以及每项净新增的当前 consumer、承担的责任及更小替代为何不足，但不裁定 Debt Gate；Local whitespace 开发检查展开并记录 PR base、merge-base 与 exact candidate SHA。正文保留主 skill 要求的验证摘要、阶段身份与报告链接。输出 `READY_FOR_VERIFICATION` 后仍须保持 task/worktree 可恢复，直到 PR merge 或主 skill 的 unwind 终止本次尝试；unwind 后不得续接本 task。
 
 ## Status
 

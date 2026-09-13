@@ -4,6 +4,7 @@
 
 ## 输入
 
+- 工作模式：`<普通尝试 | unwind 后的新尝试>`；后者先采用主 skill 的 unwind 读取边界。
 - Issue：`<Issue URL / #N>`，唯一 contract
 - Contract revision：`<Readiness 采用的 UserContentEdit ID、lastEditedAt/editedAt、editor；或创建时正文及 Issue createdAt>`
 - PR：`<唯一 active PR URL>`
