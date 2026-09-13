@@ -4874,6 +4874,12 @@ fn validate_usage_expr(
     inference: &TypeInference,
     nominals: &BTreeMap<EntityId, NominalDefinition>,
 ) -> Result<Option<UsageState>, CheckDiagnostic> {
+    // Parentheses forward the same usage context and state unchanged. Walk
+    // through them here instead of retaining a full usage frame for each one.
+    let mut expression = expression;
+    while let TypedExprKind::Parenthesized(ref mut inner) = expression.kind {
+        expression = inner;
+    }
     let Some(mut state) = state else {
         close_unreachable_expr(expression, context, headers, inference);
         return Ok(None);
@@ -4949,18 +4955,7 @@ fn validate_usage_expr(
                 }
             }
         }
-        TypedExprKind::Parenthesized(inner) => {
-            let next = validate_usage_expr(
-                inner,
-                context,
-                Some(state),
-                headers,
-                function,
-                inference,
-                nominals,
-            )?;
-            return Ok(next);
-        }
+        TypedExprKind::Parenthesized(_) => unreachable!("parentheses were traversed above"),
         TypedExprKind::Tuple(elements) => {
             let mut continuation = Some(state);
             for element in elements.iter_mut() {
@@ -6443,6 +6438,18 @@ impl<'project, 'borrow> BodyChecker<'project, 'borrow> {
     ) -> Result<TypedExpr, CheckDiagnostic> {
         let left = self.check_expr(left)?;
         let right = self.check_expr(right)?;
+        self.check_binary_operands(origin, left, operator, right)
+    }
+
+    // Operator checking needs its own temporaries only after both child checks
+    // return; do not retain that frame through a nested binary expression.
+    fn check_binary_operands(
+        &mut self,
+        origin: OriginRef,
+        left: TypedExpr,
+        operator: (Span, BinaryOperator),
+        right: TypedExpr,
+    ) -> Result<TypedExpr, CheckDiagnostic> {
         let left_never = self.is_never(&left.ty);
         let right_never = self.is_never(&right.ty);
         let diverges = left_never || right_never;

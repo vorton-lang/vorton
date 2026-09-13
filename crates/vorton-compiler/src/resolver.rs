@@ -5193,208 +5193,265 @@ impl BodyResolver<'_> {
         })
     }
 
+    // Return branch results directly so only the selected branch keeps its
+    // temporaries alive across child resolution in unoptimized builds.
     fn resolve_expr(&mut self, expression: &Expr) -> Result<ResolvedExpr, ProjectDiagnostic> {
         let kind = match &expression.kind {
-            ExprKind::Integer(value) => ResolvedExprKind::Integer(value.clone()),
-            ExprKind::Float(value) => ResolvedExprKind::Float(value.clone()),
-            ExprKind::String(value) => ResolvedExprKind::String(value.clone()),
-            ExprKind::RawString { value, delimiter } => ResolvedExprKind::RawString {
+            ExprKind::Integer(value) => Ok(ResolvedExprKind::Integer(value.clone())),
+            ExprKind::Float(value) => Ok(ResolvedExprKind::Float(value.clone())),
+            ExprKind::String(value) => Ok(ResolvedExprKind::String(value.clone())),
+            ExprKind::RawString { value, delimiter } => Ok(ResolvedExprKind::RawString {
                 value: value.clone(),
                 delimiter: *delimiter,
-            },
-            ExprKind::InterpolatedString(parts) => ResolvedExprKind::InterpolatedString(
-                parts
-                    .iter()
-                    .map(|part| match part {
-                        InterpolationPart::String(value) => Ok(ResolvedInterpolationPart::String {
-                            origin: self.origin(value.span),
-                            value: value.value.clone(),
-                        }),
-                        InterpolationPart::Expression(expression) => {
-                            Ok(ResolvedInterpolationPart::Expression(Box::new(
-                                self.resolve_expr(expression)?,
-                            )))
-                        }
-                    })
-                    .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
-            ),
-            ExprKind::Boolean(value) => ResolvedExprKind::Boolean(*value),
-            ExprKind::Path(path) => {
-                ResolvedExprKind::Path(self.resolve_path(path, ExpectedName::Value)?)
-            }
+            }),
+            ExprKind::InterpolatedString(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    InterpolationPart::String(value) => Ok(ResolvedInterpolationPart::String {
+                        origin: self.origin(value.span),
+                        value: value.value.clone(),
+                    }),
+                    InterpolationPart::Expression(expression) => {
+                        self.resolve_expr(expression).map(|expression| {
+                            ResolvedInterpolationPart::Expression(Box::new(expression))
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(ResolvedExprKind::InterpolatedString),
+            ExprKind::Boolean(value) => Ok(ResolvedExprKind::Boolean(*value)),
+            ExprKind::Path(path) => self
+                .resolve_path(path, ExpectedName::Value)
+                .map(ResolvedExprKind::Path),
             ExprKind::NamedConstruct { path, entries } => {
-                let target = self.resolve_path(path, ExpectedName::Construct)?;
-                let mut resolved_entries = Vec::new();
-                for entry in entries {
-                    resolved_entries.push(match &entry.kind {
-                        ConstructEntryKind::Spread(expression) => {
-                            ResolvedConstructEntry::Spread(self.resolve_expr(expression)?)
-                        }
-                        ConstructEntryKind::Field { name, value } => {
-                            let member = self.required_member_for_reference(
-                                &target,
-                                name,
-                                EntityKind::Field,
-                            )?;
-                            let shorthand = if value.is_none() {
-                                Some(Box::new(self.resolve_path(
-                                    &single_identifier_path(name),
-                                    ExpectedName::Value,
-                                )?))
-                            } else {
-                                None
-                            };
-                            ResolvedConstructEntry::Field {
-                                member,
-                                value: value
-                                    .as_ref()
-                                    .map(|value| self.resolve_expr(value).map(Box::new))
-                                    .transpose()?,
-                                shorthand,
-                            }
-                        }
-                    });
-                }
-                ResolvedExprKind::NamedConstruct {
-                    target,
-                    entries: resolved_entries,
-                }
+                self.resolve_named_construction(path, entries)
             }
-            ExprKind::List(elements) => ResolvedExprKind::List(
-                elements
-                    .iter()
-                    .map(|element| self.resolve_expr(element))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            ExprKind::Unit => ResolvedExprKind::Unit,
-            ExprKind::Parenthesized(inner) => {
-                ResolvedExprKind::Parenthesized(Box::new(self.resolve_expr(inner)?))
-            }
-            ExprKind::Tuple(elements) => ResolvedExprKind::Tuple(
-                elements
-                    .iter()
-                    .map(|element| self.resolve_expr(element))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            ExprKind::Block(block) => ResolvedExprKind::Block(self.resolve_block(block)?),
+            ExprKind::List(elements) => elements
+                .iter()
+                .map(|element| self.resolve_expr(element))
+                .collect::<Result<Vec<_>, _>>()
+                .map(ResolvedExprKind::List),
+            ExprKind::Unit => Ok(ResolvedExprKind::Unit),
+            ExprKind::Parenthesized(inner) => self
+                .resolve_expr(inner)
+                .map(|inner| ResolvedExprKind::Parenthesized(Box::new(inner))),
+            ExprKind::Tuple(elements) => elements
+                .iter()
+                .map(|element| self.resolve_expr(element))
+                .collect::<Result<Vec<_>, _>>()
+                .map(ResolvedExprKind::Tuple),
+            ExprKind::Block(block) => self.resolve_block(block).map(ResolvedExprKind::Block),
             ExprKind::If {
                 condition,
                 then_branch,
                 else_branch,
-            } => ResolvedExprKind::If {
-                condition: Box::new(self.resolve_expr(condition)?),
-                then_branch: self.resolve_block(then_branch)?,
-                else_branch: else_branch
-                    .as_ref()
-                    .map(|branch| self.resolve_expr(branch).map(Box::new))
-                    .transpose()?,
-            },
-            ExprKind::Match { scrutinee, arms } => ResolvedExprKind::Match {
-                scrutinee: Box::new(self.resolve_expr(scrutinee)?),
-                arms: arms
-                    .iter()
-                    .map(|arm| self.resolve_match_arm(arm))
-                    .collect::<Result<Vec<_>, _>>()?,
-            },
-            ExprKind::Handle { body, handlers } => ResolvedExprKind::Handle {
-                body: self.resolve_block(body)?,
-                handlers: handlers
-                    .iter()
-                    .map(|handler| self.resolve_handler(handler))
-                    .collect::<Result<Vec<_>, _>>()?,
-            },
-            ExprKind::Closure(closure) => {
-                ResolvedExprKind::Closure(self.resolve_closure(expression.span, closure)?)
+            } => self.resolve_if_expression(condition, then_branch, else_branch.as_deref()),
+            ExprKind::Match { scrutinee, arms } => {
+                self.resolve_expr(scrutinee).and_then(|scrutinee| {
+                    Ok(ResolvedExprKind::Match {
+                        scrutinee: Box::new(scrutinee),
+                        arms: arms
+                            .iter()
+                            .map(|arm| self.resolve_match_arm(arm))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    })
+                })
             }
-            ExprKind::Unsafe(block) => ResolvedExprKind::Unsafe(self.resolve_block(block)?),
-            ExprKind::Catch { expression, arms } => ResolvedExprKind::Catch {
-                expression: Box::new(self.resolve_expr(expression)?),
-                arms: arms
-                    .iter()
-                    .map(|arm| self.resolve_match_arm(arm))
-                    .collect::<Result<Vec<_>, _>>()?,
-            },
-            ExprKind::Unary { operator, operand } => ResolvedExprKind::Unary {
-                operator: (operator.span, operator.kind),
-                operand: Box::new(self.resolve_expr(operand)?),
-            },
+            ExprKind::Handle { body, handlers } => self.resolve_block(body).and_then(|body| {
+                Ok(ResolvedExprKind::Handle {
+                    body,
+                    handlers: handlers
+                        .iter()
+                        .map(|handler| self.resolve_handler(handler))
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            }),
+            ExprKind::Closure(closure) => self
+                .resolve_closure(expression.span, closure)
+                .map(ResolvedExprKind::Closure),
+            ExprKind::Unsafe(block) => self.resolve_block(block).map(ResolvedExprKind::Unsafe),
+            ExprKind::Catch { expression, arms } => {
+                self.resolve_expr(expression).and_then(|expression| {
+                    Ok(ResolvedExprKind::Catch {
+                        expression: Box::new(expression),
+                        arms: arms
+                            .iter()
+                            .map(|arm| self.resolve_match_arm(arm))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    })
+                })
+            }
+            ExprKind::Unary { operator, operand } => {
+                self.resolve_expr(operand)
+                    .map(|operand| ResolvedExprKind::Unary {
+                        operator: (operator.span, operator.kind),
+                        operand: Box::new(operand),
+                    })
+            }
             ExprKind::Binary {
                 left,
                 operator,
                 right,
-            } => ResolvedExprKind::Binary {
-                left: Box::new(self.resolve_expr(left)?),
-                operator: (operator.span, operator.kind),
-                right: Box::new(self.resolve_expr(right)?),
-            },
-            ExprKind::Propagate(inner) => {
-                ResolvedExprKind::Propagate(Box::new(self.resolve_expr(inner)?))
+            } => self.resolve_binary_expression(left, operator, right),
+            ExprKind::Propagate(inner) => self
+                .resolve_expr(inner)
+                .map(|inner| ResolvedExprKind::Propagate(Box::new(inner))),
+            ExprKind::Call { callee, arguments } => self.resolve_call_expression(callee, arguments),
+            ExprKind::Index { receiver, index } => {
+                self.resolve_expr(receiver).and_then(|receiver| {
+                    Ok(ResolvedExprKind::Index {
+                        receiver: Box::new(receiver),
+                        index: Box::new(self.resolve_expr(index)?),
+                    })
+                })
             }
-            ExprKind::Call { callee, arguments } => ResolvedExprKind::Call {
-                callee: Box::new(self.resolve_expr(callee)?),
-                arguments: arguments
-                    .iter()
-                    .map(|argument| self.resolve_call_argument(argument))
-                    .collect::<Result<Vec<_>, _>>()?,
-            },
-            ExprKind::Index { receiver, index } => ResolvedExprKind::Index {
-                receiver: Box::new(self.resolve_expr(receiver)?),
-                index: Box::new(self.resolve_expr(index)?),
-            },
-            ExprKind::TupleField { receiver, index } => ResolvedExprKind::TupleField {
-                receiver: Box::new(self.resolve_expr(receiver)?),
-                index: index.value.clone(),
-                origin: self.origin(index.span),
-            },
-            ExprKind::Field { receiver, name } => ResolvedExprKind::Field {
-                receiver: Box::new(self.resolve_expr(receiver)?),
-                field: ResolvedSelection {
-                    origin: self.origin(name.span),
-                    name: name.text.clone(),
-                    declaration: None,
-                },
-            },
+            ExprKind::TupleField { receiver, index } => {
+                self.resolve_expr(receiver)
+                    .map(|receiver| ResolvedExprKind::TupleField {
+                        receiver: Box::new(receiver),
+                        index: index.value.clone(),
+                        origin: self.origin(index.span),
+                    })
+            }
+            ExprKind::Field { receiver, name } => {
+                self.resolve_expr(receiver)
+                    .map(|receiver| ResolvedExprKind::Field {
+                        receiver: Box::new(receiver),
+                        field: ResolvedSelection {
+                            origin: self.origin(name.span),
+                            name: name.text.clone(),
+                            declaration: None,
+                        },
+                    })
+            }
             ExprKind::MethodCall {
                 receiver,
                 method,
                 arguments,
-            } => {
-                let receiver = if let ExprKind::Path(path) = &receiver.kind {
-                    ResolvedExpr {
-                        span: receiver.span,
-                        kind: ResolvedExprKind::Path(
-                            self.resolve_method_receiver_path(path, method)?,
-                        ),
-                    }
-                } else {
-                    self.resolve_expr(receiver)?
-                };
-                let method = match &receiver.kind {
-                    ResolvedExprKind::Path(reference)
-                        if reference_exact_target(reference)
-                            .is_some_and(|target| target.namespace == Namespace::Effect) =>
-                    {
-                        self.resolve_effect_operation(reference, method)?
-                    }
-                    _ => ResolvedSelection {
-                        origin: self.origin(method.span),
-                        name: method.text.clone(),
-                        declaration: None,
-                    },
-                };
-                ResolvedExprKind::MethodCall {
-                    receiver: Box::new(receiver),
-                    method,
-                    arguments: arguments
-                        .iter()
-                        .map(|argument| self.resolve_call_argument(argument))
-                        .collect::<Result<Vec<_>, _>>()?,
-                }
-            }
-        };
+            } => self.resolve_method_call(receiver, method, arguments),
+        }?;
         Ok(ResolvedExpr {
             span: expression.span,
             kind,
+        })
+    }
+
+    fn resolve_if_expression(
+        &mut self,
+        condition: &Expr,
+        then_branch: &Block,
+        else_branch: Option<&Expr>,
+    ) -> Result<ResolvedExprKind, ProjectDiagnostic> {
+        Ok(ResolvedExprKind::If {
+            condition: Box::new(self.resolve_expr(condition)?),
+            then_branch: self.resolve_block(then_branch)?,
+            else_branch: else_branch
+                .map(|branch| self.resolve_expr(branch).map(Box::new))
+                .transpose()?,
+        })
+    }
+
+    fn resolve_binary_expression(
+        &mut self,
+        left: &Expr,
+        operator: &Spanned<BinaryOperator>,
+        right: &Expr,
+    ) -> Result<ResolvedExprKind, ProjectDiagnostic> {
+        Ok(ResolvedExprKind::Binary {
+            left: Box::new(self.resolve_expr(left)?),
+            operator: (operator.span, operator.kind),
+            right: Box::new(self.resolve_expr(right)?),
+        })
+    }
+
+    fn resolve_call_expression(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CallArgument],
+    ) -> Result<ResolvedExprKind, ProjectDiagnostic> {
+        Ok(ResolvedExprKind::Call {
+            callee: Box::new(self.resolve_expr(callee)?),
+            arguments: arguments
+                .iter()
+                .map(|argument| self.resolve_call_argument(argument))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    fn resolve_named_construction(
+        &mut self,
+        path: &Path,
+        entries: &[ConstructEntry],
+    ) -> Result<ResolvedExprKind, ProjectDiagnostic> {
+        let target = self.resolve_path(path, ExpectedName::Construct)?;
+        let mut resolved_entries = Vec::new();
+        for entry in entries {
+            resolved_entries.push(match &entry.kind {
+                ConstructEntryKind::Spread(expression) => {
+                    ResolvedConstructEntry::Spread(self.resolve_expr(expression)?)
+                }
+                ConstructEntryKind::Field { name, value } => {
+                    let member =
+                        self.required_member_for_reference(&target, name, EntityKind::Field)?;
+                    let shorthand = if value.is_none() {
+                        Some(Box::new(self.resolve_path(
+                            &single_identifier_path(name),
+                            ExpectedName::Value,
+                        )?))
+                    } else {
+                        None
+                    };
+                    ResolvedConstructEntry::Field {
+                        member,
+                        value: value
+                            .as_ref()
+                            .map(|value| self.resolve_expr(value).map(Box::new))
+                            .transpose()?,
+                        shorthand,
+                    }
+                }
+            });
+        }
+        Ok(ResolvedExprKind::NamedConstruct {
+            target,
+            entries: resolved_entries,
+        })
+    }
+
+    fn resolve_method_call(
+        &mut self,
+        receiver: &Expr,
+        method: &Identifier,
+        arguments: &[CallArgument],
+    ) -> Result<ResolvedExprKind, ProjectDiagnostic> {
+        let receiver = if let ExprKind::Path(path) = &receiver.kind {
+            ResolvedExpr {
+                span: receiver.span,
+                kind: ResolvedExprKind::Path(self.resolve_method_receiver_path(path, method)?),
+            }
+        } else {
+            self.resolve_expr(receiver)?
+        };
+        let method = match &receiver.kind {
+            ResolvedExprKind::Path(reference)
+                if reference_exact_target(reference)
+                    .is_some_and(|target| target.namespace == Namespace::Effect) =>
+            {
+                self.resolve_effect_operation(reference, method)?
+            }
+            _ => ResolvedSelection {
+                origin: self.origin(method.span),
+                name: method.text.clone(),
+                declaration: None,
+            },
+        };
+        Ok(ResolvedExprKind::MethodCall {
+            receiver: Box::new(receiver),
+            method,
+            arguments: arguments
+                .iter()
+                .map(|argument| self.resolve_call_argument(argument))
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 
