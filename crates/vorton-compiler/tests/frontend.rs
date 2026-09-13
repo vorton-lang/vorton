@@ -755,6 +755,156 @@ fn preserves_precedence_and_associativity() {
             ..
         }
     ));
+
+    let mixed = tail_expression("a < b == c < d");
+    let ExprKind::Binary {
+        left,
+        operator,
+        right,
+    } = mixed.kind
+    else {
+        panic!("equality expression expected")
+    };
+    assert_eq!(operator.kind, BinaryOperator::Equal);
+    for comparison in [left, right] {
+        assert!(matches!(
+            comparison.kind,
+            ExprKind::Binary {
+                operator: Spanned {
+                    kind: BinaryOperator::Less,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+    for source in ["a || b < c < d", "a == b < c < d", "a && b == c != d"] {
+        let diagnostic = parse(&format!("fn probe() {{ {source} }}")).unwrap_err();
+        let last_operator = source.rfind(['<', '!']).unwrap();
+        assert_eq!(diagnostic.span.start, "fn probe() { ".len() + last_operator);
+        assert!(matches!(
+            diagnostic.kind,
+            FrontendDiagnosticKind::UnexpectedToken { .. }
+        ));
+    }
+}
+
+#[test]
+fn nested_expressions_fit_the_default_windows_stack() {
+    // The test harness normally gives its threads more than the failing
+    // Windows main thread's 1 MiB stack. Keep parse, observation, and Drop here.
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            let header = "// 前\nfn probe() { ";
+            for (prefix, suffix) in [
+                ("Wrap { value: ", " }"),
+                ("if true { ", " } else { 0 }"),
+                ("f(", ")"),
+                ("\"前${", "}後\""),
+            ] {
+                let source = format!("{header}{}1{} }}", prefix.repeat(32), suffix.repeat(32));
+                eprintln!("ENTER parse {prefix}");
+                let program = parse(&source).unwrap();
+                eprintln!("RETURN parse");
+                let DeclarationKind::Function(function) = &declaration(&program, 0).kind else {
+                    panic!("function expected")
+                };
+                let mut expression = function.item.body.tail.as_deref().unwrap();
+                let mut span = Span {
+                    start: header.len(),
+                    end: source.len() - 2,
+                };
+                for _ in 0..32 {
+                    assert_eq!(expression.span, span);
+                    expression = match (prefix, &expression.kind) {
+                        ("Wrap { value: ", ExprKind::NamedConstruct { path, entries }) => {
+                            assert_eq!(&source[path.span.start..path.span.end], "Wrap");
+                            assert_eq!(entries.len(), 1);
+                            let ConstructEntryKind::Field { name, value } = &entries[0].kind else {
+                                panic!("named field expected")
+                            };
+                            assert_eq!(name.text, "value");
+                            value.as_ref().unwrap()
+                        }
+                        (
+                            "if true { ",
+                            ExprKind::If {
+                                condition,
+                                then_branch,
+                                else_branch,
+                            },
+                        ) => {
+                            assert!(matches!(condition.kind, ExprKind::Boolean(true)));
+                            assert!(then_branch.statements.is_empty());
+                            let ExprKind::Block(block) = &else_branch.as_ref().unwrap().kind else {
+                                panic!("else block expected")
+                            };
+                            assert!(matches!(
+                                &block.tail.as_ref().unwrap().kind,
+                                ExprKind::Integer(value) if value == "0"
+                            ));
+                            then_branch.tail.as_deref().unwrap()
+                        }
+                        ("f(", ExprKind::Call { callee, arguments }) => {
+                            assert!(matches!(callee.kind, ExprKind::Path(_)));
+                            assert_eq!(&source[callee.span.start..callee.span.end], "f");
+                            assert_eq!(arguments.len(), 1);
+                            let CallArgument::Expression(argument) = &arguments[0] else {
+                                panic!("expression argument expected")
+                            };
+                            argument
+                        }
+                        ("\"前${", ExprKind::InterpolatedString(parts)) => {
+                            let [
+                                InterpolationPart::String(before),
+                                InterpolationPart::Expression(inner),
+                                InterpolationPart::String(after),
+                            ] = parts.as_slice()
+                            else {
+                                panic!("one interpolation expected")
+                            };
+                            assert_eq!(before.value, "前");
+                            assert_eq!(after.value, "後");
+                            inner
+                        }
+                        _ => panic!("nested expression shape changed"),
+                    };
+                    span.start += prefix.len();
+                    span.end -= suffix.len();
+                }
+                assert_eq!(expression.span, span);
+                assert!(matches!(&expression.kind, ExprKind::Integer(value) if value == "1"));
+                drop(program);
+                eprintln!("DROP parse");
+
+                let shallow = parse(&format!("{header}{prefix}+{suffix} }}")).unwrap_err();
+                let invalid = format!("{header}{}+{} }}", prefix.repeat(32), suffix.repeat(32));
+                let diagnostic = parse(&invalid).unwrap_err();
+                assert_eq!(diagnostic.kind, shallow.kind);
+                assert_eq!(diagnostic.span, span);
+            }
+
+            let source = format!("{header}{}1", "(".repeat(32));
+            let diagnostic = parse(&source).unwrap_err();
+            assert_eq!(
+                diagnostic.span,
+                Span {
+                    start: source.len(),
+                    end: source.len(),
+                }
+            );
+            assert_eq!(
+                diagnostic.kind,
+                FrontendDiagnosticKind::UnexpectedToken {
+                    found: FoundToken::Eof,
+                    expected: vec![ExpectedToken::Fixed(")".to_owned())],
+                }
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
