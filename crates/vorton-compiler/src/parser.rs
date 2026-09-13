@@ -1141,7 +1141,7 @@ impl Parser {
         &mut self,
         allow_named_construction: bool,
     ) -> Result<Expr, FrontendDiagnostic> {
-        let mut expression = self.parse_logic_or(allow_named_construction)?;
+        let mut expression = self.parse_binary(allow_named_construction, 1)?;
         while self.eat(Tag::Catch).is_some() {
             let (arms, body_span) = self.parse_match_body()?;
             let span = Span::new(expression.span.start, body_span.end);
@@ -1156,100 +1156,37 @@ impl Parser {
         Ok(expression)
     }
 
-    fn parse_logic_or(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
-        let mut expression = self.parse_logic_and(allow_named)?;
-        while let Some(operator) = self.eat(Tag::OrOr) {
-            let right = self.parse_logic_and(allow_named)?;
-            expression = make_binary(expression, operator.span, BinaryOperator::LogicOr, right);
-        }
-        Ok(expression)
-    }
-
-    fn parse_logic_and(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
-        let mut expression = self.parse_equality(allow_named)?;
-        while let Some(operator) = self.eat(Tag::AndAnd) {
-            let right = self.parse_equality(allow_named)?;
-            expression = make_binary(expression, operator.span, BinaryOperator::LogicAnd, right);
-        }
-        Ok(expression)
-    }
-
-    fn parse_equality(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
-        let expression = self.parse_comparison(allow_named)?;
-        let (operator, kind) = if let Some(operator) = self.eat(Tag::EqualEqual) {
-            (operator, BinaryOperator::Equal)
-        } else if let Some(operator) = self.eat(Tag::BangEqual) {
-            (operator, BinaryOperator::NotEqual)
-        } else {
-            return Ok(expression);
-        };
-        let right = self.parse_comparison(allow_named)?;
-        Ok(make_binary(expression, operator.span, kind, right))
-    }
-
-    fn parse_comparison(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
-        let expression = self.parse_range(allow_named)?;
-        let (operator, kind) = if let Some(operator) = self.eat(Tag::Less) {
-            (operator, BinaryOperator::Less)
-        } else if let Some(operator) = self.eat(Tag::Greater) {
-            (operator, BinaryOperator::Greater)
-        } else if let Some(operator) = self.eat(Tag::LessEqual) {
-            (operator, BinaryOperator::LessEqual)
-        } else if let Some(operator) = self.eat(Tag::GreaterEqual) {
-            (operator, BinaryOperator::GreaterEqual)
-        } else {
-            return Ok(expression);
-        };
-        let right = self.parse_range(allow_named)?;
-        Ok(make_binary(expression, operator.span, kind, right))
-    }
-
-    fn parse_range(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
-        let mut expression = self.parse_additive(allow_named)?;
-        loop {
-            let (operator, kind) = if let Some(operator) = self.eat(Tag::DotDot) {
-                (operator, BinaryOperator::RangeExclusive)
-            } else if let Some(operator) = self.eat(Tag::DotDotEqual) {
-                (operator, BinaryOperator::RangeInclusive)
-            } else {
-                break;
-            };
-            let right = self.parse_additive(allow_named)?;
-            expression = make_binary(expression, operator.span, kind, right);
-        }
-        Ok(expression)
-    }
-
-    fn parse_additive(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
-        let mut expression = self.parse_multiplicative(allow_named)?;
-        loop {
-            let (operator, kind) = if let Some(operator) = self.eat(Tag::Plus) {
-                (operator, BinaryOperator::Add)
-            } else if let Some(operator) = self.eat(Tag::Minus) {
-                (operator, BinaryOperator::Subtract)
-            } else {
-                break;
-            };
-            let right = self.parse_multiplicative(allow_named)?;
-            expression = make_binary(expression, operator.span, kind, right);
-        }
-        Ok(expression)
-    }
-
-    fn parse_multiplicative(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
+    fn parse_binary(
+        &mut self,
+        allow_named: bool,
+        min_precedence: u8,
+    ) -> Result<Expr, FrontendDiagnostic> {
+        // Descend only for an actual operator, rather than retaining every
+        // precedence level on the stack around each nested primary expression.
         let mut expression = self.parse_unary(allow_named)?;
-        loop {
-            let (operator, kind) = if let Some(operator) = self.eat(Tag::Star) {
-                (operator, BinaryOperator::Multiply)
-            } else if let Some(operator) = self.eat(Tag::Slash) {
-                (operator, BinaryOperator::Divide)
-            } else if let Some(operator) = self.eat(Tag::Percent) {
-                (operator, BinaryOperator::Remainder)
-            } else {
+        let mut max_precedence = u8::MAX;
+        while let Some((kind, precedence)) = binary_operator(self.current_tag()) {
+            if precedence < min_precedence || precedence > max_precedence {
                 break;
-            };
-            let right = self.parse_unary(allow_named)?;
+            }
+            let operator = self.bump();
+            let right = self.parse_binary(allow_named, precedence + 1)?;
             expression = make_binary(expression, operator.span, kind, right);
+            // Leave a disallowed chain for the enclosing production's normal
+            // diagnostic. Its operators cannot be consumed by a lower level.
+            max_precedence = if matches!(
+                kind,
+                BinaryOperator::Equal
+                    | BinaryOperator::NotEqual
+                    | BinaryOperator::Less
+                    | BinaryOperator::Greater
+                    | BinaryOperator::LessEqual
+                    | BinaryOperator::GreaterEqual
+            ) {
+                precedence - 1
+            } else {
+                precedence
+            };
         }
         Ok(expression)
     }
@@ -1274,7 +1211,11 @@ impl Parser {
     }
 
     fn parse_postfix(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
-        let mut expression = self.parse_primary(allow_named)?;
+        let expression = self.parse_primary(allow_named)?;
+        self.parse_postfix_tail(expression)
+    }
+
+    fn parse_postfix_tail(&mut self, mut expression: Expr) -> Result<Expr, FrontendDiagnostic> {
         loop {
             if let Some(question) = self.eat(Tag::Question) {
                 let span = Span::new(expression.span.start, question.span.end);
@@ -1759,41 +1700,8 @@ impl Parser {
             if self.at(Tag::Eof) {
                 return Err(self.unexpected(vec![Tag::RBrace.expected()]));
             }
-            if self.at(Tag::Let) {
-                statements.push(self.parse_let_statement()?);
-                continue;
-            }
-            if self.at(Tag::Return) {
-                statements.push(self.parse_return_statement()?);
-                continue;
-            }
-            if self.at(Tag::Break) {
-                statements.push(self.parse_keyword_statement(Tag::Break, StatementKind::Break)?);
-                continue;
-            }
-            if self.at(Tag::Continue) {
-                statements
-                    .push(self.parse_keyword_statement(Tag::Continue, StatementKind::Continue)?);
-                continue;
-            }
-            if self.at(Tag::If) && self.nth_tag(1) == Tag::Let {
-                statements.push(self.parse_if_let_statement()?);
-                continue;
-            }
-            if self.at(Tag::While) {
-                statements.push(self.parse_while_statement()?);
-                continue;
-            }
-            if self.at(Tag::For) {
-                statements.push(self.parse_for_statement()?);
-                continue;
-            }
-            if self.at(Tag::Loop) {
-                statements.push(self.parse_loop_statement()?);
-                continue;
-            }
-            if self.at_assignment_start() {
-                statements.push(self.parse_assignment_statement()?);
+            if let Some(statement) = self.parse_statement()? {
+                statements.push(statement);
                 continue;
             }
 
@@ -1825,6 +1733,26 @@ impl Parser {
             statements,
             tail,
         })
+    }
+
+    fn parse_statement(&mut self) -> Result<Option<Statement>, FrontendDiagnostic> {
+        // Keep the temporaries for the statement alternatives out of the
+        // recursive block-expression path.
+        let statement = match self.current_tag() {
+            Tag::Let => self.parse_let_statement()?,
+            Tag::Return => self.parse_return_statement()?,
+            Tag::Break => self.parse_keyword_statement(Tag::Break, StatementKind::Break)?,
+            Tag::Continue => {
+                self.parse_keyword_statement(Tag::Continue, StatementKind::Continue)?
+            }
+            Tag::If if self.nth_tag(1) == Tag::Let => self.parse_if_let_statement()?,
+            Tag::While => self.parse_while_statement()?,
+            Tag::For => self.parse_for_statement()?,
+            Tag::Loop => self.parse_loop_statement()?,
+            _ if self.at_assignment_start() => self.parse_assignment_statement()?,
+            _ => return Ok(None),
+        };
+        Ok(Some(statement))
     }
 
     fn parse_let_statement(&mut self) -> Result<Statement, FrontendDiagnostic> {
@@ -2371,6 +2299,27 @@ fn generic_bound_span(bound: &GenericBound) -> Span {
         GenericBound::Named(named) => named.span,
         GenericBound::Shape(shape) => shape.span,
     }
+}
+
+fn binary_operator(tag: Tag) -> Option<(BinaryOperator, u8)> {
+    Some(match tag {
+        Tag::OrOr => (BinaryOperator::LogicOr, 1),
+        Tag::AndAnd => (BinaryOperator::LogicAnd, 2),
+        Tag::EqualEqual => (BinaryOperator::Equal, 3),
+        Tag::BangEqual => (BinaryOperator::NotEqual, 3),
+        Tag::Less => (BinaryOperator::Less, 4),
+        Tag::Greater => (BinaryOperator::Greater, 4),
+        Tag::LessEqual => (BinaryOperator::LessEqual, 4),
+        Tag::GreaterEqual => (BinaryOperator::GreaterEqual, 4),
+        Tag::DotDot => (BinaryOperator::RangeExclusive, 5),
+        Tag::DotDotEqual => (BinaryOperator::RangeInclusive, 5),
+        Tag::Plus => (BinaryOperator::Add, 6),
+        Tag::Minus => (BinaryOperator::Subtract, 6),
+        Tag::Star => (BinaryOperator::Multiply, 7),
+        Tag::Slash => (BinaryOperator::Divide, 7),
+        Tag::Percent => (BinaryOperator::Remainder, 7),
+        _ => return None,
+    })
 }
 
 fn make_binary(left: Expr, operator_span: Span, operator: BinaryOperator, right: Expr) -> Expr {
