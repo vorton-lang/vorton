@@ -38,6 +38,7 @@ pub(super) struct CallBinder<'a, 'project> {
     pub(super) headers: &'a BTreeMap<EntityId, FunctionHeader>,
     pub(super) schemes: &'a BTreeMap<EntityId, CallableScheme>,
     pub(super) row_constraints: &'a BTreeMap<EntityId, Vec<EffectRow>>,
+    pub(super) provisional_rows: &'a BTreeMap<EntityId, EffectRow>,
     pub(super) group: &'a BTreeSet<EntityId>,
     pub(super) function: &'a FunctionHeader,
     pub(super) normalizer: &'a SourceTypeNormalizer<'project>,

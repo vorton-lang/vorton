@@ -29,6 +29,8 @@ Given 的 subject、trait actual 与 associated binding 和证明目标使用同
 
 Impl target、trait actual、关联绑定和 prerequisites 共同确定 owner actual；子证明产生的等式回到同一候选，失败候选不改变其它候选的推断状态。调用的参数、已知返回类型、callback 下界和完整 row 合法性共同约束 actual；尚待类型 mapping 的 row 义务保留到下一次闭合。Given 的正规事实同时用于证明与 dictionary member lookup。无 body 或 consumer 的声明仍检查 row/application、形成条件和公开表面；私有源引用与 projection 归约后的类型都受检查。
 
+Dictionary helper 与 impl body 的互递归按实际 impl 的 body row 闭合；完整推导 row 也参与 callback actual 的最小解。递归中的非空 atom 和清理义务保留，已发布 helper 仍可携带泛型 method 关系；显式 Method 上界或输入条件的自引用继续拒绝。
+
 每个 body 只生成一份 typed draft。普通函数与方法按真实依赖形成递归组，组内使用 monomorphic provisional 变量，全部约束成功后 final-zonk、泛化并原子发布；polymorphic recursion 和 occurs-check 无限类型拒绝。每次调用的参数、返回、owner/method actual、effect actual 与证据共用同一 mapping。Outer impl/trait formal 和 Self 保留原 owner，不重新量化成方法自身 formal。同一 callable 可见的独立 formal 保持不同，即使合法递归调用把它们分别关联到其它 callable 的 formal。Generic bound 已确定的 dictionary member 不会被 concrete actual 的同名 inherent method 替换。普通已求值 `let` 始终是 monotype。
 
 Trait/projection 选择使用显式工作栈。有限重复实例和中途增长后抵达基础事实的链可以成功；非法 selection/projection cycle 与缺少 evidence 分别诊断。每次查询最多处理 16,384 个逻辑工作单位、256 个同时活跃的查询状态；超限表示证明未完成，不代表 no-impl 或已证明不相交。Effect/callable 域闭合同样按逻辑工作计数终止，不依赖 wall timeout 或自动提高预算。合法结构递归销毁保留有来源的完整销毁关系，不把 trait query 重入当作证明。

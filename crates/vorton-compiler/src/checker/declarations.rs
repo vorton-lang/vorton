@@ -357,6 +357,9 @@ impl SourceTypeNormalizer<'_> {
             }
             for shape in &header.shapes {
                 let scope = EffectScope {
+                    callable: Some(&header.identity),
+                    group: &[],
+                    provisional: false,
                     requirements: &header.requirements,
                     shapes: &header.shapes,
                     origin: shape.origin.clone(),
@@ -384,6 +387,9 @@ impl SourceTypeNormalizer<'_> {
         }
         for (identity, row) in &self.effect_alias_rows {
             let scope = EffectScope {
+                callable: None,
+                group: &[],
+                provisional: false,
                 requirements: &self.effect_requirements[identity],
                 shapes: &[],
                 origin: CheckOrigin::Source(entity_origin(identity).expect("effect alias")),
@@ -392,6 +398,9 @@ impl SourceTypeNormalizer<'_> {
         }
         for (row, origin) in self.module_effects.values() {
             let scope = EffectScope {
+                callable: None,
+                group: &[],
+                provisional: false,
                 requirements: &[],
                 shapes: &[],
                 origin: CheckOrigin::Source(origin.clone()),

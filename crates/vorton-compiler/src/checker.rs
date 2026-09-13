@@ -738,6 +738,7 @@ fn check_prepared_project(
                     headers: &headers,
                     schemes: &schemes,
                     row_constraints: &partial.constraints,
+                    provisional_rows: &partial.lower,
                     group: &members,
                     function: header,
                     normalizer: &normalizer,
@@ -9982,5 +9983,77 @@ fn use_it() with {fail<Int>} { sequence(failure, pure); }
         assert_eq!(diagnostic.kind, CheckDiagnosticKind::TypeMismatch);
         assert!(diagnostic.message.contains("incomplete"));
         assert!(inference.effect_substitutions.is_empty());
+    }
+    #[test]
+    fn inferred_recursive_body_row_constrains_and_freezes_callback_actuals() {
+        let source = r#"trait P { fn get(self:&Self,b:Bool)->Int; }
+struct A {}
+fn emit<H:Fn+fn()->Unit with {E},effect E>(callback:call H)->Unit with {E} {}
+fn g<T:P,F:Fn+fn()->Unit with {E1},G:Fn+fn()->Unit with {E1,E2},effect E1,effect E2>(x:&T,first:call F,second:call G)->Int { emit(first); x.get(true) }
+fn pure()->Unit with {} {}
+fn fail_bool()->Unit with {fail<Bool>} {}
+fn fail_int()->Unit with {fail<Int>} {}
+impl P for A { fn get(self:&Self,b:Bool)->Int { if b {fail_bool();1} else {g(self,pure,fail_int)} } }
+fn use_it()->Int with {fail<Bool>} {A{}.get(false)}"#;
+        let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new())
+            .expect("the inferred body row makes the callback actual unique");
+        let helper = checked
+            .functions
+            .values()
+            .find(|f| f.identity.name == "g")
+            .unwrap();
+        assert!(helper.effect.0.iter().any(|term| matches!(term, EffectTerm::Method {types, ..} if matches!(types[0], CheckedType::Formal(_)))));
+        assert!(
+            helper
+                .effect
+                .0
+                .iter()
+                .any(|term| matches!(term, EffectTerm::Formal(_)))
+        );
+        let method = checked
+            .functions
+            .values()
+            .find(|f| f.identity.name == "get")
+            .unwrap();
+        assert_eq!(
+            method.effect,
+            EffectRow(vec![EffectTerm::Fail(CheckedType::Bool)])
+        );
+        let TypedExprKind::If {
+            else_branch: Some(branch),
+            ..
+        } = &method.body.tail.as_ref().unwrap().kind
+        else {
+            panic!("method branch")
+        };
+        let TypedExprKind::Block(block) = &branch.kind else {
+            panic!("else block")
+        };
+        let TypedExprKind::Call {
+            instantiation: CallInstantiation::Published(mapping),
+            ..
+        } = &block.tail.as_ref().unwrap().kind
+        else {
+            panic!("generic helper call")
+        };
+        assert_eq!(mapping.effects[0].1, EffectRow::default());
+        assert_eq!(
+            mapping.effects[1].1,
+            EffectRow(vec![EffectTerm::Fail(CheckedType::Int)])
+        );
+        for function in checked.functions.values() {
+            assert_closed_block(&function.body, &function.scheme);
+            assert_closed_row(&function.effect, &function.scheme);
+        }
+        let rejected = source.replace(
+            "fn use_it()->Int with {fail<Bool>}",
+            "fn use_it()->Int with {}",
+        );
+        let error = check_project(&sources(&rejected), &BTreeMap::new(), Vec::new())
+            .expect_err("body effects are not discarded to close recursion");
+        assert!(
+            error.message.contains("does not contain fail<Bool>"),
+            "{error:?}"
+        );
     }
 }

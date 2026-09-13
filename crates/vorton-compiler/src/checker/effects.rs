@@ -364,6 +364,9 @@ pub(super) struct EffectEnvironment<'a, 'project> {
 }
 
 pub(super) struct EffectScope<'a> {
+    pub(super) callable: Option<&'a EntityId>,
+    pub(super) group: &'a [EntityId],
+    pub(super) provisional: bool,
     pub(super) requirements: &'a [Requirement],
     pub(super) shapes: &'a [ShapeRequirement],
     pub(super) origin: CheckOrigin,
@@ -372,6 +375,9 @@ pub(super) struct EffectScope<'a> {
 impl<'a> From<&'a FunctionHeader> for EffectScope<'a> {
     fn from(header: &'a FunctionHeader) -> Self {
         Self {
+            callable: Some(&header.identity),
+            group: &[],
+            provisional: false,
             requirements: &header.requirements,
             shapes: &header.shapes,
             origin: header.effect_origin.clone(),
@@ -901,6 +907,10 @@ impl EffectEnvironment<'_, '_> {
                 work += 1;
                 let header = &self.headers[identity];
                 let origin = CheckOrigin::Source(header.origin.clone());
+                let scope = EffectScope {
+                    group,
+                    ..EffectScope::from(header)
+                };
                 if work > SELECTION_WORK_LIMIT {
                     return Err(effect_diagnostic(
                         format!(
@@ -912,7 +922,7 @@ impl EffectEnvironment<'_, '_> {
                 let mut needed = BTreeSet::new();
                 let mut actual = EffectRow::default();
                 for (row, discharge) in &equations[identity].rows {
-                    let mut row = self.expand(row, header, &rows, inference, &mut needed)?;
+                    let mut row = self.expand_scope(row, &scope, &rows, inference, &mut needed)?;
                     if *discharge {
                         row.0.retain(|term| *term != EffectTerm::Unsafe);
                     }
@@ -926,7 +936,7 @@ impl EffectEnvironment<'_, '_> {
                     let row = row
                         .instantiate(&call.types, &call.effects)
                         .map_types(&mut |ty| inference.canonical(ty));
-                    let mut row = self.expand(&row, header, &rows, inference, &mut needed)?;
+                    let mut row = self.expand_scope(&row, &scope, &rows, inference, &mut needed)?;
                     if call.discharge_unsafe {
                         row.0.retain(|term| *term != EffectTerm::Unsafe);
                     }
@@ -935,12 +945,12 @@ impl EffectEnvironment<'_, '_> {
                 let own_upper = header
                     .effect_upper
                     .as_ref()
-                    .map(|row| self.expand(row, header, &rows, inference, &mut needed))
+                    .map(|row| self.expand_scope(row, &scope, &rows, inference, &mut needed))
                     .transpose()?;
                 let trait_upper = header
                     .trait_upper
                     .as_ref()
-                    .map(|row| self.expand(row, header, &rows, inference, &mut needed))
+                    .map(|row| self.expand_scope(row, &scope, &rows, inference, &mut needed))
                     .transpose()?;
                 if !needed.is_empty() {
                     dependencies.insert(identity.clone(), needed);
@@ -1006,7 +1016,8 @@ impl EffectEnvironment<'_, '_> {
                 if let Some((ceiling, ceiling_origin)) =
                     self.normalizer.module_effects.get(&identity.module)
                 {
-                    let ceiling = self.expand(ceiling, header, &rows, inference, &mut needed)?;
+                    let ceiling =
+                        self.expand_scope(ceiling, &scope, &rows, inference, &mut needed)?;
                     self.subset(
                         &published,
                         &ceiling,
@@ -1037,6 +1048,31 @@ impl EffectEnvironment<'_, '_> {
                 if rows[identity] != published {
                     rows.insert(identity.clone(), published);
                     changed = true;
+                }
+            }
+            if dependencies.is_empty() && !changed {
+                for (identity, constraints) in self
+                    .partial_effects(group, equations, inference)?
+                    .constraints
+                {
+                    let scope = EffectScope {
+                        group,
+                        ..EffectScope::from(&self.headers[&identity])
+                    };
+                    let mut needed = BTreeSet::new();
+                    for row in constraints {
+                        self.expand_scope(&row, &scope, &rows, inference, &mut needed)?;
+                    }
+                    if !needed.is_empty() {
+                        dependencies.insert(identity, needed);
+                    }
+                }
+                for row in rows.values_mut() {
+                    let resolved = inference
+                        .resolve_effect(row)
+                        .map_types(&mut |ty| inference.canonical(ty));
+                    changed |= *row != resolved;
+                    *row = resolved;
                 }
             }
             if !dependencies.is_empty() || !changed {
@@ -1100,6 +1136,7 @@ impl EffectEnvironment<'_, '_> {
             .map(Frame::Term)
             .collect::<Vec<_>>();
         let mut active = BTreeSet::new();
+        let mut input_depth = 0;
         let mut result = EffectRow::default();
         let mut work = 0_usize;
         while let Some(frame) = pending.pop() {
@@ -1112,6 +1149,7 @@ impl EffectEnvironment<'_, '_> {
             }
             let term = match frame {
                 Frame::CheckRows { actual, upper } => {
+                    input_depth += 1;
                     let outer = std::mem::take(&mut result);
                     pending.push(Frame::CaptureActual { outer, upper });
                     pending.extend(actual.0.into_iter().rev().map(Frame::Term));
@@ -1125,9 +1163,18 @@ impl EffectEnvironment<'_, '_> {
                 }
                 Frame::CompareRows { outer, actual } => {
                     if needed.is_empty() {
-                        self.subset_scope(&actual, &result, header, inference, &origin)?;
+                        if header.provisional {
+                            // During minimum-actual solving, remaining input
+                            // lower bounds have not all entered the mapping.
+                            // Their merge legality is already necessary; full
+                            // containment is checked on the completed mapping.
+                            result.union(&actual, inference, &origin)?;
+                        } else {
+                            self.subset_scope(&actual, &result, header, inference, &origin)?;
+                        }
                     }
                     result = outer;
+                    input_depth -= 1;
                     continue;
                 }
                 Frame::End(term) => {
@@ -1280,6 +1327,68 @@ impl EffectEnvironment<'_, '_> {
                         bound: bound.clone(),
                         origin: origin.clone(),
                     })?;
+                    // Conformance supplies Self: Trait as a given in an impl
+                    // body. Its dictionary is this exact implementation, so a
+                    // recursive body edge must consume the group's provisional
+                    // row instead of publishing that given as a self equation.
+                    let current_implementation = header
+                        .callable
+                        .filter(|_| method_header.effect_upper.is_none())
+                        .and_then(|callable| {
+                            self.normalizer.project.entities[callable].owner.as_ref()
+                        })
+                        .and_then(|owner| self.normalizer.selection.implementations.get(owner))
+                        .filter(|implementation| {
+                            implementation
+                                .trait_use
+                                .as_ref()
+                                .is_some_and(|given| given.declaration == bound.declaration)
+                        });
+                    let implementation = match &solver.evidence[evidence] {
+                        Evidence::Implementation {
+                            identity, mapping, ..
+                        } => Some((identity.clone(), mapping.clone())),
+                        Evidence::Given(_) | Evidence::Associated { .. } => {
+                            if let Some(implementation) = current_implementation {
+                                let target = solver.normalize(&implementation.target)?;
+                                let arguments = implementation
+                                    .trait_use
+                                    .as_ref()
+                                    .expect("trait impl")
+                                    .arguments
+                                    .iter()
+                                    .map(|ty| solver.normalize(ty))
+                                    .collect::<SelectionResult<Vec<_>>>()?;
+                                let required = bound
+                                    .arguments
+                                    .iter()
+                                    .map(|ty| solver.normalize(ty))
+                                    .collect::<SelectionResult<Vec<_>>>()?;
+                                (target == subject && arguments == required).then(|| {
+                                    (
+                                        implementation.identity.clone(),
+                                        implementation
+                                            .formals
+                                            .iter()
+                                            .map(|formal| {
+                                                (
+                                                    formal.clone(),
+                                                    solver.inference.canonical(
+                                                        &CheckedType::Formal(Box::new(
+                                                            formal.clone(),
+                                                        )),
+                                                    ),
+                                                )
+                                            })
+                                            .collect(),
+                                    )
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                        Evidence::Primitive { .. } => None,
+                    };
                     let mut mapping = definition.mapping(&subject, &bound);
                     mapping.extend(
                         method_header
@@ -1319,47 +1428,65 @@ impl EffectEnvironment<'_, '_> {
                             solver.normalize_row(&expected.effect)?,
                         ));
                     }
+                    let body_equation = implementation.as_ref().is_some_and(|(identity, _)| {
+                        let selected = &self.normalizer.selection.implementations[identity].methods
+                            [&method.name];
+                        header.group.contains(selected)
+                            && self.headers[selected].effect_upper.is_none()
+                            && self.headers[selected].trait_upper.is_none()
+                    });
                     let replacement = if let Some(upper) = &method_header.effect_upper {
                         Some(upper.instantiate(&mapping, &effect_mapping))
+                    } else if let Some((identity, outer)) = implementation {
+                        let selected = &self.normalizer.selection.implementations[&identity]
+                            .methods[&method.name];
+                        let selected_header = &self.headers[selected];
+                        let mut mapping = outer;
+                        mapping.extend(
+                            selected_header
+                                .declared_formals
+                                .iter()
+                                .cloned()
+                                .zip(types[1 + definition.formals.len()..].iter().cloned()),
+                        );
+                        if header.group.contains(selected) {
+                            for (formal, actual) in &mapping {
+                                solver.inference.unify(&CheckedType::Formal(Box::new(formal.clone())), actual)
+                                    .map_err(|failure| effect_diagnostic(format!("recursive dictionary method changes its type actual: {}", display_unification_failure(&failure)), origin.clone()))?;
+                            }
+                        }
+                        let effects = selected_header
+                            .effect_formals
+                            .iter()
+                            .cloned()
+                            .zip(effects.iter().cloned())
+                            .collect();
+                        match rows
+                            .get(selected)
+                            .or_else(|| self.schemes.get(selected).map(|scheme| &scheme.effect))
+                        {
+                            Some(row) => Some(row.instantiate(&mapping, &effects)),
+                            None => {
+                                needed.insert(selected.clone());
+                                None
+                            }
+                        }
                     } else {
                         match &solver.evidence[evidence] {
                             Evidence::Given(_) | Evidence::Associated { .. } => None,
                             Evidence::Primitive { .. } => Some(EffectRow::default()),
-                            Evidence::Implementation {
-                                identity,
-                                mapping: outer,
-                                ..
-                            } => {
-                                let selected = &self.normalizer.selection.implementations[identity]
-                                    .methods[&method.name];
-                                let selected_header = &self.headers[selected];
-                                let mut mapping = outer.clone();
-                                mapping.extend(
-                                    selected_header
-                                        .declared_formals
-                                        .iter()
-                                        .cloned()
-                                        .zip(types[1 + definition.formals.len()..].iter().cloned()),
-                                );
-                                let effects = selected_header
-                                    .effect_formals
-                                    .iter()
-                                    .cloned()
-                                    .zip(effects.iter().cloned())
-                                    .collect();
-                                match rows.get(selected).or_else(|| {
-                                    self.schemes.get(selected).map(|scheme| &scheme.effect)
-                                }) {
-                                    Some(row) => Some(row.instantiate(&mapping, &effects)),
-                                    None => {
-                                        needed.insert(selected.clone());
-                                        None
-                                    }
-                                }
+                            Evidence::Implementation { .. } => {
+                                unreachable!("implementation selected above")
                             }
                         }
                     };
                     if !active.insert(term.clone()) {
+                        if header.provisional && input_depth == 0 && body_equation {
+                            // This backedge contributes no new atoms to the
+                            // finite body-row equation being traversed. Keep all
+                            // other terms; no contract/input cycle is discharged.
+                            continue;
+                        }
                         return Err(effect_diagnostic(
                             "illegal recursive method-effect contract or input requirement",
                             origin,

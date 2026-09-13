@@ -3405,3 +3405,111 @@ fn contract_declarations_validate_rows_and_unerased_private_references() {
         }
     }
 }
+
+#[test]
+fn dictionary_body_recursion_and_contract_cycles_have_distinct_closure() {
+    let accepted = [
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+impl P for A { fn get(self: &Self, b: Bool) -> Int { if b { 1 } else { g(self, true) } } }
+fn use_it() -> Int { g(A{},false) }"#,
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+impl P for A { fn get(self: &Self, b: Bool) -> Int { if b { 1 } else { g(self, true) } } }
+fn use_it() -> Int { A{}.get(false) }"#,
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+impl P for A { fn get(self: &Self, b: Bool) -> Int { if b { 1 } else { g(self, true) } } }
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+fn use_it() -> Int { g(A{},false) }"#,
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int with {}; }
+struct A {}
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+impl P for A { fn get(self: &Self, b: Bool) -> Int { if b { 1 } else { g(self, true) } } }
+fn use_it() -> Int { g(A{},false) }"#,
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+fn g(x: &A, b: Bool) -> Int { x.get(b) }
+impl P for A { fn get(self: &Self, b: Bool) -> Int { if b { 1 } else { g(self, true) } } }
+fn use_it() -> Int { g(A{},false) }"#,
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+impl P for A { fn get(self: &Self, b: Bool) -> Int { if b { 1 } else { g(self, true) } } }"#,
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct Wrap<T> { value:T }
+fn g<T:P>(x: &T,b:Bool)->Int { x.get(b) }
+impl<T> P for Wrap<T> { fn get(self:&Self,b:Bool)->Int { if b {1} else {g(self,true)} } }
+fn use_it()->Int { g(Wrap{value:1},false) }"#,
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+struct B {}
+fn noise()->Unit with {console} {}
+impl P for A { fn get(self:&Self,b:Bool)->Int {g(B{},b)} }
+impl B { fn get(self:&Self,b:Bool)->Int with {fs} {2} }
+impl P for B { fn get(self:&Self,b:Bool)->Int { noise();1 } }
+fn use_it()->Int with {console} {g(A{},false)}"#,
+        r#"trait P { fn get<F:Fn+fn()->Unit with {E},effect E>(self:&Self, callback:call F,b:Bool)->Int; }
+struct A {}
+fn g<T:P,F:Fn+fn()->Unit with {E},effect E>(x:&T,callback:call F,b:Bool)->Int { x.get(callback,b) }
+impl P for A { fn get<G:Fn+fn()->Unit with {X},effect X>(self:&Self,callback:call G,b:Bool)->Int { if b {callback();1} else {g(self,callback,true)} } }
+fn noise()->Unit with {console} {}
+fn use_it()->Int with {console} {g(A{},noise,false)}"#,
+        r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+fn noise() -> Unit with {console} {}
+impl P for A { fn get(self: &Self, b: Bool) -> Int { if b { noise(); 1 } else { g(self,true) } } }
+fn use_it() -> Int with {console} { g(A{},false) }"#,
+    ];
+    let mut failures = Vec::new();
+    for source in accepted {
+        if let Err(error) = check(source) {
+            failures.push(format!("{source}: {error:?}"));
+        }
+    }
+    let rejected = [
+        (
+            r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+impl P for A { fn get(self: &Self, b: Bool) -> Int with {P::get<A>} { 1 } }
+fn use_it() -> Int { g(A{},false) }"#,
+            "recursive method-effect contract",
+        ),
+        (
+            r#"trait P { fn first(self: &Self) -> Unit; fn second(self: &Self) -> Unit; }
+struct A {}
+impl P for A { fn first(self: &Self) -> Unit with {P::second<A>} {} fn second(self: &Self) -> Unit with {P::first<A>} {} }
+fn use_it() { A{}.first(); }"#,
+            "recursive method-effect contract",
+        ),
+        (
+            r#"trait P { fn get(self:&Self)->Unit; }
+struct Wrap<T> {}
+fn g<T:P>(value:&T)->Unit { value.get(); }
+impl<T> P for Wrap<T> { fn get(self:&Self)->Unit { let next:Wrap<Self> = Wrap{}; g(next); } }
+fn use_it() { let value:Wrap<Int> = Wrap{}; g(value); }"#,
+            "changes its type actual",
+        ),
+        (
+            r#"trait P { fn get(self: &Self, b: Bool) -> Int; }
+struct A {}
+fn g<T:P>(x: &T, b: Bool) -> Int { x.get(b) }
+fn noise() -> Unit with {console} {}
+impl P for A { fn get(self: &Self, b: Bool) -> Int { if b { noise(); 1 } else { g(self,true) } } }
+fn use_it() -> Int with {} { g(A{},false) }"#,
+            "does not contain console",
+        ),
+    ];
+    for (source, reason) in rejected {
+        match check(source) {
+            Err(error) if error.message.contains(reason) => {}
+            result => failures.push(format!("{source}: {result:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

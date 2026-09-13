@@ -981,7 +981,7 @@ impl CallBinder<'_, '_> {
             headers: self.headers,
             schemes: self.schemes,
         };
-        let provisional = self
+        let mut provisional = self
             .headers
             .iter()
             .filter_map(|(identity, header)| {
@@ -991,12 +991,23 @@ impl CallBinder<'_, '_> {
                     .or(header.effect_upper.as_ref())
                     .map(|row| (identity.clone(), row.clone()))
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        for (identity, row) in self.provisional_rows {
+            provisional
+                .entry(identity.clone())
+                .or_insert_with(|| row.clone());
+        }
+        let group = self.group.iter().cloned().collect::<Vec<_>>();
+        let scope = EffectScope {
+            group: &group,
+            provisional: true,
+            ..EffectScope::from(self.function)
+        };
         for row in rows {
             let mut needed = BTreeSet::new();
-            let row = environment.expand(
+            let row = environment.expand_scope(
                 &row.instantiate(types, &BTreeMap::new()),
-                self.function,
+                &scope,
                 &provisional,
                 self.inference,
                 &mut needed,
