@@ -452,11 +452,55 @@ impl SourceTypeNormalizer<'_> {
                 .trait_use
                 .as_ref()
                 .is_some_and(|bound| exports.contains(&bound.declaration));
-            if exposed {
+            if exposed
+                || implementation
+                    .associated
+                    .keys()
+                    .any(|member| self.project.entities[member].public)
+            {
                 requirements(&implementation.requirements, &origin)?;
-                for ty in implementation.associated.values() {
+                for (member, ty) in &implementation.associated {
+                    if exposed || self.project.entities[member].public {
+                        validate_public_nominals(ty, exports, &origin)?;
+                    }
+                }
+            }
+        }
+        for (identity, conditions) in &self.effect_requirements {
+            if exports.contains(identity) {
+                requirements(conditions, &entity_origin(identity).expect("effect owner"))?;
+            }
+        }
+        for (identity, operation) in &self.operations {
+            if exports.contains(&operation.owner) {
+                let origin = entity_origin(identity).expect("operation signature");
+                for ty in operation
+                    .parameters
+                    .iter()
+                    .map(|(ty, _)| ty)
+                    .chain(std::iter::once(&operation.return_type))
+                {
                     validate_public_nominals(ty, exports, &origin)?;
                 }
+            }
+        }
+        for use_site in &self.effect_uses {
+            if use_site.scope.as_ref().is_some_and(|scope| {
+                exports.contains(scope)
+                    || headers
+                        .get(scope)
+                        .is_some_and(|header| header.public_export)
+            }) && !exports.contains(&use_site.declaration)
+            {
+                return Err(CheckDiagnostic {
+                    kind: CheckDiagnosticKind::TypeMismatch,
+                    message: "public effect surface references a private declaration".to_owned(),
+                    primary: Some(use_site.origin.clone()),
+                    related: entity_origin(&use_site.declaration)
+                        .map(CheckOrigin::Source)
+                        .into_iter()
+                        .collect(),
+                });
             }
         }
         for header in headers.values().filter(|header| header.public_export) {
@@ -546,6 +590,7 @@ impl SourceTypeNormalizer<'_> {
                 if let Some(mapping) =
                     solver.match_implementation(&implementation.identity, &subject, None)?
                 {
+                    solver.require_owner_actuals(&implementation.identity, &mapping)?;
                     for requirement in &implementation.requirements {
                         match solver.prove(&requirement.instantiate(&mapping)) {
                             Ok(_) => {}
@@ -1922,6 +1967,7 @@ pub(super) const SELECTION_STATE_LIMIT: usize = 256;
 pub(super) enum SelectionGoal {
     Type(CheckedType),
     Evidence(CheckedType, Box<TraitUse>),
+    NormalizeRequirement(CheckedType, Box<TraitUse>),
     Match(Box<EntityId>, CheckedType, Option<Vec<CheckedType>>),
 }
 
@@ -1941,6 +1987,9 @@ pub(super) enum SelectionFrame {
     FinishMatch(SelectionGoal, BTreeMap<TypeFormal, CheckedType>, usize),
     MatchCandidate(EntityId, TraitUse),
     Choose(SelectionGoal, TraitUse, usize),
+    FinishRequirement(SelectionGoal, TraitUse, usize),
+    Givens(SelectionGoal, CheckedType, TraitUse, Vec<GivenCandidate>),
+    Implementations(SelectionGoal, CheckedType, TraitUse),
     Derived(SelectionGoal, Requirement),
     Candidate(EntityId, BTreeMap<TypeFormal, CheckedType>, TraitUse, usize),
     Bindings(
@@ -1957,6 +2006,12 @@ pub(super) enum SelectionValue {
     Type(CheckedType),
     Evidence(usize),
     Mapping(Option<BTreeMap<TypeFormal, CheckedType>>),
+    Requirement(CheckedType, Box<TraitUse>),
+}
+
+pub(super) struct GivenCandidate {
+    requirement: Requirement,
+    parent: Option<Requirement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2256,6 +2311,31 @@ impl<'a> SelectionSolver<'a> {
         }
     }
 
+    fn require_owner_actuals(
+        &self,
+        identity: &EntityId,
+        mapping: &BTreeMap<TypeFormal, CheckedType>,
+    ) -> SelectionResult<()> {
+        if let Some(formal) = self.declarations.implementations[identity]
+            .formals
+            .iter()
+            .find(|formal| !mapping.contains_key(*formal))
+        {
+            return Err(self.failure(
+                SelectionFailureKind::Incomplete,
+                format!(
+                    "selection proof incomplete: impl owner actual `{}` is not uniquely determined",
+                    formal.name
+                ),
+                entity_origin(identity)
+                    .map(CheckOrigin::Source)
+                    .into_iter()
+                    .collect(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn solve(&mut self, root: SelectionGoal) -> SelectionResult<SelectionValue> {
         let mut frames = vec![SelectionFrame::Enter(root)];
         let mut active = BTreeSet::new();
@@ -2417,57 +2497,26 @@ impl<'a> SelectionSolver<'a> {
                         SelectionGoal::Type(ty) => {
                             finished = Some((goal.clone(), Ok(SelectionValue::Type(ty.clone()))))
                         }
-                        SelectionGoal::Evidence(subject, bound) => {
-                            if let CheckedType::Projection(projection) = subject
-                                && let ProjectionOwner::Trait(projected_trait) = &projection.owner
-                            {
-                                let definition =
-                                    &self.declarations.traits[&projected_trait.declaration];
-                                let mapping =
-                                    definition.mapping(&projection.subject, projected_trait);
-                                let associated = &definition.associated[&projection.member];
-                                let givens = associated
-                                    .bounds
-                                    .iter()
-                                    .map(|bound| Requirement {
-                                        subject: subject.clone(),
-                                        bound: bound.instantiate(&mapping),
-                                        origin: self.origin.clone(),
-                                    })
-                                    .collect::<Vec<_>>();
-                                let derived = Self::new(
-                                    self.declarations,
-                                    self.core,
-                                    &givens,
-                                    self.origin.clone(),
-                                )?;
-                                self.charge(derived.work)?;
-                                if let Some(given) = derived.givens.iter().find(|given| {
-                                    given.bound.declaration == bound.declaration
-                                        && given.bound.arguments == bound.arguments
-                                        && bound.associated.iter().all(|(member, ty)| {
-                                            given.bound.associated.get(member) == Some(ty)
-                                        })
-                                }) {
-                                    frames
-                                        .push(SelectionFrame::Derived(goal.clone(), given.clone()));
-                                    frames.push(SelectionFrame::Enter(SelectionGoal::evidence(
-                                        projection.subject.clone(),
-                                        projected_trait.clone(),
-                                    )));
-                                    continue;
-                                }
-                            }
+                        SelectionGoal::Evidence(subject, bound)
+                        | SelectionGoal::NormalizeRequirement(subject, bound) => {
                             let children = std::iter::once(subject)
                                 .chain(&bound.arguments)
                                 .chain(bound.associated.values())
                                 .cloned()
                                 .collect::<Vec<_>>();
-                            frames.push(SelectionFrame::Choose(
-                                goal.clone(),
-                                bound.as_ref().clone(),
-                                children.len(),
-                            ));
+                            frames.push(if matches!(goal, SelectionGoal::Evidence(_, _)) {
+                                SelectionFrame::Choose(
+                                    goal.clone(),
+                                    bound.as_ref().clone(),
+                                    children.len(),
+                                )
+                            } else {
+                                SelectionFrame::FinishRequirement(
+                                    goal.clone(),
+                                    bound.as_ref().clone(),
+                                    children.len(),
+                                )
+                            });
                             frames.extend(
                                 children
                                     .into_iter()
@@ -2562,6 +2611,7 @@ impl<'a> SelectionSolver<'a> {
                             ));
                         }
                         Ok(SelectionValue::Mapping(Some(mapping))) => {
+                            self.require_owner_actuals(projection.owner.declaration(), &mapping)?;
                             let implementation =
                                 &self.declarations.implementations[projection.owner.declaration()];
                             let selected = instantiate_type(
@@ -2650,7 +2700,8 @@ impl<'a> SelectionSolver<'a> {
                     });
                     finished = Some((goal, result));
                 }
-                SelectionFrame::Choose(goal, mut bound, count) => {
+                SelectionFrame::Choose(goal, mut bound, count)
+                | SelectionFrame::FinishRequirement(goal, mut bound, count) => {
                     let operands = values
                         .split_off(values.len() - count)
                         .into_iter()
@@ -2670,7 +2721,12 @@ impl<'a> SelectionSolver<'a> {
                             {
                                 *ty = operands.next().expect("bound type");
                             }
-                            if let Some(given) = self.givens.iter().find(|given| {
+                            if matches!(goal, SelectionGoal::NormalizeRequirement(_, _)) {
+                                finished = Some((
+                                    goal,
+                                    Ok(SelectionValue::Requirement(subject, Box::new(bound))),
+                                ));
+                            } else if let Some(given) = self.givens.iter().find(|given| {
                                 given.subject == subject
                                     && given.bound.declaration == bound.declaration
                                     && given.bound.arguments == bound.arguments
@@ -2689,49 +2745,166 @@ impl<'a> SelectionSolver<'a> {
                                 });
                                 finished = Some((goal, Ok(SelectionValue::Evidence(index))));
                             } else {
-                                let mut candidates = Vec::new();
-                                for implementation in self.declarations.implementations.values() {
-                                    let Some(implemented) = &implementation.trait_use else {
-                                        continue;
-                                    };
-                                    if implemented.declaration != bound.declaration {
-                                        continue;
+                                let mut candidates = self
+                                    .givens
+                                    .iter()
+                                    .filter(|given| given.bound.declaration == bound.declaration)
+                                    .cloned()
+                                    .map(|requirement| GivenCandidate {
+                                        requirement,
+                                        parent: None,
+                                    })
+                                    .collect::<Vec<_>>();
+                                if let SelectionGoal::Evidence(
+                                    CheckedType::Projection(projection),
+                                    _,
+                                ) = &goal
+                                    && let ProjectionOwner::Trait(projected_trait) =
+                                        &projection.owner
+                                {
+                                    let definition =
+                                        &self.declarations.traits[&projected_trait.declaration];
+                                    let mapping =
+                                        definition.mapping(&projection.subject, projected_trait);
+                                    let associated = &definition.associated[&projection.member];
+                                    let givens = associated
+                                        .bounds
+                                        .iter()
+                                        .map(|bound| Requirement {
+                                            subject: subject.clone(),
+                                            bound: bound.instantiate(&mapping),
+                                            origin: self.origin.clone(),
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let derived = Self::new(
+                                        self.declarations,
+                                        self.core,
+                                        &givens,
+                                        self.origin.clone(),
+                                    )?;
+                                    self.charge(derived.work)?;
+                                    for requirement in derived.givens {
+                                        if requirement.bound.declaration == bound.declaration {
+                                            candidates.push(GivenCandidate {
+                                                requirement,
+                                                parent: Some(Requirement {
+                                                    subject: projection.subject.clone(),
+                                                    bound: projected_trait.clone(),
+                                                    origin: self.origin.clone(),
+                                                }),
+                                            });
+                                        }
                                     }
-                                    candidates.push(implementation.identity.clone());
                                 }
-                                if candidates.is_empty() {
-                                    let (kind, message) = if matches!(
-                                        subject,
-                                        CheckedType::Infer(_) | CheckedType::Projection(_)
-                                    ) {
-                                        (SelectionFailureKind::Incomplete, "selection proof incomplete: receiver or associated dependency is not determined".to_owned())
-                                    } else {
-                                        (
-                                            SelectionFailureKind::NotApplicable,
-                                            format!(
-                                                "no evidence for {}: {}",
-                                                display_type(&subject),
-                                                bound.declaration.name
-                                            ),
-                                        )
-                                    };
-                                    finished =
-                                        Some((goal, Err(self.failure(kind, message, Vec::new()))));
-                                } else {
-                                    frames.push(SelectionFrame::Candidates(goal, candidates.len()));
-                                    for identity in candidates.into_iter().rev() {
-                                        frames.push(SelectionFrame::MatchCandidate(
-                                            identity.clone(),
-                                            bound.clone(),
-                                        ));
-                                        frames.push(SelectionFrame::Enter(SelectionGoal::Match(
-                                            Box::new(identity),
-                                            subject.clone(),
-                                            Some(bound.arguments.clone()),
-                                        )));
-                                    }
+                                let normalization = candidates
+                                    .iter()
+                                    .rev()
+                                    .map(|candidate| {
+                                        SelectionFrame::Enter(SelectionGoal::NormalizeRequirement(
+                                            candidate.requirement.subject.clone(),
+                                            Box::new(candidate.requirement.bound.clone()),
+                                        ))
+                                    })
+                                    .collect::<Vec<_>>();
+                                frames
+                                    .push(SelectionFrame::Givens(goal, subject, bound, candidates));
+                                frames.extend(normalization);
+                            }
+                        }
+                    }
+                }
+                SelectionFrame::Givens(goal, subject, bound, candidates) => {
+                    let operands = values.split_off(values.len() - candidates.len());
+                    let mut selected = None;
+                    let mut failure = None;
+                    for (candidate, operand) in candidates.into_iter().zip(operands) {
+                        match operand {
+                            Ok(SelectionValue::Requirement(actual, normalized)) => {
+                                if actual == subject
+                                    && normalized.arguments == bound.arguments
+                                    && bound.associated.iter().all(|(member, expected)| {
+                                        normalized.associated.get(member) == Some(expected)
+                                    })
+                                    && selected.is_none()
+                                {
+                                    selected = Some((
+                                        Requirement {
+                                            subject: actual,
+                                            bound: *normalized,
+                                            origin: candidate.requirement.origin,
+                                        },
+                                        candidate.parent,
+                                    ));
                                 }
                             }
+                            Err(error) => {
+                                failure.get_or_insert(error);
+                            }
+                            _ => unreachable!("normalized given requirement"),
+                        }
+                    }
+                    if let Some((requirement, parent)) = selected {
+                        if let Some(parent) = parent {
+                            frames.push(SelectionFrame::Derived(goal, requirement));
+                            frames.push(SelectionFrame::Enter(SelectionGoal::evidence(
+                                parent.subject,
+                                parent.bound,
+                            )));
+                        } else {
+                            let index = self.evidence.len();
+                            self.evidence.push(Evidence::Given(requirement));
+                            finished = Some((goal, Ok(SelectionValue::Evidence(index))));
+                        }
+                    } else if let Some(error) = failure {
+                        finished = Some((goal, Err(error)));
+                    } else {
+                        frames.push(SelectionFrame::Implementations(goal, subject, bound));
+                    }
+                }
+                SelectionFrame::Implementations(goal, subject, bound) => {
+                    let candidates = self
+                        .declarations
+                        .implementations
+                        .values()
+                        .filter(|implementation| {
+                            implementation
+                                .trait_use
+                                .as_ref()
+                                .is_some_and(|implemented| {
+                                    implemented.declaration == bound.declaration
+                                })
+                        })
+                        .map(|implementation| implementation.identity.clone())
+                        .collect::<Vec<_>>();
+                    if candidates.is_empty() {
+                        let (kind, message) = if matches!(
+                            subject,
+                            CheckedType::Infer(_) | CheckedType::Projection(_)
+                        ) {
+                            (SelectionFailureKind::Incomplete, "selection proof incomplete: receiver or associated dependency is not determined".to_owned())
+                        } else {
+                            (
+                                SelectionFailureKind::NotApplicable,
+                                format!(
+                                    "no evidence for {}: {}",
+                                    display_type(&subject),
+                                    bound.declaration.name
+                                ),
+                            )
+                        };
+                        finished = Some((goal, Err(self.failure(kind, message, Vec::new()))));
+                    } else {
+                        frames.push(SelectionFrame::Candidates(goal, candidates.len()));
+                        for identity in candidates.into_iter().rev() {
+                            frames.push(SelectionFrame::MatchCandidate(
+                                identity.clone(),
+                                bound.clone(),
+                            ));
+                            frames.push(SelectionFrame::Enter(SelectionGoal::Match(
+                                Box::new(identity),
+                                subject.clone(),
+                                Some(bound.arguments.clone()),
+                            )));
                         }
                     }
                 }
@@ -2808,6 +2981,7 @@ impl<'a> SelectionSolver<'a> {
                         .into_iter()
                         .collect::<Result<Vec<_>, _>>();
                     let result = operands.and_then(|operands| {
+                        self.require_owner_actuals(&identity, &mapping)?;
                         for pair in operands.as_chunks::<2>().0 {
                             let (SelectionValue::Type(left), SelectionValue::Type(right)) = (&pair[0], &pair[1]) else { unreachable!("associated bindings compare types") };
                             if left == right { continue }

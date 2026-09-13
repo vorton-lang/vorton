@@ -25,6 +25,8 @@ Vorton 使用 Hindley-Milner 类型推断，并扩展 effect row 和 trait bound
 
 形成条件同时检查未被调用的受支持声明：trait 的 super/associated bound、impl trait 的类型参数、关联 default/assignment、非泛型 alias 和 effect operation 签名都不能隐藏无 evidence 的类型实例。Receiver method 与 associated function 的分类在 conformance 时一致，不能等到具体调用才比较。Trait 与 inherent projection 保留不同 owner；候选 header、evidence 与 coherence 共同归约嵌套关联值，只有确定的结构不兼容才证明不相交。候选不适用、冲突、非法循环和未完成证明由内部语义结果区分。
 
+Given 的 subject、trait actual 与 associated binding 和证明目标使用同一归约过程；由 associated bound 得到的事实保留父 evidence。例如已知 `U::Item=Int` 时，`T:P<Item=U::Item>` 可以满足 `T:P<Item=Int>`。关联选择消费 impl evidence 前要求 owner actual 已唯一确定；缺失 actual 不会经函数泛化变成新 binder。公开 inherent 关联结果、Effect operation 参数/返回、effect/alias bound 与公开 alias 的引用执行相同的 private-surface 检查，透明 alias 展开不能抹掉源引用的可见性要求；private representation 保持可用。
+
 每个 body 只生成一份 typed draft。普通函数与方法按真实依赖形成递归组，组内使用 monomorphic provisional 变量，全部约束成功后 final-zonk、泛化并原子发布；polymorphic recursion 和 occurs-check 无限类型拒绝。每次调用的参数、返回、owner/method actual、effect actual 与证据共用同一 mapping。Outer impl/trait formal 和 Self 保留原 owner，不重新量化成方法自身 formal。同一 callable 可见的独立 formal 保持不同，即使合法递归调用把它们分别关联到其它 callable 的 formal。Generic bound 已确定的 dictionary member 不会被 concrete actual 的同名 inherent method 替换。普通已求值 `let` 始终是 monotype。
 
 Trait/projection 选择使用显式工作栈。有限重复实例和中途增长后抵达基础事实的链可以成功；非法 selection/projection cycle 与缺少 evidence 分别诊断。每次查询最多处理 16,384 个逻辑工作单位、256 个同时活跃的查询状态；超限表示证明未完成，不代表 no-impl 或已证明不相交。Effect/callable 域闭合同样按逻辑工作计数终止，不依赖 wall timeout 或自动提高预算。合法结构递归销毁保留有来源的完整销毁关系，不把 trait query 重入当作证明。

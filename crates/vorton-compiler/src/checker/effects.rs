@@ -70,6 +70,7 @@ pub(super) struct OperationHeader {
 // Alias expansion can erase an actual from the row. Keep its formation and
 // owner requirements until callable conformance has fixed the input domain.
 pub(super) struct EffectUse {
+    pub(super) declaration: EntityId,
     pub(super) types: Vec<CheckedType>,
     pub(super) requirements: Vec<Requirement>,
     pub(super) scope: Option<EntityId>,
@@ -91,8 +92,10 @@ impl SourceTypeNormalizer<'_> {
         owner: &EntityId,
         parameters: &[crate::project::ResolvedTypeParameter],
         operations: &[crate::project::ResolvedEffectOperation],
+        exports: &BTreeSet<EntityId>,
     ) -> Result<(), CheckDiagnostic> {
         let formals = self.owner_formals[owner].clone();
+        let public = exports.contains(owner);
         for operation in operations {
             let mut inputs = Vec::new();
             for parameter in &operation.parameters {
@@ -104,6 +107,9 @@ impl SourceTypeNormalizer<'_> {
                         Vec::new(),
                     ));
                 };
+                if public {
+                    validate_public_type_visibility(exports, ty, &self.aliases)?;
+                }
                 let mode = parameter
                     .mode
                     .map_or(ParameterMode::Borrow, |(_, mode)| mode);
@@ -118,6 +124,9 @@ impl SourceTypeNormalizer<'_> {
                     ));
                 }
                 inputs.push((self.normalize_with_formals(ty, &formals)?, mode));
+            }
+            if public {
+                validate_public_type_visibility(exports, &operation.return_type, &self.aliases)?;
             }
             let return_type = self.normalize_with_formals(&operation.return_type, &formals)?;
             self.operations.insert(
@@ -1586,6 +1595,7 @@ impl SourceTypeNormalizer<'_> {
                     .map(|formal| (formal.clone(), types[formal.ordinal].clone()))
                     .collect();
                 self.effect_uses.push(EffectUse {
+                    declaration: target.clone(),
                     types: types.clone(),
                     requirements: self.effect_requirements[target]
                         .iter()

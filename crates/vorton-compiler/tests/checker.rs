@@ -3076,3 +3076,85 @@ fn handled_contract_actuals_prove_the_effect_owner_conditions() {
         }
     }
 }
+
+#[test]
+fn v3_regression_normalized_given_evidence() {
+    let sources = [
+        "trait Q { type Item; } trait P { type Item; } fn need<T: P<Item = Int>>(x: &T) -> Unit {} fn forward<U: Q<Item = Int>, T: P<Item = U::Item>>(u: &U, x: &T) -> Unit { need(x); }",
+        "trait Q { type Item; } trait P { type Item; } fn need<T: P<Item = Int>>(x: &T) -> Unit {} fn forward<U: Q<Item = Int>, T: P<Item = Int>>(u: &U, x: &T) -> Unit { need(x); }",
+        "trait Q { type Item; } trait P<T> {} fn need<T: P<Int>>(x: &T) -> Unit {} fn forward<U: Q<Item = Int>, T: P<U::Item>>(u: &U, x: &T) -> Unit { need(x); }",
+        "trait Q { type Item; } trait P { type Item; } fn need<T: P<Item = Int>>(x: &T) -> Unit {} fn forward<U: Q<Item = Int>, T: P<Item = U::Item>>(u: &U, x: &T) -> Unit { need(x); } struct ConcreteQ {} struct ConcreteP {} impl Q for ConcreteQ { type Item = Int; } impl P for ConcreteP { type Item = Int; } fn use_it() { forward(ConcreteQ {}, ConcreteP {}); }",
+    ];
+    let failures = sources
+        .iter()
+        .filter_map(|source| check(source).err())
+        .collect::<Vec<_>>();
+    assert!(failures.is_empty(), "{failures:?}");
+    check("trait Q { type Item; } trait P<T> {} trait R<U: Q> { type Item: P<U::Item>; } fn need<T: P<Int>>(x: &T) {} fn forward<U: Q<Item = Int>, T: R<U>>(u: &U, t: &T, x: &T::Item) { need(x); }")
+        .expect("derived associated evidence normalizes its trait argument");
+    check("trait Q { type Item; } trait P { type Item; } fn need<T: P<Item = (Int, Bool)>>(x: &T) {} fn forward<T: P<Item = (U::Item, Bool)>, U: Q<Item = Int>>(x: &T, u: &U) { need(x); }")
+        .expect("nested bindings do not depend on parameter declaration order");
+    let failure = error(
+        "trait Q { type Item; } trait P { type Item; } fn need<T: P<Item = Int>>(x: &T) {} fn forward<U: Q<Item = Bool>, T: P<Item = U::Item>>(u: &U, x: &T) { need(x); }",
+    );
+    assert!(failure.message.contains("no evidence"), "{failure:?}");
+}
+
+#[test]
+fn v3_regression_public_associated_and_effect_visibility() {
+    let sources = [
+        "pub struct Open {} struct Hidden {} impl Open { pub type Item = Hidden; }",
+        "struct Secret {} pub effect Leaky { fn expose(value: &Secret) -> Unit; }",
+        "struct Secret {} pub effect Leaky { fn fetch() -> Secret; }",
+        "trait Hidden {} pub effect Leaky<T: Hidden> { fn accept(value: &T) -> Unit; }",
+        "effect Hidden { fn invoke() -> Unit; } pub effect alias Exposed = {Hidden};",
+        "struct Secret {} pub trait Leaky { fn expose(self: &Self, value: &Secret) -> Unit; }",
+        "type Hidden = Int; pub struct Open {} impl Open { pub type Item = Hidden; }",
+        "type Hidden = Int; pub effect Leaky { fn expose(value: &Hidden) -> Unit; }",
+        "effect alias Hidden = {console}; pub effect alias Exposed = {Hidden};",
+        "type Hidden = Int; pub effect alias Exposed = {fail<Hidden>};",
+    ];
+    let outcomes = sources
+        .iter()
+        .map(|source| match check(source) {
+            Ok(_) => "ACCEPT".to_owned(),
+            Err(error) => error.message,
+        })
+        .collect::<Vec<_>>();
+    check("pub struct Open {} struct Hidden {} impl Open { type Item = Hidden; }")
+        .expect("private associated representation remains private");
+    check("pub struct Open {} pub struct Visible {} impl Open { pub type Item = Visible; } pub trait P {} pub effect E<T: P> { fn invoke(value: &T) -> Visible; } pub effect alias Public = {E<Visible>}; impl P for Visible {}")
+        .expect("public names and their owner conditions remain exportable");
+    check("struct Secret {} trait Hidden {} effect E<T: Hidden> { fn invoke(value: &Secret) -> Secret; } effect alias Private = {E<Secret>}; impl Hidden for Secret {}")
+        .expect("private effect surfaces retain private implementation details");
+    assert!(
+        outcomes.iter().all(|message| message.contains("private")),
+        "{outcomes:?}"
+    );
+}
+
+#[test]
+fn v3_regression_unbound_associated_owner_actual() {
+    let ambiguous = "struct A {} trait Value { type Item; } impl<T> Value for A { type Item = T; } fn accept(value: A::Item) {} fn use_it() { accept(1); accept(true); }";
+    let fixed = "struct A {} trait Value { type Item; } impl Value for A { type Item = Int; } fn accept(value: A::Item) {} fn use_it() { accept(1); accept(true); }";
+    let fixed_error = error(fixed);
+    assert!(
+        fixed_error
+            .message
+            .contains("Bool and Int are incompatible"),
+        "{fixed_error:?}"
+    );
+    let failure = check(ambiguous)
+        .expect_err("an explicit associated type cannot become a new callable formal");
+    assert!(failure.message.contains("actual"), "{failure:?}");
+    for source in [
+        "struct A {} impl<T> A { type Item = T; } fn accept(value: &A::Item) {}",
+        "struct A {} impl<T> A { fn id(value: move T) -> T { value } } fn use_it() { A::id(1); A::id(true); }",
+        "struct A {} trait Value { type Item; fn id(self: &Self, x: move Self::Item) -> Self::Item; } impl<T> Value for A { type Item = T; fn id(self: &Self, x: move T) -> T { x } } fn use_it() -> Bool { let number: Int = A {}.id(1); A {}.id(true) }",
+    ] {
+        let failure = error(source);
+        assert!(failure.message.contains("actual"), "{failure:?}");
+    }
+    check("struct Wrap<T> { value: T } trait Value { type Item; } impl<T> Value for Wrap<T> { type Item = T; } type IntWrap = Wrap<Int>; fn accept(value: &IntWrap::Item) {} fn use_it() { accept(1); }")
+        .expect("a receiver-bound owner actual determines the associated result");
+}

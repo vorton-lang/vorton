@@ -3161,9 +3161,12 @@ fn collect_supported_headers(
                     operations,
                 } => {
                     let owner = declaration.identity.as_ref().expect("effect owner");
-                    if let Err(diagnostic) =
-                        normalizer.collect_operations(owner, type_parameters, operations)
-                    {
+                    if let Err(diagnostic) = normalizer.collect_operations(
+                        owner,
+                        type_parameters,
+                        operations,
+                        public_exports,
+                    ) {
                         push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
                     }
                 }
@@ -3171,8 +3174,38 @@ fn collect_supported_headers(
                     let formals = normalizer.owner_formals
                         [declaration.identity.as_ref().expect("alias owner")]
                     .clone();
-                    if let Err(diagnostic) =
-                        normalizer.normalize_effects(effects, &formals, &BTreeMap::new())
+                    if let Err(diagnostic) = normalizer
+                        .normalize_effects(effects, &formals, &BTreeMap::new())
+                        .and_then(|row| {
+                            if public_exports
+                                .contains(declaration.identity.as_ref().expect("alias owner"))
+                            {
+                                let mut pending = vec![effects];
+                                while let Some(row) = pending.pop() {
+                                    for effect in &row.effects {
+                                        for ty in &effect.arguments {
+                                            validate_public_type_visibility(
+                                                public_exports,
+                                                ty,
+                                                &normalizer.aliases,
+                                            )?;
+                                        }
+                                        pending.extend(
+                                            effect
+                                                .effect_arguments
+                                                .iter()
+                                                .map(|argument| &argument.effects),
+                                        );
+                                    }
+                                }
+                                normalizer.validate_effect_visibility(
+                                    &row,
+                                    public_exports,
+                                    &declaration.origin,
+                                )?;
+                            }
+                            Ok(())
+                        })
                     {
                         push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
                     }
@@ -3216,6 +3249,16 @@ fn collect_supported_headers(
                     };
                     let impl_id = declaration.identity.as_ref().expect("impl identity");
                     for member in &implementation.members {
+                        let owner = &normalizer.selection.implementations[impl_id];
+                        let exposed = validate_public_nominals(
+                            &owner.target,
+                            public_exports,
+                            &declaration.origin,
+                        )
+                        .is_ok()
+                            && owner.trait_use.as_ref().map_or(member.public, |bound| {
+                                public_exports.contains(&bound.declaration)
+                            });
                         if let crate::project::ResolvedImplMemberKind::Function(function) =
                             &member.kind
                         {
@@ -3225,16 +3268,6 @@ fn collect_supported_headers(
                                 public: member.public,
                                 kind: ResolvedDeclarationKind::Function(function.clone()),
                             };
-                            let owner = &normalizer.selection.implementations[impl_id];
-                            let exposed = validate_public_nominals(
-                                &owner.target,
-                                public_exports,
-                                &declaration.origin,
-                            )
-                            .is_ok()
-                                && owner.trait_use.as_ref().map_or(member.public, |bound| {
-                                    public_exports.contains(&bound.declaration)
-                                });
                             match collect_function_header(
                                 &member_declaration,
                                 function,
@@ -3265,6 +3298,16 @@ fn collect_supported_headers(
                                     }
                                 }
                             }
+                        } else if exposed
+                            && let crate::project::ResolvedImplMemberKind::AssociatedType(ty) =
+                                &member.kind
+                            && let Err(diagnostic) = validate_public_type_visibility(
+                                public_exports,
+                                ty,
+                                &normalizer.aliases,
+                            )
+                        {
+                            push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
                         }
                     }
                 }

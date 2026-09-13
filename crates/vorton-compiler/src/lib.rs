@@ -80,6 +80,8 @@ pub fn prepare_project(project: ResolvedProject) -> Result<PreparedProject, Proj
 /// associated defaults/assignments and handled-effect or alias owner requirements.
 /// Evidence and coherence reduce trait and inherent projections by their owners;
 /// unresolved associated equality does not establish disjoint implementation domains.
+/// Given predicates share that reduction, and associated selection requires determined
+/// impl owner actuals. Public associated/effect surfaces retain visibility checks.
 ///
 /// Handler/catch, capturing closures, general callable returns or storage,
 /// FnMut/FnOnce entry, Mut/partial move, user Drop/Rc/Weak and other unsupported
