@@ -596,6 +596,29 @@ fn contract_pattern(
 }
 
 impl ContractTypeContext<'_> {
+    pub(super) fn public_reference(
+        &self,
+        declaration: &EntityId,
+        path: &str,
+    ) -> Result<(), CheckDiagnostic> {
+        if self
+            .headers
+            .get(self.target)
+            .is_some_and(|header| header.public_export)
+            && !actual_public_exports(self.project).contains(declaration)
+        {
+            return Err(self.error(
+                CheckDiagnosticKind::TypeMismatch,
+                path,
+                format!(
+                    "public contract surface references private declaration `{}`",
+                    declaration.name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn requirements(
         &self,
         requirements: &[contract::GenericRequirement],
@@ -647,7 +670,7 @@ impl ContractTypeContext<'_> {
                             contract::ModeRule::CallableUse { callable } => {
                                 let callable = normalize_contract_type(self, &format!("{parameter_path}.mode.callable"), callable)?;
                                 if callable != ty { return Err(self.error(CheckDiagnosticKind::ContractConflict, &parameter_path, "shape callable_use selects a different input type")) }
-                                self.normalizer.shared_callable(&ty, &normalized.traits, origin.clone()).map_err(|mut error| { error.kind = CheckDiagnosticKind::Unsupported; error })?;
+                                self.normalizer.shared_callable(&ty, &normalized.traits, origin.clone(), &TypeInference::default()).map_err(|mut error| { error.kind = CheckDiagnosticKind::Unsupported; error })?;
                                 ParameterMode::Borrow
                             }
                             _ => return Err(self.error(CheckDiagnosticKind::Unsupported, &format!("{parameter_path}.mode"), "callback shape requires fixed Borrow/Move or proven shared Fn inputs")),
@@ -762,6 +785,7 @@ impl ContractTypeContext<'_> {
                             "handled effect identity or arity does not match",
                         ));
                     }
+                    self.public_reference(&target, &path)?;
                     EffectTerm::Handled(
                         target,
                         arguments
@@ -823,6 +847,7 @@ impl ContractTypeContext<'_> {
                     let owner = bind_trait_ref(self.project, self.owner, &method.owner).map_err(
                         |message| self.error(CheckDiagnosticKind::ContractBinding, &path, message),
                     )?;
+                    self.public_reference(&owner, &path)?;
                     let method = self.normalizer.selection.traits[&owner]
                         .methods
                         .get(&method.name.0)
@@ -952,6 +977,7 @@ impl ContractTypeContext<'_> {
     ) -> Result<TraitUse, CheckDiagnostic> {
         let declaration = bind_trait_ref(self.project, self.owner, &bound.trait_ref)
             .map_err(|message| self.error(CheckDiagnosticKind::ContractBinding, path, message))?;
+        self.public_reference(&declaration, path)?;
         let arguments = bound
             .arguments
             .iter()
@@ -1011,6 +1037,7 @@ pub(super) fn normalize_selected_contract_type(
 ) -> Result<CheckedType, CheckDiagnostic> {
     let ty = normalize_contract_type(context, path, ty)?;
     let givens = &context.headers[context.target].requirements;
+    let mut selection_inference = TypeInference::default();
     let mut solver = SelectionSolver::new(
         &context.normalizer.selection,
         &context.project.core_roles,
@@ -1019,6 +1046,7 @@ pub(super) fn normalize_selected_contract_type(
             document_index: context.document_index,
             json_path: path.to_owned(),
         },
+        &mut selection_inference,
     )?;
     solver.normalize(&ty).map_err(Into::into)
 }

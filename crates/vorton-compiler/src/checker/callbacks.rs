@@ -146,16 +146,19 @@ impl SourceTypeNormalizer<'_> {
         ty: &CheckedType,
         requirements: &[Requirement],
         origin: &OriginRef,
+        inference: &TypeInference,
     ) -> bool {
         if matches!(ty, CheckedType::Function(_)) {
             return true;
         }
         let origin = CheckOrigin::Source(origin.clone());
+        let mut selection_inference = inference.clone();
         SelectionSolver::new(
             &self.selection,
             &self.project.core_roles,
             requirements,
             origin.clone(),
+            &mut selection_inference,
         )
         .and_then(|mut solver| {
             solver.prove(&Requirement {
@@ -172,121 +175,11 @@ impl SourceTypeNormalizer<'_> {
     }
 }
 
-pub(super) fn substitute_body_effects(
-    block: &mut TypedBlock,
-    replacements: &BTreeMap<EffectFormal, EffectRow>,
-) {
-    fn expression(value: &mut TypedExpr, replacements: &BTreeMap<EffectFormal, EffectRow>) {
-        match &mut value.kind {
-            TypedExprKind::Call {
-                arguments,
-                instantiation,
-                effect,
-                ..
-            } => {
-                for argument in arguments {
-                    expression(argument, replacements);
-                }
-                if let CallInstantiation::Published(mapping)
-                | CallInstantiation::Provisional(mapping) = instantiation
-                {
-                    for (_, row) in &mut mapping.effects {
-                        *row = row.instantiate(&BTreeMap::new(), replacements);
-                    }
-                }
-                if let CallInstantiation::RecursiveBinding { effects } = instantiation {
-                    for (_, row) in effects {
-                        *row = row.instantiate(&BTreeMap::new(), replacements);
-                    }
-                }
-                if let Some(row) = effect {
-                    *row = row.instantiate(&BTreeMap::new(), replacements);
-                }
-            }
-            TypedExprKind::Indirect(call) => {
-                expression(&mut call.callable, replacements);
-                for argument in &mut call.arguments {
-                    expression(argument, replacements);
-                }
-                if let Some(row) = &mut call.effect {
-                    *row = row.instantiate(&BTreeMap::new(), replacements);
-                }
-            }
-            TypedExprKind::FunctionValue(value) => {
-                if let Some(mapping) = &mut value.mapping {
-                    for (_, row) in &mut mapping.effects {
-                        *row = row.instantiate(&BTreeMap::new(), replacements);
-                    }
-                }
-            }
-            TypedExprKind::Operation(operation) => {
-                for argument in &mut operation.arguments {
-                    expression(argument, replacements);
-                }
-                operation.effect = operation.effect.instantiate(&BTreeMap::new(), replacements);
-            }
-            TypedExprKind::Block(block) | TypedExprKind::Unsafe(block) => {
-                substitute_body_effects(block, replacements)
-            }
-            TypedExprKind::Parenthesized(inner)
-            | TypedExprKind::Unary { operand: inner, .. }
-            | TypedExprKind::Field {
-                receiver: inner, ..
-            }
-            | TypedExprKind::TupleField {
-                receiver: inner, ..
-            } => expression(inner, replacements),
-            TypedExprKind::Tuple(elements) => {
-                for element in elements {
-                    expression(element, replacements);
-                }
-            }
-            TypedExprKind::Construct(construction) => {
-                for field in &mut construction.fields {
-                    expression(&mut field.value, replacements);
-                }
-            }
-            TypedExprKind::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                expression(condition, replacements);
-                substitute_body_effects(then_branch, replacements);
-                if let Some(branch) = else_branch {
-                    expression(branch, replacements);
-                }
-            }
-            TypedExprKind::Binary { left, right, .. } => {
-                expression(left, replacements);
-                expression(right, replacements);
-            }
-            _ => {}
-        }
-    }
-    for statement in &mut block.statements {
-        match &mut statement.kind {
-            TypedStatementKind::Let { value, .. } | TypedStatementKind::Expression(value) => {
-                expression(value, replacements)
-            }
-            TypedStatementKind::Return(value) => {
-                if let Some(value) = value {
-                    expression(value, replacements);
-                }
-            }
-        }
-    }
-    if let Some(tail) = &mut block.tail {
-        expression(tail, replacements);
-    }
-}
-
 pub(super) fn conform_callback_shapes(
     expected: &FunctionHeader,
     actual: &mut FunctionHeader,
     types: &BTreeMap<TypeFormal, CheckedType>,
     solver: &mut SelectionSolver<'_>,
-    inference: &mut TypeInference,
 ) -> Result<(), CheckDiagnostic> {
     let explicit = actual.effect_formals.len()
         - actual
@@ -365,20 +258,20 @@ pub(super) fn conform_callback_shapes(
                         actual_shape.origin.clone(),
                     ));
                 }
-                inference
-                    .unify(&solver.normalize(left)?, &solver.normalize(right)?)
-                    .map_err(|failure| {
-                        effect_diagnostic(
-                            display_unification_failure(&failure),
-                            actual_shape.origin.clone(),
-                        )
-                    })?;
+                let left = solver.normalize(left)?;
+                let right = solver.normalize(right)?;
+                solver.inference.unify(&left, &right).map_err(|failure| {
+                    effect_diagnostic(
+                        display_unification_failure(&failure),
+                        actual_shape.origin.clone(),
+                    )
+                })?;
             }
-            inference
-                .unify(
-                    &solver.normalize(&actual_shape.shape.return_type)?,
-                    &solver.normalize(&expected_shape.shape.return_type)?,
-                )
+            let actual_type = solver.normalize(&actual_shape.shape.return_type)?;
+            let expected_type = solver.normalize(&expected_shape.shape.return_type)?;
+            solver
+                .inference
+                .unify(&actual_type, &expected_type)
                 .map_err(|failure| {
                     effect_diagnostic(
                         display_unification_failure(&failure),
@@ -393,7 +286,7 @@ pub(super) fn conform_callback_shapes(
                         .shape
                         .effect
                         .instantiate(&BTreeMap::new(), &replacements),
-                    inference,
+                    solver.inference,
                     &actual_shape.origin,
                 )?;
             }
@@ -488,6 +381,7 @@ pub(super) struct ShapeRequirement {
 pub(super) struct TypedFunctionValue {
     pub(super) function: EntityId,
     pub(super) mapping: Option<CallMapping>,
+    pub(super) evidence: Vec<Evidence>,
 }
 
 pub(super) struct CallbackActuals {
@@ -565,12 +459,16 @@ impl SourceTypeNormalizer<'_> {
                     let ty = self.normalize_with_formals(&input.ty, formals)?;
                     let mode = input.mode.map_or(ParameterMode::Borrow, |(_, mode)| mode);
                     let mode = if mode == ParameterMode::Call {
-                        self.shared_callable(&ty, &givens, origin.clone()).map_err(
-                            |mut error| {
-                                error.kind = CheckDiagnosticKind::Unsupported;
-                                error
-                            },
-                        )?;
+                        self.shared_callable(
+                            &ty,
+                            &givens,
+                            origin.clone(),
+                            &TypeInference::default(),
+                        )
+                        .map_err(|mut error| {
+                            error.kind = CheckDiagnosticKind::Unsupported;
+                            error
+                        })?;
                         ParameterMode::Borrow
                     } else {
                         mode
@@ -611,12 +509,15 @@ impl SourceTypeNormalizer<'_> {
         ty: &CheckedType,
         requirements: &[Requirement],
         origin: CheckOrigin,
+        inference: &TypeInference,
     ) -> Result<(), CheckDiagnostic> {
+        let mut selection_inference = inference.clone();
         let mut solver = SelectionSolver::new(
             &self.selection,
             &self.project.core_roles,
             requirements,
             origin.clone(),
+            &mut selection_inference,
         )?;
         solver
             .prove(&Requirement {
@@ -642,6 +543,7 @@ impl BodyChecker<'_, '_> {
         let header = &self.environment.headers[function];
         if function.module.source_library() == self.function.identity.module.source_library() {
             let closed = header.source_return_explicit
+                && header.inferable_effects.is_empty()
                 && header
                     .parameters
                     .iter()
@@ -671,6 +573,7 @@ impl BodyChecker<'_, '_> {
             kind: TypedExprKind::FunctionValue(Box::new(TypedFunctionValue {
                 function: function.clone(),
                 mapping: None,
+                evidence: Vec::new(),
             })),
         })
     }
@@ -714,6 +617,15 @@ impl CallBinder<'_, '_> {
         ty: &CheckedType,
         origin: &CheckOrigin,
     ) -> Result<Option<Vec<Evidence>>, CheckDiagnostic> {
+        let mut variables = BTreeSet::new();
+        self.inference.unresolved_variables(ty, &mut variables);
+        if !variables.is_empty() {
+            self.pending = Some(effect_diagnostic(
+                "named function domain proof incomplete: type actuals remain undetermined",
+                origin.clone(),
+            ));
+            return Ok(None);
+        }
         enum Frame {
             Enter(CheckedType),
             Finish(CheckedType),
@@ -779,8 +691,20 @@ impl CallBinder<'_, '_> {
                         .clone();
                     let formals = header.effect_formals.clone();
                     let types = item.mapping.types.iter().cloned().collect();
-                    let Some(actuals) =
-                        self.callback_actuals_inner(&shapes, &types, &formals, origin, false)?
+                    let rows = self
+                        .schemes
+                        .get(&item.function)
+                        .map(|scheme| scheme.row_constraints.clone())
+                        .unwrap_or_else(|| {
+                            header
+                                .effect_upper
+                                .iter()
+                                .chain(&header.trait_upper)
+                                .cloned()
+                                .collect()
+                        });
+                    let Some(actuals) = self
+                        .callback_actuals_inner(&shapes, &types, &formals, &rows, origin, false)?
                     else {
                         return Ok(None);
                     };
@@ -806,22 +730,24 @@ impl CallBinder<'_, '_> {
                         &self.normalizer.project.core_roles,
                         &givens,
                         origin.clone(),
+                        self.inference,
                     )?;
                     for requirement in &requirements {
                         solver.prove(
                             &requirement
                                 .instantiate(&types)
-                                .map_types(|ty| self.inference.canonical(ty)),
+                                .map_types(|ty| solver.inference.canonical(ty)),
                         )?;
                     }
                     if let Some(scheme) = self.schemes.get(&item.function) {
                         for stored in &scheme.stored_types {
                             if self.normalizer.callable_type(
-                                &self
+                                &solver
                                     .inference
                                     .canonical(&instantiate_type(&stored.ty, &types)),
                                 &givens,
                                 &stored.origin,
+                                solver.inference,
                             ) {
                                 return Err(effect_diagnostic(
                                     "callable storage through a named function value requires later escape/resource analysis",
@@ -860,6 +786,10 @@ impl CallBinder<'_, '_> {
         span: Span,
     ) -> Result<(), CheckDiagnostic> {
         if value.mapping.is_some() {
+            let origin = CheckOrigin::Source(self.function.context.origin(span));
+            if let Some(evidence) = self.check_function_item_domain(ty, &origin)? {
+                value.evidence = evidence;
+            }
             return Ok(());
         }
         let mapping = if let Some(scheme) = self.schemes.get(&value.function) {
@@ -901,11 +831,14 @@ impl CallBinder<'_, '_> {
                     .effect_formals
                     .iter()
                     .cloned()
-                    .map(|formal| (formal.clone(), EffectRow(vec![EffectTerm::Formal(formal)])))
+                    .map(|formal| (formal, self.inference.fresh_effect()))
                     .collect(),
             }
         } else {
-            self.pending = Some(self.function.context.origin(span));
+            self.pending = Some(effect_diagnostic(
+                "function value actuals remain undetermined",
+                CheckOrigin::Source(self.function.context.origin(span)),
+            ));
             return Ok(());
         };
         let item = CheckedType::Function(Box::new(FunctionItem {
@@ -922,6 +855,10 @@ impl CallBinder<'_, '_> {
         })?;
         value.mapping = Some(mapping);
         self.changed = true;
+        let origin = CheckOrigin::Source(self.function.context.origin(span));
+        if let Some(evidence) = self.check_function_item_domain(ty, &origin)? {
+            value.evidence = evidence;
+        }
         Ok(())
     }
 
@@ -955,7 +892,10 @@ impl CallBinder<'_, '_> {
             self.inference.resolve(&call.callable.ty),
             CheckedType::Infer(_)
         ) {
-            self.pending = Some(self.function.context.origin(span));
+            self.pending = Some(effect_diagnostic(
+                "indirect callable type remains undetermined",
+                CheckOrigin::Source(self.function.context.origin(span)),
+            ));
             return Ok(());
         }
         let origin = CheckOrigin::Source(self.function.context.origin(span));
@@ -1002,9 +942,10 @@ impl CallBinder<'_, '_> {
         shapes: &[ShapeRequirement],
         types: &BTreeMap<TypeFormal, CheckedType>,
         formals: &[EffectFormal],
+        rows: &[EffectRow],
         origin: &CheckOrigin,
     ) -> Result<Option<CallbackActuals>, CheckDiagnostic> {
-        self.callback_actuals_inner(shapes, types, formals, origin, true)
+        self.callback_actuals_inner(shapes, types, formals, rows, origin, true)
     }
 
     fn callback_actuals_inner(
@@ -1012,6 +953,7 @@ impl CallBinder<'_, '_> {
         shapes: &[ShapeRequirement],
         types: &BTreeMap<TypeFormal, CheckedType>,
         formals: &[EffectFormal],
+        rows: &[EffectRow],
         origin: &CheckOrigin,
         check_domain: bool,
     ) -> Result<Option<CallbackActuals>, CheckDiagnostic> {
@@ -1023,6 +965,41 @@ impl CallBinder<'_, '_> {
         let mut checks = Vec::new();
         let mut demands = Vec::new();
         let mut evidence = Vec::new();
+        let environment = EffectEnvironment {
+            normalizer: self.normalizer,
+            headers: self.headers,
+            schemes: self.schemes,
+        };
+        let provisional = self
+            .headers
+            .iter()
+            .filter_map(|(identity, header)| {
+                header
+                    .trait_upper
+                    .as_ref()
+                    .or(header.effect_upper.as_ref())
+                    .map(|row| (identity.clone(), row.clone()))
+            })
+            .collect();
+        for row in rows {
+            let mut needed = BTreeSet::new();
+            let row = environment.expand(
+                &row.instantiate(types, &BTreeMap::new()),
+                self.function,
+                &provisional,
+                self.inference,
+                &mut needed,
+            )?;
+            if !needed.is_empty() {
+                self.dependencies.extend(needed);
+                self.pending = Some(effect_diagnostic(
+                    "callback effect dependencies remain undetermined",
+                    origin.clone(),
+                ));
+                return Ok(None);
+            }
+            checks.push((EffectRow::default(), row));
+        }
         for required in shapes {
             let subject = instantiate_type(&required.subject, types);
             let mut actual = self.callable_shape(&subject, origin)?;
@@ -1077,7 +1054,10 @@ impl CallBinder<'_, '_> {
                     ));
                 }
                 self.dependencies.extend(needed);
-                self.pending = Some(origin_as_source(origin, &self.function.origin));
+                self.pending = Some(effect_diagnostic(
+                    "callback effect dependencies remain undetermined",
+                    origin.clone(),
+                ));
                 return Ok(None);
             }
             let destinations = expected
@@ -1174,10 +1154,11 @@ impl CallBinder<'_, '_> {
                 }
             }
             if !deferred.is_empty() && !changed {
-                return Err(effect_diagnostic(
+                self.pending = Some(effect_diagnostic(
                     "callback row has no unique minimal effect-actual solution",
                     origin.clone(),
                 ));
+                return Ok(None);
             }
             demands = deferred;
         }
@@ -1217,6 +1198,32 @@ impl EffectEnvironment<'_, '_> {
         actual: &CallableShape,
         expected: &CallableShape,
         caller: &FunctionHeader,
+        inference: &mut TypeInference,
+        origin: &CheckOrigin,
+    ) -> Result<(), CheckDiagnostic> {
+        self.match_callback_types_scope(
+            actual,
+            expected,
+            &EffectScope::from(caller),
+            inference,
+            origin,
+        )
+    }
+    pub(super) fn callable_shape(
+        &self,
+        ty: &CheckedType,
+        caller: &FunctionHeader,
+        inference: &TypeInference,
+        origin: &CheckOrigin,
+    ) -> Result<CallableShape, CheckDiagnostic> {
+        self.callable_shape_scope(ty, &EffectScope::from(caller), inference, origin)
+    }
+
+    pub(super) fn match_callback_types_scope(
+        &self,
+        actual: &CallableShape,
+        expected: &CallableShape,
+        caller: &EffectScope,
         inference: &mut TypeInference,
         origin: &CheckOrigin,
     ) -> Result<(), CheckDiagnostic> {
@@ -1269,27 +1276,31 @@ impl EffectEnvironment<'_, '_> {
             &self.normalizer.project.core_roles,
             &givens,
             origin.clone(),
+            inference,
         )?;
         for (actual, expected) in pairs {
-            let actual = solver.normalize(&inference.canonical(actual))?;
-            let expected = solver.normalize(&inference.canonical(expected))?;
-            inference.unify(&actual, &expected).map_err(|failure| {
-                effect_diagnostic(
-                    format!(
-                        "callback input/result type is invariant: {}",
-                        display_unification_failure(&failure)
-                    ),
-                    origin.clone(),
-                )
-            })?;
+            let actual = solver.normalize(actual)?;
+            let expected = solver.normalize(expected)?;
+            solver
+                .inference
+                .unify(&actual, &expected)
+                .map_err(|failure| {
+                    effect_diagnostic(
+                        format!(
+                            "callback input/result type is invariant: {}",
+                            display_unification_failure(&failure)
+                        ),
+                        origin.clone(),
+                    )
+                })?;
         }
         Ok(())
     }
 
-    pub(super) fn callable_shape(
+    pub(super) fn callable_shape_scope(
         &self,
         ty: &CheckedType,
-        caller: &FunctionHeader,
+        caller: &EffectScope,
         inference: &TypeInference,
         origin: &CheckOrigin,
     ) -> Result<CallableShape, CheckDiagnostic> {
@@ -1347,7 +1358,7 @@ impl EffectEnvironment<'_, '_> {
                     .map(|requirement| requirement.map_types(|ty| inference.canonical(ty)))
                     .collect::<Vec<_>>();
                 self.normalizer
-                    .shared_callable(&ty, &requirements, origin.clone())
+                    .shared_callable(&ty, &requirements, origin.clone(), inference)
                     .map_err(|mut diagnostic| {
                         diagnostic.kind = CheckDiagnosticKind::Unsupported;
                         diagnostic.message =

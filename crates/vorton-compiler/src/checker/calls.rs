@@ -37,12 +37,13 @@ impl BodyChecker<'_, '_> {
 pub(super) struct CallBinder<'a, 'project> {
     pub(super) headers: &'a BTreeMap<EntityId, FunctionHeader>,
     pub(super) schemes: &'a BTreeMap<EntityId, CallableScheme>,
+    pub(super) row_constraints: &'a BTreeMap<EntityId, Vec<EffectRow>>,
     pub(super) group: &'a BTreeSet<EntityId>,
     pub(super) function: &'a FunctionHeader,
     pub(super) normalizer: &'a SourceTypeNormalizer<'project>,
     pub(super) inference: &'a mut TypeInference,
     pub(super) changed: bool,
-    pub(super) pending: Option<OriginRef>,
+    pub(super) pending: Option<CheckDiagnostic>,
     pub(super) dependencies: BTreeSet<EntityId>,
 }
 
@@ -106,12 +107,36 @@ impl CallBinder<'_, '_> {
             }
             let subject = self.inference.receiver_type(subject);
             if matches!(subject, CheckedType::Infer(_)) {
-                self.pending = Some(member.origin.clone());
+                self.pending = Some(effect_diagnostic(
+                    "method selection proof incomplete: receiver dependencies remain undetermined",
+                    CheckOrigin::Source(member.origin.clone()),
+                ));
                 return Ok(());
             }
-            let (selected, mapping) =
-                self.normalizer
-                    .select_method(&subject, member, self.function)?;
+            let inputs = MethodInputs {
+                arguments: receiver
+                    .iter()
+                    .map(|value| value.ty.clone())
+                    .chain(arguments.iter().map(|value| value.ty.clone()))
+                    .collect(),
+                result: expression.ty.clone(),
+                headers: self.headers,
+                schemes: self.schemes,
+            };
+            let (selected, mapping) = match self.normalizer.select_method(
+                &subject,
+                member,
+                self.function,
+                self.inference,
+                &inputs,
+            ) {
+                Ok(selected) => selected,
+                Err(error) if error.kind == SelectionFailureKind::Incomplete => {
+                    self.pending = Some(error.into());
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
             let header = self.headers.get(&selected).ok_or_else(|| {
                 source_diagnostic(
                     CheckDiagnosticKind::Unsupported,
@@ -204,6 +229,7 @@ impl CallBinder<'_, '_> {
                         &self.normalizer.project.core_roles,
                         &givens,
                         CheckOrigin::Source(self.function.context.origin(expression.span)),
+                        self.inference,
                     )?;
                     for requirement in &self.normalizer.effect_requirements[&header.owner] {
                         solver.prove(&requirement.instantiate(&mapping))?;
@@ -275,7 +301,10 @@ impl CallBinder<'_, '_> {
                 if !self.group.contains(callee.as_ref())
                     && !self.schemes.contains_key(callee.as_ref())
                 {
-                    self.pending = Some(self.function.context.origin(expression.span));
+                    self.pending = Some(effect_diagnostic(
+                        "call depends on an unpublished callable",
+                        CheckOrigin::Source(self.function.context.origin(expression.span)),
+                    ));
                     return Ok(());
                 }
                 let header = &self.headers[callee.as_ref()];
@@ -340,6 +369,18 @@ impl CallBinder<'_, '_> {
                             &scheme.requirements,
                         )
                     };
+                if !has_projection(&result) {
+                    self.inference
+                        .satisfy(&result, return_type)
+                        .map_err(|failure| {
+                            source_diagnostic(
+                                CheckDiagnosticKind::CallMismatch,
+                                format!("call result: {}", display_unification_failure(&failure)),
+                                self.function.context.origin(expression.span),
+                                vec![header.origin.clone()],
+                            )
+                        })?;
+                }
                 for (index, (argument, parameter)) in arguments.iter().zip(&parameters).enumerate()
                 {
                     if !has_projection(parameter) {
@@ -358,50 +399,6 @@ impl CallBinder<'_, '_> {
                             })?;
                     }
                 }
-                let givens = self
-                    .function
-                    .requirements
-                    .iter()
-                    .map(|requirement| requirement.map_types(|ty| self.inference.canonical(ty)))
-                    .collect::<Vec<_>>();
-                let mut solver = SelectionSolver::new(
-                    &self.normalizer.selection,
-                    &self.normalizer.project.core_roles,
-                    &givens,
-                    CheckOrigin::Source(self.function.context.origin(expression.span)),
-                )?;
-                for (index, (argument, parameter)) in arguments.iter().zip(&parameters).enumerate()
-                {
-                    if has_projection(parameter) {
-                        let parameter = solver.normalize(&self.inference.canonical(parameter))?;
-                        let actual = solver.normalize(&self.inference.canonical(&argument.ty))?;
-                        self.inference
-                            .satisfy(&actual, &parameter)
-                            .map_err(|failure| {
-                                source_diagnostic(
-                                    CheckDiagnosticKind::CallMismatch,
-                                    format!(
-                                        "argument {index}: {}",
-                                        display_unification_failure(&failure)
-                                    ),
-                                    self.function.context.origin(argument.span),
-                                    vec![header.origin.clone()],
-                                )
-                            })?;
-                    }
-                }
-                if !has_projection(&result) {
-                    self.inference
-                        .satisfy(&result, return_type)
-                        .map_err(|failure| {
-                            source_diagnostic(
-                                CheckDiagnosticKind::CallMismatch,
-                                format!("call result: {}", display_unification_failure(&failure)),
-                                self.function.context.origin(expression.span),
-                                vec![header.origin.clone()],
-                            )
-                        })?;
-                }
                 let substitutions = mapping
                     .as_ref()
                     .map(|mapping| {
@@ -417,37 +414,72 @@ impl CallBinder<'_, '_> {
                     self.schemes[callee.as_ref()].shapes.clone()
                 };
                 let effect_formals = header.effect_formals.clone();
+                let row_constraints = self
+                    .schemes
+                    .get(callee.as_ref())
+                    .map(|scheme| scheme.row_constraints.clone())
+                    .or_else(|| self.row_constraints.get(callee.as_ref()).cloned())
+                    .unwrap_or_else(|| {
+                        header
+                            .effect_upper
+                            .iter()
+                            .chain(&header.trait_upper)
+                            .cloned()
+                            .collect()
+                    });
                 let Some(callback_actuals) = self.callback_actuals(
                     &shape_requirements,
                     &substitutions,
                     &effect_formals,
+                    &row_constraints,
                     &CheckOrigin::Source(self.function.context.origin(expression.span)),
                 )?
                 else {
                     return Ok(());
                 };
-                for requirement in requirements {
-                    solver.prove(
-                        &requirement
-                            .instantiate(&substitutions)
-                            .map_types(|ty| self.inference.canonical(ty)),
-                    )?;
+                let givens = self
+                    .function
+                    .requirements
+                    .iter()
+                    .map(|requirement| requirement.map_types(|ty| self.inference.canonical(ty)))
+                    .collect::<Vec<_>>();
+                let mut solver = SelectionSolver::new(
+                    &self.normalizer.selection,
+                    &self.normalizer.project.core_roles,
+                    &givens,
+                    CheckOrigin::Source(self.function.context.origin(expression.span)),
+                    self.inference,
+                )?;
+                let equalities = arguments
+                    .iter()
+                    .zip(&parameters)
+                    .map(|(argument, parameter)| TypeEquation {
+                        actual: argument.ty.clone(),
+                        expected: parameter.clone(),
+                        widening: true,
+                    })
+                    .chain(std::iter::once(TypeEquation {
+                        actual: result.clone(),
+                        expected: return_type.clone(),
+                        widening: true,
+                    }))
+                    .collect();
+                let requirements = requirements
+                    .iter()
+                    .map(|requirement| requirement.instantiate(&substitutions))
+                    .collect();
+                if let Err(error) = solver.constrain_application(equalities, requirements) {
+                    if error.kind == SelectionFailureKind::Incomplete {
+                        self.pending = Some(error.into());
+                        return Ok(());
+                    }
+                    return Err(error.into());
                 }
-                let result = solver.normalize(&self.inference.resolve(&result))?;
-                self.inference
-                    .satisfy(&result, return_type)
-                    .map_err(|failure| {
-                        source_diagnostic(
-                            CheckDiagnosticKind::CallMismatch,
-                            format!("call result: {}", display_unification_failure(&failure)),
-                            self.function.context.origin(expression.span),
-                            vec![header.origin.clone()],
-                        )
-                    })?;
+                let result = solver.normalize(&result)?;
                 *return_type = result;
                 expression.ty = if arguments
                     .iter()
-                    .any(|argument| self.inference.resolve(&argument.ty) == CheckedType::Never)
+                    .any(|argument| solver.inference.resolve(&argument.ty) == CheckedType::Never)
                 {
                     CheckedType::Never
                 } else {

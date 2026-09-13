@@ -3158,3 +3158,250 @@ fn v3_regression_unbound_associated_owner_actual() {
     check("struct Wrap<T> { value: T } trait Value { type Item; } impl<T> Value for Wrap<T> { type Item = T; } type IntWrap = Wrap<Int>; fn accept(value: &IntWrap::Item) {} fn use_it() { accept(1); }")
         .expect("a receiver-bound owner actual determines the associated result");
 }
+
+#[test]
+fn joint_candidate_constraints_solve_owner_actuals_before_commit() {
+    let cases = [
+        r#"trait Has { type Item; }
+trait P {}
+struct Wrap<U> { value: U }
+struct A {}
+impl Has for A { type Item = Int; }
+impl<T, U: Has<Item = T>> P for Wrap<U> {}
+fn need<X: P>(value: &X) {}
+fn use_proof() { need(Wrap { value: A {} }); }"#,
+        r#"trait Has { type Item; }
+trait P {}
+struct Wrap<U> { value: U }
+struct A {}
+impl Has for A { type Item = (Int, Bool); }
+impl<T, U: Has<Item = (T, Bool)>> P for Wrap<U> {}
+fn need<X: P>(value: &X) {}
+fn use_proof() { need(Wrap { value: A {} }); }"#,
+        r#"trait Has { type Item; } struct A {} impl Has for A { type Item = Int; }
+struct Wrap<U> { value: U }
+impl<T, U: Has<Item=T>> Wrap<U> { fn read(self: &Self, value: &T) -> Unit {} }
+fn use_it() { Wrap { value: A {} }.read(1); }"#,
+        r#"trait Has { type Item; } struct A {} impl Has for A { type Item = Int; }
+struct Wrap<U> { value: U } impl<T, U: Has<Item=T>> Wrap<U> { type Item=T; }
+type Selected=Wrap<A>; fn use_it(value: &Selected::Item) -> Int { value+1 }"#,
+    ];
+    let mut failures = Vec::new();
+    for source in cases {
+        let result = check(source);
+        if let Err(error) = result {
+            failures.push(format!("{source}: {error:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn call_constraints_receive_return_row_and_normalized_dictionary_facts() {
+    let cases = [
+        r#"trait Has { type Item; }
+struct A {}
+struct B {}
+impl Has for A { type Item = Int; }
+impl Has for B { type Item = Int; }
+fn make<T: Has>(x: &T::Item) -> T with {fail<Int>} { fail.raise(1) }
+fn use_it() -> A with {fail<Int>} { make(1) }"#,
+        r#"trait Ping { fn ping(self: &Self) -> Unit with {}; }
+impl Ping for Int { fn ping(self: &Self) -> Unit with {} {} }
+fn send(value) -> Never with {fail<Int>} {
+    value.ping();
+    fail.raise(value)
+}"#,
+        r#"trait Has { type Item; }
+trait Ping { fn ping(self: &Self) -> Unit; }
+trait Run { fn run(self: &Self) -> Unit; }
+struct Wrap<T, U> { owner: T, value: U }
+impl<T: Has<Item=U>, U> Run for Wrap<T, U> where T::Item: Ping {
+    fn run(self: &Self) -> Unit { self.value.ping(); }
+}"#,
+        r#"fn noisy() -> Unit with {fail<Int>} {}
+fn choose<F: Fn + fn() -> Unit with {E1, E2}, effect E1, effect E2>(
+    f: call F
+) -> Unit with {E1, fail<Bool>} {}
+fn use_it() with {fail<Bool>} { choose(noisy); }"#,
+    ];
+    let mut failures = Vec::new();
+    for source in cases {
+        let result = check(source);
+        if let Err(error) = result {
+            failures.push(format!("{source}: {error:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn unconsumed_declarations_check_complete_rows_and_applications() {
+    let cases = [
+        (
+            r#"effect alias Bad={fail<Int>, fail<Bool>};"#,
+            "effect payload conflict",
+        ),
+        (
+            r#"requires {fail<Int>, fail<Bool>};"#,
+            "effect payload conflict",
+        ),
+        (
+            r#"trait Bad {
+    fn f() -> Unit with {fail<Int>, fail<Bool>};
+}"#,
+            "effect payload conflict",
+        ),
+        (
+            r#"trait Run { fn run() -> Unit with {}; } trait Bad { fn bad() -> Unit with {Run::run<Int, Bool>}; }"#,
+            "arity",
+        ),
+        (
+            r#"trait P {} trait Run { fn run<T:P>() -> Unit with {}; } struct A {} impl Run for A { fn run<T:P>() -> Unit {} } trait Bad { fn bad() -> Unit with {Run::run<A, Int>}; }"#,
+            "no evidence for Int: P",
+        ),
+        (
+            r#"fn unused<F: Fn + fn() -> Unit with {fail<Int>, fail<Bool>}>(
+    callback: &F
+) -> Unit {}"#,
+            "effect payload conflict",
+        ),
+        (
+            r#"trait Run { fn run() -> Unit with {}; } fn unused<F:Fn+fn()->Unit with {Run::run<Int, Bool>}>(callback:&F) -> Unit {}"#,
+            "arity",
+        ),
+        (
+            r#"trait P {} trait Run { fn run<T:P>() -> Unit with {}; } struct A {} impl Run for A { fn run<T:P>() -> Unit {} } effect alias Bad={Run::run<A, Int>};"#,
+            "no evidence for Int: P",
+        ),
+        (r#"struct Carrier<F: Fn + fn() -> Str> {}"#, "Unsupported"),
+        (
+            r#"struct Carrier<F:Fn+fn(&mut Int)->Unit> {}"#,
+            "Unsupported",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (source, expected) in cases {
+        let result = check(source);
+        match result {
+            Err(error) if format!("{error:?}").contains(expected) => {}
+            actual => failures.push(format!("{source}: {actual:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn public_surfaces_check_source_names_and_reduced_types_without_consumers() {
+    let cases = [
+        (
+            "struct Hidden {} pub struct A {} impl A { pub type Item = Int; type Private = Hidden; } pub effect E { fn expose() -> A::Private; }",
+            "private",
+        ),
+        (
+            r#"type Hidden = Int;
+pub trait Public { type Item = Hidden; }"#,
+            "private",
+        ),
+        (
+            r#"pub struct A {} struct Hidden {} impl A { type Item=Hidden; } pub type Exposed=A::Item;"#,
+            "private",
+        ),
+        (
+            r#"pub struct A {} struct Hidden {} impl A { type Item=Hidden; } pub enum Exposed { Value(A::Item) }"#,
+            "private",
+        ),
+        (
+            r#"pub struct A {}
+struct Hidden {}
+impl A { type Item = Hidden; }
+pub struct Exposed { pub value: A::Item }"#,
+            "private",
+        ),
+        (
+            r#"pub struct A {} struct Hidden {} impl A { type Item=Hidden; } pub trait Exposed { fn value()->A::Item; }"#,
+            "private",
+        ),
+        (
+            r#"pub effect alias Empty<T> = {};
+struct Hidden {}
+pub fn exposed() -> Unit with {Empty<Hidden>} {}"#,
+            "private",
+        ),
+        (
+            r#"type Hidden = Int;
+pub trait Public<T> { fn get(self: &Self) -> Int; }
+pub struct S {}
+impl Public<Hidden> for S { fn get(self: &Self) -> Int { 1 } }
+fn consumer() -> Int { S {}.get() }"#,
+            "private",
+        ),
+        (
+            r#"struct Hidden {}
+pub trait Public<T> {}
+pub struct S {}
+impl Public<Hidden> for S {}"#,
+            "private",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (source, expected) in cases {
+        let result = check(source);
+        match result {
+            Err(error) if format!("{error:?}").contains(expected) => {}
+            actual => failures.push(format!("{source}: {actual:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contract_declarations_validate_rows_and_unerased_private_references() {
+    let target = r#"{"tag":"trait_member","owner":{"library":{"tag":"self"},"path":["Bad"],"kind":"trait"},"kind":"method","name":"bad"}"#;
+    for (row, message) in [
+        (
+            r#"[{"tag":"selected_call","callable":{"tag":"primitive","name":"Int"}}]"#,
+            "no evidence for Int: Fn",
+        ),
+        (
+            r#"[{"tag":"fail","payload":{"tag":"primitive","name":"Int"}},{"tag":"fail","payload":{"tag":"primitive","name":"Bool"}}]"#,
+            "effect payload conflict",
+        ),
+    ] {
+        let record = format!(r#"{{"target":{target},"set":{{"effect_upper":{row}}}}}"#);
+        let failure = check_project(
+            &project("trait Bad { fn bad() -> Unit; }"),
+            &BTreeMap::from([("app".to_owned(), APP)]),
+            vec![contract(&document(&record))],
+        )
+        .expect_err("no body is required to check a contract row");
+        assert!(failure.message.contains(message), "{failure:?}");
+        assert!(
+            matches!(failure.primary, Some(CheckOrigin::Contract { ref json_path, .. }) if json_path.contains("effect_upper")),
+            "{failure:?}"
+        );
+    }
+    let alias = r#"{"tag":"nominal","declaration":{"library":{"tag":"self"},"path":["Hidden"],"kind":"type_alias"},"arguments":[]}"#;
+    let record = format!(
+        r#"{{"target":{},"set":{{"return_type":{alias}}}}}"#,
+        function_target("expose")
+    );
+    for (source, accepted) in [
+        ("type Hidden = Int; pub fn expose() -> Int { 1 }", false),
+        ("pub type Hidden = Int; pub fn expose() -> Int { 1 }", true),
+        ("type Hidden = Int; fn expose() -> Int { 1 }", true),
+    ] {
+        let result = check_project(
+            &project(source),
+            &BTreeMap::from([("app".to_owned(), APP)]),
+            vec![contract(&document(&record))],
+        );
+        if accepted {
+            result.expect("visibility control");
+        } else {
+            let failure =
+                result.expect_err("the private source alias must not disappear at normalization");
+            assert!(failure.message.contains("private"), "{failure:?}");
+        }
+    }
+}

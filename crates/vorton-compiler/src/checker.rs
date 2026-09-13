@@ -11,6 +11,7 @@ mod callbacks;
 use callbacks::*;
 mod contract_input;
 use contract_input::*;
+mod declarations;
 
 use crate::ast::{BinaryOperator, ParameterMode, Span, UnaryOperator};
 use crate::contract;
@@ -595,10 +596,8 @@ fn check_prepared_project(
         &mut inference,
     )?;
     normalizer.conform_methods(&mut headers, &mut inference)?;
-    normalizer.normalize_header_types(&mut headers, &inference)?;
+    normalizer.normalize_header_types(&mut headers, &mut inference)?;
     validate_method_effect_contracts(&headers, &inference)?;
-    normalizer.validate_surfaces(&headers, &public_exports)?;
-    normalizer.validate_declaration_formations(&headers)?;
     for header in headers.values() {
         for parameter in &header.parameters {
             if parameter.callable_use {
@@ -607,6 +606,7 @@ fn check_prepared_project(
                         &parameter.ty,
                         &header.requirements,
                         parameter.type_origin.clone(),
+                        &inference,
                     )
                     .map_err(|mut diagnostic| {
                         diagnostic.kind = CheckDiagnosticKind::Unsupported;
@@ -634,7 +634,7 @@ fn check_prepared_project(
             &mut obligations,
         );
         let body = checker.check_block(header.body.as_ref().expect("body callable"))?;
-        if header.source_return_explicit {
+        {
             inference
                 .satisfy(&body.ty, &header.return_type)
                 .map_err(|failure| {
@@ -673,6 +673,12 @@ fn check_prepared_project(
                 requirements: header.requirements.clone(),
                 effect_formals: header.effect_formals.clone(),
                 effect: normalizer.signature_effect(header),
+                row_constraints: header
+                    .effect_upper
+                    .iter()
+                    .chain(&header.trait_upper)
+                    .cloned()
+                    .collect(),
                 shapes: header.shapes.clone(),
                 stored_types: Vec::new(),
             },
@@ -689,8 +695,37 @@ fn check_prepared_project(
         let mut regroup = false;
         let mut group_effects = None;
         loop {
+            let revision = inference.revision;
             let mut changed = false;
             let mut pending = None;
+            for identity in &group {
+                inference
+                    .satisfy(&drafts[identity].ty, &headers[identity].return_type)
+                    .map_err(|failure| {
+                        source_diagnostic(
+                            CheckDiagnosticKind::ReturnMismatch,
+                            display_unification_failure(&failure),
+                            headers[identity].origin.clone(),
+                            Vec::new(),
+                        )
+                    })?;
+                effect_equations.insert(
+                    identity.clone(),
+                    EffectEquation::from_body(&drafts[identity]),
+                );
+            }
+            let partial = EffectEnvironment {
+                normalizer: &normalizer,
+                headers: &headers,
+                schemes: &schemes,
+            }
+            .partial_effects(&group, &effect_equations, &inference)?;
+            EffectEnvironment {
+                normalizer: &normalizer,
+                headers: &headers,
+                schemes: &schemes,
+            }
+            .constrain_effect_payloads(&group, &partial, &mut inference)?;
             validate_type_obligations(
                 &mut obligations,
                 &members,
@@ -704,6 +739,7 @@ fn check_prepared_project(
                 let mut binder = CallBinder {
                     headers: &headers,
                     schemes: &schemes,
+                    row_constraints: &partial.constraints,
                     group: &members,
                     function: header,
                     normalizer: &normalizer,
@@ -734,6 +770,25 @@ fn check_prepared_project(
                 regroup = true;
                 break;
             }
+            for identity in &group {
+                effect_equations.insert(
+                    identity.clone(),
+                    EffectEquation::from_body(&drafts[identity]),
+                );
+            }
+            let updated = EffectEnvironment {
+                normalizer: &normalizer,
+                headers: &headers,
+                schemes: &schemes,
+            }
+            .partial_effects(&group, &effect_equations, &inference)?;
+            EffectEnvironment {
+                normalizer: &normalizer,
+                headers: &headers,
+                schemes: &schemes,
+            }
+            .constrain_effect_payloads(&group, &updated, &mut inference)?;
+            changed |= inference.revision != revision || partial.constraints != updated.constraints;
             if pending.is_none() {
                 for identity in &group {
                     let header = &headers[identity];
@@ -758,29 +813,16 @@ fn check_prepared_project(
                 }
                 .close_group(&group, &effect_equations, &mut inference)?;
                 if !closure.inferences.is_empty() {
+                    inference.bind_inferred_effects(
+                        &closure.inferences,
+                        &headers[&group[0]].effect_origin,
+                    )?;
                     for identity in &group {
-                        let header = headers.get_mut(identity).expect("unpublished header");
-                        for shape in &mut header.shapes {
-                            shape.shape.effect = shape
-                                .shape
-                                .effect
-                                .instantiate(&BTreeMap::new(), &closure.inferences);
-                        }
-                        header.effect_upper = header
-                            .effect_upper
-                            .as_ref()
-                            .map(|row| row.instantiate(&BTreeMap::new(), &closure.inferences));
-                        header
+                        headers
+                            .get_mut(identity)
+                            .expect("unpublished header")
                             .inferable_effects
                             .retain(|formal| !closure.inferences.contains_key(formal));
-                        effect_equations
-                            .get_mut(identity)
-                            .expect("one equation")
-                            .substitute(&closure.inferences);
-                        substitute_body_effects(
-                            drafts.get_mut(identity).expect("one draft"),
-                            &closure.inferences,
-                        );
                     }
                     continue;
                 }
@@ -808,12 +850,7 @@ fn check_prepared_project(
             )?;
             changed |= before != inference.substitutions.len();
             if !changed {
-                return Err(source_diagnostic(
-                    CheckDiagnosticKind::TypeMismatch,
-                    "method selection proof incomplete: receiver dependencies remain undetermined",
-                    pending.expect("pending call"),
-                    Vec::new(),
-                ));
+                return Err(pending.expect("pending call"));
             }
         }
         if regroup {
@@ -911,6 +948,7 @@ fn check_prepared_project(
                 &inference.canonical(&header.return_type),
                 &requirements,
                 &header.origin,
+                &inference,
             ) {
                 return Err(source_diagnostic(
                     CheckDiagnosticKind::Unsupported,
@@ -924,6 +962,7 @@ fn check_prepared_project(
                     &inference.canonical(&stored.ty),
                     &requirements,
                     &stored.origin,
+                    &inference,
                 ) {
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::Unsupported,
@@ -954,6 +993,13 @@ fn check_prepared_project(
             ));
         }
         let group_effects = effect_closure.rows;
+        let group_constraints = EffectEnvironment {
+            normalizer: &normalizer,
+            headers: &headers,
+            schemes: &schemes,
+        }
+        .partial_effects(&group, &effect_equations, &inference)?
+        .constraints;
         for identity in &group {
             EffectEnvironment {
                 normalizer: &normalizer,
@@ -1072,8 +1118,10 @@ fn check_prepared_project(
             let closure = BodyClosure {
                 inference: &inference,
                 function: &member.generalization,
+                effect_formals: &header.effect_formals,
                 group: &group_members,
                 obligations: &obligations,
+                incomplete: std::cell::Cell::new(false),
             };
             closed_cleanups.insert(
                 identity.clone(),
@@ -1106,7 +1154,11 @@ fn check_prepared_project(
                         .map(|requirement| requirement.map_types(|ty| closure.close_type(ty)))
                         .collect(),
                     effect_formals: header.effect_formals.clone(),
-                    effect: group_effects[identity].map_types(&mut |ty| closure.close_type(ty)),
+                    effect: closure.close_effect(&group_effects[identity]),
+                    row_constraints: std::iter::once(&group_effects[identity])
+                        .chain(&group_constraints[identity])
+                        .map(|row| closure.close_effect(row))
+                        .collect(),
                     shapes: header
                         .shapes
                         .iter()
@@ -1120,10 +1172,7 @@ fn check_prepared_project(
                                     .map(|(ty, mode)| (closure.close_type(ty), *mode))
                                     .collect(),
                                 return_type: closure.close_type(&shape.shape.return_type),
-                                effect: shape
-                                    .shape
-                                    .effect
-                                    .map_types(&mut |ty| closure.close_type(ty)),
+                                effect: closure.close_effect(&shape.shape.effect),
                             },
                             origin: shape.origin.clone(),
                             inferred_row: shape.inferred_row.clone(),
@@ -1147,6 +1196,12 @@ fn check_prepared_project(
                     &closure,
                 ),
             );
+            if closure.incomplete.get() {
+                return Err(effect_diagnostic(
+                    "callable publication incomplete: an actual has no final type/effect binding",
+                    CheckOrigin::Source(header.origin.clone()),
+                ));
+            }
         }
 
         for (identity, scheme) in &group_schemes {
@@ -1161,6 +1216,7 @@ fn check_prepared_project(
                 &types,
                 &scheme.requirements,
                 CheckOrigin::Source(headers[identity].origin.clone()),
+                &mut inference,
             )?;
             let header = headers
                 .get_mut(identity)
@@ -1189,6 +1245,7 @@ fn check_prepared_project(
         remaining.retain(|identity| !members.contains(identity));
     }
 
+    normalizer.validate_declarations(&headers, &schemes, &public_exports, &mut inference)?;
     let mut functions = BTreeMap::new();
     for identity in function_order {
         let header = headers
@@ -1289,6 +1346,7 @@ fn display_unification_failure(failure: &UnificationFailure) -> String {
 
 #[derive(Clone)]
 struct CallableScheme {
+    row_constraints: Vec<EffectRow>,
     quantified: Vec<TypeFormal>,
     // Vacuous declaration binders remain part of the public scheme, but no
     // parameter, result or body consumes an actual for them at a call site.
@@ -1493,11 +1551,20 @@ fn collect_expr_variables(
                 .iter()
                 .map(|(_, ty)| ty)
                 .chain(mapping.effects.iter().flat_map(|(_, row)| row.types()))
+                .chain(value.evidence.iter().flat_map(Evidence::types))
             {
                 collect_inference_inputs(inference, actual, variables, formals);
             }
         }
         TypedExprKind::Indirect(call) => {
+            for ty in call
+                .evidence
+                .iter()
+                .flat_map(Evidence::types)
+                .chain(call.effect.iter().flat_map(EffectRow::types))
+            {
+                collect_inference_inputs(inference, ty, variables, formals);
+            }
             collect_expr_variables(
                 &call.callable,
                 inference,
@@ -1516,7 +1583,14 @@ fn collect_expr_variables(
             for argument in &operation.arguments {
                 collect_expr_variables(argument, inference, variables, formals, recursive_calls);
             }
-            for (_, ty) in &operation.mapping.types {
+            for ty in operation
+                .mapping
+                .types
+                .iter()
+                .map(|(_, ty)| ty)
+                .chain(operation.effect.types())
+                .chain(operation.evidence.iter().flat_map(Evidence::types))
+            {
                 collect_inference_inputs(inference, ty, variables, formals);
             }
         }
@@ -1561,7 +1635,30 @@ fn collect_expr_variables(
                 collect_expr_variables(else_branch, inference, variables, formals, recursive_calls);
             }
         }
-        TypedExprKind::Binary { left, right, .. } => {
+        TypedExprKind::Binary {
+            left,
+            right,
+            comparison,
+            ..
+        } => {
+            if let Some(comparison) = comparison {
+                for ty in comparison
+                    .mapping
+                    .types
+                    .iter()
+                    .map(|(_, ty)| ty)
+                    .chain(
+                        comparison
+                            .mapping
+                            .effects
+                            .iter()
+                            .flat_map(|(_, row)| row.types()),
+                    )
+                    .chain(comparison.selection.iter().flat_map(Evidence::types))
+                {
+                    collect_inference_inputs(inference, ty, variables, formals);
+                }
+            }
             collect_expr_variables(left, inference, variables, formals, recursive_calls);
             collect_expr_variables(right, inference, variables, formals, recursive_calls);
         }
@@ -1569,8 +1666,17 @@ fn collect_expr_variables(
             callee,
             arguments,
             instantiation,
+            evidence,
+            return_type,
+            effect,
             ..
         } => {
+            for ty in std::iter::once(return_type)
+                .chain(evidence.iter().flat_map(Evidence::types))
+                .chain(effect.iter().flat_map(EffectRow::types))
+            {
+                collect_inference_inputs(inference, ty, variables, formals);
+            }
             for argument in arguments {
                 collect_expr_variables(argument, inference, variables, formals, recursive_calls);
             }
@@ -1609,19 +1715,81 @@ fn collect_expr_variables(
 struct BodyClosure<'a> {
     inference: &'a TypeInference,
     function: &'a FunctionGeneralization,
+    effect_formals: &'a [EffectFormal],
     group: &'a BTreeMap<EntityId, GroupMember>,
     obligations: &'a [TypeObligation],
+    // Mapping algebra stays infallible while constructing one unpublished group.
+    // Any missing binder rejects that group before any result is published.
+    incomplete: std::cell::Cell<bool>,
 }
 
 impl BodyClosure<'_> {
     fn close_effect(&self, row: &EffectRow) -> EffectRow {
-        self.inference
+        let mut row = self
+            .inference
             .resolve_effect(row)
-            .map_types(&mut |ty| self.close_type(ty))
+            .map_types(&mut |ty| self.close_type(ty));
+        let mut pending = vec![&mut row];
+        while let Some(row) = pending.pop() {
+            for term in &mut row.0 {
+                match term {
+                    EffectTerm::Variable(_) => self.incomplete.set(true),
+                    EffectTerm::Formal(formal) if !self.effect_formals.contains(formal) => {
+                        self.incomplete.set(true);
+                    }
+                    EffectTerm::Method { effects, .. } => pending.extend(effects.iter_mut()),
+                    _ => {}
+                }
+            }
+        }
+        row
     }
 
     fn close_type(&self, ty: &CheckedType) -> CheckedType {
-        self.inference.close_type(ty, self.function)
+        match self.inference.resolve(ty) {
+            CheckedType::Function(item) => CheckedType::Function(Box::new(FunctionItem {
+                function: item.function,
+                mapping: self.close_mapping(item.mapping),
+            })),
+            CheckedType::Projection(projection) => {
+                CheckedType::Projection(Box::new(projection.map_types(|ty| self.close_type(ty))))
+            }
+            shared @ (CheckedType::Infer(_) | CheckedType::Formal(_)) => {
+                if let Some(formal) = self.function.formal_for(&shared, self.inference) {
+                    CheckedType::Formal(Box::new(formal.clone()))
+                } else {
+                    self.incomplete.set(true);
+                    shared
+                }
+            }
+            CheckedType::Tuple(elements) => {
+                CheckedType::Tuple(elements.iter().map(|ty| self.close_type(ty)).collect())
+            }
+            CheckedType::Nominal(nominal) => CheckedType::Nominal(Box::new(NominalType {
+                declaration: nominal.declaration,
+                arguments: nominal
+                    .arguments
+                    .iter()
+                    .map(|ty| self.close_type(ty))
+                    .collect(),
+            })),
+            resolved => resolved,
+        }
+    }
+
+    fn close_mapping(&self, mapping: CallMapping) -> CallMapping {
+        CallMapping {
+            types: mapping
+                .types
+                .into_iter()
+                .map(|(formal, ty)| (formal, self.close_type(&ty)))
+                .collect(),
+            effects: mapping
+                .effects
+                .into_iter()
+                .map(|(formal, row)| (formal, self.close_effect(&row)))
+                .collect(),
+        }
     }
 
     fn close_instantiation(
@@ -1631,18 +1799,9 @@ impl BodyClosure<'_> {
     ) -> CallInstantiation {
         match instantiation {
             CallInstantiation::Pending(_) => unreachable!("only selected calls are frozen"),
-            CallInstantiation::Published(mapping) => CallInstantiation::Published(CallMapping {
-                types: mapping
-                    .types
-                    .into_iter()
-                    .map(|(formal, actual)| (formal, self.close_type(&actual)))
-                    .collect(),
-                effects: mapping
-                    .effects
-                    .into_iter()
-                    .map(|(formal, row)| (formal, self.close_effect(&row)))
-                    .collect(),
-            }),
+            CallInstantiation::Published(mapping) => {
+                CallInstantiation::Published(self.close_mapping(mapping))
+            }
             CallInstantiation::RecursiveBinding { effects } => {
                 let member = self
                     .group
@@ -1709,18 +1868,12 @@ fn close_typed_expr(expression: TypedExpr, closure: &BodyClosure<'_>) -> TypedEx
         TypedExprKind::FunctionValue(value) => {
             TypedExprKind::FunctionValue(Box::new(TypedFunctionValue {
                 function: value.function,
-                mapping: value.mapping.map(|mapping| CallMapping {
-                    types: mapping
-                        .types
-                        .into_iter()
-                        .map(|(formal, ty)| (formal, closure.close_type(&ty)))
-                        .collect(),
-                    effects: mapping
-                        .effects
-                        .into_iter()
-                        .map(|(formal, row)| (formal, closure.close_effect(&row)))
-                        .collect(),
-                }),
+                mapping: value.mapping.map(|mapping| closure.close_mapping(mapping)),
+                evidence: value
+                    .evidence
+                    .into_iter()
+                    .map(|proof| proof.map_types(|ty| closure.close_type(ty)))
+                    .collect(),
             }))
         }
         TypedExprKind::Indirect(call) => TypedExprKind::Indirect(Box::new(TypedIndirectCall {
@@ -1752,16 +1905,8 @@ fn close_typed_expr(expression: TypedExpr, closure: &BodyClosure<'_>) -> TypedEx
                 .map(|argument| close_typed_expr(argument, closure))
                 .collect(),
             parameter_modes: operation.parameter_modes,
-            mapping: CallMapping {
-                types: operation
-                    .mapping
-                    .types
-                    .into_iter()
-                    .map(|(formal, ty)| (formal, closure.close_type(&ty)))
-                    .collect(),
-                effects: Vec::new(),
-            },
-            effect: operation.effect.map_types(&mut |ty| closure.close_type(ty)),
+            mapping: closure.close_mapping(operation.mapping),
+            effect: closure.close_effect(&operation.effect),
             evidence: operation
                 .evidence
                 .into_iter()
@@ -1814,12 +1959,7 @@ fn close_typed_expr(expression: TypedExpr, closure: &BodyClosure<'_>) -> TypedEx
                     .cloned()
                     .map(|evidence| evidence.map_types(|ty| closure.close_type(ty)))
                     .collect();
-                comparison.mapping.types = comparison
-                    .mapping
-                    .types
-                    .into_iter()
-                    .map(|(formal, ty)| (formal, closure.close_type(&ty)))
-                    .collect();
+                comparison.mapping = closure.close_mapping(comparison.mapping);
                 comparison
             }),
         },
@@ -2103,6 +2243,7 @@ struct TypeFormal {
 
 #[derive(Clone, Default)]
 struct TypeInference {
+    revision: u64,
     next_variable: u32,
     substitutions: BTreeMap<TypeVariable, CheckedType>,
     formal_parents: BTreeMap<TypeFormal, TypeFormal>,
@@ -2110,6 +2251,7 @@ struct TypeInference {
     receiver_hints: BTreeMap<TypeVariable, CheckedType>,
     next_effect_variable: u32,
     effect_substitutions: BTreeMap<u32, EffectRow>,
+    inferred_effects: BTreeMap<EffectFormal, EffectRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2130,6 +2272,9 @@ impl TypeInference {
         let mut result = Vec::new();
         while let Some(term) = pending.pop() {
             match term {
+                EffectTerm::Formal(ref formal) if self.inferred_effects.contains_key(formal) => {
+                    pending.extend(self.inferred_effects[formal].0.iter().rev().cloned());
+                }
                 EffectTerm::Variable(variable)
                     if self.effect_substitutions.contains_key(&variable) =>
                 {
@@ -2167,18 +2312,128 @@ impl TypeInference {
             (_, [EffectTerm::Variable(variable)]) => (*variable, left),
             _ => return false,
         };
-        let mut pending = vec![&row];
-        while let Some(row) = pending.pop() {
-            for term in &row.0 {
-                match term {
-                    EffectTerm::Variable(found) if *found == variable => return false,
-                    EffectTerm::Method { effects, .. } => pending.extend(effects),
-                    _ => {}
+        if self.effect_occurs(&row, Some(variable), None, &self.inferred_effects) {
+            return false;
+        }
+        self.effect_substitutions.insert(variable, row);
+        self.revision += 1;
+        true
+    }
+
+    fn effect_occurs(
+        &self,
+        row: &EffectRow,
+        variable: Option<u32>,
+        formal: Option<&EffectFormal>,
+        named: &BTreeMap<EffectFormal, EffectRow>,
+    ) -> bool {
+        enum Node<'a> {
+            Row(&'a EffectRow),
+            Type(&'a CheckedType),
+        }
+        let mut pending = vec![Node::Row(row)];
+        let mut types = BTreeSet::new();
+        let mut rows = BTreeSet::new();
+        let mut work = 0;
+        while let Some(node) = pending.pop() {
+            work += 1;
+            if work > SELECTION_WORK_LIMIT {
+                return true;
+            }
+            match node {
+                Node::Row(row) => {
+                    if !rows.insert(row) {
+                        continue;
+                    }
+                    for term in &row.0 {
+                        match term {
+                            EffectTerm::Variable(found) => {
+                                if variable == Some(*found) {
+                                    return true;
+                                }
+                                if let Some(row) = self.effect_substitutions.get(found) {
+                                    pending.push(Node::Row(row));
+                                }
+                            }
+                            EffectTerm::Formal(found) => {
+                                if formal == Some(found) {
+                                    return true;
+                                }
+                                if let Some(row) = named.get(found) {
+                                    pending.push(Node::Row(row));
+                                }
+                            }
+                            EffectTerm::Method { types, effects, .. } => {
+                                pending.extend(types.iter().map(Node::Type));
+                                pending.extend(effects.iter().map(Node::Row));
+                            }
+                            EffectTerm::Handled(_, arguments) => {
+                                pending.extend(arguments.iter().map(Node::Type))
+                            }
+                            EffectTerm::Fail(ty)
+                            | EffectTerm::Destruction(ty)
+                            | EffectTerm::SelectedCall(ty) => pending.push(Node::Type(ty)),
+                            _ => {}
+                        }
+                    }
+                }
+                Node::Type(ty) => {
+                    if !types.insert(ty) {
+                        continue;
+                    }
+                    match ty {
+                        CheckedType::Infer(variable) => {
+                            if let Some(ty) = self.substitutions.get(variable) {
+                                pending.push(Node::Type(ty));
+                            }
+                        }
+                        CheckedType::Tuple(elements) => {
+                            pending.extend(elements.iter().map(Node::Type))
+                        }
+                        CheckedType::Nominal(nominal) => {
+                            pending.extend(nominal.arguments.iter().map(Node::Type))
+                        }
+                        CheckedType::Projection(projection) => {
+                            pending.extend(projection.types().map(Node::Type))
+                        }
+                        CheckedType::Function(item) => {
+                            pending.extend(item.mapping.types.iter().map(|(_, ty)| Node::Type(ty)));
+                            pending
+                                .extend(item.mapping.effects.iter().map(|(_, row)| Node::Row(row)));
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
-        self.effect_substitutions.insert(variable, row);
-        true
+        false
+    }
+
+    fn bind_inferred_effects(
+        &mut self,
+        replacements: &BTreeMap<EffectFormal, EffectRow>,
+        origin: &CheckOrigin,
+    ) -> Result<(), CheckDiagnostic> {
+        let mut named = self.inferred_effects.clone();
+        for (formal, row) in replacements {
+            if row.0 == [EffectTerm::Formal(formal.clone())] {
+                continue;
+            }
+            named.insert(formal.clone(), row.clone());
+        }
+        for (formal, row) in &named {
+            if self.effect_occurs(row, None, Some(formal), &named) {
+                return Err(effect_diagnostic(
+                    "effect inference has a cyclic or non-finite dependency",
+                    origin.clone(),
+                ));
+            }
+        }
+        if self.inferred_effects != named {
+            self.inferred_effects = named;
+            self.revision += 1;
+        }
+        Ok(())
     }
 
     fn receiver_type(&self, ty: &CheckedType) -> CheckedType {
@@ -2325,6 +2580,7 @@ impl TypeInference {
             (right_root, left_root)
         };
         self.formal_parents.insert(child, root);
+        self.revision += 1;
         Ok(())
     }
 
@@ -2360,6 +2616,7 @@ impl TypeInference {
                     return Err(UnificationFailure::Infinite(variable, Box::new(ty)));
                 }
                 self.substitutions.insert(variable, ty);
+                self.revision += 1;
                 Ok(())
             }
             (CheckedType::Tuple(left), CheckedType::Tuple(right)) if left.len() == right.len() => {
@@ -2464,40 +2721,6 @@ impl TypeInference {
                 }
             }
             _ => {}
-        }
-    }
-
-    fn close_type(&self, ty: &CheckedType, generalized: &FunctionGeneralization) -> CheckedType {
-        match self.resolve(ty) {
-            CheckedType::Function(item) => CheckedType::Function(Box::new(
-                item.map_types(|ty| self.close_type(ty, generalized)),
-            )),
-            CheckedType::Projection(projection) => CheckedType::Projection(Box::new(
-                projection.map_types(|ty| self.close_type(ty, generalized)),
-            )),
-            shared @ (CheckedType::Infer(_) | CheckedType::Formal(_)) => {
-                CheckedType::Formal(Box::new(
-                    generalized
-                        .formal_for(&shared, self)
-                        .expect("every published type is bound by its recorded callable binder")
-                        .clone(),
-                ))
-            }
-            CheckedType::Tuple(elements) => CheckedType::Tuple(
-                elements
-                    .iter()
-                    .map(|element| self.close_type(element, generalized))
-                    .collect(),
-            ),
-            CheckedType::Nominal(nominal) => CheckedType::Nominal(Box::new(NominalType {
-                declaration: nominal.declaration,
-                arguments: nominal
-                    .arguments
-                    .iter()
-                    .map(|ty| self.close_type(ty, generalized))
-                    .collect(),
-            })),
-            resolved => resolved,
         }
     }
 }
@@ -2620,6 +2843,7 @@ struct SourceTypeNormalizer<'a> {
     operations: BTreeMap<EntityId, OperationHeader>,
     effect_requirements: BTreeMap<EntityId, Vec<Requirement>>,
     effect_uses: Vec<effects::EffectUse>,
+    effect_alias_rows: BTreeMap<EntityId, EffectRow>,
 }
 
 enum NormalizeFrame {
@@ -2751,6 +2975,7 @@ impl<'a> SourceTypeNormalizer<'a> {
             operations: BTreeMap::new(),
             effect_requirements: BTreeMap::new(),
             effect_uses: Vec::new(),
+            effect_alias_rows: BTreeMap::new(),
         }
     }
 
@@ -3177,6 +3402,10 @@ fn collect_supported_headers(
                     if let Err(diagnostic) = normalizer
                         .normalize_effects(effects, &formals, &BTreeMap::new())
                         .and_then(|row| {
+                            normalizer.effect_alias_rows.insert(
+                                declaration.identity.as_ref().expect("alias owner").clone(),
+                                row.clone(),
+                            );
                             if public_exports
                                 .contains(declaration.identity.as_ref().expect("alias owner"))
                             {
@@ -3492,15 +3721,20 @@ fn validate_public_type_visibility(
             ResolvedTypeKind::Tuple(elements) => pending.extend(elements.into_iter().rev()),
             ResolvedTypeKind::Named(named) => {
                 for argument in named.arguments.into_iter().rev() {
-                    if let ResolvedTypeArgument::Type(ty) = argument {
-                        pending.push(*ty);
+                    match argument {
+                        ResolvedTypeArgument::Type(ty)
+                        | ResolvedTypeArgument::AssociatedType { value: ty, .. } => {
+                            pending.push(*ty)
+                        }
                     }
                 }
-                let ResolvedReference::Exact {
-                    occurrence, target, ..
-                } = named.reference
-                else {
-                    continue;
+                let (occurrence, target) = match named.reference {
+                    ResolvedReference::Exact {
+                        occurrence, target, ..
+                    } => (occurrence, target),
+                    ResolvedReference::Selection {
+                        occurrence, base, ..
+                    } => (occurrence, base),
                 };
                 if !matches!(
                     target.kind,
@@ -4314,6 +4548,7 @@ fn validate_contract_record(
                                     document_index,
                                     json_path: format!("{clause_path}.mode"),
                                 },
+                                &TypeInference::default(),
                             )
                             .map_err(|mut diagnostic| {
                                 diagnostic.kind = CheckDiagnosticKind::Unsupported;
@@ -4658,6 +4893,7 @@ fn normalize_contract_type(
                         .collect(),
                 ));
             }
+            context.public_reference(&target, path)?;
             if expected_kind != EntityKind::TypeAlias {
                 let definition = &context.normalizer.nominals[&target];
                 if definition.formals.len() != arguments.len() {
@@ -6938,9 +7174,10 @@ fn validate_type_obligations(
                 &normalizer.project.core_roles,
                 &givens,
                 CheckOrigin::Source(obligation.primary.clone()),
+                inference,
             )?;
-            let expected = solver.normalize(&inference.canonical(expected))?;
-            let actual = solver.normalize(&inference.canonical(&obligation.ty))?;
+            let expected = solver.normalize(expected)?;
+            let actual = solver.normalize(&obligation.ty)?;
             inference.satisfy(&actual, &expected).map_err(|failure| {
                 source_diagnostic(
                     CheckDiagnosticKind::TypeMismatch,
@@ -7008,8 +7245,9 @@ fn validate_type_obligations(
                 &normalizer.project.core_roles,
                 &givens,
                 CheckOrigin::Source(obligation.primary.clone()),
+                inference,
             )?;
-            let field_type = solver.normalize(&inference.canonical(&field_type))?;
+            let field_type = solver.normalize(&field_type)?;
             inference
                 .unify(&obligation.ty, &receiver)
                 .map_err(|failure| {
@@ -7071,9 +7309,10 @@ fn validate_type_obligations(
                     &normalizer.project.core_roles,
                     &givens,
                     CheckOrigin::Source(obligation.primary.clone()),
+                    inference,
                 )?;
-                let actual = solver.normalize(&inference.canonical(&ty))?;
-                let expected = solver.normalize(&inference.canonical(expected))?;
+                let actual = solver.normalize(&ty)?;
+                let expected = solver.normalize(expected)?;
                 inference.satisfy(&actual, &expected).map_err(|failure| {
                     source_diagnostic(
                         CheckDiagnosticKind::TypeMismatch,
@@ -7097,6 +7336,7 @@ fn validate_type_obligations(
                     std::slice::from_ref(&ty),
                     &givens,
                     CheckOrigin::Source(obligation.primary.clone()),
+                    inference,
                 )?;
                 let CheckedType::Nominal(nominal) = &ty else {
                     unreachable!("construction keeps its nominal type")
@@ -7107,6 +7347,7 @@ fn validate_type_obligations(
                     &normalizer.project.core_roles,
                     &givens,
                     CheckOrigin::Source(obligation.primary.clone()),
+                    inference,
                 )?;
                 for requirement in &normalizer.nominals[&nominal.declaration].requirements {
                     solver.prove(&requirement.instantiate(&mapping))?;
@@ -7143,9 +7384,10 @@ fn validate_type_obligations(
                     &normalizer.project.core_roles,
                     &givens,
                     CheckOrigin::Source(obligation.primary.clone()),
+                    inference,
                 )?;
                 solver.prove(&Requirement {
-                    subject: inference.canonical(&ty),
+                    subject: solver.inference.canonical(&ty),
                     bound: TraitUse {
                         declaration: declaration.clone(),
                         arguments: Vec::new(),
@@ -8558,9 +8800,7 @@ mod checking_tests {
                 }
             }
             CheckedType::Function(item) => {
-                for ty in item.types() {
-                    assert_closed_type(ty, scheme);
-                }
+                assert_closed_mapping(&item.mapping, scheme);
             }
             CheckedType::Formal(formal) => assert!(
                 scheme.contains(formal.as_ref()),
@@ -8569,6 +8809,48 @@ mod checking_tests {
                 formal.name,
             ),
             _ => {}
+        }
+    }
+
+    fn assert_closed_row(row: &EffectRow, scheme: &[TypeFormal]) {
+        for ty in row.types() {
+            assert_closed_type(ty, scheme);
+        }
+        let mut pending = vec![row];
+        while let Some(row) = pending.pop() {
+            for term in &row.0 {
+                match term {
+                    EffectTerm::Variable(variable) => {
+                        panic!("published effect retains ?E{variable:?}")
+                    }
+                    EffectTerm::Method { effects, .. } => pending.extend(effects),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn assert_closed_mapping(mapping: &CallMapping, scheme: &[TypeFormal]) {
+        for (_, ty) in &mapping.types {
+            assert_closed_type(ty, scheme);
+        }
+        for (_, row) in &mapping.effects {
+            assert_closed_row(row, scheme);
+        }
+    }
+
+    fn assert_closed_evidence(evidence: &[Evidence], scheme: &[TypeFormal]) {
+        for proof in evidence {
+            for ty in proof.types() {
+                assert_closed_type(ty, scheme);
+            }
+            match proof {
+                Evidence::Associated { parent, .. } => assert!(*parent < evidence.len()),
+                Evidence::Implementation { requirements, .. } => {
+                    assert!(requirements.iter().all(|index| *index < evidence.len()));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -8595,10 +8877,17 @@ mod checking_tests {
         assert_closed_type(&expression.ty, scheme);
         match &expression.kind {
             TypedExprKind::FunctionValue(value) => {
-                assert!(value.mapping.is_some());
+                let mapping = value.mapping.as_ref().expect("provider mapping");
+                assert_closed_mapping(mapping, scheme);
+                assert_closed_evidence(&value.evidence, scheme);
+                let CheckedType::Function(item) = &expression.ty else {
+                    panic!("function item type")
+                };
+                assert_eq!(&item.mapping, mapping);
             }
             TypedExprKind::Indirect(call) => {
-                assert!(call.effect.is_some());
+                assert_closed_row(call.effect.as_ref().expect("indirect row"), scheme);
+                assert_closed_evidence(&call.evidence, scheme);
                 assert_closed_expr(&call.callable, scheme);
                 for argument in &call.arguments {
                     assert_closed_expr(argument, scheme);
@@ -8608,9 +8897,9 @@ mod checking_tests {
                 for argument in &operation.arguments {
                     assert_closed_expr(argument, scheme);
                 }
-                for (_, actual) in &operation.mapping.types {
-                    assert_closed_type(actual, scheme);
-                }
+                assert_closed_mapping(&operation.mapping, scheme);
+                assert_closed_row(&operation.effect, scheme);
+                assert_closed_evidence(&operation.evidence, scheme);
             }
             TypedExprKind::MethodDraft { .. } => {
                 unreachable!("method selection closes before this phase")
@@ -8619,6 +8908,7 @@ mod checking_tests {
                 for actual in &construction.nominal.arguments {
                     assert_closed_type(actual, scheme);
                 }
+                assert_closed_evidence(&construction.evidence, scheme);
                 for field in &construction.fields {
                     assert_closed_expr(&field.value, scheme);
                 }
@@ -8667,7 +8957,16 @@ mod checking_tests {
                     assert_closed_expr(else_branch, scheme);
                 }
             }
-            TypedExprKind::Binary { left, right, .. } => {
+            TypedExprKind::Binary {
+                left,
+                right,
+                comparison,
+                ..
+            } => {
+                if let Some(comparison) = comparison {
+                    assert_closed_mapping(&comparison.mapping, scheme);
+                    assert_closed_evidence(&comparison.selection, scheme);
+                }
                 assert_closed_expr(left, scheme);
                 assert_closed_expr(right, scheme);
             }
@@ -8675,18 +8974,20 @@ mod checking_tests {
                 arguments,
                 parameter_modes,
                 instantiation,
+                evidence,
+                effect,
                 ..
             } => {
                 assert_eq!(parameter_modes.len(), arguments.len());
+                assert_closed_evidence(evidence, scheme);
+                assert_closed_row(effect.as_ref().expect("call row"), scheme);
                 for argument in arguments {
                     assert_closed_expr(argument, scheme);
                 }
                 match instantiation {
                     CallInstantiation::Published(mapping)
                     | CallInstantiation::Provisional(mapping) => {
-                        for (_, actual) in &mapping.types {
-                            assert_closed_type(actual, scheme);
-                        }
+                        assert_closed_mapping(mapping, scheme);
                     }
                     CallInstantiation::RecursiveBinding { .. } | CallInstantiation::Pending(_) => {
                         panic!("published body retains an unfinished group binding")
@@ -9569,5 +9870,43 @@ fn use_it() with {fail<Int>} { sequence(failure, pure); }
             assert_eq!(mapping.effects[0].1, first);
             assert_eq!(mapping.effects[1].1, second);
         }
+    }
+    #[test]
+    fn provider_and_alias_freeze_the_same_closed_mapping() {
+        for source in [
+            "fn apply<F: Fn + fn() -> Unit with {}>(f: call F) -> Unit with {} { let alias = apply; f(); }",
+            "fn provider<effect E>() -> Unit with {} {} fn run() with {} { let unused = provider; }",
+            "fn ignore<G: Fn + fn() -> Unit with {E}, effect E>(callback: call G) -> Unit with {} {} fn noisy() -> Unit with {console} {} fn run() with {} { let alias = ignore; alias(noisy); }",
+        ] {
+            let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new())
+                .expect("closed producer actuals");
+            for function in checked.functions.values() {
+                assert_closed_block(&function.body, &function.scheme);
+                assert_closed_row(&function.effect, &function.scheme);
+                for statement in &function.body.statements {
+                    if let TypedStatementKind::Let { ty, value, .. } = &statement.kind {
+                        assert_eq!(ty, &value.ty);
+                    }
+                }
+                for cleanup in &function.cleanups {
+                    for usage in cleanup.state.bindings.values() {
+                        for ty in &usage.cleanup {
+                            assert_closed_type(ty, &function.scheme);
+                        }
+                    }
+                    for temporary in &cleanup.state.temporaries {
+                        assert_closed_type(&temporary.value_type, &function.scheme);
+                        for ty in &temporary.types {
+                            assert_closed_type(ty, &function.scheme);
+                        }
+                    }
+                }
+            }
+        }
+        let error = check_project(&sources("fn apply<F: Fn + fn() -> Unit>(f: call F) -> Unit with {} { let alias = apply; f(); }"), &BTreeMap::new(), Vec::new()).expect_err("inferable shape is an open provider header");
+        assert!(
+            error.message.contains("closed declaration header"),
+            "{error:?}"
+        );
     }
 }

@@ -303,6 +303,45 @@ impl EffectTerm {
 pub(super) struct EffectEquation {
     pub(super) calls: Vec<EffectCall>,
     pub(super) rows: Vec<(EffectRow, bool)>,
+    pub(super) incomplete: bool,
+}
+
+pub(super) struct PartialEffects {
+    pub(super) lower: BTreeMap<EntityId, EffectRow>,
+    pub(super) constraints: BTreeMap<EntityId, Vec<EffectRow>>,
+}
+
+pub(super) fn effect_payload_equations(
+    actual: &EffectRow,
+    expected: &EffectRow,
+) -> Vec<TypeEquation> {
+    let mut equations = Vec::new();
+    for actual in &actual.0 {
+        for expected in &expected.0 {
+            match (actual, expected) {
+                (EffectTerm::Fail(actual), EffectTerm::Fail(expected)) => {
+                    equations.push(TypeEquation {
+                        actual: actual.clone(),
+                        expected: expected.clone(),
+                        widening: false,
+                    })
+                }
+                (EffectTerm::Handled(left, actual), EffectTerm::Handled(right, expected))
+                    if left == right =>
+                {
+                    equations.extend(actual.iter().zip(expected).map(|(actual, expected)| {
+                        TypeEquation {
+                            actual: actual.clone(),
+                            expected: expected.clone(),
+                            widening: false,
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    equations
 }
 
 pub(super) struct EffectCall {
@@ -324,17 +363,23 @@ pub(super) struct EffectEnvironment<'a, 'project> {
     pub(super) schemes: &'a BTreeMap<EntityId, CallableScheme>,
 }
 
-impl EffectEquation {
-    pub(super) fn substitute(&mut self, replacements: &BTreeMap<EffectFormal, EffectRow>) {
-        for (row, _) in &mut self.rows {
-            *row = row.instantiate(&BTreeMap::new(), replacements);
-        }
-        for call in &mut self.calls {
-            for row in call.effects.values_mut() {
-                *row = row.instantiate(&BTreeMap::new(), replacements);
-            }
+pub(super) struct EffectScope<'a> {
+    pub(super) requirements: &'a [Requirement],
+    pub(super) shapes: &'a [ShapeRequirement],
+    pub(super) origin: CheckOrigin,
+}
+
+impl<'a> From<&'a FunctionHeader> for EffectScope<'a> {
+    fn from(header: &'a FunctionHeader) -> Self {
+        Self {
+            requirements: &header.requirements,
+            shapes: &header.shapes,
+            origin: header.effect_origin.clone(),
         }
     }
+}
+
+impl EffectEquation {
     pub(super) fn from_body(block: &TypedBlock) -> Self {
         enum Node<'a> {
             Block(&'a TypedBlock, bool),
@@ -344,6 +389,7 @@ impl EffectEquation {
         let mut equation = Self {
             calls: Vec::new(),
             rows: Vec::new(),
+            incomplete: false,
         };
         while let Some(node) = pending.pop() {
             match node {
@@ -382,8 +428,13 @@ impl EffectEquation {
                             enters &= argument.ty != CheckedType::Never;
                         }
                         if enters {
+                            equation.incomplete |= call.effect.is_none();
                             equation.rows.push((
-                                call.effect.clone().expect("indirect row is selected"),
+                                call.effect.clone().unwrap_or_else(|| {
+                                    EffectRow(vec![EffectTerm::SelectedCall(
+                                        call.callable.ty.clone(),
+                                    )])
+                                }),
                                 discharge,
                             ));
                         }
@@ -412,8 +463,9 @@ impl EffectEquation {
                                 CallInstantiation::RecursiveBinding { effects } => {
                                     (BTreeMap::new(), effects.iter().cloned().collect())
                                 }
-                                CallInstantiation::Pending(_) => {
-                                    unreachable!("effect equations consume bound calls")
+                                CallInstantiation::Pending(mapping) => {
+                                    equation.incomplete = true;
+                                    (mapping.clone(), BTreeMap::new())
                                 }
                             };
                             equation.calls.push(EffectCall {
@@ -424,8 +476,20 @@ impl EffectEquation {
                             });
                         }
                     }
-                    TypedExprKind::MethodDraft { .. } => {
-                        unreachable!("method selection precedes effect equations")
+                    TypedExprKind::MethodDraft {
+                        receiver,
+                        arguments,
+                        ..
+                    } => {
+                        equation.incomplete = true;
+                        if let Some(receiver) = receiver {
+                            pending.push(Node::Expr(receiver, discharge));
+                        }
+                        pending.extend(
+                            arguments
+                                .iter()
+                                .map(|argument| Node::Expr(argument, discharge)),
+                        );
                     }
                     TypedExprKind::Parenthesized(inner)
                     | TypedExprKind::Unary { operand: inner, .. }
@@ -494,6 +558,172 @@ impl EffectEquation {
 }
 
 impl EffectEnvironment<'_, '_> {
+    pub(super) fn partial_effects(
+        &self,
+        group: &[EntityId],
+        equations: &BTreeMap<EntityId, EffectEquation>,
+        inference: &TypeInference,
+    ) -> Result<PartialEffects, CheckDiagnostic> {
+        let members = group.iter().cloned().collect::<BTreeSet<_>>();
+        let mut lower = group
+            .iter()
+            .cloned()
+            .map(|identity| (identity, EffectRow::default()))
+            .collect::<BTreeMap<_, _>>();
+        let mut constraints = group
+            .iter()
+            .cloned()
+            .map(|identity| (identity, Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut work = 0;
+        loop {
+            let mut changed = false;
+            for identity in group {
+                work += 1;
+                let header = &self.headers[identity];
+                if work > SELECTION_WORK_LIMIT {
+                    return Err(effect_diagnostic(
+                        "effect constraint propagation incomplete: deterministic work limit reached",
+                        header.effect_origin.clone(),
+                    ));
+                }
+                let mut actual = EffectRow::default();
+                for (row, discharge) in &equations[identity].rows {
+                    actual.0.extend(
+                        row.0
+                            .iter()
+                            .filter(|term| !*discharge || **term != EffectTerm::Unsafe)
+                            .cloned(),
+                    );
+                }
+                let mut conditions = header
+                    .effect_upper
+                    .iter()
+                    .chain(&header.trait_upper)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for call in &equations[identity].calls {
+                    let missing_types = if members.contains(&call.callee) {
+                        BTreeSet::new()
+                    } else {
+                        self.schemes
+                            .get(&call.callee)
+                            .map(|scheme| scheme.quantified.iter().collect::<Vec<_>>())
+                            .unwrap_or_else(|| {
+                                self.headers[&call.callee]
+                                    .outer_formals
+                                    .iter()
+                                    .chain(&self.headers[&call.callee].declared_formals)
+                                    .collect()
+                            })
+                            .into_iter()
+                            .filter(|formal| !call.types.contains_key(*formal))
+                            .cloned()
+                            .collect()
+                    };
+                    let available = |row: &EffectRow| {
+                        let mut row = row.instantiate(&call.types, &call.effects);
+                        row.0.retain(|term| {
+                            let mut referenced = BTreeSet::new();
+                            for ty in EffectRow(vec![term.clone()]).types() {
+                                inference.referenced_formals(ty, &mut referenced);
+                            }
+                            referenced.is_disjoint(&missing_types)
+                        });
+                        row
+                    };
+                    let source = self
+                        .schemes
+                        .get(&call.callee)
+                        .map(|scheme| &scheme.effect)
+                        .or_else(|| {
+                            self.headers[&call.callee]
+                                .trait_upper
+                                .as_ref()
+                                .or(self.headers[&call.callee].effect_upper.as_ref())
+                        })
+                        .or_else(|| lower.get(&call.callee));
+                    if let Some(row) = source {
+                        let mut row = available(row);
+                        if call.discharge_unsafe {
+                            row.0.retain(|term| *term != EffectTerm::Unsafe);
+                        }
+                        actual.0.extend(row.0);
+                    }
+                    if let Some(rows) = self
+                        .schemes
+                        .get(&call.callee)
+                        .map(|scheme| &scheme.row_constraints)
+                        .or_else(|| constraints.get(&call.callee))
+                    {
+                        conditions.extend(rows.iter().map(available));
+                    }
+                }
+                actual = inference
+                    .resolve_effect(&actual)
+                    .map_types(&mut |ty| inference.canonical(ty));
+                actual.0.sort();
+                actual.0.dedup();
+                conditions.push(actual.clone());
+                for row in &mut conditions {
+                    *row = inference
+                        .resolve_effect(row)
+                        .map_types(&mut |ty| inference.canonical(ty));
+                    row.0.sort();
+                    row.0.dedup();
+                }
+                conditions.sort();
+                conditions.dedup();
+                if lower[identity] != actual || constraints[identity] != conditions {
+                    lower.insert(identity.clone(), actual);
+                    constraints.insert(identity.clone(), conditions);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Ok(PartialEffects { lower, constraints });
+            }
+        }
+    }
+
+    pub(super) fn constrain_effect_payloads(
+        &self,
+        group: &[EntityId],
+        partial: &PartialEffects,
+        inference: &mut TypeInference,
+    ) -> Result<(), CheckDiagnostic> {
+        for identity in group {
+            let header = &self.headers[identity];
+            let ceilings = header.effect_upper.iter().chain(&header.trait_upper).chain(
+                self.normalizer
+                    .module_effects
+                    .get(&identity.module)
+                    .map(|(row, _)| row),
+            );
+            for ceiling in ceilings {
+                for actual in &partial.lower[identity].0 {
+                    if !matches!(actual, EffectTerm::Fail(_) | EffectTerm::Handled(_, _)) {
+                        continue;
+                    }
+                    for expected in &ceiling.0 {
+                        if actual.same_atom(expected) {
+                            // These atom identities are already facts of the
+                            // draft and its declared ceiling. No missing row
+                            // is treated as pure by this type constraint.
+                            let mut row = EffectRow(vec![expected.clone()]);
+                            row.union(
+                                &EffectRow(vec![actual.clone()]),
+                                inference,
+                                &header.effect_origin,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn populate_calls(
         &self,
         block: &mut TypedBlock,
@@ -641,6 +871,15 @@ impl EffectEnvironment<'_, '_> {
         equations: &BTreeMap<EntityId, EffectEquation>,
         inference: &mut TypeInference,
     ) -> Result<EffectClosure, CheckDiagnostic> {
+        if let Some(identity) = group
+            .iter()
+            .find(|identity| equations[*identity].incomplete)
+        {
+            return Err(effect_diagnostic(
+                "effect closure is pending: the draft still contains an unbound application",
+                self.headers[identity].effect_origin.clone(),
+            ));
+        }
         let mut rows = group
             .iter()
             .map(|identity| {
@@ -818,6 +1057,17 @@ impl EffectEnvironment<'_, '_> {
         inference: &mut TypeInference,
         needed: &mut BTreeSet<EntityId>,
     ) -> Result<EffectRow, CheckDiagnostic> {
+        self.expand_scope(row, &EffectScope::from(header), rows, inference, needed)
+    }
+
+    pub(super) fn expand_scope(
+        &self,
+        row: &EffectRow,
+        header: &EffectScope,
+        rows: &BTreeMap<EntityId, EffectRow>,
+        inference: &mut TypeInference,
+        needed: &mut BTreeSet<EntityId>,
+    ) -> Result<EffectRow, CheckDiagnostic> {
         enum Frame {
             Term(EffectTerm),
             End(EffectTerm),
@@ -830,14 +1080,18 @@ impl EffectEnvironment<'_, '_> {
             .iter()
             .map(|requirement| requirement.map_types(|ty| inference.canonical(ty)))
             .collect::<Vec<_>>();
-        let origin = header.effect_origin.clone();
-        let mut solver = SelectionSolver::new(
-            &self.normalizer.selection,
-            &self.normalizer.project.core_roles,
-            &givens,
-            origin.clone(),
-        )?;
-        let row = solver.normalize_row(&row.map_types(&mut |ty| inference.canonical(ty)))?;
+        let origin = header.origin.clone();
+        let row = {
+            let mut solver = SelectionSolver::new(
+                &self.normalizer.selection,
+                &self.normalizer.project.core_roles,
+                &givens,
+                origin.clone(),
+                inference,
+            )?;
+            let row = solver.inference.resolve_effect(row);
+            solver.normalize_row(&row)?
+        };
         let mut pending = row
             .0
             .iter()
@@ -871,7 +1125,7 @@ impl EffectEnvironment<'_, '_> {
                 }
                 Frame::CompareRows { outer, actual } => {
                     if needed.is_empty() {
-                        self.subset(&actual, &result, header, inference, &origin)?;
+                        self.subset_scope(&actual, &result, header, inference, &origin)?;
                     }
                     result = outer;
                     continue;
@@ -882,14 +1136,32 @@ impl EffectEnvironment<'_, '_> {
                 }
                 Frame::Term(term) => term,
             };
+            let resolved = inference.resolve_effect(&EffectRow(vec![term.clone()]));
+            if matches!(term, EffectTerm::Formal(_) | EffectTerm::Variable(_))
+                && resolved.0 != [term.clone()]
+            {
+                pending.extend(resolved.0.into_iter().rev().map(Frame::Term));
+                continue;
+            }
             match &term {
                 EffectTerm::Handled(owner, types) => {
                     let mapping = self.normalizer.owner_formals[owner]
                         .values()
                         .map(|formal| (formal.clone(), types[formal.ordinal].clone()))
                         .collect();
-                    self.normalizer
-                        .validate_formation(types, &givens, origin.clone())?;
+                    self.normalizer.validate_formation(
+                        types,
+                        &givens,
+                        origin.clone(),
+                        inference,
+                    )?;
+                    let mut solver = SelectionSolver::new(
+                        &self.normalizer.selection,
+                        &self.normalizer.project.core_roles,
+                        &givens,
+                        origin.clone(),
+                        inference,
+                    )?;
                     for requirement in &self.normalizer.effect_requirements[owner] {
                         solver.prove(&requirement.instantiate(&mapping))?;
                     }
@@ -929,7 +1201,7 @@ impl EffectEnvironment<'_, '_> {
                             .map(|requirement| requirement.map_types(|ty| inference.canonical(ty)))
                             .collect::<Vec<_>>();
                         self.normalizer
-                            .shared_callable(&ty, &givens, origin.clone())?;
+                            .shared_callable(&ty, &givens, origin.clone(), inference)?;
                         header
                             .shapes
                             .iter()
@@ -1000,8 +1272,9 @@ impl EffectEnvironment<'_, '_> {
                         &self.normalizer.project.core_roles,
                         &givens,
                         origin.clone(),
+                        inference,
                     )?;
-                    let subject = solver.normalize(&inference.canonical(&types[0]))?;
+                    let subject = solver.normalize(&types[0])?;
                     let evidence = solver.prove(&Requirement {
                         subject: subject.clone(),
                         bound: bound.clone(),
@@ -1019,7 +1292,7 @@ impl EffectEnvironment<'_, '_> {
                         solver.prove(
                             &requirement
                                 .instantiate(&mapping)
-                                .map_types(|ty| inference.canonical(ty)),
+                                .map_types(|ty| solver.inference.canonical(ty)),
                         )?;
                     }
                     let effect_mapping = method_header
@@ -1031,9 +1304,16 @@ impl EffectEnvironment<'_, '_> {
                     let mut shape_checks = Vec::new();
                     for required in &method_header.shapes {
                         let subject = instantiate_type(&required.subject, &mapping);
-                        let actual = self.callable_shape(&subject, header, inference, &origin)?;
+                        let actual =
+                            self.callable_shape_scope(&subject, header, solver.inference, &origin)?;
                         let expected = required.shape.instantiate(&mapping, &effect_mapping);
-                        self.match_callback_types(&actual, &expected, header, inference, &origin)?;
+                        self.match_callback_types_scope(
+                            &actual,
+                            &expected,
+                            header,
+                            solver.inference,
+                            &origin,
+                        )?;
                         shape_checks.push((
                             solver.normalize_row(&actual.effect)?,
                             solver.normalize_row(&expected.effect)?,
@@ -1104,7 +1384,7 @@ impl EffectEnvironment<'_, '_> {
     fn destruction(
         &self,
         ty: &CheckedType,
-        header: &FunctionHeader,
+        header: &EffectScope,
         inference: &TypeInference,
     ) -> Result<EffectRow, CheckDiagnostic> {
         enum Frame {
@@ -1113,19 +1393,21 @@ impl EffectEnvironment<'_, '_> {
             Enter(NominalType),
             Leave(EntityId, usize),
         }
-        let origin = CheckOrigin::Source(header.origin.clone());
+        let origin = header.origin.clone();
         let givens = header
             .requirements
             .iter()
             .map(|requirement| requirement.map_types(|ty| inference.canonical(ty)))
             .collect::<Vec<_>>();
+        let mut normalization = inference.clone();
         let mut solver = SelectionSolver::new(
             &self.normalizer.selection,
             &self.normalizer.project.core_roles,
             &givens,
             origin.clone(),
+            &mut normalization,
         )?;
-        let ty = solver.normalize(&inference.canonical(ty))?;
+        let ty = solver.normalize(ty)?;
         if cleanup_is_empty(std::slice::from_ref(&ty), &self.normalizer.nominals) {
             return Ok(EffectRow::default());
         }
@@ -1263,6 +1545,17 @@ impl EffectEnvironment<'_, '_> {
         inference: &mut TypeInference,
         origin: &CheckOrigin,
     ) -> Result<(), CheckDiagnostic> {
+        self.subset_scope(actual, upper, &EffectScope::from(header), inference, origin)
+    }
+
+    pub(super) fn subset_scope(
+        &self,
+        actual: &EffectRow,
+        upper: &EffectRow,
+        header: &EffectScope,
+        inference: &mut TypeInference,
+        origin: &CheckOrigin,
+    ) -> Result<(), CheckDiagnostic> {
         for term in &actual.0 {
             if let EffectTerm::SelectedCall(ty) = term
                 && !upper.0.contains(term)
@@ -1390,6 +1683,8 @@ impl EffectRow {
         inference: &mut TypeInference,
         origin: &CheckOrigin,
     ) -> Result<(), CheckDiagnostic> {
+        *self = inference.resolve_effect(self);
+        let other = inference.resolve_effect(other);
         for term in &other.0 {
             let matching = self.0.iter().find(|existing| existing.same_atom(term));
             if let Some(existing) = matching {
@@ -1427,7 +1722,9 @@ impl EffectRow {
         inference: &mut TypeInference,
         origin: &CheckOrigin,
     ) -> Result<(), CheckDiagnostic> {
-        for term in &self.0 {
+        let actual = inference.resolve_effect(self);
+        let upper = inference.resolve_effect(upper);
+        for term in &actual.0 {
             let matching = upper.0.iter().find(|expected| expected.same_atom(term));
             let Some(matching) = matching else {
                 return Err(effect_diagnostic(
