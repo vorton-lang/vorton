@@ -113,7 +113,7 @@ Panic 发生后不再求值后续表达式，并终止整个程序。语言不�
 
 Effect row 可以用 `TraitPath::method<SelfActual, ..., effect {row}>` 引用 trait 的完整公开方法 scheme。`TraitPath` 必须名称解析到 exact trait，terminal 必须是该 owner 的 exact method；module/import/re-export alias 可以改变可见路径，但不能改变 identity。裸方法名、`T::method` 或从 impl 集合按名称猜测都非法。
 
-Actual 顺序固定为 `SelfActual`、trait type actuals、method type actuals，最后是各 effect-row actual。Row actual 可以包含已绑定 formals、既有 atoms 和嵌套的确定 scheme application。Type actual、effect actual、trait evidence 与 scheme application 必须消费同一次实例化关系，不能各自重建 substitution。引用总是取得完整公开调用 scheme，而不是某个 body 的较窄 row；显式公共上界不能直接或间接引用自身来定义自身。
+Actual 顺序固定为 `SelfActual`、trait type actuals、method type actuals，最后是各 effect-row actual。Row actual 可以包含已绑定 formals、既有 atoms 和嵌套的确定 scheme application。Type actual、effect actual、trait evidence 与 scheme application 必须消费同一次实例化关系，不能各自重建 substitution。引用必须满足同一次 type/effect mapping 下的方法自身 named-trait 和 callable-shape 条件；只有 Self 的 trait evidence 不足以证明这些条件。输入 shape 的检查不把 callback 的 row 自动加入方法调用 row。引用总是取得完整公开调用 scheme，而不是某个 body 的较窄 row；显式公共上界不能直接或间接引用自身来定义自身。
 
 Effect alias 可以沿用自己的既有 type parameters 并引用参数已给定的方法 scheme；alias 不成为 effect-formal 的新量化 owner，也不改变透明展开规则。Canonical 0.1 不提供独立 associated effect member/assignment、匿名 effect 函数或全局 impl-effect union。
 
@@ -327,7 +327,9 @@ trait Pipeline {
 
 ## Drop 边界
 
-用户 `Drop::drop` 的最终推断 effect row 必须为空；`fail`、system effect、handled effect 与逃逸的 `mut` 均禁止。编译器生成的字段递归释放、RC deallocation 与已验证 intrinsic cleanup 不属于用户 effect body。
+用户 `Drop::drop` 可以产生 system effect 与按既有规则未消除的 mut；最终外逸 row 不得包含 fail、handled effect 或 unsafe obligation。完整销毁的摘要包括 hook、剩余字段/元素和可能的最后一个 Rc owner 清理，不能用单个 `Drop::drop` scheme 替代。发生清理的 callable 必须计入这些 may-effects，`with {}` 不能隐藏它们；纯内存释放与 RC bookkeeping 的既有分类不变。
+
+当前 Checker 只开放无用户 Drop/Rc/Weak 的整值清理以及泛型 full_destruction(T) 关系，尚不接受用户 Drop 实现。不能证明无退出的调用需保留 caller 的清理：只有 handled atom 的操作也可能因动态 handler arm 失败而离开挂起计算。先前已求值但尚未移交的 Move temporary 归 caller；进入 callee 后的 Move 值归 callee。物理 cleanup 指令由后续资源阶段安排，不得在那里补改公开 effect。
 
 ## Canonical 边界
 
