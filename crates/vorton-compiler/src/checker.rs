@@ -2564,6 +2564,14 @@ struct FunctionHeader {
 }
 
 impl FunctionHeader {
+    fn has_receiver(&self) -> bool {
+        self.identity.kind == EntityKind::Method
+            && self
+                .parameters
+                .first()
+                .is_some_and(|parameter| parameter.binding.name == "self")
+    }
+
     fn interface_types(&self) -> Vec<&CheckedType> {
         let mut types = self
             .parameters
@@ -2610,6 +2618,8 @@ struct SourceTypeNormalizer<'a> {
     contract_scope: Option<EntityId>,
     module_effects: BTreeMap<ModuleRef, (EffectRow, OriginRef)>,
     operations: BTreeMap<EntityId, OperationHeader>,
+    effect_requirements: BTreeMap<EntityId, Vec<Requirement>>,
+    effect_uses: Vec<effects::EffectUse>,
 }
 
 enum NormalizeFrame {
@@ -2739,6 +2749,8 @@ impl<'a> SourceTypeNormalizer<'a> {
             contract_scope: None,
             module_effects: BTreeMap::new(),
             operations: BTreeMap::new(),
+            effect_requirements: BTreeMap::new(),
+            effect_uses: Vec::new(),
         }
     }
 
@@ -3127,6 +3139,7 @@ fn collect_supported_headers(
             continue;
         };
         let context = SourceContext::from_origin(&body.origin);
+        normalizer.contract_scope = None;
         if let Some(requires) = &body.requires {
             match normalizer.normalize_effects(requires, &BTreeMap::new(), &BTreeMap::new()) {
                 Ok(row) => {
@@ -3140,6 +3153,7 @@ fn collect_supported_headers(
             }
         }
         for declaration in &body.declarations {
+            normalizer.contract_scope = declaration.identity.clone();
             match &declaration.kind {
                 ResolvedDeclarationKind::Module(_) => {}
                 ResolvedDeclarationKind::Effect {
@@ -3497,14 +3511,14 @@ fn validate_public_nominals(
                 pending.extend(&nominal.arguments);
             }
             CheckedType::Projection(projection) => {
-                if !public_exports.contains(&projection.bound.declaration) {
+                if let ProjectionOwner::Trait(bound) = &projection.owner
+                    && !public_exports.contains(&bound.declaration)
+                {
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::TypeMismatch,
                         "public associated result exposes a private trait",
                         origin.clone(),
-                        entity_origin(&projection.bound.declaration)
-                            .into_iter()
-                            .collect(),
+                        entity_origin(&bound.declaration).into_iter().collect(),
                     ));
                 }
                 pending.extend(projection.types());
@@ -4463,10 +4477,7 @@ fn contract_parameter_index(
     document_index: usize,
     path: &str,
 ) -> Result<usize, CheckDiagnostic> {
-    let receiver = header
-        .parameters
-        .first()
-        .is_some_and(|parameter| parameter.binding.name == "self");
+    let receiver = header.has_receiver();
     let index = match parameter {
         contract::ParameterRef::Receiver {} if receiver => Some(0),
         contract::ParameterRef::Receiver {} => None,
@@ -4554,7 +4565,7 @@ fn normalize_contract_type(
                 })?;
             Ok(CheckedType::Projection(Box::new(Projection {
                 subject,
-                bound,
+                owner: ProjectionOwner::Trait(bound),
                 member,
             })))
         }

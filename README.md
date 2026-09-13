@@ -118,6 +118,8 @@ let checked = check_project(
 
 当前 `check_project` 支持普通函数和方法的 HM 推断、Trait/impl、关联类型、named-trait 条件及整值 Borrow/Move 检查。函数与方法按真实递归依赖共同闭合，每个 body 只生成一次；调用共用一份 type/effect actual mapping 和 evidence。类型覆盖 scalar、tuple、普通 struct/enum、非泛型透明 alias、合法 projection，以及用作实参或不可变别名的具名函数值。
 
+形成条件覆盖声明和实际实例化，包括关联类型 default/assignment、trait/impl 参数、alias 与 operation 签名。Trait 和 inherent projection 按各自 owner 归约；证据选择与 coherence 使用归约后的结构，无法确定的关联值不能证明 impl 不相交。
+
 Effect row 支持五类 atom、alias、显隐 formal、method scheme、shared Fn 回调的最小 effect actual、module ceiling 与词法 unsafe。正常/return/failure 出口保留 live owner 与尚未移交 temporary 的完整销毁关系；具体受支持 actual 可以归约。Handler/catch、捕获 closure、一般函数值返回或存储、FnMut/FnOnce 入口、Mut/partial move、用户 Drop/Rc/Weak、生成器与后端仍未开放。完整边界见[当前 Checker API 支持说明](docs/lang-spec/type-system.md#当前-checker-api-支持边界)。
 
 `CheckedProject` 保留闭合 scheme、selection/evidence、唯一调用 mapping、typed body、名义构造/字段身份和语义清理义务；不提供通用查询 API，也不表示完整接口 S 或最终 TypedHIR。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：

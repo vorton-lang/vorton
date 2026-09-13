@@ -587,7 +587,7 @@ fn contract_pattern(
                 .ok_or_else(|| "impl pattern associated member is missing".to_owned())?;
             Ok(CheckedType::Projection(Box::new(Projection {
                 subject,
-                bound,
+                owner: ProjectionOwner::Trait(bound),
                 member,
             })))
         }
@@ -1020,5 +1020,5 @@ pub(super) fn normalize_selected_contract_type(
             json_path: path.to_owned(),
         },
     )?;
-    solver.normalize(&ty)
+    solver.normalize(&ty).map_err(Into::into)
 }

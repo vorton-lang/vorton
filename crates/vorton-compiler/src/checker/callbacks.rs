@@ -629,6 +629,7 @@ impl SourceTypeNormalizer<'_> {
                 origin,
             })
             .map(|_| ())
+            .map_err(Into::into)
     }
 }
 

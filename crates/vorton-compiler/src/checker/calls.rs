@@ -120,12 +120,7 @@ impl CallBinder<'_, '_> {
                     entity_origin(&selected).into_iter().collect(),
                 )
             })?;
-            if header
-                .parameters
-                .first()
-                .is_some_and(|parameter| parameter.binding.name == "self")
-                != receiver.is_some()
-            {
+            if header.has_receiver() != receiver.is_some() {
                 return Err(source_diagnostic(
                     CheckDiagnosticKind::CallMismatch,
                     "instance method and associated function receiver forms do not match",
@@ -210,7 +205,7 @@ impl CallBinder<'_, '_> {
                         &givens,
                         CheckOrigin::Source(self.function.context.origin(expression.span)),
                     )?;
-                    for requirement in &header.requirements {
+                    for requirement in &self.normalizer.effect_requirements[&header.owner] {
                         solver.prove(&requirement.instantiate(&mapping))?;
                     }
                     operation.evidence = solver.evidence;

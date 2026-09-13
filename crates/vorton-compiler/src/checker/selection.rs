@@ -13,8 +13,29 @@ pub(super) struct TraitUse {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Projection {
     pub(super) subject: CheckedType,
-    pub(super) bound: TraitUse,
+    pub(super) owner: ProjectionOwner,
     pub(super) member: EntityId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum ProjectionOwner {
+    Trait(TraitUse),
+    Inherent(EntityId),
+}
+
+impl ProjectionOwner {
+    fn declaration(&self) -> &EntityId {
+        match self {
+            Self::Trait(bound) => &bound.declaration,
+            Self::Inherent(owner) => owner,
+        }
+    }
+    fn trait_use(&self) -> Option<&TraitUse> {
+        match self {
+            Self::Trait(bound) => Some(bound),
+            Self::Inherent(_) => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -163,6 +184,7 @@ impl SourceTypeNormalizer<'_> {
                         pending.push(normalized);
                     }
                 }
+                CheckedType::Function(item) => pending.extend(item.types().cloned()),
                 _ => {}
             }
         }
@@ -190,20 +212,35 @@ impl SourceTypeNormalizer<'_> {
             let origin = CheckOrigin::Source(entity_origin(identity).expect("trait declaration"));
             let subject = CheckedType::Formal(Box::new(definition.self_formal.clone()));
             let mut givens = definition.requirements.clone();
+            let bound = TraitUse {
+                declaration: identity.clone(),
+                arguments: definition
+                    .formals
+                    .iter()
+                    .cloned()
+                    .map(|formal| CheckedType::Formal(Box::new(formal)))
+                    .collect(),
+                associated: BTreeMap::new(),
+            };
             givens.push(Requirement {
-                subject,
-                bound: TraitUse {
-                    declaration: identity.clone(),
-                    arguments: definition
-                        .formals
-                        .iter()
-                        .cloned()
-                        .map(|formal| CheckedType::Formal(Box::new(formal)))
-                        .collect(),
-                    associated: BTreeMap::new(),
-                },
+                subject: subject.clone(),
+                bound: bound.clone(),
                 origin: origin.clone(),
             });
+            for (member, associated) in &definition.associated {
+                for associated_bound in &associated.bounds {
+                    givens.push(Requirement {
+                        subject: CheckedType::Projection(Box::new(Projection {
+                            subject: subject.clone(),
+                            owner: ProjectionOwner::Trait(bound.clone()),
+                            member: member.clone(),
+                        })),
+                        bound: associated_bound.clone(),
+                        origin: origin.clone(),
+                    });
+                }
+            }
+            self.validate_formation(&[], &givens, origin.clone())?;
             let mut solver = SelectionSolver::new(
                 &self.selection,
                 &self.project.core_roles,
@@ -228,8 +265,16 @@ impl SourceTypeNormalizer<'_> {
             }
         }
         for implementation in self.selection.implementations.values() {
+            let mut types = std::iter::once(&implementation.target)
+                .chain(implementation.associated.values())
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(bound) = &implementation.trait_use {
+                types.extend(bound.arguments.iter().cloned());
+                types.extend(bound.associated.values().cloned());
+            }
             self.validate_formation(
-                std::slice::from_ref(&implementation.target),
+                &types,
                 &implementation.requirements,
                 CheckOrigin::Source(
                     entity_origin(&implementation.identity).expect("impl declaration"),
@@ -257,6 +302,55 @@ impl SourceTypeNormalizer<'_> {
                 &header.requirements,
                 CheckOrigin::Source(header.origin.clone()),
             )?;
+        }
+        for (identity, ty) in &self.normalized_aliases {
+            self.validate_formation(
+                std::slice::from_ref(ty),
+                &[],
+                CheckOrigin::Source(entity_origin(identity).expect("alias declaration")),
+            )?;
+        }
+        for (identity, operation) in &self.operations {
+            let types = operation
+                .parameters
+                .iter()
+                .map(|(ty, _)| ty.clone())
+                .chain(std::iter::once(operation.return_type.clone()))
+                .collect::<Vec<_>>();
+            self.validate_formation(
+                &types,
+                &self.effect_requirements[&operation.owner],
+                CheckOrigin::Source(entity_origin(identity).expect("operation declaration")),
+            )?;
+        }
+        for (identity, requirements) in &self.effect_requirements {
+            self.validate_formation(
+                &[],
+                requirements,
+                CheckOrigin::Source(entity_origin(identity).expect("effect declaration")),
+            )?;
+        }
+        for use_site in &self.effect_uses {
+            let givens = use_site
+                .scope
+                .as_ref()
+                .and_then(|scope| {
+                    headers
+                        .get(scope)
+                        .map(|header| &header.requirements)
+                        .or_else(|| self.effect_requirements.get(scope))
+                })
+                .map_or(&[][..], Vec::as_slice);
+            self.validate_formation(&use_site.types, givens, use_site.origin.clone())?;
+            let mut solver = SelectionSolver::new(
+                &self.selection,
+                &self.project.core_roles,
+                givens,
+                use_site.origin.clone(),
+            )?;
+            for requirement in &use_site.requirements {
+                solver.prove(requirement)?;
+            }
         }
         Ok(())
     }
@@ -403,9 +497,11 @@ impl SourceTypeNormalizer<'_> {
         let mut candidates = Vec::new();
         if matches!(subject, CheckedType::Formal(_) | CheckedType::Projection(_)) {
             let mut givens = solver.givens.clone();
-            if let CheckedType::Projection(projection) = &subject {
-                let definition = &self.selection.traits[&projection.bound.declaration];
-                let mapping = definition.mapping(&projection.subject, &projection.bound);
+            if let CheckedType::Projection(projection) = &subject
+                && let ProjectionOwner::Trait(bound) = &projection.owner
+            {
+                let definition = &self.selection.traits[&bound.declaration];
+                let mapping = definition.mapping(&projection.subject, bound);
                 let associated = definition.associated[&projection.member]
                     .bounds
                     .iter()
@@ -447,20 +543,18 @@ impl SourceTypeNormalizer<'_> {
                 {
                     continue;
                 }
-                let mut mapping = BTreeMap::new();
-                if solver.matches(
-                    &implementation.target,
-                    &subject,
-                    &implementation.formals,
-                    &mut mapping,
-                )? {
+                if let Some(mapping) =
+                    solver.match_implementation(&implementation.identity, &subject, None)?
+                {
                     for requirement in &implementation.requirements {
                         match solver.prove(&requirement.instantiate(&mapping)) {
                             Ok(_) => {}
-                            Err(diagnostic) if diagnostic.message.starts_with("no evidence") => {
+                            Err(diagnostic)
+                                if diagnostic.kind == SelectionFailureKind::NotApplicable =>
+                            {
                                 continue 'inherent;
                             }
-                            Err(diagnostic) => return Err(diagnostic),
+                            Err(diagnostic) => return Err(diagnostic.into()),
                         }
                     }
                     candidates.push((method.clone(), mapping));
@@ -486,15 +580,14 @@ impl SourceTypeNormalizer<'_> {
                         if bound.declaration != *trait_id {
                             continue;
                         }
-                        let mut mapping = BTreeMap::new();
-                        if !solver.matches(
-                            &implementation.target,
+                        let Some(mapping) = solver.match_implementation(
+                            &implementation.identity,
                             &subject,
-                            &implementation.formals,
-                            &mut mapping,
-                        )? {
+                            None,
+                        )?
+                        else {
                             continue;
-                        }
+                        };
                         let mut referenced = BTreeSet::new();
                         let inference = TypeInference::default();
                         for ty in &bound.arguments {
@@ -529,11 +622,11 @@ impl SourceTypeNormalizer<'_> {
                         let index = match solver.prove(&requirement) {
                             Ok(index) => index,
                             Err(diagnostic)
-                                if diagnostic.message.starts_with("no evidence for ") =>
+                                if diagnostic.kind == SelectionFailureKind::NotApplicable =>
                             {
                                 continue;
                             }
-                            Err(diagnostic) => return Err(diagnostic),
+                            Err(diagnostic) => return Err(diagnostic.into()),
                         };
                         match &solver.evidence[index] {
                             Evidence::Implementation {
@@ -679,87 +772,115 @@ impl SourceTypeNormalizer<'_> {
                 for formal in left.formals.iter().chain(&right.formals) {
                     mapping.insert(formal.clone(), inference.fresh());
                 }
-                let mut pairs = vec![(
-                    instantiate_type(&left.target, &mapping),
-                    instantiate_type(&right.target, &mapping),
-                )];
+                let origin =
+                    CheckOrigin::Source(entity_origin(&right.identity).expect("impl source"));
+                let mut left_solver = SelectionSolver::new(
+                    &self.selection,
+                    &self.project.core_roles,
+                    &left.requirements,
+                    origin.clone(),
+                )?;
+                let mut right_solver = SelectionSolver::new(
+                    &self.selection,
+                    &self.project.core_roles,
+                    &right.requirements,
+                    origin,
+                )?;
+                let mut projection = false;
+                let left_target =
+                    coherence_operand(&mut left_solver, &left.target, &mapping, &mut projection)?;
+                let right_target =
+                    coherence_operand(&mut right_solver, &right.target, &mapping, &mut projection)?;
+                let mut pairs = vec![(left_target, right_target)];
                 if let (Some(left), Some(right)) = (&left.trait_use, &right.trait_use) {
-                    pairs.extend(left.arguments.iter().zip(&right.arguments).map(
-                        |(left, right)| {
-                            (
-                                instantiate_type(left, &mapping),
-                                instantiate_type(right, &mapping),
-                            )
-                        },
-                    ));
+                    for (left, right) in left.arguments.iter().zip(&right.arguments) {
+                        pairs.push((
+                            coherence_operand(&mut left_solver, left, &mapping, &mut projection)?,
+                            coherence_operand(&mut right_solver, right, &mapping, &mut projection)?,
+                        ));
+                    }
                 }
                 let mut disjoint = false;
-                let mut projection = false;
-                while let Some((left_type, right_type)) = pairs.pop() {
-                    let left_type = inference.resolve(&left_type);
-                    let right_type = inference.resolve(&right_type);
-                    match (&left_type, &right_type) {
-                        (CheckedType::Projection(_), _) | (_, CheckedType::Projection(_))
-                            if left_type != right_type =>
-                        {
-                            projection = true
+                for (left, right) in pairs {
+                    match compare_coherence_types(&left, &right, &mut inference) {
+                        CoherenceRelation::Disjoint => {
+                            disjoint = true;
+                            break;
                         }
-                        (CheckedType::Nominal(left), CheckedType::Nominal(right))
-                            if left.declaration == right.declaration =>
-                        {
-                            pairs.extend(
-                                left.arguments
-                                    .iter()
-                                    .cloned()
-                                    .zip(right.arguments.iter().cloned()),
-                            )
-                        }
-                        (CheckedType::Tuple(left), CheckedType::Tuple(right))
-                            if left.len() == right.len() =>
-                        {
-                            pairs.extend(left.iter().cloned().zip(right.iter().cloned()))
-                        }
-                        _ => {
-                            if inference.unify(&left_type, &right_type).is_err() {
-                                disjoint = true;
-                                break;
-                            }
-                        }
+                        CoherenceRelation::Incomplete => projection = true,
+                        CoherenceRelation::Compatible => {}
                     }
                 }
                 if disjoint {
                     continue;
                 }
-                // A shared associated type cannot equal incompatible rigid
-                // values. Absence of an impl is never a disjointness proof.
-                let predicates = left
-                    .requirements
-                    .iter()
-                    .chain(&right.requirements)
-                    .map(|requirement| {
-                        requirement
-                            .instantiate(&mapping)
-                            .map_types(|ty| inference.resolve(ty))
-                    })
-                    .collect::<Vec<_>>();
+                let mut predicates = Vec::new();
+                for (implementation, solver) in
+                    [(left, &mut left_solver), (right, &mut right_solver)]
+                {
+                    for requirement in &implementation.requirements {
+                        let subject = coherence_operand(
+                            solver,
+                            &requirement.subject,
+                            &mapping,
+                            &mut projection,
+                        )?;
+                        let mut arguments = Vec::new();
+                        for ty in &requirement.bound.arguments {
+                            arguments.push(coherence_operand(
+                                solver,
+                                ty,
+                                &mapping,
+                                &mut projection,
+                            )?);
+                        }
+                        let mut associated = BTreeMap::new();
+                        for (member, ty) in &requirement.bound.associated {
+                            associated.insert(
+                                member.clone(),
+                                coherence_operand(solver, ty, &mapping, &mut projection)?,
+                            );
+                        }
+                        predicates.push(Requirement {
+                            subject,
+                            bound: TraitUse {
+                                declaration: requirement.bound.declaration.clone(),
+                                arguments,
+                                associated,
+                            },
+                            origin: requirement.origin.clone(),
+                        });
+                    }
+                }
+                // Only incompatible rigid structure after shared reduction
+                // proves disjointness. Unknown projections never prove it.
                 for (index, first) in predicates.iter().enumerate() {
                     for second in &predicates[index + 1..] {
-                        if first.subject == second.subject
-                            && first.bound.declaration == second.bound.declaration
-                            && first.bound.arguments == second.bound.arguments
+                        if inference.canonical(&first.subject)
+                            != inference.canonical(&second.subject)
+                            || first.bound.declaration != second.bound.declaration
+                            || first
+                                .bound
+                                .arguments
+                                .iter()
+                                .map(|ty| inference.canonical(ty))
+                                .collect::<Vec<_>>()
+                                != second
+                                    .bound
+                                    .arguments
+                                    .iter()
+                                    .map(|ty| inference.canonical(ty))
+                                    .collect::<Vec<_>>()
                         {
-                            for (member, first_type) in &first.bound.associated {
-                                if let Some(second_type) = second.bound.associated.get(member) {
-                                    let mut variables = BTreeSet::new();
-                                    inference.unresolved_variables(first_type, &mut variables);
-                                    inference.unresolved_variables(second_type, &mut variables);
-                                    if variables.is_empty()
-                                        && first_type != second_type
-                                        && !matches!(first_type, CheckedType::Projection(_))
-                                        && !matches!(second_type, CheckedType::Projection(_))
-                                    {
-                                        disjoint = true;
-                                    }
+                            continue;
+                        }
+                        for (member, left_type) in &first.bound.associated {
+                            if let Some(right_type) = second.bound.associated.get(member) {
+                                match compare_coherence_types(left_type, right_type, &mut inference)
+                                {
+                                    CoherenceRelation::Disjoint => disjoint = true,
+                                    CoherenceRelation::Incomplete => projection = true,
+                                    CoherenceRelation::Compatible => {}
                                 }
                             }
                         }
@@ -976,6 +1097,14 @@ impl SourceTypeNormalizer<'_> {
                 let actual = headers
                     .get_mut(&implementation.methods[name])
                     .expect("impl body has a header");
+                if expected.has_receiver() != actual.has_receiver() {
+                    return Err(source_diagnostic(
+                        CheckDiagnosticKind::TypeMismatch,
+                        "trait and impl method receiver forms do not match",
+                        actual.origin.clone(),
+                        vec![expected.origin.clone()],
+                    ));
+                }
                 if expected.declared_formals.len() != actual.declared_formals.len()
                     || expected.parameters.len() != actual.parameters.len()
                 {
@@ -1402,6 +1531,21 @@ impl SourceTypeNormalizer<'_> {
             typed.requirements = requirements;
             typed.associated = associated;
         }
+        for declaration in &declarations {
+            let parameters = match &declaration.kind {
+                ResolvedDeclarationKind::Effect {
+                    type_parameters, ..
+                }
+                | ResolvedDeclarationKind::EffectAlias {
+                    type_parameters, ..
+                } => type_parameters,
+                _ => continue,
+            };
+            let owner = declaration.identity.as_ref().expect("effect owner");
+            let formals = self.owner_formals[owner].clone();
+            let requirements = self.parameter_requirements(parameters, &formals)?;
+            self.effect_requirements.insert(owner.clone(), requirements);
+        }
         Ok(())
     }
 
@@ -1523,12 +1667,12 @@ impl SourceTypeNormalizer<'_> {
                 let owner = self.project.entities[target]
                     .owner
                     .as_ref()
-                    .expect("associated member has an owner")
+                    .expect("associated member owner")
                     .clone();
                 if let Some(definition) = self.selection.traits.get(&owner) {
                     return Ok(CheckedType::Projection(Box::new(Projection {
                         subject: CheckedType::Formal(Box::new(definition.self_formal.clone())),
-                        bound: TraitUse {
+                        owner: ProjectionOwner::Trait(TraitUse {
                             declaration: owner,
                             arguments: definition
                                 .formals
@@ -1537,22 +1681,21 @@ impl SourceTypeNormalizer<'_> {
                                 .map(|formal| CheckedType::Formal(Box::new(formal)))
                                 .collect(),
                             associated: BTreeMap::new(),
-                        },
+                        }),
                         member: target.clone(),
                     })));
                 }
                 let implementation = &self.selection.implementations[&owner];
                 let subject = implementation.target.clone();
-                let bound = implementation.trait_use.clone().unwrap_or(TraitUse {
-                    declaration: owner,
-                    arguments: Vec::new(),
-                    associated: BTreeMap::new(),
-                });
+                let owner = implementation
+                    .trait_use
+                    .clone()
+                    .map_or(ProjectionOwner::Inherent(owner), ProjectionOwner::Trait);
                 let member =
-                    self.associated_member(&bound.declaration, &target.name, occurrence.clone())?;
+                    self.associated_member(owner.declaration(), &target.name, occurrence.clone())?;
                 Ok(CheckedType::Projection(Box::new(Projection {
                     subject,
-                    bound,
+                    owner,
                     member,
                 })))
             }
@@ -1589,16 +1732,25 @@ impl SourceTypeNormalizer<'_> {
                                     .into_iter()
                                     .flatten()
                                     .filter(|requirement| requirement.subject == subject)
-                                    .map(|requirement| requirement.bound.clone()),
+                                    .map(|requirement| {
+                                        ProjectionOwner::Trait(requirement.bound.clone())
+                                    }),
                             );
                         }
-                        let bounds = self
+                        for mut named in self
                             .generic_bounds
                             .get(formal.as_ref())
                             .cloned()
-                            .unwrap_or_default();
-                        for named in bounds {
-                            candidates.push(self.normalize_trait_use(&named, formals)?);
+                            .unwrap_or_default()
+                        {
+                            // The projection selects a trait member. Associated
+                            // equalities are checked through the owning requirement.
+                            named.arguments.retain(|argument| {
+                                matches!(argument, ResolvedTypeArgument::Type(_))
+                            });
+                            candidates.push(ProjectionOwner::Trait(
+                                self.normalize_trait_use(&named, formals)?,
+                            ));
                         }
                         if let Some((identity, definition)) = self
                             .selection
@@ -1606,7 +1758,7 @@ impl SourceTypeNormalizer<'_> {
                             .iter()
                             .find(|(_, definition)| &definition.self_formal == formal.as_ref())
                         {
-                            candidates.push(TraitUse {
+                            candidates.push(ProjectionOwner::Trait(TraitUse {
                                 declaration: identity.clone(),
                                 arguments: definition
                                     .formals
@@ -1615,50 +1767,51 @@ impl SourceTypeNormalizer<'_> {
                                     .map(|formal| CheckedType::Formal(Box::new(formal)))
                                     .collect(),
                                 associated: BTreeMap::new(),
-                            });
+                            }));
                         }
                     } else if let CheckedType::Projection(projection) = &subject {
-                        if let Some(definition) =
-                            self.selection.traits.get(&projection.bound.declaration)
-                        {
-                            let mapping =
-                                definition.mapping(&projection.subject, &projection.bound);
+                        if let ProjectionOwner::Trait(bound) = &projection.owner {
+                            let definition = &self.selection.traits[&bound.declaration];
+                            let mapping = definition.mapping(&projection.subject, bound);
                             if let Some(associated) = definition.associated.get(&projection.member)
                             {
-                                candidates.extend(
-                                    associated
-                                        .bounds
-                                        .iter()
-                                        .map(|bound| bound.instantiate(&mapping)),
-                                );
+                                candidates.extend(associated.bounds.iter().map(|bound| {
+                                    ProjectionOwner::Trait(bound.instantiate(&mapping))
+                                }));
                             }
                         }
                     } else {
                         for implementation in self.selection.implementations.values() {
+                            let owner = implementation
+                                .trait_use
+                                .as_ref()
+                                .map_or(&implementation.identity, |bound| &bound.declaration);
+                            if !self.project.entities[owner]
+                                .members
+                                .get(&member.name)
+                                .is_some_and(|members| {
+                                    members
+                                        .iter()
+                                        .any(|member| member.kind == EntityKind::AssociatedType)
+                                })
+                            {
+                                continue;
+                            }
                             let mut solver = SelectionSolver::new(
                                 &self.selection,
                                 &self.project.core_roles,
                                 &[],
                                 CheckOrigin::Source(member.origin.clone()),
                             )?;
-                            let mut mapping = BTreeMap::new();
-                            if solver.matches(
-                                &implementation.target,
+                            if let Some(mapping) = solver.match_implementation(
+                                &implementation.identity,
                                 &subject,
-                                &implementation.formals,
-                                &mut mapping,
+                                None,
                             )? {
-                                candidates.push(
-                                    implementation
-                                        .trait_use
-                                        .as_ref()
-                                        .map(|bound| bound.instantiate(&mapping))
-                                        .unwrap_or(TraitUse {
-                                            declaration: implementation.identity.clone(),
-                                            arguments: Vec::new(),
-                                            associated: BTreeMap::new(),
-                                        }),
-                                );
+                                candidates.push(implementation.trait_use.as_ref().map_or_else(
+                                    || ProjectionOwner::Inherent(implementation.identity.clone()),
+                                    |bound| ProjectionOwner::Trait(bound.instantiate(&mapping)),
+                                ));
                             }
                         }
                     }
@@ -1672,22 +1825,27 @@ impl SourceTypeNormalizer<'_> {
                                 Vec::new(),
                             ));
                         }
-                        let bound = candidates[next].clone();
+                        let owner = candidates[next].clone();
                         next += 1;
-                        if let Some(definition) = self.selection.traits.get(&bound.declaration) {
+                        if let ProjectionOwner::Trait(bound) = owner {
+                            let definition = &self.selection.traits[&bound.declaration];
                             let mapping = definition.mapping(&subject, &bound);
                             for requirement in &definition.requirements {
                                 let requirement = requirement.instantiate(&mapping);
-                                if requirement.subject == subject
-                                    && !candidates.contains(&requirement.bound)
-                                {
-                                    candidates.push(requirement.bound);
+                                let owner = ProjectionOwner::Trait(requirement.bound);
+                                if requirement.subject == subject && !candidates.contains(&owner) {
+                                    candidates.push(owner);
                                 }
                             }
                         }
                     }
-                    candidates.retain(|bound| {
-                        self.project.entities[&bound.declaration]
+                    for owner in &mut candidates {
+                        if let ProjectionOwner::Trait(bound) = owner {
+                            bound.associated.clear();
+                        }
+                    }
+                    candidates.retain(|owner| {
+                        self.project.entities[owner.declaration()]
                             .members
                             .get(&member.name)
                             .is_some_and(|members| {
@@ -1698,7 +1856,7 @@ impl SourceTypeNormalizer<'_> {
                     });
                     candidates.sort();
                     candidates.dedup();
-                    let [bound] = candidates.as_slice() else {
+                    let [owner] = candidates.as_slice() else {
                         return Err(source_diagnostic(
                             CheckDiagnosticKind::TypeMismatch,
                             if candidates.is_empty() {
@@ -1709,18 +1867,18 @@ impl SourceTypeNormalizer<'_> {
                             member.origin.clone(),
                             candidates
                                 .iter()
-                                .filter_map(|bound| entity_origin(&bound.declaration))
+                                .filter_map(|owner| entity_origin(owner.declaration()))
                                 .collect(),
                         ));
                     };
                     let exact = self.associated_member(
-                        &bound.declaration,
+                        owner.declaration(),
                         &member.name,
                         member.origin.clone(),
                     )?;
                     subject = CheckedType::Projection(Box::new(Projection {
                         subject,
-                        bound: bound.clone(),
+                        owner: owner.clone(),
                         member: exact,
                     }));
                 }
@@ -1764,6 +1922,7 @@ pub(super) const SELECTION_STATE_LIMIT: usize = 256;
 pub(super) enum SelectionGoal {
     Type(CheckedType),
     Evidence(CheckedType, Box<TraitUse>),
+    Match(Box<EntityId>, CheckedType, Option<Vec<CheckedType>>),
 }
 
 impl SelectionGoal {
@@ -1777,7 +1936,10 @@ pub(super) enum SelectionFrame {
     FinishType(SelectionGoal, CheckedType, usize),
     Project(SelectionGoal, Projection),
     FinishProjection(SelectionGoal),
+    SelectInherentProjection(SelectionGoal, Projection),
     InherentProjection(SelectionGoal, CheckedType, usize),
+    FinishMatch(SelectionGoal, BTreeMap<TypeFormal, CheckedType>, usize),
+    MatchCandidate(EntityId, TraitUse),
     Choose(SelectionGoal, TraitUse, usize),
     Derived(SelectionGoal, Requirement),
     Candidate(EntityId, BTreeMap<TypeFormal, CheckedType>, TraitUse, usize),
@@ -1794,7 +1956,30 @@ pub(super) enum SelectionFrame {
 pub(super) enum SelectionValue {
     Type(CheckedType),
     Evidence(usize),
+    Mapping(Option<BTreeMap<TypeFormal, CheckedType>>),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SelectionFailureKind {
+    NotApplicable,
+    Conflict,
+    Cycle,
+    Incomplete,
+}
+
+#[derive(Debug)]
+pub(super) struct SelectionFailure {
+    pub(super) kind: SelectionFailureKind,
+    diagnostic: Box<CheckDiagnostic>,
+}
+
+impl From<SelectionFailure> for CheckDiagnostic {
+    fn from(failure: SelectionFailure) -> Self {
+        *failure.diagnostic
+    }
+}
+
+pub(super) type SelectionResult<T> = Result<T, SelectionFailure>;
 
 pub(super) struct SelectionSolver<'a> {
     pub(super) declarations: &'a TraitSelection,
@@ -1825,24 +2010,29 @@ impl TraitUse {
 
 impl Projection {
     pub(super) fn types(&self) -> impl Iterator<Item = &CheckedType> {
-        std::iter::once(&self.subject)
-            .chain(&self.bound.arguments)
-            .chain(self.bound.associated.values())
+        std::iter::once(&self.subject).chain(
+            self.owner
+                .trait_use()
+                .into_iter()
+                .flat_map(|bound| bound.arguments.iter().chain(bound.associated.values())),
+        )
     }
-
     pub(super) fn map_types(&self, mut map: impl FnMut(&CheckedType) -> CheckedType) -> Self {
-        Self {
-            subject: map(&self.subject),
-            bound: TraitUse {
-                declaration: self.bound.declaration.clone(),
-                arguments: self.bound.arguments.iter().map(&mut map).collect(),
-                associated: self
-                    .bound
+        let owner = match &self.owner {
+            ProjectionOwner::Trait(bound) => ProjectionOwner::Trait(TraitUse {
+                declaration: bound.declaration.clone(),
+                arguments: bound.arguments.iter().map(&mut map).collect(),
+                associated: bound
                     .associated
                     .iter()
                     .map(|(member, ty)| (member.clone(), map(ty)))
                     .collect(),
-            },
+            }),
+            ProjectionOwner::Inherent(owner) => ProjectionOwner::Inherent(owner.clone()),
+        };
+        Self {
+            subject: map(&self.subject),
+            owner,
             member: self.member.clone(),
         }
     }
@@ -1947,7 +2137,7 @@ impl<'a> SelectionSolver<'a> {
         core: &'a crate::project::CoreRoles,
         givens: &[Requirement],
         origin: CheckOrigin,
-    ) -> Result<Self, CheckDiagnostic> {
+    ) -> SelectionResult<Self> {
         let mut solver = Self {
             declarations,
             core,
@@ -1980,35 +2170,39 @@ impl<'a> SelectionSolver<'a> {
         Ok(solver)
     }
 
-    pub(super) fn diagnostic(
+    fn failure(
         &self,
+        kind: SelectionFailureKind,
         message: impl Into<String>,
         related: Vec<CheckOrigin>,
-    ) -> CheckDiagnostic {
-        CheckDiagnostic {
-            kind: CheckDiagnosticKind::TypeMismatch,
-            message: message.into(),
-            primary: Some(self.origin.clone()),
-            related,
+    ) -> SelectionFailure {
+        SelectionFailure {
+            kind,
+            diagnostic: Box::new(CheckDiagnostic {
+                kind: CheckDiagnosticKind::TypeMismatch,
+                message: message.into(),
+                primary: Some(self.origin.clone()),
+                related,
+            }),
         }
     }
 
-    pub(super) fn charge(&mut self, count: usize) -> Result<(), CheckDiagnostic> {
+    pub(super) fn charge(&mut self, count: usize) -> SelectionResult<()> {
         self.work = self.work.saturating_add(count);
         if self.work > SELECTION_WORK_LIMIT {
-            return Err(self.diagnostic(format!("selection proof incomplete: logical work limit {SELECTION_WORK_LIMIT} exceeded at work {}", self.work), Vec::new()));
+            return Err(self.failure(SelectionFailureKind::Incomplete, format!("selection proof incomplete: logical work limit {SELECTION_WORK_LIMIT} exceeded at work {}", self.work), Vec::new()));
         }
         Ok(())
     }
 
-    pub(super) fn normalize(&mut self, ty: &CheckedType) -> Result<CheckedType, CheckDiagnostic> {
+    pub(super) fn normalize(&mut self, ty: &CheckedType) -> SelectionResult<CheckedType> {
         match self.solve(SelectionGoal::Type(ty.clone()))? {
             SelectionValue::Type(ty) => Ok(ty),
-            SelectionValue::Evidence(_) => unreachable!("a type query returns a type"),
+            _ => unreachable!("a type query returns a type"),
         }
     }
 
-    pub(super) fn normalize_row(&mut self, row: &EffectRow) -> Result<EffectRow, CheckDiagnostic> {
+    pub(super) fn normalize_row(&mut self, row: &EffectRow) -> SelectionResult<EffectRow> {
         let mut failure = None;
         let row = row.map_types(&mut |ty| match self.normalize(ty) {
             Ok(ty) => ty,
@@ -2024,7 +2218,7 @@ impl<'a> SelectionSolver<'a> {
         }
     }
 
-    pub(super) fn prove(&mut self, requirement: &Requirement) -> Result<usize, CheckDiagnostic> {
+    pub(super) fn prove(&mut self, requirement: &Requirement) -> SelectionResult<usize> {
         match self
             .solve(SelectionGoal::evidence(
                 requirement.subject.clone(),
@@ -2032,26 +2226,45 @@ impl<'a> SelectionSolver<'a> {
             ))
             .map_err(|mut diagnostic| {
                 if requirement.origin != self.origin
-                    && !diagnostic.related.contains(&requirement.origin)
+                    && !diagnostic.diagnostic.related.contains(&requirement.origin)
                 {
-                    diagnostic.related.push(requirement.origin.clone());
+                    diagnostic
+                        .diagnostic
+                        .related
+                        .push(requirement.origin.clone());
                 }
                 diagnostic
             })? {
             SelectionValue::Evidence(index) => Ok(index),
-            SelectionValue::Type(_) => unreachable!("an evidence query returns evidence"),
+            _ => unreachable!("an evidence query returns evidence"),
         }
     }
 
-    pub(super) fn solve(&mut self, root: SelectionGoal) -> Result<SelectionValue, CheckDiagnostic> {
+    fn match_implementation(
+        &mut self,
+        identity: &EntityId,
+        subject: &CheckedType,
+        arguments: Option<&[CheckedType]>,
+    ) -> SelectionResult<Option<BTreeMap<TypeFormal, CheckedType>>> {
+        match self.solve(SelectionGoal::Match(
+            Box::new(identity.clone()),
+            subject.clone(),
+            arguments.map(<[_]>::to_vec),
+        ))? {
+            SelectionValue::Mapping(mapping) => Ok(mapping),
+            _ => unreachable!("header matching returns a mapping"),
+        }
+    }
+
+    pub(super) fn solve(&mut self, root: SelectionGoal) -> SelectionResult<SelectionValue> {
         let mut frames = vec![SelectionFrame::Enter(root)];
         let mut active = BTreeSet::new();
         let mut complete: BTreeMap<SelectionGoal, SelectionValue> = BTreeMap::new();
-        let mut values: Vec<Result<SelectionValue, CheckDiagnostic>> = Vec::new();
+        let mut values: Vec<SelectionResult<SelectionValue>> = Vec::new();
         while let Some(frame) = frames.pop() {
             self.charge(1)?;
             if active.len() > SELECTION_STATE_LIMIT {
-                return Err(self.diagnostic(format!("selection proof incomplete: active state limit {SELECTION_STATE_LIMIT} exceeded after {} logical steps", self.work), Vec::new()));
+                return Err(self.failure(SelectionFailureKind::Incomplete, format!("selection proof incomplete: active state limit {SELECTION_STATE_LIMIT} exceeded after {} logical steps", self.work), Vec::new()));
             }
             let mut finished = None;
             match frame {
@@ -2077,13 +2290,75 @@ impl<'a> SelectionSolver<'a> {
                         continue;
                     }
                     if !active.insert(goal.clone()) {
-                        values.push(Err(self.diagnostic(
+                        values.push(Err(self.failure(
+                            SelectionFailureKind::Cycle,
                             "illegal selection or associated-projection cycle without a base fact",
                             Vec::new(),
                         )));
                         continue;
                     }
                     match &goal {
+                        SelectionGoal::Match(identity, subject, arguments) => {
+                            let implementation =
+                                &self.declarations.implementations[identity.as_ref()];
+                            let mut pairs = vec![(&implementation.target, subject)];
+                            if let Some(arguments) = arguments {
+                                pairs.extend(
+                                    implementation
+                                        .trait_use
+                                        .as_ref()
+                                        .expect("trait header")
+                                        .arguments
+                                        .iter()
+                                        .zip(arguments),
+                                );
+                            }
+                            let mut mapping = BTreeMap::new();
+                            if !self.match_inputs(
+                                &pairs,
+                                &implementation.formals,
+                                &mut mapping,
+                                true,
+                            )? {
+                                finished = Some((goal.clone(), Ok(SelectionValue::Mapping(None))));
+                            } else {
+                                let types = pairs
+                                    .into_iter()
+                                    .flat_map(|(pattern, actual)| {
+                                        [instantiate_type(pattern, &mapping), actual.clone()]
+                                    })
+                                    .collect::<Vec<_>>();
+                                frames.push(SelectionFrame::FinishMatch(
+                                    goal.clone(),
+                                    mapping,
+                                    types.len(),
+                                ));
+                                frames.extend(
+                                    types
+                                        .into_iter()
+                                        .rev()
+                                        .map(|ty| SelectionFrame::Enter(SelectionGoal::Type(ty))),
+                                );
+                            }
+                        }
+                        SelectionGoal::Type(CheckedType::Function(item)) => {
+                            let mut types = Vec::new();
+                            item.map_types(|ty| {
+                                types.push(ty.clone());
+                                ty.clone()
+                            });
+                            frames.push(SelectionFrame::FinishType(
+                                goal.clone(),
+                                CheckedType::Function(item.clone()),
+                                types.len(),
+                            ));
+                            frames.extend(
+                                types
+                                    .into_iter()
+                                    .rev()
+                                    .map(|ty| SelectionFrame::Enter(SelectionGoal::Type(ty))),
+                            );
+                        }
                         SelectionGoal::Type(CheckedType::Tuple(elements)) => {
                             frames.push(SelectionFrame::FinishType(
                                 goal.clone(),
@@ -2114,49 +2389,16 @@ impl<'a> SelectionSolver<'a> {
                             );
                         }
                         SelectionGoal::Type(CheckedType::Projection(projection)) => {
-                            if let Some(implementation) = self
-                                .declarations
-                                .implementations
-                                .get(&projection.bound.declaration)
-                            {
-                                let mut mapping = BTreeMap::new();
-                                if self.matches(
-                                    &implementation.target,
-                                    &projection.subject,
-                                    &implementation.formals,
-                                    &mut mapping,
-                                )? {
-                                    let selected = instantiate_type(
-                                        &implementation.associated[&projection.member],
-                                        &mapping,
-                                    );
-                                    let requirements = implementation
-                                        .requirements
-                                        .iter()
-                                        .map(|requirement| requirement.instantiate(&mapping))
-                                        .collect::<Vec<_>>();
-                                    frames.push(SelectionFrame::InherentProjection(
-                                        goal.clone(),
-                                        selected,
-                                        requirements.len(),
-                                    ));
-                                    frames.extend(requirements.into_iter().rev().map(
-                                        |requirement| {
-                                            SelectionFrame::Enter(SelectionGoal::evidence(
-                                                requirement.subject,
-                                                requirement.bound,
-                                            ))
-                                        },
-                                    ));
-                                } else {
-                                    finished = Some((
-                                        goal.clone(),
-                                        Err(self.diagnostic(
-                                            "no evidence for inherent associated owner",
-                                            Vec::new(),
-                                        )),
-                                    ));
-                                }
+                            if let ProjectionOwner::Inherent(owner) = &projection.owner {
+                                frames.push(SelectionFrame::SelectInherentProjection(
+                                    goal.clone(),
+                                    projection.as_ref().clone(),
+                                ));
+                                frames.push(SelectionFrame::Enter(SelectionGoal::Match(
+                                    Box::new(owner.clone()),
+                                    projection.subject.clone(),
+                                    None,
+                                )));
                             } else {
                                 frames.push(SelectionFrame::Project(
                                     goal.clone(),
@@ -2164,7 +2406,11 @@ impl<'a> SelectionSolver<'a> {
                                 ));
                                 frames.push(SelectionFrame::Enter(SelectionGoal::evidence(
                                     projection.subject.clone(),
-                                    projection.bound.clone(),
+                                    projection
+                                        .owner
+                                        .trait_use()
+                                        .expect("trait projection")
+                                        .clone(),
                                 )));
                             }
                         }
@@ -2172,11 +2418,13 @@ impl<'a> SelectionSolver<'a> {
                             finished = Some((goal.clone(), Ok(SelectionValue::Type(ty.clone()))))
                         }
                         SelectionGoal::Evidence(subject, bound) => {
-                            if let CheckedType::Projection(projection) = subject {
+                            if let CheckedType::Projection(projection) = subject
+                                && let ProjectionOwner::Trait(projected_trait) = &projection.owner
+                            {
                                 let definition =
-                                    &self.declarations.traits[&projection.bound.declaration];
+                                    &self.declarations.traits[&projected_trait.declaration];
                                 let mapping =
-                                    definition.mapping(&projection.subject, &projection.bound);
+                                    definition.mapping(&projection.subject, projected_trait);
                                 let associated = &definition.associated[&projection.member];
                                 let givens = associated
                                     .bounds
@@ -2194,24 +2442,18 @@ impl<'a> SelectionSolver<'a> {
                                     self.origin.clone(),
                                 )?;
                                 self.charge(derived.work)?;
-                                if derived.givens.iter().any(|given| {
+                                if let Some(given) = derived.givens.iter().find(|given| {
                                     given.bound.declaration == bound.declaration
                                         && given.bound.arguments == bound.arguments
                                         && bound.associated.iter().all(|(member, ty)| {
                                             given.bound.associated.get(member) == Some(ty)
                                         })
                                 }) {
-                                    frames.push(SelectionFrame::Derived(
-                                        goal.clone(),
-                                        Requirement {
-                                            subject: subject.clone(),
-                                            bound: bound.as_ref().clone(),
-                                            origin: self.origin.clone(),
-                                        },
-                                    ));
+                                    frames
+                                        .push(SelectionFrame::Derived(goal.clone(), given.clone()));
                                     frames.push(SelectionFrame::Enter(SelectionGoal::evidence(
                                         projection.subject.clone(),
-                                        projection.bound.clone(),
+                                        projected_trait.clone(),
                                     )));
                                     continue;
                                 }
@@ -2241,7 +2483,7 @@ impl<'a> SelectionSolver<'a> {
                         .into_iter()
                         .collect::<Result<Vec<_>, _>>();
                     let result = operands.map(|operands| {
-                        let children = operands
+                        let children: Vec<_> = operands
                             .into_iter()
                             .map(|value| match value {
                                 SelectionValue::Type(ty) => ty,
@@ -2249,6 +2491,12 @@ impl<'a> SelectionSolver<'a> {
                             })
                             .collect();
                         match &mut ty {
+                            CheckedType::Function(item) => {
+                                let mut children = children.into_iter();
+                                **item = item.map_types(|_| {
+                                    children.next().expect("normalized function actual")
+                                });
+                            }
                             CheckedType::Tuple(elements) => *elements = children,
                             CheckedType::Nominal(nominal) => nominal.arguments = children,
                             _ => unreachable!(),
@@ -2294,11 +2542,82 @@ impl<'a> SelectionSolver<'a> {
                                     )))),
                                 ));
                             } else {
-                                finished = Some((goal, Err(self.diagnostic("selected evidence has no required associated type assignment", Vec::new()))));
+                                finished = Some((goal, Err(self.failure(SelectionFailureKind::Conflict, "selected evidence has no required associated type assignment", Vec::new()))));
                             }
                         }
                         _ => unreachable!(),
                     }
+                }
+                SelectionFrame::SelectInherentProjection(goal, projection) => {
+                    match values.pop().expect("inherent header mapping") {
+                        Err(error) => finished = Some((goal, Err(error))),
+                        Ok(SelectionValue::Mapping(None)) => {
+                            finished = Some((
+                                goal,
+                                Err(self.failure(
+                                    SelectionFailureKind::NotApplicable,
+                                    "no evidence for inherent associated owner",
+                                    Vec::new(),
+                                )),
+                            ));
+                        }
+                        Ok(SelectionValue::Mapping(Some(mapping))) => {
+                            let implementation =
+                                &self.declarations.implementations[projection.owner.declaration()];
+                            let selected = instantiate_type(
+                                &implementation.associated[&projection.member],
+                                &mapping,
+                            );
+                            let requirements = implementation
+                                .requirements
+                                .iter()
+                                .map(|requirement| requirement.instantiate(&mapping))
+                                .collect::<Vec<_>>();
+                            frames.push(SelectionFrame::InherentProjection(
+                                goal,
+                                selected,
+                                requirements.len(),
+                            ));
+                            frames.extend(requirements.into_iter().rev().map(|requirement| {
+                                SelectionFrame::Enter(SelectionGoal::evidence(
+                                    requirement.subject,
+                                    requirement.bound,
+                                ))
+                            }));
+                        }
+                        _ => unreachable!("inherent header mapping"),
+                    }
+                }
+                SelectionFrame::FinishMatch(goal, mut mapping, count) => {
+                    let operands = values
+                        .split_off(values.len() - count)
+                        .into_iter()
+                        .map(|value| {
+                            value.map(|value| match value {
+                                SelectionValue::Type(ty) => ty,
+                                _ => unreachable!("header operand"),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>();
+                    let result = operands.and_then(|operands| {
+                        let SelectionGoal::Match(identity, _, _) = &goal else {
+                            unreachable!()
+                        };
+                        let pairs = operands
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|[left, right]| (left, right))
+                            .collect::<Vec<_>>();
+                        self.match_inputs(
+                            &pairs,
+                            &self.declarations.implementations[identity.as_ref()].formals,
+                            &mut mapping,
+                            false,
+                        )
+                        .map(|matched| SelectionValue::Mapping(matched.then_some(mapping)))
+                    });
+                    finished = Some((goal, result));
                 }
                 SelectionFrame::InherentProjection(goal, selected, count) => {
                     let prerequisites = values
@@ -2378,75 +2697,72 @@ impl<'a> SelectionSolver<'a> {
                                     if implemented.declaration != bound.declaration {
                                         continue;
                                     }
-                                    let mut mapping = BTreeMap::new();
-                                    if !self.matches(
-                                        &implementation.target,
-                                        &subject,
-                                        &implementation.formals,
-                                        &mut mapping,
-                                    )? {
-                                        continue;
-                                    }
-                                    let mut matches = true;
-                                    for (pattern, actual) in
-                                        implemented.arguments.iter().zip(&bound.arguments)
-                                    {
-                                        if !self.matches(
-                                            pattern,
-                                            actual,
-                                            &implementation.formals,
-                                            &mut mapping,
-                                        )? {
-                                            matches = false;
-                                            break;
-                                        }
-                                    }
-                                    if matches {
-                                        candidates.push((implementation.identity.clone(), mapping));
-                                    }
+                                    candidates.push(implementation.identity.clone());
                                 }
                                 if candidates.is_empty() {
-                                    let message = if matches!(
+                                    let (kind, message) = if matches!(
                                         subject,
                                         CheckedType::Infer(_) | CheckedType::Projection(_)
                                     ) {
-                                        "selection proof incomplete: receiver or associated dependency is not determined".to_owned()
+                                        (SelectionFailureKind::Incomplete, "selection proof incomplete: receiver or associated dependency is not determined".to_owned())
                                     } else {
-                                        format!(
-                                            "no evidence for {}: {}",
-                                            display_type(&subject),
-                                            bound.declaration.name
+                                        (
+                                            SelectionFailureKind::NotApplicable,
+                                            format!(
+                                                "no evidence for {}: {}",
+                                                display_type(&subject),
+                                                bound.declaration.name
+                                            ),
                                         )
                                     };
                                     finished =
-                                        Some((goal, Err(self.diagnostic(message, Vec::new()))));
+                                        Some((goal, Err(self.failure(kind, message, Vec::new()))));
                                 } else {
                                     frames.push(SelectionFrame::Candidates(goal, candidates.len()));
-                                    for (identity, mapping) in candidates.into_iter().rev() {
-                                        let requirements = self.declarations.implementations
-                                            [&identity]
-                                            .requirements
-                                            .iter()
-                                            .map(|requirement| requirement.instantiate(&mapping))
-                                            .collect::<Vec<_>>();
-                                        frames.push(SelectionFrame::Candidate(
-                                            identity,
-                                            mapping,
+                                    for identity in candidates.into_iter().rev() {
+                                        frames.push(SelectionFrame::MatchCandidate(
+                                            identity.clone(),
                                             bound.clone(),
-                                            requirements.len(),
                                         ));
-                                        frames.extend(requirements.into_iter().rev().map(
-                                            |requirement| {
-                                                SelectionFrame::Enter(SelectionGoal::evidence(
-                                                    requirement.subject,
-                                                    requirement.bound,
-                                                ))
-                                            },
-                                        ));
+                                        frames.push(SelectionFrame::Enter(SelectionGoal::Match(
+                                            Box::new(identity),
+                                            subject.clone(),
+                                            Some(bound.arguments.clone()),
+                                        )));
                                     }
                                 }
                             }
                         }
+                    }
+                }
+                SelectionFrame::MatchCandidate(identity, bound) => {
+                    match values.pop().expect("candidate header mapping") {
+                        Err(error) => values.push(Err(error)),
+                        Ok(SelectionValue::Mapping(None)) => values.push(Err(self.failure(
+                            SelectionFailureKind::NotApplicable,
+                            "no evidence: implementation header does not match",
+                            Vec::new(),
+                        ))),
+                        Ok(SelectionValue::Mapping(Some(mapping))) => {
+                            let requirements = self.declarations.implementations[&identity]
+                                .requirements
+                                .iter()
+                                .map(|requirement| requirement.instantiate(&mapping))
+                                .collect::<Vec<_>>();
+                            frames.push(SelectionFrame::Candidate(
+                                identity,
+                                mapping,
+                                bound,
+                                requirements.len(),
+                            ));
+                            frames.extend(requirements.into_iter().rev().map(|requirement| {
+                                SelectionFrame::Enter(SelectionGoal::evidence(
+                                    requirement.subject,
+                                    requirement.bound,
+                                ))
+                            }));
+                        }
+                        _ => unreachable!("candidate header mapping"),
                     }
                 }
                 SelectionFrame::Candidate(identity, mapping, bound, count) => {
@@ -2492,8 +2808,20 @@ impl<'a> SelectionSolver<'a> {
                         .into_iter()
                         .collect::<Result<Vec<_>, _>>();
                     let result = operands.and_then(|operands| {
-                        if operands.as_chunks::<2>().0.iter().any(|pair| !matches!((&pair[0], &pair[1]), (SelectionValue::Type(left), SelectionValue::Type(right)) if left == right)) { return Err(self.diagnostic("no evidence: selected impl does not satisfy the required associated binding", entity_origin(&identity).map(CheckOrigin::Source).into_iter().collect())); }
-                        let index = self.evidence.len(); self.evidence.push(Evidence::Implementation { identity, mapping, requirements }); Ok(SelectionValue::Evidence(index))
+                        for pair in operands.as_chunks::<2>().0 {
+                            let (SelectionValue::Type(left), SelectionValue::Type(right)) = (&pair[0], &pair[1]) else { unreachable!("associated bindings compare types") };
+                            if left == right { continue }
+                            let relation = compare_coherence_types(left, right, &mut TypeInference::default());
+                            let (kind, message) = if matches!(relation, CoherenceRelation::Disjoint) {
+                                (SelectionFailureKind::NotApplicable, "no evidence: selected impl does not satisfy the required associated binding")
+                            } else {
+                                (SelectionFailureKind::Incomplete, "selection proof incomplete: associated binding equality is not determined")
+                            };
+                            return Err(self.failure(kind, message, entity_origin(&identity).map(CheckOrigin::Source).into_iter().collect()));
+                        }
+                        let index = self.evidence.len();
+                        self.evidence.push(Evidence::Implementation { identity, mapping, requirements });
+                        Ok(SelectionValue::Evidence(index))
                     });
                     values.push(result);
                 }
@@ -2506,9 +2834,9 @@ impl<'a> SelectionSolver<'a> {
                         match result {
                             Ok(value) if selected.is_none() => selected = Some(value),
                             Ok(_) => {
-                                unresolved = Some(self.diagnostic("conflicting applicable impls prevent unique evidence selection", Vec::new()));
+                                unresolved = Some(self.failure(SelectionFailureKind::Conflict, "conflicting applicable impls prevent unique evidence selection", Vec::new()));
                             }
-                            Err(error) if error.message.starts_with("no evidence") => {
+                            Err(error) if error.kind == SelectionFailureKind::NotApplicable => {
                                 negative = Some(error)
                             }
                             Err(error) => unresolved = Some(error),
@@ -2536,21 +2864,31 @@ impl<'a> SelectionSolver<'a> {
         values.pop().expect("one result")
     }
 
-    pub(super) fn matches(
+    fn match_inputs(
         &mut self,
-        pattern: &CheckedType,
-        actual: &CheckedType,
+        pairs: &[(&CheckedType, &CheckedType)],
         formals: &[TypeFormal],
         mapping: &mut BTreeMap<TypeFormal, CheckedType>,
-    ) -> Result<bool, CheckDiagnostic> {
-        let mut pending = vec![(pattern, actual)];
+        defer_projection: bool,
+    ) -> SelectionResult<bool> {
+        let mut pending = pairs.to_vec();
+        let mut incomplete = false;
         while let Some((pattern, actual)) = pending.pop() {
             self.charge(1)?;
             if let CheckedType::Formal(formal) = pattern
                 && formals.contains(formal)
             {
                 match mapping.get(formal.as_ref()) {
-                    Some(previous) if previous != actual => return Ok(false),
+                    Some(previous) if previous != actual => {
+                        match compare_coherence_types(
+                            previous,
+                            actual,
+                            &mut TypeInference::default(),
+                        ) {
+                            CoherenceRelation::Disjoint => return Ok(false),
+                            _ => incomplete = true,
+                        }
+                    }
                     Some(_) => {}
                     None => {
                         mapping.insert(formal.as_ref().clone(), actual.clone());
@@ -2570,8 +2908,17 @@ impl<'a> SelectionSolver<'a> {
                     pending.extend(left.arguments.iter().zip(&right.arguments))
                 }
                 _ if pattern == actual => {}
+                (CheckedType::Projection(_) | CheckedType::Infer(_), _)
+                | (_, CheckedType::Projection(_) | CheckedType::Infer(_)) => incomplete = true,
                 _ => return Ok(false),
             }
+        }
+        if incomplete && !defer_projection {
+            return Err(self.failure(
+                SelectionFailureKind::Incomplete,
+                "selection proof incomplete: implementation header equality is not determined",
+                Vec::new(),
+            ));
         }
         Ok(true)
     }
@@ -2596,4 +2943,96 @@ impl<'a> SelectionSolver<'a> {
         ) && (partial || total)
             || matches!(subject, CheckedType::Float) && partial
     }
+}
+
+#[derive(Clone, Copy)]
+enum CoherenceRelation {
+    Compatible,
+    Disjoint,
+    Incomplete,
+}
+
+fn coherence_operand(
+    solver: &mut SelectionSolver<'_>,
+    ty: &CheckedType,
+    mapping: &BTreeMap<TypeFormal, CheckedType>,
+    incomplete: &mut bool,
+) -> SelectionResult<CheckedType> {
+    let normalized = match solver.normalize(ty) {
+        Ok(ty) => ty,
+        Err(failure)
+            if matches!(
+                failure.kind,
+                SelectionFailureKind::NotApplicable | SelectionFailureKind::Incomplete
+            ) =>
+        {
+            *incomplete = true;
+            ty.clone()
+        }
+        Err(failure) => return Err(failure),
+    };
+    Ok(instantiate_type(&normalized, mapping))
+}
+
+fn compare_coherence_types(
+    left: &CheckedType,
+    right: &CheckedType,
+    inference: &mut TypeInference,
+) -> CoherenceRelation {
+    let mut pairs = vec![(left.clone(), right.clone())];
+    let mut incomplete = false;
+    while let Some((left, right)) = pairs.pop() {
+        let left = inference.resolve(&left);
+        let right = inference.resolve(&right);
+        if left == right {
+            continue;
+        }
+        match (&left, &right) {
+            (CheckedType::Projection(_) | CheckedType::Formal(_) | CheckedType::Function(_), _)
+            | (_, CheckedType::Projection(_) | CheckedType::Formal(_) | CheckedType::Function(_)) => {
+                incomplete = true
+            }
+            (CheckedType::Nominal(left), CheckedType::Nominal(right))
+                if left.declaration == right.declaration =>
+            {
+                pairs.extend(
+                    left.arguments
+                        .iter()
+                        .cloned()
+                        .zip(right.arguments.iter().cloned()),
+                )
+            }
+            (CheckedType::Tuple(left), CheckedType::Tuple(right)) if left.len() == right.len() => {
+                pairs.extend(left.iter().cloned().zip(right.iter().cloned()))
+            }
+            (CheckedType::Infer(_), _) | (_, CheckedType::Infer(_)) => {
+                if opaque_coherence_type(&left) || opaque_coherence_type(&right) {
+                    incomplete = true;
+                } else if inference.unify(&left, &right).is_err() {
+                    return CoherenceRelation::Disjoint;
+                }
+            }
+            _ => return CoherenceRelation::Disjoint,
+        }
+    }
+    if incomplete {
+        CoherenceRelation::Incomplete
+    } else {
+        CoherenceRelation::Compatible
+    }
+}
+
+fn opaque_coherence_type(ty: &CheckedType) -> bool {
+    let mut types = vec![ty];
+    while let Some(ty) = types.pop() {
+        match ty {
+            CheckedType::Projection(_) | CheckedType::Formal(_) | CheckedType::Function(_) => {
+                return true;
+            }
+            CheckedType::Tuple(elements) => types.extend(elements),
+            CheckedType::Nominal(nominal) => types.extend(&nominal.arguments),
+            _ => {}
+        }
+    }
+    false
 }

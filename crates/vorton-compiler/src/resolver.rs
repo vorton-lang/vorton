@@ -2297,9 +2297,6 @@ impl ResolverState {
             .map(|(module, table)| {
                 let table = table
                     .iter()
-                    .filter(|((namespace, _), _)| {
-                        matches!(namespace, Namespace::Type | Namespace::Value)
-                    })
                     .map(|(name, deliveries)| {
                         let bindings = deliveries
                             .values()

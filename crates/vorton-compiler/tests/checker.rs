@@ -2786,3 +2786,293 @@ fn select<F: Fn + fn() -> Unit with {E1, E2}, G: Fn + fn() -> Unit with {E1, E3}
 fn use_it() with {} { select(first, second); }
 "#).expect("E1 stays empty; E2 and E3 separately carry the incompatible payloads");
 }
+
+#[test]
+fn v2_regression_nested_projection_coherence() {
+    let cases = [
+        (
+            "overlap_nested_projection",
+            r#"trait Item { type Kind; }
+struct K {}
+impl Item for K { type Kind = Int; }
+trait Tag { type Kind; }
+trait Read { fn read(self: &Self) -> Int; }
+struct Wrap<T> { value: T }
+impl<T: Tag<Kind = (K::Kind, Bool)>> Read for Wrap<T> { fn read(self: &Self) -> Int { 1 } }
+impl<T: Tag<Kind = (Int, Bool)>> Read for Wrap<T> { fn read(self: &Self) -> Int { 2 } }"#,
+            false,
+        ),
+        (
+            "overlap_control",
+            r#"trait Tag { type Kind; }
+trait Read { fn read(self: &Self) -> Int; }
+struct Wrap<T> { value: T }
+impl<T: Tag<Kind = (Int, Bool)>> Read for Wrap<T> { fn read(self: &Self) -> Int { 1 } }
+impl<T: Tag<Kind = (Int, Bool)>> Read for Wrap<T> { fn read(self: &Self) -> Int { 2 } }"#,
+            false,
+        ),
+        (
+            "overlap_nested_projection_consumer",
+            r#"trait Item { type Kind; }
+struct K {}
+impl Item for K { type Kind = Int; }
+trait Tag { type Kind; }
+trait Read { fn read(self: &Self) -> Int; }
+struct Wrap<T> { value: T }
+impl<T: Tag<Kind = (K::Kind, Bool)>> Read for Wrap<T> { fn read(self: &Self) -> Int { 1 } }
+impl<T: Tag<Kind = (Int, Bool)>> Read for Wrap<T> { fn read(self: &Self) -> Int { 2 } }
+struct V {}
+impl Tag for V { type Kind = (Int, Bool); }
+fn use_it() -> Int { Wrap { value: V {} }.read() }"#,
+            false,
+        ),
+    ];
+    let mut actual = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (name, source, _) in &cases {
+        let result = check(source);
+        actual.push(result.is_ok());
+        diagnostics.push(format!("{name}: {result:?}"));
+    }
+    let expected = cases
+        .iter()
+        .map(|(_, _, accepted)| *accepted)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "{}", diagnostics.join("\n"));
+}
+
+#[test]
+fn v2_regression_receiver_conformance() {
+    let cases = [
+        (
+            "receiver_conformance",
+            r#"trait Read { fn read(value: &Self) -> Int; }
+struct A {}
+impl Read for A { fn read(self: &Self) -> Int { 1 } }
+fn generic<T: Read>(value: &T) -> Int { T::read(value) }
+fn use_it() -> Int { generic(A {}) }"#,
+            false,
+        ),
+        (
+            "receiver_conformance_inverse",
+            r#"trait Read { fn read(self: &Self) -> Int; }
+struct A {}
+impl Read for A { fn read(value: &Self) -> Int { 1 } }
+fn generic<T: Read>(value: &T) -> Int { value.read() }
+fn use_it() -> Int { generic(A {}) }"#,
+            false,
+        ),
+        (
+            "receiver_conformance_direct",
+            r#"trait Read { fn read(value: &Self) -> Int; }
+struct A {}
+impl Read for A { fn read(self: &Self) -> Int { 1 } }
+fn use_it() -> Int { A::read(A {}) }"#,
+            false,
+        ),
+        (
+            "receiver_conformance_positive",
+            r#"trait Read { fn read(value: &Self) -> Int; }
+struct A {}
+impl Read for A { fn read(value: &Self) -> Int { 1 } }
+fn generic<T: Read>(value: &T) -> Int { T::read(value) }
+fn use_it() -> Int { generic(A {}) + A::read(A {}) }"#,
+            true,
+        ),
+    ];
+    let mut actual = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (name, source, _) in &cases {
+        let result = check(source);
+        actual.push(result.is_ok());
+        diagnostics.push(format!("{name}: {result:?}"));
+    }
+    let expected = cases
+        .iter()
+        .map(|(_, _, accepted)| *accepted)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "{}", diagnostics.join("\n"));
+}
+
+#[test]
+fn v2_regression_associated_assignment_formation() {
+    let cases = [
+        (
+            "associated_formation",
+            r#"trait P {}
+struct Needs<T: P> { value: T }
+trait Assoc { type Item; }
+struct A {}
+impl Assoc for A { type Item = Needs<Int>; }"#,
+            false,
+        ),
+        (
+            "associated_formation_control",
+            r#"trait P {}
+struct Needs<T: P> { value: T }
+trait Assoc { type Item = Needs<Int>; }"#,
+            false,
+        ),
+        (
+            "associated_formation_positive",
+            r#"trait P {}
+impl P for Int {}
+struct Needs<T: P> { value: T }
+trait Assoc { type Item; }
+struct A {}
+impl Assoc for A { type Item = Needs<Int>; }"#,
+            true,
+        ),
+    ];
+    let mut actual = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (name, source, _) in &cases {
+        let result = check(source);
+        actual.push(result.is_ok());
+        diagnostics.push(format!("{name}: {result:?}"));
+    }
+    let expected = cases
+        .iter()
+        .map(|(_, _, accepted)| *accepted)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "{}", diagnostics.join("\n"));
+}
+
+#[test]
+fn v2_regression_inherent_projection_evidence() {
+    let cases = [
+        (
+            "inherent_projection_control",
+            r#"trait P {}
+impl P for Int {}
+struct A {}
+impl A { type Item = Int; }
+trait Mark {}
+struct B {}
+impl Mark for B where Int: P {}
+fn need<T: Mark>(value: &T) {}
+fn use_it() { need(B {}); }
+fn direct(value: &A::Item) -> Int { value + 1 }"#,
+            true,
+        ),
+        (
+            "inherent_projection_evidence",
+            r#"trait P {}
+impl P for Int {}
+struct A {}
+impl A { type Item = Int; }
+trait Mark {}
+struct B {}
+impl Mark for B where A::Item: P {}
+fn need<T: Mark>(value: &T) {}
+fn use_it() { need(B {}); }"#,
+            true,
+        ),
+    ];
+    let mut actual = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (name, source, _) in &cases {
+        let result = check(source);
+        actual.push(result.is_ok());
+        diagnostics.push(format!("{name}: {result:?}"));
+    }
+    let expected = cases
+        .iter()
+        .map(|(_, _, accepted)| *accepted)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "{}", diagnostics.join("\n"));
+}
+
+#[test]
+fn formation_conditions_cover_supported_declaration_owners() {
+    let declarations = [
+        "trait Outer<T> {} struct A {} impl Outer<Needs<Int>> for A {}",
+        "trait Outer<T> {} trait Assoc { type Item: Outer<Needs<Int>>; }",
+        "trait Outer<T> {} trait Sub: Outer<Needs<Int>> {}",
+        "type Bad = Needs<Int>;",
+        "effect E { fn get(value: Needs<Int>) -> Unit; }",
+        "effect E<T: P> { fn get(value: T) -> T; } fn expose() with {E<Int>} {}",
+        "effect alias Alias<T: P> = {console}; fn expose() with {Alias<Int>} {}",
+        "effect alias Alias<T> = {console}; fn expose() with {Alias<Needs<Int>>} {}",
+    ];
+    let mut failures = Vec::new();
+    for declaration in declarations {
+        let source = format!("trait P {{}} struct Needs<T: P> {{ value: T }} {declaration}");
+        match check(&source) {
+            Err(error) if error.message.contains("no evidence for Int: P") => {}
+            result => failures.push(format!("missing evidence: {declaration}: {result:?}")),
+        }
+        let positive = format!("{source} impl P for Int {{}}");
+        if let Err(error) = check(&positive) {
+            failures.push(format!("available evidence: {declaration}: {error:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn abstract_associated_inequality_is_an_incomplete_proof() {
+    for source in [
+        "trait P { type Item; } trait Tag { type Kind; } trait Read {} struct Wrap<T> { value: T } impl<T: P + Tag<Kind = T::Item>> Read for Wrap<T> {} impl<T: P + Tag<Kind = Int>> Read for Wrap<T> {}",
+        "trait P { type Item; } trait Tag { type Kind; } struct Wrap<T> { value: T } impl<T: P> Tag for Wrap<T> { type Kind = T::Item; } fn need<T: Tag<Kind = Int>>(value: &T) {} fn use_it<T: P>(value: &Wrap<T>) { need(value); }",
+    ] {
+        let error = check(source).expect_err("abstract equality is not evidence of disjointness");
+        assert!(error.message.contains("incomplete"), "{error:?}");
+    }
+    check("trait Item { type Kind; } struct K {} impl Item for K { type Kind = Int; } trait Tag { type Kind; } trait Read { fn read(self: &Self) -> Int; } struct Wrap<T> { value: T } impl<T: Tag<Kind = (K::Kind, Bool)>> Read for Wrap<T> { fn read(self: &Self) -> Int { 1 } } impl<T: Tag<Kind = (Bool, Bool)>> Read for Wrap<T> { fn read(self: &Self) -> Int { 2 } } struct A {} impl Tag for A { type Kind = (Int, Bool); } fn use_it() -> Int { Wrap { value: A {} }.read() }")
+        .expect("fully reduced nested projection proves distinct associated values");
+}
+
+#[test]
+fn effect_alias_formation_uses_the_completed_callable_input_domain() {
+    check("trait P {} effect alias IO<T: P> = {console}; trait Run { fn run<T: P>(value: &T) with {IO<T>}; } struct A {} impl Run for A { fn run<U>(value: &U) with {IO<U>} {} } impl P for Int {} fn use_it() with {console} { A::run(1); }")
+        .expect("impl aliases use the requirement inherited by conformance");
+    check("trait P {} effect alias IO<T: P> = {console}; effect alias Outer<T: P> = {IO<T>}; fn use_it<T: P>(value: &T) with {Outer<T>} {}")
+        .expect("transparent nested aliases retain generic givens");
+}
+
+#[test]
+fn selection_reduces_associated_types_in_implementation_headers() {
+    check("struct A {} impl A { type Item = Int; } trait P {} struct Wrap<T> { value: T } impl P for Wrap<A::Item> {} fn need<T: P>(value: &T) {} fn use_it() { need(Wrap { value: 1 }); }")
+        .expect("evidence matches the reduced implementation target");
+    check("struct A {} impl A { type Item = Int; } struct Wrap<T> { value: T } impl Wrap<A::Item> { fn get(self: &Self) -> Int { self.value + 1 } } fn use_it() -> Int { Wrap { value: 1 }.get() }")
+        .expect("inherent selection matches the reduced implementation target");
+    check("trait Item { type Kind; } struct A {} impl Item for A { type Kind = Int; } struct Pair<T, U> { first: T, second: U } trait P {} impl<T: Item> P for Pair<T, T::Kind> {} fn need<T: P>(value: &T) {} fn use_it() { need(Pair { first: A {}, second: 1 }); }")
+        .expect("the same header mapping supplies projection actuals before reduction");
+    let failure = error(
+        "trait Item { type Kind; } struct A {} impl Item for A { type Kind = Int; } struct Pair<T, U> { first: T, second: U } trait P {} impl<T: Item> P for Pair<T, T::Kind> {} fn need<T: P>(value: &T) {} fn use_it() { need(Pair { first: A {}, second: true }); }",
+    );
+    assert!(failure.message.contains("no evidence"), "{failure:?}");
+}
+
+#[test]
+fn handled_contract_actuals_prove_the_effect_owner_conditions() {
+    let target = function_target("expose");
+    let record = format!(
+        r#"{{"target":{target},"set":{{"effect_upper":[{{"tag":"handled","effect":{{"library":{{"tag":"self"}},"path":["E"],"kind":"effect"}},"arguments":[{{"tag":"primitive","name":"Int"}}]}}]}}}}"#
+    );
+    for evidence in [false, true] {
+        let source = format!(
+            "pub trait P {{}} pub effect E<T: P> {{ fn get(value: T) -> T; }} fn expose() {{}} {}",
+            if evidence { "impl P for Int {}" } else { "" }
+        );
+        let result = check_project(
+            &project(&source),
+            &BTreeMap::from([("app".to_owned(), APP)]),
+            vec![contract(&document(&record))],
+        );
+        if evidence {
+            result.expect("contract actual has the owner evidence");
+        } else {
+            let failure = result.expect_err("contract rows cannot skip owner requirements");
+            assert!(
+                failure.message.contains("no evidence for Int: P"),
+                "{failure:?}"
+            );
+            assert!(
+                matches!(failure.primary, Some(CheckOrigin::Contract { ref json_path, .. }) if json_path == "$.records[0].set.effect_upper"),
+                "{failure:?}"
+            );
+        }
+    }
+}

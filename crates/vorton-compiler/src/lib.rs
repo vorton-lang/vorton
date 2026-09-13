@@ -76,6 +76,10 @@ pub fn prepare_project(project: ResolvedProject) -> Result<PreparedProject, Proj
 /// modes, effect rows and whole-value cleanup together. Normal and possible
 /// failure exits retain live owners and pending argument/construction temporaries.
 /// Generic full-destruction and method relations remain formal when appropriate.
+/// Formation conditions apply to supported declarations and actual uses, including
+/// associated defaults/assignments and handled-effect or alias owner requirements.
+/// Evidence and coherence reduce trait and inherent projections by their owners;
+/// unresolved associated equality does not establish disjoint implementation domains.
 ///
 /// Handler/catch, capturing closures, general callable returns or storage,
 /// FnMut/FnOnce entry, Mut/partial move, user Drop/Rc/Weak and other unsupported

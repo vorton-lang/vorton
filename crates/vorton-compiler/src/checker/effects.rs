@@ -63,9 +63,17 @@ pub(super) fn validate_method_effect_contracts(
 pub(super) struct OperationHeader {
     pub(super) owner: EntityId,
     pub(super) formals: Vec<TypeFormal>,
-    pub(super) requirements: Vec<Requirement>,
     pub(super) parameters: Vec<(CheckedType, ParameterMode)>,
     pub(super) return_type: CheckedType,
+}
+
+// Alias expansion can erase an actual from the row. Keep its formation and
+// owner requirements until callable conformance has fixed the input domain.
+pub(super) struct EffectUse {
+    pub(super) types: Vec<CheckedType>,
+    pub(super) requirements: Vec<Requirement>,
+    pub(super) scope: Option<EntityId>,
+    pub(super) origin: CheckOrigin,
 }
 
 pub(super) struct TypedOperation {
@@ -85,7 +93,6 @@ impl SourceTypeNormalizer<'_> {
         operations: &[crate::project::ResolvedEffectOperation],
     ) -> Result<(), CheckDiagnostic> {
         let formals = self.owner_formals[owner].clone();
-        let requirements = self.parameter_requirements(parameters, &formals)?;
         for operation in operations {
             let mut inputs = Vec::new();
             for parameter in &operation.parameters {
@@ -121,7 +128,6 @@ impl SourceTypeNormalizer<'_> {
                         .iter()
                         .map(|parameter| formals[&parameter.binding.identity].clone())
                         .collect(),
-                    requirements: requirements.clone(),
                     parameters: inputs,
                     return_type,
                 },
@@ -815,11 +821,12 @@ impl EffectEnvironment<'_, '_> {
             .iter()
             .map(|requirement| requirement.map_types(|ty| inference.canonical(ty)))
             .collect::<Vec<_>>();
+        let origin = header.effect_origin.clone();
         let mut solver = SelectionSolver::new(
             &self.normalizer.selection,
             &self.normalizer.project.core_roles,
             &givens,
-            CheckOrigin::Source(header.origin.clone()),
+            origin.clone(),
         )?;
         let row = solver.normalize_row(&row.map_types(&mut |ty| inference.canonical(ty)))?;
         let mut pending = row
@@ -831,7 +838,6 @@ impl EffectEnvironment<'_, '_> {
             .collect::<Vec<_>>();
         let mut active = BTreeSet::new();
         let mut result = EffectRow::default();
-        let origin = CheckOrigin::Source(header.origin.clone());
         let mut work = 0_usize;
         while let Some(frame) = pending.pop() {
             work += 1;
@@ -868,6 +874,18 @@ impl EffectEnvironment<'_, '_> {
                 Frame::Term(term) => term,
             };
             match &term {
+                EffectTerm::Handled(owner, types) => {
+                    let mapping = self.normalizer.owner_formals[owner]
+                        .values()
+                        .map(|formal| (formal.clone(), types[formal.ordinal].clone()))
+                        .collect();
+                    self.normalizer
+                        .validate_formation(types, &givens, origin.clone())?;
+                    for requirement in &self.normalizer.effect_requirements[owner] {
+                        solver.prove(&requirement.instantiate(&mapping))?;
+                    }
+                    result.union(&EffectRow(vec![term]), inference, &origin)?;
+                }
                 EffectTerm::Variable(_) => {
                     let resolved = inference.resolve_effect(&EffectRow(vec![term.clone()]));
                     if resolved == EffectRow(vec![term.clone()]) {
@@ -1560,6 +1578,23 @@ impl SourceTypeNormalizer<'_> {
                         .map(|ty| instantiate_type(&ty, &mapping))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            if matches!(target.kind, EntityKind::Effect | EntityKind::EffectAlias)
+                && self.arities[target] == types.len()
+            {
+                let actuals = self.owner_formals[target]
+                    .values()
+                    .map(|formal| (formal.clone(), types[formal.ordinal].clone()))
+                    .collect();
+                self.effect_uses.push(EffectUse {
+                    types: types.clone(),
+                    requirements: self.effect_requirements[target]
+                        .iter()
+                        .map(|requirement| requirement.instantiate(&actuals))
+                        .collect(),
+                    scope: self.contract_scope.clone(),
+                    origin: origin.clone(),
+                });
+            }
             let term = match target.kind {
                 EntityKind::EffectParameter => {
                     let formal = effect_formals.get(target).ok_or_else(|| {
@@ -1635,8 +1670,21 @@ impl SourceTypeNormalizer<'_> {
                         .effect_arguments
                         .iter()
                         .map(|argument| {
-                            self.normalize_effects(&argument.effects, &environment, effect_formals)
-                                .map(|row| row.instantiate(&mapping, &BTreeMap::new()))
+                            let start = self.effect_uses.len();
+                            let row = self.normalize_effects(
+                                &argument.effects,
+                                &environment,
+                                effect_formals,
+                            )?;
+                            for use_site in &mut self.effect_uses[start..] {
+                                for ty in &mut use_site.types {
+                                    *ty = instantiate_type(ty, &mapping);
+                                }
+                                for requirement in &mut use_site.requirements {
+                                    *requirement = requirement.instantiate(&mapping);
+                                }
+                            }
+                            Ok::<_, CheckDiagnostic>(row.instantiate(&mapping, &BTreeMap::new()))
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     EffectTerm::Method {
