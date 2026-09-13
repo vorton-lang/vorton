@@ -712,6 +712,12 @@ impl CallBinder<'_, '_> {
                         if !self
                             .inference
                             .unify_effect_actual(current, &actuals.effects[formal])
+                            .map_err(|failure| {
+                                effect_diagnostic(
+                                    display_unification_failure(&failure),
+                                    origin.clone(),
+                                )
+                            })?
                         {
                             return Err(effect_diagnostic(
                                 "named function effect actual does not satisfy its callback input domain",

@@ -1331,6 +1331,9 @@ fn origin_as_source(origin: &CheckOrigin, fallback: &OriginRef) -> OriginRef {
 
 fn display_unification_failure(failure: &UnificationFailure) -> String {
     match failure {
+        UnificationFailure::EffectIncomplete => {
+            "effect actual occurs check incomplete: deterministic work limit reached".to_owned()
+        }
         UnificationFailure::Mismatch(left, right) => format!(
             "{} and {} are incompatible",
             display_type(left),
@@ -2258,6 +2261,7 @@ struct TypeInference {
 enum UnificationFailure {
     Mismatch(Box<CheckedType>, Box<CheckedType>),
     Infinite(TypeVariable, Box<CheckedType>),
+    EffectIncomplete,
 }
 
 impl TypeInference {
@@ -2297,7 +2301,11 @@ impl TypeInference {
         EffectRow(result)
     }
 
-    fn unify_effect_actual(&mut self, left: &EffectRow, right: &EffectRow) -> bool {
+    fn unify_effect_actual(
+        &mut self,
+        left: &EffectRow,
+        right: &EffectRow,
+    ) -> Result<bool, UnificationFailure> {
         let left = self
             .resolve_effect(left)
             .map_types(&mut |ty| self.canonical(ty));
@@ -2305,19 +2313,19 @@ impl TypeInference {
             .resolve_effect(right)
             .map_types(&mut |ty| self.canonical(ty));
         if left == right {
-            return true;
+            return Ok(true);
         }
         let (variable, row) = match (left.0.as_slice(), right.0.as_slice()) {
             ([EffectTerm::Variable(variable)], _) => (*variable, right),
             (_, [EffectTerm::Variable(variable)]) => (*variable, left),
-            _ => return false,
+            _ => return Ok(false),
         };
-        if self.effect_occurs(&row, Some(variable), None, &self.inferred_effects) {
-            return false;
+        if self.effect_occurs(&row, Some(variable), None, &self.inferred_effects)? {
+            return Ok(false);
         }
         self.effect_substitutions.insert(variable, row);
         self.revision += 1;
-        true
+        Ok(true)
     }
 
     fn effect_occurs(
@@ -2326,7 +2334,7 @@ impl TypeInference {
         variable: Option<u32>,
         formal: Option<&EffectFormal>,
         named: &BTreeMap<EffectFormal, EffectRow>,
-    ) -> bool {
+    ) -> Result<bool, UnificationFailure> {
         enum Node<'a> {
             Row(&'a EffectRow),
             Type(&'a CheckedType),
@@ -2338,7 +2346,7 @@ impl TypeInference {
         while let Some(node) = pending.pop() {
             work += 1;
             if work > SELECTION_WORK_LIMIT {
-                return true;
+                return Err(UnificationFailure::EffectIncomplete);
             }
             match node {
                 Node::Row(row) => {
@@ -2349,7 +2357,7 @@ impl TypeInference {
                         match term {
                             EffectTerm::Variable(found) => {
                                 if variable == Some(*found) {
-                                    return true;
+                                    return Ok(true);
                                 }
                                 if let Some(row) = self.effect_substitutions.get(found) {
                                     pending.push(Node::Row(row));
@@ -2357,7 +2365,7 @@ impl TypeInference {
                             }
                             EffectTerm::Formal(found) => {
                                 if formal == Some(found) {
-                                    return true;
+                                    return Ok(true);
                                 }
                                 if let Some(row) = named.get(found) {
                                     pending.push(Node::Row(row));
@@ -2406,7 +2414,7 @@ impl TypeInference {
                 }
             }
         }
-        false
+        Ok(false)
     }
 
     fn bind_inferred_effects(
@@ -2422,7 +2430,12 @@ impl TypeInference {
             named.insert(formal.clone(), row.clone());
         }
         for (formal, row) in &named {
-            if self.effect_occurs(row, None, Some(formal), &named) {
+            if self
+                .effect_occurs(row, None, Some(formal), &named)
+                .map_err(|failure| {
+                    effect_diagnostic(display_unification_failure(&failure), origin.clone())
+                })?
+            {
                 return Err(effect_diagnostic(
                     "effect inference has a cyclic or non-finite dependency",
                     origin.clone(),
@@ -2599,7 +2612,7 @@ impl TypeInference {
                 for ((_, left_row), (_, right_row)) in
                     left.mapping.effects.iter().zip(&right.mapping.effects)
                 {
-                    if !self.unify_effect_actual(left_row, right_row) {
+                    if !self.unify_effect_actual(left_row, right_row)? {
                         return Err(UnificationFailure::Mismatch(
                             Box::new(CheckedType::Function(left)),
                             Box::new(CheckedType::Function(right)),
@@ -9908,5 +9921,16 @@ fn use_it() with {fail<Int>} { sequence(failure, pure); }
             error.message.contains("closed declaration header"),
             "{error:?}"
         );
+    }
+    #[test]
+    fn effect_occurs_limit_reports_incomplete_without_binding() {
+        let mut inference = TypeInference::default();
+        let actual = inference.fresh_effect();
+        let payload = CheckedType::Tuple(vec![CheckedType::Int; SELECTION_WORK_LIMIT]);
+        assert!(matches!(
+            inference.unify_effect_actual(&actual, &EffectRow(vec![EffectTerm::Fail(payload)])),
+            Err(UnificationFailure::EffectIncomplete)
+        ));
+        assert!(inference.effect_substitutions.is_empty());
     }
 }
