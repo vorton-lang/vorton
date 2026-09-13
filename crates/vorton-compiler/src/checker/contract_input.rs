@@ -670,7 +670,7 @@ impl ContractTypeContext<'_> {
                             contract::ModeRule::CallableUse { callable } => {
                                 let callable = normalize_contract_type(self, &format!("{parameter_path}.mode.callable"), callable)?;
                                 if callable != ty { return Err(self.error(CheckDiagnosticKind::ContractConflict, &parameter_path, "shape callable_use selects a different input type")) }
-                                self.normalizer.shared_callable(&ty, &normalized.traits, origin.clone(), &TypeInference::default()).map_err(|mut error| { error.kind = CheckDiagnosticKind::Unsupported; error })?;
+                                self.normalizer.shared_callable(&ty, &normalized.traits, origin.clone(), &TypeInference::default()).map_err(|failure| failure.capability_diagnostic(None))?;
                                 ParameterMode::Borrow
                             }
                             _ => return Err(self.error(CheckDiagnosticKind::Unsupported, &format!("{parameter_path}.mode"), "callback shape requires fixed Borrow/Move or proven shared Fn inputs")),

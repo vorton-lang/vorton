@@ -147,13 +147,18 @@ impl SourceTypeNormalizer<'_> {
         requirements: &[Requirement],
         origin: &OriginRef,
         inference: &TypeInference,
-    ) -> bool {
+    ) -> SelectionResult<bool> {
         if matches!(ty, CheckedType::Function(_)) {
-            return true;
+            return Ok(true);
+        }
+        // An unbound HM variable has no selected callable capability. Do not
+        // guess it from unrelated givens merely to classify a value use.
+        if matches!(ty, CheckedType::Infer(_)) {
+            return Ok(false);
         }
         let origin = CheckOrigin::Source(origin.clone());
         let mut selection_inference = inference.clone();
-        SelectionSolver::new(
+        let result = SelectionSolver::new(
             &self.selection,
             &self.project.core_roles,
             requirements,
@@ -170,8 +175,12 @@ impl SourceTypeNormalizer<'_> {
                 },
                 origin,
             })
-        })
-        .is_ok()
+        });
+        match result {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind == SelectionFailureKind::NotApplicable => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -465,10 +474,7 @@ impl SourceTypeNormalizer<'_> {
                             origin.clone(),
                             &TypeInference::default(),
                         )
-                        .map_err(|mut error| {
-                            error.kind = CheckDiagnosticKind::Unsupported;
-                            error
-                        })?;
+                        .map_err(|failure| failure.capability_diagnostic(None))?;
                         ParameterMode::Borrow
                     } else {
                         mode
@@ -510,7 +516,7 @@ impl SourceTypeNormalizer<'_> {
         requirements: &[Requirement],
         origin: CheckOrigin,
         inference: &TypeInference,
-    ) -> Result<(), CheckDiagnostic> {
+    ) -> SelectionResult<()> {
         let mut selection_inference = inference.clone();
         let mut solver = SelectionSolver::new(
             &self.selection,
@@ -530,7 +536,6 @@ impl SourceTypeNormalizer<'_> {
                 origin,
             })
             .map(|_| ())
-            .map_err(Into::into)
     }
 }
 
@@ -754,7 +759,7 @@ impl CallBinder<'_, '_> {
                                 &givens,
                                 &stored.origin,
                                 solver.inference,
-                            ) {
+                            )? {
                                 return Err(effect_diagnostic(
                                     "callable storage through a named function value requires later escape/resource analysis",
                                     origin.clone(),
@@ -1142,11 +1147,16 @@ impl CallBinder<'_, '_> {
                         Ok(()) => {
                             possible.insert(destination);
                         }
+                        Err(error) if error.kind == SelectionFailureKind::Incomplete => {
+                            return Err(error.into());
+                        }
                         Err(error) => failure = Some(error),
                     }
                 }
                 if possible.is_empty() {
-                    return Err(failure.expect("every destination had a row conflict"));
+                    return Err(failure
+                        .expect("every destination had a row conflict")
+                        .into());
                 }
                 if possible.len() == 1 {
                     lower
@@ -1188,7 +1198,7 @@ fn check_callback_rows(
     actuals: &BTreeMap<EffectFormal, EffectRow>,
     inference: &mut TypeInference,
     origin: &CheckOrigin,
-) -> Result<(), CheckDiagnostic> {
+) -> SelectionResult<()> {
     for (actual, expected) in checks {
         let expected = expected.instantiate(&BTreeMap::new(), actuals);
         let mut required = EffectRow::default();
@@ -1365,11 +1375,10 @@ impl EffectEnvironment<'_, '_> {
                     .collect::<Vec<_>>();
                 self.normalizer
                     .shared_callable(&ty, &requirements, origin.clone(), inference)
-                    .map_err(|mut diagnostic| {
-                        diagnostic.kind = CheckDiagnosticKind::Unsupported;
-                        diagnostic.message =
-                            "indirect invocation requires retained shared Fn evidence".to_owned();
-                        diagnostic
+                    .map_err(|failure| {
+                        failure.capability_diagnostic(Some(
+                            "indirect invocation requires retained shared Fn evidence",
+                        ))
                     })?;
                 let shapes = caller
                     .shapes

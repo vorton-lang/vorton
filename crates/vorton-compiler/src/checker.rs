@@ -608,12 +608,10 @@ fn check_prepared_project(
                         parameter.type_origin.clone(),
                         &inference,
                     )
-                    .map_err(|mut diagnostic| {
-                        diagnostic.kind = CheckDiagnosticKind::Unsupported;
-                        diagnostic.message =
-                            "callable_use requires shared Fn evidence in the declared input domain"
-                                .to_owned();
-                        diagnostic
+                    .map_err(|failure| {
+                        failure.capability_diagnostic(Some(
+                            "callable_use requires shared Fn evidence in the declared input domain",
+                        ))
                     })?;
             }
         }
@@ -949,7 +947,7 @@ fn check_prepared_project(
                 &requirements,
                 &header.origin,
                 &inference,
-            ) {
+            )? {
                 return Err(source_diagnostic(
                     CheckDiagnosticKind::Unsupported,
                     "general callable value returns are outside this Checker profile",
@@ -963,7 +961,7 @@ fn check_prepared_project(
                     &requirements,
                     &stored.origin,
                     &inference,
-                ) {
+                )? {
                     return Err(source_diagnostic(
                         CheckDiagnosticKind::Unsupported,
                         "callable storage or failure payload requires the later escape/resource checker",
@@ -2262,6 +2260,22 @@ enum UnificationFailure {
     Mismatch(Box<CheckedType>, Box<CheckedType>),
     Infinite(TypeVariable, Box<CheckedType>),
     EffectIncomplete,
+}
+
+impl UnificationFailure {
+    fn contextual_message(&self, context: &str) -> String {
+        if matches!(self, Self::EffectIncomplete) {
+            display_unification_failure(self)
+        } else {
+            format!("{context}: {}", display_unification_failure(self))
+        }
+    }
+    fn selection_kind(&self, mismatch: SelectionFailureKind) -> SelectionFailureKind {
+        match self {
+            Self::EffectIncomplete => SelectionFailureKind::Incomplete,
+            _ => mismatch,
+        }
+    }
 }
 
 impl TypeInference {
@@ -4563,10 +4577,7 @@ fn validate_contract_record(
                                 },
                                 &TypeInference::default(),
                             )
-                            .map_err(|mut diagnostic| {
-                                diagnostic.kind = CheckDiagnosticKind::Unsupported;
-                                diagnostic
-                            })?;
+                            .map_err(|failure| failure.capability_diagnostic(None))?;
                         (ParameterMode::Borrow, true)
                     }
                     contract::ModeRule::Fixed {
@@ -9931,6 +9942,45 @@ fn use_it() with {fail<Int>} { sequence(failure, pure); }
             inference.unify_effect_actual(&actual, &EffectRow(vec![EffectTerm::Fail(payload)])),
             Err(UnificationFailure::EffectIncomplete)
         ));
+        assert!(inference.effect_substitutions.is_empty());
+        let checked = check_project(
+            &sources("fn provider<effect E>() -> Unit with {} {}"),
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let identity = checked.functions.keys().next().unwrap().clone();
+        let formal = EffectFormal {
+            owner: identity.clone(),
+            ordinal: 0,
+        };
+        let item = |row| {
+            CheckedType::Function(Box::new(FunctionItem {
+                function: identity.clone(),
+                mapping: CallMapping {
+                    types: Vec::new(),
+                    effects: vec![(formal.clone(), row)],
+                },
+            }))
+        };
+        let mut left = EffectRow(vec![EffectTerm::Fail(item(actual))]);
+        let right = EffectRow(vec![EffectTerm::Fail(item(EffectRow(vec![
+            EffectTerm::Fail(CheckedType::Tuple(vec![
+                CheckedType::Int;
+                SELECTION_WORK_LIMIT
+            ])),
+        ])))]);
+        let failure = left
+            .union(
+                &right,
+                &mut inference,
+                &CheckOrigin::Source(entity_origin(&identity).unwrap()),
+            )
+            .unwrap_err();
+        assert_eq!(failure.kind, SelectionFailureKind::Incomplete);
+        let diagnostic = failure.capability_diagnostic(Some("missing capability"));
+        assert_eq!(diagnostic.kind, CheckDiagnosticKind::TypeMismatch);
+        assert!(diagnostic.message.contains("incomplete"));
         assert!(inference.effect_substitutions.is_empty());
     }
 }

@@ -655,6 +655,9 @@ impl SourceTypeNormalizer<'_> {
             }
         }
         solver.restore(base);
+        if let Some(error) = unresolved {
+            return Err(error);
+        }
         if possible_traits.len() > 1 {
             return Err(solver.failure(
                 SelectionFailureKind::Conflict,
@@ -664,9 +667,6 @@ impl SourceTypeNormalizer<'_> {
                     .filter_map(|trait_id| entity_origin(trait_id).map(CheckOrigin::Source))
                     .collect(),
             ));
-        }
-        if let Some(error) = unresolved {
-            return Err(error);
         }
         let mut seen = BTreeSet::new();
         candidates.retain(|(method, mapping, _)| seen.insert((method.clone(), mapping.clone())));
@@ -2077,12 +2077,24 @@ pub(super) enum SelectionFailureKind {
 #[derive(Debug)]
 pub(super) struct SelectionFailure {
     pub(super) kind: SelectionFailureKind,
-    diagnostic: Box<CheckDiagnostic>,
+    pub(super) diagnostic: Box<CheckDiagnostic>,
 }
 
 impl From<SelectionFailure> for CheckDiagnostic {
     fn from(failure: SelectionFailure) -> Self {
         *failure.diagnostic
+    }
+}
+
+impl SelectionFailure {
+    pub(super) fn capability_diagnostic(mut self, message: Option<&str>) -> CheckDiagnostic {
+        if self.kind != SelectionFailureKind::Incomplete {
+            self.diagnostic.kind = CheckDiagnosticKind::Unsupported;
+            if let Some(message) = message {
+                self.diagnostic.message = message.to_owned();
+            }
+        }
+        *self.diagnostic
     }
 }
 
@@ -2311,8 +2323,8 @@ impl<'a> SelectionSolver<'a> {
                 (CheckedType::Infer(_), _) | (_, CheckedType::Infer(_)) => {
                     self.inference.unify(&left, &right).map_err(|failure| {
                         self.failure(
-                            SelectionFailureKind::NotApplicable,
-                            format!("no evidence: {}", display_unification_failure(&failure)),
+                            failure.selection_kind(SelectionFailureKind::NotApplicable),
+                            failure.contextual_message("no evidence"),
                             Vec::new(),
                         )
                     })?;
@@ -2350,8 +2362,8 @@ impl<'a> SelectionSolver<'a> {
                 }
                 _ => self.inference.unify(&left, &right).map_err(|failure| {
                     self.failure(
-                        SelectionFailureKind::NotApplicable,
-                        format!("no evidence: {}", display_unification_failure(&failure)),
+                        failure.selection_kind(SelectionFailureKind::NotApplicable),
+                        failure.contextual_message("no evidence"),
                         Vec::new(),
                     )
                 })?,

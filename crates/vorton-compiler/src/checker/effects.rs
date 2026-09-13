@@ -1682,7 +1682,7 @@ impl EffectRow {
         other: &Self,
         inference: &mut TypeInference,
         origin: &CheckOrigin,
-    ) -> Result<(), CheckDiagnostic> {
+    ) -> SelectionResult<()> {
         *self = inference.resolve_effect(self);
         let other = inference.resolve_effect(other);
         for term in &other.0 {
@@ -1696,15 +1696,15 @@ impl EffectRow {
                     _ => Vec::new(),
                 };
                 for (left, right) in pairs {
-                    inference.unify(left, right).map_err(|failure| {
-                        effect_diagnostic(
-                            format!(
-                                "effect payload conflict: {}",
-                                display_unification_failure(&failure)
-                            ),
-                            origin.clone(),
-                        )
-                    })?;
+                    inference
+                        .unify(left, right)
+                        .map_err(|failure| SelectionFailure {
+                            kind: failure.selection_kind(SelectionFailureKind::Conflict),
+                            diagnostic: Box::new(effect_diagnostic(
+                                failure.contextual_message("effect payload conflict"),
+                                origin.clone(),
+                            )),
+                        })?;
                 }
             } else {
                 self.0.push(term.clone());
@@ -1721,19 +1721,22 @@ impl EffectRow {
         upper: &Self,
         inference: &mut TypeInference,
         origin: &CheckOrigin,
-    ) -> Result<(), CheckDiagnostic> {
+    ) -> SelectionResult<()> {
         let actual = inference.resolve_effect(self);
         let upper = inference.resolve_effect(upper);
         for term in &actual.0 {
             let matching = upper.0.iter().find(|expected| expected.same_atom(term));
             let Some(matching) = matching else {
-                return Err(effect_diagnostic(
-                    format!(
-                        "effect upper bound does not contain {}",
-                        display_effect(term)
-                    ),
-                    origin.clone(),
-                ));
+                return Err(SelectionFailure {
+                    kind: SelectionFailureKind::Conflict,
+                    diagnostic: Box::new(effect_diagnostic(
+                        format!(
+                            "effect upper bound does not contain {}",
+                            display_effect(term)
+                        ),
+                        origin.clone(),
+                    )),
+                });
             };
             let mut one = Self(vec![matching.clone()]);
             one.union(&Self(vec![term.clone()]), inference, origin)?;
