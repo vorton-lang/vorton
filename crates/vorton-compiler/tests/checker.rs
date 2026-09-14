@@ -650,6 +650,158 @@ fn joint_contract_projection_partials_normalize_before_conflict_checks() {
     );
 }
 
+#[test]
+fn public_associated_and_callback_types_retain_nested_visibility() {
+    for source in [
+        "pub trait Bound<T> {} struct Hidden {} pub trait Host { type Item: Bound<Hidden>; }",
+        "pub trait Bound { type Value; } struct Hidden {} pub trait Host { type Item: Bound<Value = Hidden>; }",
+        "pub trait Item { type Value; } pub struct A {} struct Hidden {} impl Item for A { type Value = Hidden; }",
+        "struct Hidden {} pub fn consume<F: Fn + fn(Hidden) -> Unit with {}>(callback: call F) -> Unit with {} {}",
+        "struct Hidden {} pub fn consume<F: Fn + fn() -> Hidden with {}>(callback: call F) -> Unit with {} {}",
+        "pub trait Bound<T> {} type Hidden = Int; pub trait Host { type Item: Bound<Hidden>; }",
+        "pub trait Item { type Value; } pub struct A {} type Hidden = Int; impl Item for A { type Value = Hidden; }",
+        "type Hidden = Int; pub fn consume<F: Fn + fn(Hidden) -> Unit with {}>(callback: call F) -> Unit with {} {}",
+        "pub trait Bound<T> {} type Hidden = Int; pub struct A<T: Bound<Hidden>> { value: T }",
+        "pub trait Bound<T> {} type Hidden = Int; pub trait Item {} pub struct A<T> { value: T } impl<T> Item for A<T> where T: Bound<Hidden> {}",
+    ] {
+        let diagnostic = error(source);
+        assert_eq!(
+            diagnostic.kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{source}: {diagnostic:?}"
+        );
+        assert!(diagnostic.message.contains("private"), "{diagnostic:?}");
+        assert!(matches!(diagnostic.primary, Some(CheckOrigin::Source(_))));
+    }
+    for source in [
+        "pub trait Bound<T> {} pub struct Visible {} pub trait Host { type Item: Bound<Visible>; } pub trait Item { type Value; } pub struct A {} impl Item for A { type Value = Visible; }",
+        "pub struct Visible {} pub fn consume<F: Fn + fn(Visible) -> Visible with {}>(callback: call F) -> Unit with {} {}",
+        "pub trait Item { type Value; } struct A {} struct Hidden {} impl Item for A { type Value = Hidden; }",
+        "type Hidden = Int; fn consume<F: Fn + fn(Hidden) -> Hidden with {}>(callback: call F) -> Unit with {} {}",
+    ] {
+        check(source).unwrap();
+    }
+}
+
+#[test]
+fn nested_projection_uses_associated_givens_without_guessing() {
+    for source in [
+        "trait Inner { type Value; } trait Outer { type Item: Inner<Value = Int>; } fn value<T: Outer>(x: &T) -> T::Item::Value { 1 }",
+        "trait Inner { type Value; } trait Outer { type Item: Inner; } fn identity<T: Outer>(x: move T::Item::Value) -> T::Item::Value { x }",
+        "trait Leaf { type End; } trait Inner { type Value: Leaf<End = Int>; } trait Outer { type Item: Inner; } fn value<T: Outer>(x: &T) -> T::Item::Value::End { 1 }",
+    ] {
+        check(source).unwrap();
+    }
+    let missing =
+        error("trait Outer { type Item; } fn value<T: Outer>(x: &T) -> T::Item::Value { 1 }");
+    assert!(missing.message.contains("no trait evidence"), "{missing:?}");
+    let ambiguous = error(
+        "trait Left { type Value; } trait Right { type Value; } trait Outer { type Item: Left + Right; } fn value<T: Outer>(x: &T) -> T::Item::Value { 1 }",
+    );
+    assert!(ambiguous.message.contains("ambiguous"), "{ambiguous:?}");
+}
+
+#[test]
+fn nested_method_effect_actuals_resolve_on_the_default_windows_stack() {
+    std::thread::Builder::new().stack_size(1024 * 1024).spawn(|| {
+        let prefix = "trait T { fn run<effect E>(self: &Self) -> Unit with {E}; } struct A {} impl T for A { fn run<effect E>(self: &Self) -> Unit with {E} {} } ";
+        for depth in [8, 32, 64, 128] {
+            let mut row = "fs".to_owned();
+            for _ in 0..depth { row = format!("T::run<A, effect {{{row}}}>"); }
+            let source = format!("{prefix} fn nested() -> Unit with {{{row}}} {{}} fn call() -> Unit with {{fs}} {{ nested(); }}");
+            let sources = project(&source);
+            let resolved = vorton_compiler::resolve_project(&sources).unwrap();
+            drop(vorton_compiler::prepare_project(resolved).unwrap());
+            check_project(&sources, &BTreeMap::new(), Vec::new()).unwrap();
+            if depth == 128 {
+                let invalid = source.replacen("fs", "missing", 1);
+                let diagnostic = vorton_compiler::resolve_project(&project(&invalid)).unwrap_err();
+                let origin = diagnostic.primary.unwrap();
+                assert_eq!(&invalid[origin.span.start..origin.span.end], "missing");
+            }
+        }
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+fn callback_minimum_is_recomputed_after_payload_unification() {
+    for source in [
+        "fn actual() -> Unit with {fail<Int>} {} fn ignore<T, F: Fn + fn() -> Unit with {fail<T>, E}, effect E>(callback: call F) -> Unit with {E} {} fn pure() -> Unit with {} { ignore(actual); }",
+        "fn actual() -> Unit with {fail<Int>} {} fn ignore<T, F: Fn + fn() -> Unit with {fail<T>, E}, effect E>(value: &T, callback: call F) -> Unit with {E} {} fn pure() -> Unit with {} { ignore(1, actual); }",
+        "fn first() -> Unit with {fail<Int>} {} fn second() -> Unit with {fail<Int>, fs} {} fn ignore<T,F: Fn + fn() -> Unit with {fail<T>, E}, G: Fn + fn() -> Unit with {fail<T>, E}, effect E>(f: call F, g: call G) -> Unit with {E} {} fn call() -> Unit with {fs} { ignore(first, second); }",
+        "fn actual() -> Unit with {fail<Int>} {} fn ignore<T,F: Fn + fn() -> Unit with {fail<T>, E, H}, effect E, effect H>(f: call F) -> Unit with {E,H} {} fn call() -> Unit with {} { ignore(actual); }",
+        "fn actual<T>() -> Unit with {fail<T>} {} fn ignore<F: Fn + fn() -> Unit with {fail<Int>, E}, effect E>(f: call F) -> Unit with {E} {} fn call() -> Unit with {} { ignore(actual); }",
+    ] {
+        check(source).unwrap();
+    }
+    let conflict = error(
+        "fn first() -> Unit with {fail<Int>} {} fn second() -> Unit with {fail<Bool>} {} fn ignore<T,F: Fn + fn() -> Unit with {fail<T>, E}, G: Fn + fn() -> Unit with {fail<T>, E}, effect E>(f: call F, g: call G) -> Unit with {E} {} fn call() -> Unit { ignore(first, second); }",
+    );
+    assert!(
+        conflict.message.contains("payload conflict"),
+        "{conflict:?}"
+    );
+}
+
+#[test]
+fn public_contract_shapes_reject_private_types_before_erasing_aliases() {
+    let owners = BTreeMap::from([("app".to_owned(), APP)]);
+    let target = function_target("consume");
+    let formal = function_formal("consume", 0);
+    for (declaration, kind) in [
+        ("struct Hidden {}", "struct"),
+        ("type Hidden = Int;", "type_alias"),
+    ] {
+        let hidden = format!(
+            r#"{{"tag":"nominal","declaration":{{"library":{{"tag":"self"}},"path":["Hidden"],"kind":"{kind}"}},"arguments":[]}}"#
+        );
+        for result in [false, true] {
+            let shape = if result {
+                format!(r#"{{"parameters":[],"result":{hidden},"effect_upper":[]}}"#)
+            } else {
+                format!(
+                    r#"{{"parameters":[{{"type":{hidden},"mode":{{"tag":"fixed","mode":"borrow"}},"escape":"may_escape"}}],"result":{{"tag":"primitive","name":"Unit"}},"effect_upper":[]}}"#
+                )
+            };
+            let record = format!(
+                r#"{{"target":{target},"type_parameters":["F"],"set":{{"generic_requirements":[{{"tag":"trait","subject":{formal},"bound":{{"trait":{{"library":{{"tag":"dependency","alias":"vorton_core"}},"path":["Fn"],"kind":"trait"}},"arguments":[],"associated_bindings":[]}}}},{{"tag":"callable_shape","subject":{formal},"shape":{shape}}}]}}}}"#
+            );
+            let source =
+                format!("{declaration} pub fn consume<F>(callback: &F) -> Unit with {{}} {{}}");
+            let diagnostic = check_project(
+                &project(&source),
+                &owners,
+                vec![contract(&document(&record))],
+            )
+            .unwrap_err();
+            assert_eq!(
+                diagnostic.kind,
+                CheckDiagnosticKind::TypeMismatch,
+                "{diagnostic:?}"
+            );
+            let suffix = if result {
+                ".result"
+            } else {
+                ".parameters[0].type"
+            };
+            assert_eq!(
+                diagnostic.primary,
+                Some(CheckOrigin::Contract {
+                    document_index: 0,
+                    json_path: format!("$.records[0].set.generic_requirements[1].shape{suffix}")
+                })
+            );
+            let visible = source.replacen(declaration, &format!("pub {declaration}"), 1);
+            check_project(
+                &project(&visible),
+                &owners,
+                vec![contract(&document(&record))],
+            )
+            .unwrap();
+        }
+    }
+}
+
 fn error(root: &str) -> CheckDiagnostic {
     check(root).expect_err("the Checker should reject this source")
 }

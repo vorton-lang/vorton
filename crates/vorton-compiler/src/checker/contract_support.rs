@@ -635,6 +635,20 @@ pub(super) fn contract_trait(
     path: &str,
 ) -> Result<TraitUse, CheckDiagnostic> {
     let declaration = bind_trait(context, &reference.trait_ref, &format!("{path}.trait"))?;
+    if context.header.public_export
+        && !actual_public_exports(context.project).contains(&declaration)
+    {
+        return Err(contract_diagnostic(
+            CheckDiagnosticKind::TypeMismatch,
+            "public contract bound references a private trait",
+            context.document_index,
+            format!("{path}.trait"),
+            entity_origin(&declaration)
+                .map(CheckOrigin::Source)
+                .into_iter()
+                .collect(),
+        ));
+    }
     let arguments = reference
         .arguments
         .iter()

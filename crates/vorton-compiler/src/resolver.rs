@@ -4294,19 +4294,57 @@ impl BodyResolver<'_> {
         &mut self,
         set: &EffectSet,
     ) -> Result<ResolvedEffectSet, ProjectDiagnostic> {
-        let effects = set
-            .effects
-            .iter()
-            .map(|effect| self.resolve_effect(effect))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ResolvedEffectSet {
-            span: set.span,
-            effects,
-        })
+        enum Work<'a> {
+            Set(&'a EffectSet),
+            FinishSet(Span, usize),
+            Effect(&'a EffectExpr),
+            FinishEffect(Box<ResolvedEffect>, &'a [EffectRowArgument]),
+        }
+        let mut work = vec![Work::Set(set)];
+        let mut effects = Vec::new();
+        let mut rows = Vec::new();
+        while let Some(step) = work.pop() {
+            match step {
+                Work::Set(set) => {
+                    work.push(Work::FinishSet(set.span, set.effects.len()));
+                    work.extend(set.effects.iter().rev().map(Work::Effect));
+                }
+                Work::FinishSet(span, count) => {
+                    let effects = effects.split_off(effects.len() - count);
+                    rows.push(ResolvedEffectSet { span, effects });
+                }
+                Work::Effect(effect) => {
+                    let (resolved, arguments) = self.resolve_effect_head(effect)?;
+                    work.push(Work::FinishEffect(Box::new(resolved), arguments));
+                    work.extend(
+                        arguments
+                            .iter()
+                            .rev()
+                            .map(|argument| Work::Set(&argument.effects)),
+                    );
+                }
+                Work::FinishEffect(mut effect, arguments) => {
+                    let actuals = rows.split_off(rows.len() - arguments.len());
+                    effect.effect_arguments = arguments
+                        .iter()
+                        .zip(actuals)
+                        .map(|(argument, effects)| ResolvedEffectRowArgument {
+                            span: argument.span,
+                            effects,
+                        })
+                        .collect();
+                    effects.push(*effect);
+                }
+            }
+        }
+        Ok(rows.pop().expect("one root effect row was resolved"))
     }
 
-    fn resolve_effect(&mut self, effect: &EffectExpr) -> Result<ResolvedEffect, ProjectDiagnostic> {
-        let (reference, arguments, effect_arguments) = match &effect.kind {
+    fn resolve_effect_head<'a>(
+        &mut self,
+        effect: &'a EffectExpr,
+    ) -> Result<(ResolvedEffect, &'a [EffectRowArgument]), ProjectDiagnostic> {
+        let (reference, arguments, effect_arguments): (_, _, &[_]) = match &effect.kind {
             EffectKind::Named {
                 path,
                 arguments,
@@ -4337,15 +4375,7 @@ impl BodyResolver<'_> {
                         .iter()
                         .map(|argument| self.resolve_type(argument))
                         .collect::<Result<Vec<_>, _>>()?,
-                    effect_arguments
-                        .iter()
-                        .map(|argument| {
-                            Ok(ResolvedEffectRowArgument {
-                                span: argument.span,
-                                effects: self.resolve_effect_set(&argument.effects)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
+                    effect_arguments.as_slice(),
                 )
             }
             EffectKind::Mutation => (
@@ -4355,7 +4385,7 @@ impl BodyResolver<'_> {
                     self_reference: None,
                 },
                 Vec::new(),
-                Vec::new(),
+                &[],
             ),
             EffectKind::Unsafe => (
                 ResolvedReference::Exact {
@@ -4369,15 +4399,18 @@ impl BodyResolver<'_> {
                     self_reference: None,
                 },
                 Vec::new(),
-                Vec::new(),
+                &[],
             ),
         };
-        Ok(ResolvedEffect {
-            span: effect.span,
-            reference,
-            arguments,
+        Ok((
+            ResolvedEffect {
+                span: effect.span,
+                reference,
+                arguments,
+                effect_arguments: Vec::new(),
+            },
             effect_arguments,
-        })
+        ))
     }
 
     fn resolve_path(

@@ -1962,8 +1962,10 @@ pub(super) fn solve_effect_actuals(
             )?;
         constraints.push((actual, expected));
     }
+    let mut work = 0;
     loop {
         let before = actuals.clone();
+        let revision = inference.revision;
         let mut pending = constraints.clone();
         for (formal, bounds) in &callee.effect_caps {
             for bound in bounds {
@@ -1974,6 +1976,22 @@ pub(super) fn solve_effect_actuals(
             }
         }
         for (actual, expected) in &pending {
+            work += 1;
+            if work > 8192 {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "incomplete callback effect solve: 8192 row constraints exhausted",
+                    origin.clone(),
+                    Vec::new(),
+                ));
+            }
+            // Unify payload/type actuals before subtracting the fixed heads.
+            // This uses the same TypeInference and call mapping as the signature.
+            let expanded = expected.instantiate(&BTreeMap::new(), &actuals);
+            let mut payloads = actual.clone();
+            payloads.merge(&expanded, inference, origin)?;
+            let actual = actual.normalized(inference);
+            let expected = expected.normalized(inference);
             let tails = expected
                 .0
                 .iter()
@@ -1990,6 +2008,14 @@ pub(super) fn solve_effect_actuals(
                     .unwrap()
                     .merge(&remainder, inference, origin)?;
             }
+        }
+        if revision != inference.revision {
+            // A newly solved payload can remove an earlier lower bound. Restart
+            // row closure at bottom; retain every solved type constraint.
+            for row in actuals.values_mut() {
+                *row = CheckedEffect::default();
+            }
+            continue;
         }
         if before == actuals {
             break;

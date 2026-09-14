@@ -1369,17 +1369,14 @@ impl<'a> TraitSolver<'a> {
     }
 
     fn projection_bounds(
-        &self,
+        &mut self,
         projection: &ProjectionType,
     ) -> Result<Vec<(EntityId, TraitUse)>, CheckDiagnostic> {
         if let (Some(member), Some(bound)) = (&projection.member, &projection.bound) {
             return Ok(vec![(member.clone(), bound.clone())]);
         }
         let mut choices = BTreeSet::new();
-        for given in &self.givens {
-            if !inferred_types_equal(&given.subject, &projection.receiver, self.inference) {
-                continue;
-            }
+        for given in self.bounds_for_type(&projection.receiver)? {
             for member in self.environment.traits[&given.bound.declaration]
                 .associated
                 .keys()
@@ -1532,25 +1529,25 @@ pub(super) fn validate_public_requirements(
     headers: &BTreeMap<EntityId, FunctionHeader>,
     exports: &BTreeSet<EntityId>,
 ) -> Result<(), CheckDiagnostic> {
+    let validate_bound = |bound: &TraitUse, origin: &OriginRef| -> Result<(), CheckDiagnostic> {
+        if !exports.contains(&bound.declaration) {
+            return Err(source_diagnostic(
+                CheckDiagnosticKind::TypeMismatch,
+                "public bound exposes a private trait",
+                origin.clone(),
+                entity_origin(&bound.declaration).into_iter().collect(),
+            ));
+        }
+        for ty in bound.arguments.iter().chain(bound.associated.values()) {
+            validate_public_nominals(ty, exports, origin)?;
+        }
+        Ok(())
+    };
     let validate =
         |requirements: &[Requirement], origin: &OriginRef| -> Result<(), CheckDiagnostic> {
             for requirement in requirements {
-                if !exports.contains(&requirement.bound.declaration) {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::TypeMismatch,
-                        "public bound exposes a private trait",
-                        origin.clone(),
-                        entity_origin(&requirement.bound.declaration)
-                            .into_iter()
-                            .collect(),
-                    ));
-                }
-                for ty in std::iter::once(&requirement.subject)
-                    .chain(&requirement.bound.arguments)
-                    .chain(requirement.bound.associated.values())
-                {
-                    validate_public_nominals(ty, exports, origin)?;
-                }
+                validate_public_nominals(&requirement.subject, exports, origin)?;
+                validate_bound(&requirement.bound, origin)?;
             }
             Ok(())
         };
@@ -1566,22 +1563,41 @@ pub(super) fn validate_public_requirements(
         for (member, (bounds, default)) in &definition.associated {
             let origin = entity_origin(member).unwrap();
             for bound in bounds {
-                if !exports.contains(&bound.declaration) {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::TypeMismatch,
-                        "public associated bound exposes a private trait",
-                        origin.clone(),
-                        entity_origin(&bound.declaration).into_iter().collect(),
-                    ));
-                }
+                validate_bound(bound, &origin)?;
             }
             if let Some(ty) = default {
                 validate_public_nominals(ty, exports, &origin)?;
             }
         }
     }
+    for implementation in &traits.implementations {
+        let Some(bound) = &implementation.trait_use else {
+            continue;
+        };
+        if !exports.contains(&bound.declaration) || !type_is_public(&implementation.target, exports)
+        {
+            continue;
+        }
+        let origin = entity_origin(&implementation.identity).unwrap();
+        validate_bound(bound, &origin)?;
+        validate(&implementation.requirements, &origin)?;
+        for ty in implementation.associated.values() {
+            validate_public_nominals(ty, exports, &origin)?;
+        }
+    }
     for header in headers.values().filter(|header| header.public_export) {
         validate(&header.requirements, &header.origin)?;
+        validate(&header.outer_requirements, &header.origin)?;
+        for shape in header.shapes.values() {
+            for ty in shape
+                .parameters
+                .iter()
+                .map(|(ty, _)| ty)
+                .chain(std::iter::once(&shape.result))
+            {
+                validate_public_nominals(ty, exports, &header.origin)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1745,11 +1761,40 @@ pub(super) fn collect_method_headers(
             };
             let context = SourceContext::from_origin(&declaration.origin);
             match &declaration.kind {
-                ResolvedDeclarationKind::Trait { members, .. } => {
+                ResolvedDeclarationKind::Trait {
+                    members,
+                    supertraits,
+                    ..
+                } => {
                     if core.contains(owner) && !supported_core.contains(&owner) {
                         continue;
                     }
+                    if public_exports.contains(owner) {
+                        for bound in supertraits {
+                            validate_public_named_type(bound, public_exports, &normalizer.aliases)?;
+                        }
+                    }
                     for member in members {
+                        if public_exports.contains(owner)
+                            && let ResolvedTraitMemberKind::AssociatedType { bounds, default } =
+                                &member.kind
+                        {
+                            for bound in bounds {
+                                validate_public_named_type(
+                                    bound,
+                                    public_exports,
+                                    &normalizer.aliases,
+                                )?;
+                            }
+                            if let Some(default) = default {
+                                validate_public_type_visibility(
+                                    public_exports,
+                                    default,
+                                    &normalizer.aliases,
+                                )?;
+                            }
+                        }
+
                         let ResolvedTraitMemberKind::Method(signature) = &member.kind else {
                             continue;
                         };
@@ -1838,7 +1883,59 @@ pub(super) fn collect_method_headers(
                         .iter()
                         .find(|implementation| &implementation.identity == owner)
                         .unwrap();
+                    let public_trait_impl = checked_impl.trait_use.as_ref().is_some_and(|bound| {
+                        public_exports.contains(&bound.declaration)
+                            && type_is_public(&checked_impl.target, public_exports)
+                    });
+                    if public_trait_impl {
+                        validate_public_generic_types(
+                            &implementation.type_parameters,
+                            public_exports,
+                            &normalizer.aliases,
+                        )?;
+                        if let ResolvedDeclarationKind::TraitImpl {
+                            trait_type,
+                            where_clause,
+                            ..
+                        } = &declaration.kind
+                        {
+                            validate_public_named_type(
+                                trait_type,
+                                public_exports,
+                                &normalizer.aliases,
+                            )?;
+                            for predicate in
+                                where_clause.iter().flat_map(|clause| &clause.predicates)
+                            {
+                                validate_public_type_visibility(
+                                    public_exports,
+                                    &predicate.subject,
+                                    &normalizer.aliases,
+                                )?;
+                                for bound in &predicate.bounds {
+                                    validate_public_named_type(
+                                        bound,
+                                        public_exports,
+                                        &normalizer.aliases,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
                     for member in &implementation.members {
+                        if (public_trait_impl
+                            || (checked_impl.trait_use.is_none()
+                                && member.public
+                                && type_is_public(&checked_impl.target, public_exports)))
+                            && let ResolvedImplMemberKind::AssociatedType(value) = &member.kind
+                        {
+                            validate_public_type_visibility(
+                                public_exports,
+                                value,
+                                &normalizer.aliases,
+                            )?;
+                        }
+
                         let ResolvedImplMemberKind::Function(function) = &member.kind else {
                             continue;
                         };

@@ -1821,6 +1821,7 @@ struct TypeFormal {
 
 #[derive(Default)]
 struct TypeInference {
+    revision: usize,
     next_variable: u32,
     substitutions: BTreeMap<TypeVariable, CheckedType>,
     formal_parents: BTreeMap<TypeFormal, TypeFormal>,
@@ -1950,6 +1951,7 @@ impl TypeInference {
             (right_root, left_root)
         };
         self.formal_parents.insert(child, root);
+        self.revision += 1;
         Ok(())
     }
 
@@ -1965,6 +1967,7 @@ impl TypeInference {
                     return Err(UnificationFailure::Infinite(variable, Box::new(ty)));
                 }
                 self.substitutions.insert(variable, ty);
+                self.revision += 1;
                 Ok(())
             }
             (CheckedType::Tuple(left), CheckedType::Tuple(right)) if left.len() == right.len() => {
@@ -2733,6 +2736,35 @@ fn collect_supported_headers(
             }) {
                 continue;
             }
+            if declaration
+                .identity
+                .as_ref()
+                .is_some_and(|identity| public_exports.contains(identity))
+            {
+                let parameters = match &declaration.kind {
+                    ResolvedDeclarationKind::Struct {
+                        type_parameters, ..
+                    }
+                    | ResolvedDeclarationKind::Enum {
+                        type_parameters, ..
+                    }
+                    | ResolvedDeclarationKind::Trait {
+                        type_parameters, ..
+                    }
+                    | ResolvedDeclarationKind::Effect {
+                        type_parameters, ..
+                    }
+                    | ResolvedDeclarationKind::EffectAlias {
+                        type_parameters, ..
+                    } => type_parameters.as_slice(),
+                    _ => &[],
+                };
+                if let Err(diagnostic) =
+                    validate_public_generic_types(parameters, public_exports, &normalizer.aliases)
+                {
+                    push_header_diagnostic(project, module, &mut diagnostics, diagnostic);
+                }
+            }
             match &declaration.kind {
                 ResolvedDeclarationKind::Module(_)
                 | ResolvedDeclarationKind::Trait { .. }
@@ -2921,19 +2953,27 @@ fn validate_public_type_visibility(
             ResolvedTypeKind::Tuple(elements) => pending.extend(elements.into_iter().rev()),
             ResolvedTypeKind::Named(named) => {
                 for argument in named.arguments.into_iter().rev() {
-                    if let ResolvedTypeArgument::Type(ty) = argument {
-                        pending.push(*ty);
+                    match argument {
+                        ResolvedTypeArgument::Type(ty)
+                        | ResolvedTypeArgument::AssociatedType { value: ty, .. } => {
+                            pending.push(*ty)
+                        }
                     }
                 }
-                let ResolvedReference::Exact {
-                    occurrence, target, ..
-                } = named.reference
-                else {
-                    continue;
+                let (occurrence, target) = match named.reference {
+                    ResolvedReference::Exact {
+                        occurrence, target, ..
+                    } => (occurrence, target),
+                    ResolvedReference::Selection {
+                        occurrence, base, ..
+                    } => (occurrence, base),
                 };
                 if !matches!(
                     target.kind,
-                    EntityKind::TypeAlias | EntityKind::Struct | EntityKind::Enum
+                    EntityKind::TypeAlias
+                        | EntityKind::Struct
+                        | EntityKind::Enum
+                        | EntityKind::Trait
                 ) {
                     continue;
                 }
@@ -2962,6 +3002,84 @@ fn validate_public_type_visibility(
     Ok(())
 }
 
+fn validate_public_named_type(
+    named: &ResolvedNamedType,
+    exports: &BTreeSet<EntityId>,
+    aliases: &BTreeMap<EntityId, AliasDefinition>,
+) -> Result<(), CheckDiagnostic> {
+    validate_public_type_visibility(
+        exports,
+        &ResolvedType {
+            span: named.span,
+            kind: ResolvedTypeKind::Named(Box::new(named.clone())),
+        },
+        aliases,
+    )
+}
+
+fn validate_public_generic_types(
+    parameters: &[crate::project::ResolvedTypeParameter],
+    exports: &BTreeSet<EntityId>,
+    aliases: &BTreeMap<EntityId, AliasDefinition>,
+) -> Result<(), CheckDiagnostic> {
+    for parameter in parameters {
+        for bound in &parameter.bounds {
+            match bound {
+                crate::project::ResolvedGenericBound::Named(bound) => {
+                    validate_public_named_type(bound, exports, aliases)?
+                }
+                crate::project::ResolvedGenericBound::Shape(shape) => {
+                    let mut shape = shape;
+                    while let crate::project::ResolvedShapeKind::Grouped(inner) = &shape.kind {
+                        shape = inner;
+                    }
+                    let crate::project::ResolvedShapeKind::Callable {
+                        parameters,
+                        return_type,
+                        effects,
+                    } = &shape.kind
+                    else {
+                        unreachable!()
+                    };
+                    for ty in parameters
+                        .iter()
+                        .map(|parameter| &parameter.ty)
+                        .chain(std::iter::once(return_type.as_ref()))
+                    {
+                        validate_public_type_visibility(exports, ty, aliases)?;
+                    }
+                    if let Some(effects) = effects {
+                        validate_public_effect_types(effects, exports, aliases)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_public_effect_types(
+    row: &ResolvedEffectSet,
+    exports: &BTreeSet<EntityId>,
+    aliases: &BTreeMap<EntityId, AliasDefinition>,
+) -> Result<(), CheckDiagnostic> {
+    let mut rows = vec![row];
+    while let Some(row) = rows.pop() {
+        for effect in &row.effects {
+            for ty in &effect.arguments {
+                validate_public_type_visibility(exports, ty, aliases)?;
+            }
+            rows.extend(
+                effect
+                    .effect_arguments
+                    .iter()
+                    .map(|argument| &argument.effects),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_public_nominals(
     ty: &CheckedType,
     public_exports: &BTreeSet<EntityId>,
@@ -2982,6 +3100,22 @@ fn validate_public_nominals(
                 }
                 pending.extend(&nominal.arguments);
             }
+            CheckedType::Projection(projection) => {
+                pending.push(&projection.receiver);
+                if let Some(bound) = &projection.bound {
+                    if !public_exports.contains(&bound.declaration) {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::TypeMismatch,
+                            "public projection exposes a private trait",
+                            origin.clone(),
+                            entity_origin(&bound.declaration).into_iter().collect(),
+                        ));
+                    }
+                    pending.extend(&bound.arguments);
+                    pending.extend(bound.associated.values());
+                }
+            }
+            CheckedType::Function(value) => pending.extend(value.types.iter().map(|(_, ty)| ty)),
             _ => {}
         }
     }
@@ -3004,6 +3138,18 @@ fn collect_function_header(
             context.origin(span),
             Vec::new(),
         )]);
+    }
+    if public_export {
+        validate_public_generic_types(
+            &function.type_parameters,
+            public_exports,
+            &normalizer.aliases,
+        )
+        .map_err(|diagnostic| vec![diagnostic])?;
+        if let Some(effects) = &function.effects {
+            validate_public_effect_types(effects, public_exports, &normalizer.aliases)
+                .map_err(|diagnostic| vec![diagnostic])?;
+        }
     }
     let function_identity = declaration
         .identity
@@ -4191,6 +4337,20 @@ fn normalize_contract_type(
                 return Err(contract_diagnostic(
                     CheckDiagnosticKind::ContractBinding,
                     "nominal contract type does not resolve to its declared kind",
+                    context.document_index,
+                    path,
+                    entity_origin(&target)
+                        .map(CheckOrigin::Source)
+                        .into_iter()
+                        .collect(),
+                ));
+            }
+            if context.header.public_export
+                && !actual_public_exports(context.project).contains(&target)
+            {
+                return Err(contract_diagnostic(
+                    CheckDiagnosticKind::TypeMismatch,
+                    "public contract type references a private declaration",
                     context.document_index,
                     path,
                     entity_origin(&target)
@@ -8616,6 +8776,115 @@ fn concrete() -> Option<Int> { Option::Some(1) }
                 roles.option.declaration.clone(),
                 roles.ordering.declaration.clone()
             ))
+        );
+    }
+
+    #[test]
+    fn callback_effect_minimum_retains_the_payload_substitution() {
+        let source = r#"
+fn actual() -> Unit with {fail<Int>} {}
+fn ignore<T, F: Fn + fn() -> Unit with {fail<T>, E}, effect E>(callback: call F) -> Unit with {E} {}
+fn broad() -> Unit with {fail<Int>} { ignore(actual) }
+"#;
+        let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new()).unwrap();
+        let caller = checked
+            .functions
+            .values()
+            .find(|f| f.identity.name == "broad")
+            .unwrap();
+        let TypedExprKind::Call(call) = &caller.body.tail.as_ref().unwrap().kind else {
+            panic!("call");
+        };
+        let CallInstantiation::Published(mapping) = &call.instantiation else {
+            panic!("the closed caller retains its published instantiation");
+        };
+        assert_eq!(
+            mapping
+                .iter()
+                .find(|(formal, _)| formal.name == "T")
+                .unwrap()
+                .1,
+            CheckedType::Int
+        );
+        assert_eq!(call.effect_actuals.len(), 1);
+        assert_eq!(call.effect_actuals[0].0.owner, *call.callee);
+        assert_eq!(call.effect_actuals[0].0.ordinal, 0);
+        assert!(call.proofs.iter().any(|proof| matches!(proof, Evidence::Callable { value, declaration } if value.declaration.name == "actual" && *declaration == checked.prepared.0.core_roles.function)));
+        for (formal, row) in &call.effect_actuals {
+            println!("EFFECT_ACTUAL ordinal {} = {:?}", formal.ordinal, row);
+        }
+        assert!(
+            call.effect_actuals.iter().all(|(_, row)| row.is_empty()),
+            "unique least row must be empty after T = Int"
+        );
+    }
+    #[test]
+    fn shared_callback_cleanup_distinguishes_open_and_proven_nonfailure() {
+        let source = r#"
+fn keep<T, F: Fn + fn() -> Unit with {E}, effect E>(value: move T, callback: call F) -> T { callback(); value }
+fn keep_fs<T, F: Fn + fn() -> Unit with {fs}>(value: move T, callback: call F) -> T { callback(); value }
+"#;
+        let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new()).unwrap();
+        let has_destruction = |function: &CheckedFunction| {
+            function.effect.0.iter().any(|term| matches!(term, EffectTerm::Destruction(CheckedType::Formal(formal)) if formal.name == "T"))
+        };
+        let keep = checked
+            .functions
+            .values()
+            .find(|f| f.identity.name == "keep")
+            .unwrap();
+        let keep_fs = checked
+            .functions
+            .values()
+            .find(|f| f.identity.name == "keep_fs")
+            .unwrap();
+        assert!(has_destruction(keep));
+        assert!(!has_destruction(keep_fs));
+        assert!(
+            keep.body
+                .cleanups
+                .iter()
+                .any(|fact| matches!(fact.exit, CleanupExit::Failure))
+        );
+        assert!(
+            !keep_fs
+                .body
+                .cleanups
+                .iter()
+                .any(|fact| matches!(fact.exit, CleanupExit::Failure))
+        );
+        println!("CLEANUP open callback retains D(T), known fs callback has no failure cleanup");
+    }
+    #[test]
+    fn method_receiver_is_staged_before_later_argument_failure() {
+        let source = r#"
+trait Tick { fn tick(self: &Self) -> Int; }
+trait Pass { fn take<T>(self: move Self, value: move T) -> T; }
+fn staged<R: Pass, T, U: Tick>(receiver: move R, value: move T, runner: &U) -> T { receiver.take({ runner.tick(); value }) }
+"#;
+        let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new()).unwrap();
+        let function = checked
+            .functions
+            .values()
+            .find(|f| f.identity.name == "staged")
+            .unwrap();
+        let fact = function
+            .body
+            .cleanups
+            .iter()
+            .find(|fact| matches!(fact.exit, CleanupExit::Failure))
+            .unwrap();
+        assert!(fact.state.temporaries.iter().any(|temporary| temporary.transfer && matches!(&temporary.owner, CheckedType::Formal(formal) if formal.name == "R")));
+        let value = fact
+            .state
+            .bindings
+            .iter()
+            .find(|(identity, _)| identity.name == "value")
+            .unwrap()
+            .1;
+        assert!(value.availability == Availability::Live);
+        println!(
+            "CLEANUP Move receiver is caller temporary while value remains live during later argument failure"
         );
     }
 }
