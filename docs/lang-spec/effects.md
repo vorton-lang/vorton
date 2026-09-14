@@ -327,7 +327,7 @@ trait Pipeline {
 
 ## Drop 边界
 
-用户 `Drop::drop` 的最终推断 effect row 必须为空；`fail`、system effect、handled effect 与逃逸的 `mut` 均禁止。编译器生成的字段递归释放、RC deallocation 与已验证 intrinsic cleanup 不属于用户 effect body。
+用户 `Drop::drop` 可产生 system effect 和 `mut`，但不得逃逸 `fail`、handled effect 或 `unsafe`。Generic Drop 必须覆盖所属 nominal 的全部合法实例，不能加强其形成条件。完整销毁 `full_destruction(T)` 包含 hook 及剩余字段/元素的实际清理；它与单个 Drop method scheme 不等价，也不是任意 caller 可填充的 effect formal。当前 Checker 保留 generic 完整销毁关系并归约受支持的普通数据 actual，用户 Drop、Rc 与物理资源操作仍后置。
 
 ## Canonical 边界
 
