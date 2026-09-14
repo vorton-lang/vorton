@@ -4,7 +4,9 @@ use std::fmt;
 mod joint;
 use joint::*;
 mod effects;
+mod inputs;
 use effects::*;
+use inputs::*;
 mod contract_support;
 use contract_support::*;
 
@@ -55,6 +57,7 @@ pub struct CheckedProject {
     nominals: BTreeMap<EntityId, NominalDefinition>,
     functions: BTreeMap<EntityId, CheckedFunction>,
     signatures: BTreeMap<EntityId, CallableScheme>,
+    checks: Vec<ClosedCheck>,
 }
 
 impl fmt::Debug for CheckedProject {
@@ -580,12 +583,22 @@ fn check_prepared_project(
         &normalizer,
         &traits,
     )?;
-    validate_implementations(project, &mut traits, &mut headers, &mut inference)?;
+    for header in headers.values_mut() {
+        header.semantic_inputs = header_inputs(header);
+    }
+    let mut obligations = Vec::new();
+    validate_implementations(
+        project,
+        &mut traits,
+        &mut headers,
+        &mut inference,
+        &mut obligations,
+    )?;
     normalize_headers(project, &traits, &mut headers, &inference)?;
     normalize_contract_types(
         project,
         &traits,
-        &headers,
+        &mut headers,
         &mut contract_selections,
         &inference,
     )?;
@@ -607,25 +620,20 @@ fn check_prepared_project(
         &documents,
     )?;
     finalize_effect_headers(project, &mut headers, &traits, &mut inference)?;
-    validate_declaration_types(project, &traits, &mut normalizer, &mut headers, &inference)?;
-    validate_public_requirements(&traits, &headers, &public_exports)?;
-    validate_public_effects(&headers, &public_exports)?;
-    let signatures = headers
-        .iter()
-        .filter_map(|(identity, header)| header.body.is_none().then_some(identity.clone()))
-        .collect::<Vec<_>>();
-    apply_contract_type_constraints(
-        &signatures,
-        &mut headers,
-        &contract_selections,
-        &mut inference,
-    )?;
-    validate_public_inputs(&function_order, &headers, &contract_selections)?;
-
-    let mut schemes = signature_schemes(&headers, &inference)?;
+    let declarations = DeclarationClosure {
+        project,
+        traits: &traits,
+        normalizer: &mut normalizer,
+        headers: &mut headers,
+        inference: &mut inference,
+        selections: &contract_selections,
+        exports: &public_exports,
+        obligations: &mut obligations,
+    }
+    .close()?;
+    let mut schemes = declarations.signatures;
     let mut closed_bodies = BTreeMap::new();
     let mut drafts = BTreeMap::new();
-    let mut obligations = Vec::new();
     let mut calls = Vec::new();
     for identity in &function_order {
         let header = &headers[identity];
@@ -668,319 +676,39 @@ fn check_prepared_project(
             },
         )?;
         pending_functions.retain(|identity| !group.contains(identity));
-        let members = group.iter().cloned().collect::<BTreeSet<_>>();
-        let mut group_drafts = BTreeMap::new();
-        for identity in &group {
-            let mut body = drafts.remove(identity).expect("one draft per body");
-            materialize_calls(&mut body, &mut calls);
-            let header = &headers[identity];
-            if body.ty == CheckedType::Never
-                && matches!(
-                    inference.resolve(&header.return_type),
-                    CheckedType::Infer(_)
-                )
-            {
-                inference
-                    .unify(&body.ty, &header.return_type)
-                    .expect("an inferred bottom result binds once");
-            }
-            inference
-                .satisfy(&body.ty, &header.return_type)
-                .map_err(|failure| {
-                    source_diagnostic(
-                        CheckDiagnosticKind::ReturnMismatch,
-                        format!(
-                            "function body cannot satisfy its return type: {}",
-                            display_unification_failure(&failure)
-                        ),
-                        header.context.origin(body.span),
-                        vec![origin_as_source(&header.return_origin, &header.origin)],
-                    )
-                })?;
-            group_drafts.insert(identity.clone(), body);
-        }
-        validate_type_obligations(
-            &mut obligations,
-            &mut inference,
-            project,
-            &normalizer.nominals,
-            &members,
-            &traits,
-            &headers,
-        )?;
-        validate_group_values(&group, &mut headers, &traits, project, &inference)?;
-        apply_contract_type_constraints(
-            &group,
-            &mut headers,
-            &contract_selections,
-            &mut inference,
-        )?;
-        validate_contracted_inference_is_explicit(
-            &group,
-            &headers,
-            &contract_selections,
-            &inference,
-        )?;
-
-        infer_parameter_modes(&group, &mut headers, &group_drafts, &inference)?;
-        let preliminary_effects = infer_group_effects(
-            &group,
-            &headers,
-            &schemes,
-            &mut group_drafts,
-            &mut inference,
-            TypeEnvironment {
+        let closed = GroupClosure {
+            types: TypeEnvironment {
                 project,
                 traits: &traits,
                 nominals: &normalizer.nominals,
             },
-            &calls,
-        )?;
-        constrain_flexible_effects(
-            &group,
-            &mut headers,
-            &schemes,
-            &mut group_drafts,
-            &preliminary_effects,
-            &mut inference,
-            TypeEnvironment {
-                project,
-                traits: &traits,
-                nominals: &normalizer.nominals,
-            },
-        )?;
-        validate_whole_value_use(&group, &headers, &mut group_drafts, &inference)?;
-
-        let group_effects = infer_group_effects(
-            &group,
-            &headers,
-            &schemes,
-            &mut group_drafts,
-            &mut inference,
-            TypeEnvironment {
-                project,
-                traits: &traits,
-                nominals: &normalizer.nominals,
-            },
-            &calls,
-        )?;
-        validate_group_effects(
-            &group,
-            &headers,
-            &schemes,
-            &mut group_drafts,
-            &group_effects,
-            &mut inference,
-            TypeEnvironment {
-                project,
-                traits: &traits,
-                nominals: &normalizer.nominals,
-            },
-        )?;
-
-        // Close demands in the shared monotype graph before introducing any
-        // generalized scheme binders. Calls refer to exact group bindings.
-        let mut requirements = BTreeMap::new();
-        let mut callers: BTreeMap<EntityId, Vec<(EntityId, Span)>> = BTreeMap::new();
-        for identity in &group {
-            let header = &headers[identity];
-            let body = &group_drafts[identity];
-            let mut variables = BTreeSet::new();
-            let mut formals = BTreeSet::new();
-            for ty in header
-                .parameters
-                .iter()
-                .map(|parameter| &parameter.ty)
-                .chain(std::iter::once(&header.return_type))
-            {
-                collect_inference_inputs(&inference, ty, &mut variables, &mut formals);
-            }
-            collect_header_inputs(header, &inference, &mut variables, &mut formals);
-            let mut scope = type_dependencies(&inference, &variables, &formals);
-            scope.extend(
-                header
-                    .declared_formals
-                    .iter()
-                    .chain(&header.outer_formals)
-                    .map(|formal| CheckedType::Formal(Box::new(inference.formal_root(formal)))),
-            );
-            let mut recursive_calls = Vec::new();
-            collect_typed_variables(
-                body,
-                &inference,
-                &mut variables,
-                &mut formals,
-                &mut recursive_calls,
-            );
-            let required = type_dependencies(&inference, &variables, &formals);
-            if !required.is_subset(&scope) {
-                return Err(unbound_body_type(
-                    header.context.origin(body.span),
-                    Vec::new(),
-                ));
-            }
-            requirements.insert(identity.clone(), GroupTypeRequirements { scope, required });
-            for (callee, span) in recursive_calls {
-                callers
-                    .entry(callee)
-                    .or_default()
-                    .push((identity.clone(), span));
-            }
+            headers: &mut headers,
+            schemes: &schemes,
+            inference: &mut inference,
+            obligations: &mut obligations,
+            calls: &mut calls,
+            contract_selections: &contract_selections,
+            public_exports: &public_exports,
         }
-
-        // Propagate each actual type demand to every recursive caller. The
-        // finite worklist contains shared inference identities, not new types.
-        let mut pending = requirements
-            .iter()
-            .flat_map(|(identity, member)| {
-                member
-                    .required
-                    .iter()
-                    .map(|shared| (identity.clone(), shared.clone()))
-            })
-            .collect::<VecDeque<_>>();
-        while let Some((callee, shared)) = pending.pop_front() {
-            for (caller, span) in callers.get(&callee).into_iter().flatten() {
-                let member = requirements
-                    .get_mut(caller)
-                    .expect("recursive caller is in the group");
-                if !member.scope.contains(&shared) {
-                    return Err(unbound_body_type(
-                        headers[caller].context.origin(*span),
-                        vec![headers[&callee].origin.clone()],
-                    ));
-                }
-                if member.required.insert(shared.clone()) {
-                    pending.push_back((caller.clone(), shared.clone()));
-                }
-            }
-        }
-
-        // Generalize the now-closed group. Keep each binder's original shared
-        // type identity so recursive actuals are never inferred from final types.
-        let mut group_members = BTreeMap::new();
-        for identity in &group {
-            let generalization =
-                function_generalization(identity, &headers[identity], &mut inference);
-            let required = requirements[identity]
-                .required
-                .iter()
-                .map(|shared| {
-                    generalization
-                        .formal_for(shared, &inference)
-                        .expect("every closed group demand has a binder in the function scope")
-                        .clone()
-                })
-                .collect();
-            group_members.insert(
-                identity.clone(),
-                GroupMember {
-                    generalization,
-                    required,
-                },
-            );
-        }
-
-        let mut group_schemes = BTreeMap::new();
-        let mut group_bodies = BTreeMap::new();
-        for identity in &group {
-            let header = &headers[identity];
-            let member = &group_members[identity];
-            let closure = BodyClosure {
-                inference: &inference,
-                function: &member.generalization,
-                group: &group_members,
-                obligations: &obligations,
-            };
-            group_schemes.insert(
-                identity.clone(),
-                CallableScheme {
-                    quantified: member
-                        .generalization
-                        .bindings
-                        .iter()
-                        .map(|(formal, _)| formal.clone())
-                        .collect(),
-                    instantiation_formals: member.required.clone(),
-                    parameters: header
-                        .parameters
-                        .iter()
-                        .map(|parameter| closure.close_type(&parameter.ty))
-                        .collect(),
-                    return_type: closure.close_type(&header.return_type),
-                    effect: group_effects[identity].close(&closure),
-                    effect_formals: header
-                        .effect_formals
-                        .iter()
-                        .map(|(_, formal)| formal.clone())
-                        .collect(),
-                    effect_caps: header
-                        .effect_caps
-                        .iter()
-                        .map(|(formal, bounds)| {
-                            (
-                                formal.clone(),
-                                bounds.iter().map(|row| row.close(&closure)).collect(),
-                            )
-                        })
-                        .collect(),
-                    shapes: header
-                        .shapes
-                        .iter()
-                        .map(|(formal, shape)| (formal.clone(), shape.close(&closure)))
-                        .collect(),
-                    requirements: header
-                        .requirements
-                        .iter()
-                        .chain(&header.outer_requirements)
-                        .cloned()
-                        .map(|requirement| close_requirement(requirement, &closure))
-                        .collect(),
-                },
-            );
-            let formation_evidence = header
-                .formation_evidence
-                .iter()
-                .cloned()
-                .map(|evidence| close_evidence(evidence, &closure))
-                .collect();
-            headers.get_mut(identity).unwrap().formation_evidence = formation_evidence;
-            group_bodies.insert(
-                identity.clone(),
-                close_typed_block(
-                    group_drafts
-                        .remove(identity)
-                        .expect("every member has one typed draft"),
-                    &closure,
-                ),
-            );
-        }
-
-        for (identity, scheme) in &group_schemes {
-            let header = headers
-                .get_mut(identity)
-                .expect("a closed group scheme retains its source header");
-            if header.public_export {
-                validate_public_effect_row(&scheme.effect, &public_exports, &header.origin)?;
-                for ty in scheme
-                    .parameters
-                    .iter()
-                    .chain(std::iter::once(&scheme.return_type))
-                {
-                    validate_public_nominals(ty, &public_exports, &header.origin)?;
-                }
-            }
-            for (parameter, closed) in header.parameters.iter_mut().zip(&scheme.parameters) {
-                parameter.ty = closed.clone();
-            }
-            header.return_type = scheme.return_type.clone();
-            header.shapes = scheme.shapes.clone();
-            header.effect_caps = scheme.effect_caps.clone();
-        }
-        schemes.extend(group_schemes);
-        closed_bodies.extend(group_bodies);
+        .close(&group, &mut drafts)?;
+        schemes.extend(closed.schemes);
+        closed_bodies.extend(closed.bodies);
     }
 
+    if !drafts.is_empty()
+        || function_order.iter().cloned().collect::<BTreeSet<_>>()
+            != closed_bodies.keys().cloned().collect()
+        || headers.keys().cloned().collect::<BTreeSet<_>>() != schemes.keys().cloned().collect()
+    {
+        return Err(CheckDiagnostic {
+            kind: CheckDiagnosticKind::Unsupported,
+            message:
+                "incomplete solve: declaration and body inventories differ at project assembly"
+                    .to_owned(),
+            primary: None,
+            related: Vec::new(),
+        });
+    }
     let mut functions = BTreeMap::new();
     for identity in function_order {
         let header = headers
@@ -1018,7 +746,6 @@ fn check_prepared_project(
                 effect_caps: scheme.effect_caps,
                 shapes: scheme.shapes,
                 requirements: scheme.requirements,
-                formation_evidence: header.formation_evidence.clone(),
                 body,
             },
         );
@@ -1047,6 +774,10 @@ fn check_prepared_project(
         nominals,
         functions,
         signatures: schemes,
+        checks: obligations
+            .into_iter()
+            .map(TypeObligation::into_closed)
+            .collect::<Result<_, _>>()?,
     })
 }
 
@@ -1178,6 +909,443 @@ fn unbound_body_type(origin: OriginRef, related: Vec<OriginRef>) -> CheckDiagnos
         origin,
         related,
     )
+}
+
+struct ClosedGroup {
+    schemes: BTreeMap<EntityId, CallableScheme>,
+    bodies: BTreeMap<EntityId, TypedBlock>,
+}
+
+struct GroupClosure<'a> {
+    types: TypeEnvironment<'a>,
+    headers: &'a mut BTreeMap<EntityId, FunctionHeader>,
+    schemes: &'a BTreeMap<EntityId, CallableScheme>,
+    inference: &'a mut TypeInference,
+    obligations: &'a mut Vec<TypeObligation>,
+    calls: &'a mut [DraftCall],
+    contract_selections: &'a ContractSelections,
+    public_exports: &'a BTreeSet<EntityId>,
+}
+
+impl GroupClosure<'_> {
+    fn close(
+        self,
+        group: &[EntityId],
+        drafts: &mut BTreeMap<EntityId, TypedBlock>,
+    ) -> Result<ClosedGroup, CheckDiagnostic> {
+        let Self {
+            types:
+                TypeEnvironment {
+                    project,
+                    traits,
+                    nominals,
+                },
+            headers,
+            schemes,
+            inference,
+            obligations,
+            calls,
+            contract_selections,
+            public_exports,
+        } = self;
+        let mut group_drafts = BTreeMap::new();
+        let members = group.iter().cloned().collect::<BTreeSet<_>>();
+        for identity in group {
+            let mut body = drafts.remove(identity).expect("one draft per body");
+            materialize_calls(&mut body, calls);
+            let header = &headers[identity];
+            if body.ty == CheckedType::Never
+                && matches!(
+                    inference.resolve(&header.return_type),
+                    CheckedType::Infer(_)
+                )
+            {
+                inference
+                    .unify(&body.ty, &header.return_type)
+                    .expect("an inferred bottom result binds once");
+            }
+            inference
+                .satisfy(&body.ty, &header.return_type)
+                .map_err(|failure| {
+                    source_diagnostic(
+                        CheckDiagnosticKind::ReturnMismatch,
+                        format!(
+                            "function body cannot satisfy its return type: {}",
+                            display_unification_failure(&failure)
+                        ),
+                        header.context.origin(body.span),
+                        vec![origin_as_source(&header.return_origin, &header.origin)],
+                    )
+                })?;
+            group_drafts.insert(identity.clone(), body);
+        }
+        validate_type_obligations(
+            obligations,
+            inference,
+            project,
+            nominals,
+            &members,
+            traits,
+            headers,
+        )?;
+        apply_contract_type_constraints(group, headers, contract_selections, inference)?;
+        validate_contracted_inference_is_explicit(group, headers, contract_selections, inference)?;
+
+        loop {
+            let before = inference.revision;
+            let preliminary_effects = infer_group_effects(
+                group,
+                headers,
+                schemes,
+                &mut group_drafts,
+                inference,
+                TypeEnvironment {
+                    project,
+                    traits,
+                    nominals,
+                },
+                calls,
+            )?;
+            constrain_flexible_effects(
+                group,
+                headers,
+                schemes,
+                &mut group_drafts,
+                &preliminary_effects,
+                inference,
+                TypeEnvironment {
+                    project,
+                    traits,
+                    nominals,
+                },
+            )?;
+            validate_group_effects(
+                group,
+                headers,
+                schemes,
+                &mut group_drafts,
+                &preliminary_effects,
+                inference,
+                TypeEnvironment {
+                    project,
+                    traits,
+                    nominals,
+                },
+            )?;
+            if inference.revision == before {
+                break;
+            }
+        }
+        infer_parameter_modes(group, headers, &group_drafts, inference)?;
+        validate_whole_value_use(group, headers, &mut group_drafts, inference)?;
+
+        let group_effects = infer_group_effects(
+            group,
+            headers,
+            schemes,
+            &mut group_drafts,
+            inference,
+            TypeEnvironment {
+                project,
+                traits,
+                nominals,
+            },
+            calls,
+        )?;
+        validate_group_effects(
+            group,
+            headers,
+            schemes,
+            &mut group_drafts,
+            &group_effects,
+            inference,
+            TypeEnvironment {
+                project,
+                traits,
+                nominals,
+            },
+        )?;
+
+        for identity in group {
+            let mut inputs = header_inputs(&headers[identity]);
+            inputs.extend(body_inputs(
+                &group_drafts[identity],
+                &headers[identity],
+                headers,
+                Some(obligations),
+            )?);
+            let obligation = obligations
+                .iter_mut()
+                .find(|obligation| {
+                    &obligation.owner == identity
+                        && matches!(obligation.kind, TypeObligationKind::Semantic(_))
+                })
+                .expect("each callable has an input obligation before its body is generated");
+            obligation.kind = TypeObligationKind::Semantic(inputs);
+            obligation.evidence = ObligationState::Pending;
+        }
+        validate_type_obligations(
+            obligations,
+            inference,
+            project,
+            nominals,
+            &members,
+            traits,
+            headers,
+        )?;
+        // Close demands in the shared monotype graph before introducing any
+        // generalized scheme binders. Calls refer to exact group bindings.
+        let mut requirements = BTreeMap::new();
+        let mut callers: BTreeMap<EntityId, Vec<(EntityId, Span)>> = BTreeMap::new();
+        for identity in group {
+            normalize_header(
+                project,
+                traits,
+                headers.get_mut(identity).unwrap(),
+                inference,
+            )?;
+            let header = &headers[identity];
+            let body = &group_drafts[identity];
+            let mut variables = BTreeSet::new();
+            let mut formals = BTreeSet::new();
+            for ty in header
+                .parameters
+                .iter()
+                .map(|parameter| &parameter.ty)
+                .chain(std::iter::once(&header.return_type))
+            {
+                collect_inference_inputs(inference, ty, &mut variables, &mut formals);
+            }
+            collect_header_inputs(header, inference, &mut variables, &mut formals);
+            let mut scope = type_dependencies(inference, &variables, &formals);
+            scope.extend(
+                header
+                    .declared_formals
+                    .iter()
+                    .chain(&header.outer_formals)
+                    .map(|formal| CheckedType::Formal(Box::new(inference.formal_root(formal)))),
+            );
+            let mut recursive_calls = Vec::new();
+            collect_typed_variables(
+                body,
+                inference,
+                &mut variables,
+                &mut formals,
+                &mut recursive_calls,
+            );
+            let required = type_dependencies(inference, &variables, &formals);
+            if !required.is_subset(&scope) {
+                return Err(unbound_body_type(
+                    header.context.origin(body.span),
+                    Vec::new(),
+                ));
+            }
+            requirements.insert(identity.clone(), GroupTypeRequirements { scope, required });
+            for (callee, span) in recursive_calls {
+                callers
+                    .entry(callee)
+                    .or_default()
+                    .push((identity.clone(), span));
+            }
+        }
+
+        // Propagate each actual type demand to every recursive caller. The
+        // finite worklist contains shared inference identities, not new types.
+        let mut pending = requirements
+            .iter()
+            .flat_map(|(identity, member)| {
+                member
+                    .required
+                    .iter()
+                    .map(|shared| (identity.clone(), shared.clone()))
+            })
+            .collect::<VecDeque<_>>();
+        while let Some((callee, shared)) = pending.pop_front() {
+            for (caller, span) in callers.get(&callee).into_iter().flatten() {
+                let member = requirements
+                    .get_mut(caller)
+                    .expect("recursive caller is in the group");
+                if !member.scope.contains(&shared) {
+                    return Err(unbound_body_type(
+                        headers[caller].context.origin(*span),
+                        vec![headers[&callee].origin.clone()],
+                    ));
+                }
+                if member.required.insert(shared.clone()) {
+                    pending.push_back((caller.clone(), shared.clone()));
+                }
+            }
+        }
+
+        // Generalize the now-closed group. Keep each binder's original shared
+        // type identity so recursive actuals are never inferred from final types.
+        let mut group_members = BTreeMap::new();
+        for identity in group {
+            let generalization = function_generalization(identity, &headers[identity], inference);
+            let required = requirements[identity]
+                .required
+                .iter()
+                .map(|shared| {
+                    generalization
+                        .formal_for(shared, inference)
+                        .expect("every closed group demand has a binder in the function scope")
+                        .clone()
+                })
+                .collect();
+            group_members.insert(
+                identity.clone(),
+                GroupMember {
+                    generalization,
+                    required,
+                },
+            );
+        }
+
+        validate_type_obligations(
+            obligations,
+            inference,
+            project,
+            nominals,
+            &members,
+            traits,
+            headers,
+        )?;
+        let mut group_schemes = BTreeMap::new();
+        let mut group_bodies = BTreeMap::new();
+        for identity in group {
+            let header = &headers[identity];
+            let member = &group_members[identity];
+            let closure = BodyClosure {
+                inference,
+                function: &member.generalization,
+                group: &group_members,
+                obligations,
+            };
+            group_schemes.insert(
+                identity.clone(),
+                CallableScheme {
+                    quantified: member
+                        .generalization
+                        .bindings
+                        .iter()
+                        .map(|(formal, _)| formal.clone())
+                        .collect(),
+                    instantiation_formals: member.required.clone(),
+                    parameters: header
+                        .parameters
+                        .iter()
+                        .map(|parameter| closure.close_type(&parameter.ty))
+                        .collect(),
+                    return_type: closure.close_type(&header.return_type),
+                    effect: group_effects[identity].close(&closure),
+                    effect_formals: header
+                        .effect_formals
+                        .iter()
+                        .map(|(_, formal)| formal.clone())
+                        .collect(),
+                    effect_caps: header
+                        .effect_caps
+                        .iter()
+                        .map(|(formal, bounds)| {
+                            (
+                                formal.clone(),
+                                bounds.iter().map(|row| row.close(&closure)).collect(),
+                            )
+                        })
+                        .collect(),
+                    shapes: header
+                        .shapes
+                        .iter()
+                        .map(|(formal, shape)| (formal.clone(), shape.close(&closure)))
+                        .collect(),
+                    requirements: header
+                        .requirements
+                        .iter()
+                        .chain(&header.outer_requirements)
+                        .cloned()
+                        .map(|requirement| close_requirement(requirement, &closure))
+                        .collect(),
+                },
+            );
+            group_bodies.insert(
+                identity.clone(),
+                close_typed_block(
+                    group_drafts
+                        .remove(identity)
+                        .expect("every member has one typed draft"),
+                    &closure,
+                ),
+            );
+        }
+
+        for (identity, scheme) in &group_schemes {
+            require_closed_scheme(scheme, &headers[identity].origin)?;
+            let inputs = body_inputs(&group_bodies[identity], &headers[identity], headers, None)?;
+            require_closed_inputs(
+                inputs,
+                &scheme.quantified.iter().cloned().collect(),
+                &scheme.effect_formals.iter().cloned().collect(),
+            )?;
+        }
+        for (identity, scheme) in &group_schemes {
+            let header = headers
+                .get_mut(identity)
+                .expect("a closed group scheme retains its source header");
+            if header.public_export {
+                validate_public_effect_row(&scheme.effect, public_exports, &header.origin)?;
+                for ty in scheme
+                    .parameters
+                    .iter()
+                    .chain(std::iter::once(&scheme.return_type))
+                {
+                    validate_public_nominals(ty, public_exports, &header.origin)?;
+                }
+            }
+            for (parameter, closed) in header.parameters.iter_mut().zip(&scheme.parameters) {
+                parameter.ty = closed.clone();
+            }
+            header.return_type = scheme.return_type.clone();
+            header.shapes = scheme.shapes.clone();
+            header.effect_caps = scheme.effect_caps.clone();
+        }
+
+        for obligation in obligations
+            .iter_mut()
+            .filter(|obligation| members.contains(&obligation.owner))
+        {
+            let closure = BodyClosure {
+                inference,
+                function: &group_members[&obligation.owner].generalization,
+                group: &group_members,
+                obligations: &[],
+            };
+            let evidence = obligation
+                .solved_evidence(inference.revision)?
+                .iter()
+                .cloned()
+                .map(|evidence| close_evidence(evidence, &closure))
+                .collect::<Vec<_>>();
+            let scheme = &group_schemes[&obligation.owner];
+            require_closed_inputs(
+                evidence
+                    .iter()
+                    .cloned()
+                    .map(|proof| LocatedInput {
+                        exposed: false,
+                        origin: obligation.primary.clone(),
+                        value: SemanticInput::Evidence(proof),
+                    })
+                    .collect(),
+                &scheme.quantified.iter().cloned().collect(),
+                &scheme.effect_formals.iter().cloned().collect(),
+            )?;
+            obligation.evidence = ObligationState::Closed(evidence);
+        }
+        Ok(ClosedGroup {
+            schemes: group_schemes,
+            bodies: group_bodies,
+        })
+    }
 }
 
 fn function_generalization(
@@ -1597,7 +1765,7 @@ fn close_typed_expr(expression: TypedExpr, closure: &BodyClosure<'_>) -> TypedEx
                     else {
                         unreachable!("every field selection closes before publication")
                     };
-                    FieldSelection::Exact(identity.clone(), obligation.primary.clone())
+                    FieldSelection::Exact(identity.clone(), obligation.source_origin())
                 }
                 exact => exact,
             };
@@ -2222,7 +2390,7 @@ struct FunctionHeader {
     contract_shapes: Vec<Vec<ContractShape>>,
     effect_origin: Option<CheckOrigin>,
     source_requirements_explicit: bool,
-    formation_evidence: Vec<Evidence>,
+    semantic_inputs: Vec<LocatedInput>,
 }
 
 #[derive(Clone)]
@@ -2395,6 +2563,14 @@ impl SourceTypeNormalizer {
                                 occurrence, target, ..
                             } => (occurrence, target),
                             reference @ ResolvedReference::Selection { .. } => {
+                                if !named.arguments.is_empty() {
+                                    return Err(source_diagnostic(
+                                        CheckDiagnosticKind::TypeMismatch,
+                                        "associated types do not accept type arguments",
+                                        reference_origin(&reference).clone(),
+                                        Vec::new(),
+                                    ));
+                                }
                                 values.push(self.normalize_projection(&reference, formals)?);
                                 continue;
                             }
@@ -3348,7 +3524,7 @@ fn collect_function_header(
         public_export,
         declared_formals,
         outer_formals: Vec::new(),
-        formation_evidence: Vec::new(),
+        semantic_inputs: Vec::new(),
         formal_by_identity,
         parameters,
         return_type,
@@ -6389,7 +6565,6 @@ struct CheckedFunction {
     effect_caps: BTreeMap<EffectFormal, Vec<CheckedEffect>>,
     shapes: BTreeMap<TypeFormal, CallableShape>,
     requirements: Vec<Requirement>,
-    formation_evidence: Vec<Evidence>,
     body: TypedBlock,
 }
 
@@ -6530,7 +6705,8 @@ impl ObligationEvidence {
         };
         Self::Closed(
             closure.obligations[index]
-                .evidence
+                .solved_evidence(closure.inference.revision)
+                .expect("group closure checked every obligation before freezing receipts")
                 .iter()
                 .cloned()
                 .map(|evidence| close_evidence(evidence, closure))
@@ -6578,13 +6754,16 @@ struct ComparisonEvidence {
 }
 
 enum TypeObligationKind {
-    Formation,
-    Numeric,
+    Formation(CheckedType),
+    Numeric(CheckedType),
+    Semantic(Vec<LocatedInput>),
     TupleProjection {
+        receiver: CheckedType,
         index: usize,
         result: CheckedType,
     },
     FieldProjection {
+        receiver: CheckedType,
         field: Box<ResolvedSelection>,
         result: CheckedType,
         selected: Option<Box<EntityId>>,
@@ -6593,10 +6772,9 @@ enum TypeObligationKind {
 
 struct TypeObligation {
     owner: EntityId,
-    evidence: Vec<Evidence>,
+    evidence: ObligationState,
     kind: TypeObligationKind,
-    ty: CheckedType,
-    primary: OriginRef,
+    primary: CheckOrigin,
     related: Vec<OriginRef>,
 }
 
@@ -6609,44 +6787,58 @@ fn validate_type_obligations(
     traits: &TraitEnvironment,
     headers: &BTreeMap<EntityId, FunctionHeader>,
 ) -> Result<(), CheckDiagnostic> {
-    // All projections consume the same body constraints before numeric checks.
     let mut pending = obligations
         .iter()
         .enumerate()
-        .filter(|(_, obligation)| members.contains(&obligation.owner))
         .filter_map(|(index, obligation)| {
-            matches!(
-                obligation.kind,
-                TypeObligationKind::TupleProjection { .. }
-                    | TypeObligationKind::FieldProjection { .. }
-            )
+            (members.contains(&obligation.owner)
+                && matches!(
+                    obligation.kind,
+                    TypeObligationKind::TupleProjection { .. }
+                        | TypeObligationKind::FieldProjection { .. }
+                ))
             .then_some(index)
         })
         .collect::<Vec<_>>();
     while !pending.is_empty() {
-        let previous_count = pending.len();
+        let previous = pending.len();
         let mut deferred = Vec::new();
         for index in pending {
             let obligation = &mut obligations[index];
-            let receiver = inference.resolve(&obligation.ty);
+            let origin = obligation.source_origin();
             let (field_type, result) = match &mut obligation.kind {
-                TypeObligationKind::TupleProjection { index, result } => (
-                    tuple_field_type(&receiver, *index, &obligation.primary, &obligation.related)?,
+                TypeObligationKind::TupleProjection {
+                    receiver,
+                    index,
+                    result,
+                } => (
+                    tuple_field_type(
+                        &inference.resolve(receiver),
+                        *index,
+                        &origin,
+                        &obligation.related,
+                    )?,
                     result,
                 ),
                 TypeObligationKind::FieldProjection {
+                    receiver,
                     field,
                     result,
                     selected,
                 } => {
-                    let resolved = nominal_field_type(&receiver, field, project, nominals)?;
+                    let resolved =
+                        nominal_field_type(&inference.resolve(receiver), field, project, nominals)?;
                     let ty = resolved.map(|(identity, ty)| {
                         *selected = Some(Box::new(identity));
                         ty
                     });
                     (ty, result)
                 }
-                _ => unreachable!("only projections enter the pending equations"),
+                TypeObligationKind::Formation(_)
+                | TypeObligationKind::Numeric(_)
+                | TypeObligationKind::Semantic(_) => {
+                    unreachable!("only projections enter the pending equations")
+                }
             };
             let Some(field_type) = field_type else {
                 deferred.push(index);
@@ -6664,17 +6856,17 @@ fn validate_type_obligations(
                         "projection result is incompatible: {}",
                         display_unification_failure(&failure)
                     ),
-                    obligation.primary.clone(),
+                    origin,
                     obligation.related.clone(),
                 )
             })?;
         }
-        if deferred.len() == previous_count {
+        if deferred.len() == previous {
             let obligation = &obligations[deferred[0]];
             return Err(source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
                 "projection requires a known receiver structure after recursive-group inference",
-                obligation.primary.clone(),
+                obligation.source_origin(),
                 obligation.related.clone(),
             ));
         }
@@ -6684,45 +6876,55 @@ fn validate_type_obligations(
         .iter_mut()
         .filter(|obligation| members.contains(&obligation.owner))
     {
-        let ty = inference.resolve(&obligation.ty);
-        let result = match &obligation.kind {
-            TypeObligationKind::Formation => {
-                let header = &headers[&obligation.owner];
-                let givens = header
-                    .requirements
-                    .iter()
-                    .chain(&header.outer_requirements)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                obligation.evidence = TraitSolver::new(
-                    traits,
-                    project,
-                    inference,
-                    &givens,
-                    obligation.primary.clone(),
-                )?
-                .formation(&ty, nominals)?;
-                Ok(())
-            }
-            TypeObligationKind::Numeric => match ty {
-                CheckedType::Int | CheckedType::Float | CheckedType::Never => Ok(()),
-                CheckedType::Infer(_) | CheckedType::Formal(_) => Err(source_diagnostic(
-                    CheckDiagnosticKind::Unsupported,
-                    "arithmetic on a generic value requires later numeric Trait selection",
-                    obligation.primary.clone(),
-                    obligation.related.clone(),
-                )),
-                other => Err(source_diagnostic(
-                    CheckDiagnosticKind::TypeMismatch,
-                    format!("numeric operation does not accept {}", display_type(&other)),
-                    obligation.primary.clone(),
-                    obligation.related.clone(),
-                )),
-            },
-            TypeObligationKind::TupleProjection { .. }
-            | TypeObligationKind::FieldProjection { .. } => Ok(()),
+        let environment = TypeEnvironment {
+            project,
+            traits,
+            nominals,
         };
-        result?;
+        let evidence = match &obligation.kind {
+            TypeObligationKind::Formation(ty) => check_semantic_inputs(
+                &obligation.owner,
+                &[LocatedInput {
+                    exposed: false,
+                    origin: obligation.primary.clone(),
+                    value: SemanticInput::Type(ty.clone(), TypeUse::Value),
+                }],
+                environment,
+                headers,
+                inference,
+            )?,
+            TypeObligationKind::Semantic(inputs) => {
+                check_semantic_inputs(&obligation.owner, inputs, environment, headers, inference)?
+            }
+            TypeObligationKind::Numeric(ty) => {
+                match inference.resolve(ty) {
+                    CheckedType::Int | CheckedType::Float | CheckedType::Never => {}
+                    CheckedType::Infer(_) | CheckedType::Formal(_) => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::Unsupported,
+                            "arithmetic on a generic value requires later numeric Trait selection",
+                            obligation.source_origin(),
+                            obligation.related.clone(),
+                        ));
+                    }
+                    other => {
+                        return Err(source_diagnostic(
+                            CheckDiagnosticKind::TypeMismatch,
+                            format!("numeric operation does not accept {}", display_type(&other)),
+                            obligation.source_origin(),
+                            obligation.related.clone(),
+                        ));
+                    }
+                }
+                Vec::new()
+            }
+            TypeObligationKind::TupleProjection { .. }
+            | TypeObligationKind::FieldProjection { .. } => Vec::new(),
+        };
+        obligation.evidence = ObligationState::Solved {
+            revision: inference.revision,
+            evidence,
+        };
     }
     Ok(())
 }
@@ -7101,14 +7303,14 @@ impl<'borrow> BodyChecker<'borrow> {
                 let index = self.obligations.len();
                 self.obligations.push(TypeObligation {
                     owner: self.function.identity.clone(),
-                    evidence: Vec::new(),
+                    evidence: ObligationState::Pending,
                     kind: TypeObligationKind::FieldProjection {
+                        receiver: receiver.ty.clone(),
                         field: Box::new(field.clone()),
                         result: result.clone(),
                         selected: None,
                     },
-                    ty: receiver.ty.clone(),
-                    primary: field.origin.clone(),
+                    primary: CheckOrigin::Source(field.origin.clone()),
                     related: vec![self.origin(receiver.span)],
                 });
                 Ok(TypedExpr {
@@ -7144,12 +7346,11 @@ impl<'borrow> BodyChecker<'borrow> {
                 };
                 self.obligations.push(TypeObligation {
                     owner: self.function.identity.clone(),
-                    evidence: Vec::new(),
-                    kind: TypeObligationKind::Formation,
-                    ty: CheckedType::Tuple(
+                    evidence: ObligationState::Pending,
+                    kind: TypeObligationKind::Formation(CheckedType::Tuple(
                         typed.iter().map(|element| element.ty.clone()).collect(),
-                    ),
-                    primary: origin.clone(),
+                    )),
+                    primary: CheckOrigin::Source(origin.clone()),
                     related: Vec::new(),
                 });
                 Ok(TypedExpr {
@@ -7324,10 +7525,9 @@ impl<'borrow> BodyChecker<'borrow> {
                 CheckedType::Infer(_) | CheckedType::Formal(_) => {
                     self.obligations.push(TypeObligation {
                         owner: self.function.identity.clone(),
-                        evidence: Vec::new(),
-                        kind: TypeObligationKind::Numeric,
-                        ty: operand.ty.clone(),
-                        primary: self.origin(operator.0),
+                        evidence: ObligationState::Pending,
+                        kind: TypeObligationKind::Numeric(operand.ty.clone()),
+                        primary: CheckOrigin::Source(self.origin(operator.0)),
                         related: vec![self.origin(operand.span)],
                     });
                 }
@@ -7416,10 +7616,9 @@ impl<'borrow> BodyChecker<'borrow> {
                     CheckedType::Infer(_) | CheckedType::Formal(_) => {
                         self.obligations.push(TypeObligation {
                             owner: self.function.identity.clone(),
-                            evidence: Vec::new(),
-                            kind: TypeObligationKind::Numeric,
-                            ty: operand_type.clone(),
-                            primary: self.origin(operator.0),
+                            evidence: ObligationState::Pending,
+                            kind: TypeObligationKind::Numeric(operand_type.clone()),
+                            primary: CheckOrigin::Source(self.origin(operator.0)),
                             related: vec![self.origin(left.span), self.origin(right.span)],
                         });
                     }
@@ -7672,13 +7871,13 @@ impl<'borrow> BodyChecker<'borrow> {
             let result = self.inference.fresh();
             self.obligations.push(TypeObligation {
                 owner: self.function.identity.clone(),
-                evidence: Vec::new(),
+                evidence: ObligationState::Pending,
                 kind: TypeObligationKind::TupleProjection {
+                    receiver: receiver.ty.clone(),
                     index,
                     result: result.clone(),
                 },
-                ty: receiver.ty.clone(),
-                primary: index_origin.clone(),
+                primary: CheckOrigin::Source(index_origin.clone()),
                 related,
             });
             result
@@ -7882,10 +8081,9 @@ impl BodyChecker<'_> {
         let formation = self.obligations.len();
         self.obligations.push(TypeObligation {
             owner: self.function.identity.clone(),
-            evidence: Vec::new(),
-            kind: TypeObligationKind::Formation,
-            ty: CheckedType::Nominal(Box::new(nominal.clone())),
-            primary: origin.clone(),
+            evidence: ObligationState::Pending,
+            kind: TypeObligationKind::Formation(CheckedType::Nominal(Box::new(nominal.clone()))),
+            primary: CheckOrigin::Source(origin.clone()),
             related: Vec::new(),
         });
         let ty = if fields.iter().any(|field| self.is_never(&field.value.ty)) {
@@ -8817,6 +9015,73 @@ fn broad() -> Unit with {fail<Int>} { ignore(actual) }
             call.effect_actuals.iter().all(|(_, row)| row.is_empty()),
             "unique least row must be empty after T = Int"
         );
+    }
+
+    #[test]
+    fn declaration_and_body_closure_retain_completed_checks_and_symbolic_shapes() {
+        let source = "trait Has { type Item; fn use_item<F: Fn + fn(Self::Item) -> Unit with {}>(self: &Self, callback: call F); } fn leaf() -> Int { 1 }";
+        let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new()).unwrap();
+        let (owner, function) = checked
+            .functions
+            .iter()
+            .find(|(owner, _)| owner.name == "leaf")
+            .unwrap();
+        assert!(
+            checked
+                .checks
+                .iter()
+                .any(|check| &check.owner == owner && check.evidence.is_empty())
+        );
+        assert!(checked.checks.iter().any(|check| check.owner.name == "Has"));
+        assert!(
+            checked
+                .checks
+                .iter()
+                .any(|check| check.owner.name == "use_item")
+        );
+        let signature = checked
+            .signatures
+            .iter()
+            .find(|(owner, _)| owner.name == "use_item")
+            .unwrap()
+            .1;
+        let shape = signature.shapes.values().next().unwrap();
+        let CheckedType::Projection(projection) = &shape.parameters[0].0 else {
+            panic!("abstract associated type remains symbolic");
+        };
+        assert_eq!(projection.member.as_ref().unwrap().name, "Item");
+        assert_eq!(projection.bound.as_ref().unwrap().declaration.name, "Has");
+        let origin = CheckOrigin::Source(function.origin.clone());
+        let mut pending = TypeObligation {
+            owner: owner.clone(),
+            primary: origin.clone(),
+            related: Vec::new(),
+            kind: TypeObligationKind::Semantic(Vec::new()),
+            evidence: ObligationState::Pending,
+        };
+        assert!(pending.solved_evidence(0).is_err());
+        pending.evidence = ObligationState::Solved {
+            revision: 0,
+            evidence: Vec::new(),
+        };
+        assert!(pending.solved_evidence(0).unwrap().is_empty());
+        assert!(pending.solved_evidence(1).is_err());
+        assert!(
+            pending.into_closed().is_err(),
+            "a solved draft is not a published receipt"
+        );
+        let closed = TypeObligation {
+            owner: owner.clone(),
+            primary: origin.clone(),
+            related: Vec::new(),
+            kind: TypeObligationKind::Semantic(Vec::new()),
+            evidence: ObligationState::Closed(Vec::new()),
+        }
+        .into_closed()
+        .unwrap();
+        assert_eq!(&closed.owner, owner);
+        assert_eq!(closed.origin, origin);
+        assert!(closed.evidence.is_empty());
     }
     #[test]
     fn shared_callback_cleanup_distinguishes_open_and_proven_nonfailure() {

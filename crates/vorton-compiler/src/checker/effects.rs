@@ -27,6 +27,77 @@ pub(super) enum EffectTerm {
 }
 
 impl CheckedEffect {
+    pub(super) fn normalize_types(
+        &self,
+        solver: &mut TraitSolver<'_>,
+    ) -> Result<Self, CheckDiagnostic> {
+        enum Step<'a> {
+            Row(&'a CheckedEffect),
+            Term(&'a EffectTerm),
+            Join(usize),
+            Method(&'a EntityId, Vec<(TypeFormal, CheckedType)>, usize),
+        }
+        let mut work = vec![Step::Row(self)];
+        let mut values: Vec<CheckedEffect> = Vec::new();
+        while let Some(step) = work.pop() {
+            match step {
+                Step::Row(row) => {
+                    work.push(Step::Join(row.0.len()));
+                    work.extend(row.0.iter().rev().map(Step::Term));
+                }
+                Step::Join(count) => {
+                    let rows = values.split_off(values.len() - count);
+                    values.push(Self(rows.into_iter().flat_map(|row| row.0).collect()));
+                }
+                Step::Method(method, types, count) => {
+                    let effects = values.split_off(values.len() - count);
+                    values.push(Self::singleton(EffectTerm::Method {
+                        method: method.clone(),
+                        types,
+                        effects,
+                    }));
+                }
+                Step::Term(term) => {
+                    let term = match term {
+                        EffectTerm::Failure(ty) => EffectTerm::Failure(solver.normalize(ty)?),
+                        EffectTerm::Destruction(ty) => {
+                            EffectTerm::Destruction(solver.normalize(ty)?)
+                        }
+                        EffectTerm::SelectedCall(ty) => {
+                            EffectTerm::SelectedCall(solver.normalize(ty)?)
+                        }
+                        EffectTerm::Handled(identity, arguments) => EffectTerm::Handled(
+                            identity.clone(),
+                            arguments
+                                .iter()
+                                .map(|ty| solver.normalize(ty))
+                                .collect::<Result<_, _>>()?,
+                        ),
+                        EffectTerm::Method {
+                            method,
+                            types,
+                            effects,
+                        } => {
+                            let types = types
+                                .iter()
+                                .map(|(formal, ty)| Ok((formal.clone(), solver.normalize(ty)?)))
+                                .collect::<Result<_, CheckDiagnostic>>()?;
+                            work.push(Step::Method(method, types, effects.len()));
+                            work.extend(effects.iter().rev().map(Step::Row));
+                            continue;
+                        }
+                        EffectTerm::System(_)
+                        | EffectTerm::Mut
+                        | EffectTerm::Unsafe
+                        | EffectTerm::Formal(_) => term.clone(),
+                    };
+                    values.push(Self::singleton(term));
+                }
+            }
+        }
+        Ok(values.pop().expect("each row produces one normalized row"))
+    }
+
     pub(super) fn singleton(term: EffectTerm) -> Self {
         Self(BTreeSet::from([term]))
     }
@@ -918,6 +989,20 @@ fn finish_call_effect(
     inference: &mut TypeInference,
 ) -> Result<(), CheckDiagnostic> {
     let origin = context.header.context.origin(span);
+    let givens = context
+        .header
+        .requirements
+        .iter()
+        .chain(&context.header.outer_requirements)
+        .cloned()
+        .collect::<Vec<_>>();
+    *effect = effect.normalize_types(&mut TraitSolver::new(
+        context.traits,
+        context.project,
+        inference,
+        &givens,
+        origin.clone(),
+    )?)?;
     *effect = effect
         .reduce_methods(
             BodyEnvironment {
@@ -933,6 +1018,13 @@ fn finish_call_effect(
         )?
         .reduce_destruction(context.nominals, &origin)?;
     *effect = joint_destruction(effect, context, inference, &origin)?;
+    *effect = effect.normalize_types(&mut TraitSolver::new(
+        context.traits,
+        context.project,
+        inference,
+        &givens,
+        origin.clone(),
+    )?)?;
     effect.validate_identity(&origin)?;
     if active {
         rows.last_mut().unwrap().merge(effect, inference, &origin)?;
@@ -988,6 +1080,19 @@ pub(super) fn validate_group_effects(
         let normalize = |row: &CheckedEffect,
                          inference: &mut TypeInference|
          -> Result<CheckedEffect, CheckDiagnostic> {
+            let givens = header
+                .requirements
+                .iter()
+                .chain(&header.outer_requirements)
+                .cloned()
+                .collect::<Vec<_>>();
+            let row = row.normalize_types(&mut TraitSolver::new(
+                traits,
+                project,
+                inference,
+                &givens,
+                header.origin.clone(),
+            )?)?;
             let row = row
                 .reduce_methods(
                     BodyEnvironment {
@@ -1002,7 +1107,9 @@ pub(super) fn validate_group_effects(
                     header,
                 )?
                 .reduce_destruction(nominals, &header.origin)?;
-            joint_destruction(&row, &context, inference, &header.origin)
+            joint_destruction(&row, &context, inference, &header.origin)?.normalize_types(
+                &mut TraitSolver::new(traits, project, inference, &givens, header.origin.clone())?,
+            )
         };
         if let Some(upper) = &header.effect_upper {
             actual.subset_inferred(
@@ -1029,9 +1136,10 @@ pub(super) fn validate_group_effects(
                 inference,
             )?;
         }
-        if identity.name == "main"
+        if identity.kind == EntityKind::Function
+            && identity.name == "main"
             && identity.module.library() == project.entry
-            && rows[identity]
+            && normalize(&rows[identity], inference)?
                 .0
                 .iter()
                 .any(|term| matches!(term, EffectTerm::Handled(_, _)))
@@ -1115,13 +1223,14 @@ pub(super) fn normalize_effect_headers(
     project: &ResolvedProject,
     normalizer: &mut SourceTypeNormalizer,
     headers: &mut BTreeMap<EntityId, FunctionHeader>,
-    traits: &TraitEnvironment,
+    _traits: &TraitEnvironment,
 ) -> Result<(), CheckDiagnostic> {
     let sources = headers
         .iter()
         .map(|(identity, header)| (identity.clone(), header.source_effects.clone()))
         .collect::<Vec<_>>();
     for (identity, source) in sources {
+        let mut inputs = Vec::new();
         if let Some(module) = module_for_origin(project, &headers[&identity].origin)
             && let Some(requires) = project.modules[&module]
                 .body
@@ -1130,25 +1239,38 @@ pub(super) fn normalize_effect_headers(
         {
             let row = source_effect_row(
                 requires,
-                &headers[&identity],
+                SourceEffectScope {
+                    origin: &headers[&identity].origin,
+                    effect_formals: &headers[&identity].effect_formals,
+                    use_kind: EffectUse::Runtime,
+                },
                 normalizer,
                 project,
                 headers,
-                traits,
+                &mut inputs,
             )?;
             headers.get_mut(&identity).unwrap().module_upper = Some(row);
         }
         if let Some(source) = source {
             let row = source_effect_row(
                 &source,
-                &headers[&identity],
+                SourceEffectScope {
+                    origin: &headers[&identity].origin,
+                    effect_formals: &headers[&identity].effect_formals,
+                    use_kind: EffectUse::Runtime,
+                },
                 normalizer,
                 project,
                 headers,
-                traits,
+                &mut inputs,
             )?;
             headers.get_mut(&identity).unwrap().effect_upper = Some(row);
         }
+        headers
+            .get_mut(&identity)
+            .unwrap()
+            .semantic_inputs
+            .extend(inputs);
     }
     Ok(())
 }
@@ -1330,6 +1452,7 @@ pub(super) fn normalize_callable_shapes(
     }
     for identity in headers.keys().cloned().collect::<Vec<_>>() {
         let header = &headers[&identity];
+        let mut inputs = Vec::new();
         let mut shapes = BTreeMap::new();
         for (index, (formal, source)) in header.source_shapes.iter().enumerate() {
             let crate::project::ResolvedShapeKind::Callable {
@@ -1362,7 +1485,18 @@ pub(super) fn normalize_callable_shapes(
                 ));
             }
             let effect = if let Some(effects) = effects {
-                source_effect_row(effects, header, normalizer, project, headers, traits)?
+                source_effect_row(
+                    effects,
+                    SourceEffectScope {
+                        origin: &header.origin,
+                        effect_formals: &header.effect_formals,
+                        use_kind: EffectUse::Runtime,
+                    },
+                    normalizer,
+                    project,
+                    headers,
+                    &mut inputs,
+                )?
             } else {
                 CheckedEffect::singleton(EffectTerm::Formal(
                     implicit[&(identity.clone(), index)].clone(),
@@ -1383,6 +1517,11 @@ pub(super) fn normalize_callable_shapes(
                 ));
             }
         }
+        headers
+            .get_mut(&identity)
+            .unwrap()
+            .semantic_inputs
+            .extend(inputs);
         headers.get_mut(&identity).unwrap().shapes = shapes;
     }
     merge_contract_shapes(project, normalizer, headers, traits, documents)?;
@@ -1443,7 +1582,7 @@ pub(super) fn normalize_callable_shapes(
                 let CheckedType::Formal(actual_formal) = &types[formal] else {
                     unreachable!()
                 };
-                let mapped = CallableShape {
+                let mut mapped = CallableShape {
                     parameters: shape
                         .parameters
                         .iter()
@@ -1452,7 +1591,18 @@ pub(super) fn normalize_callable_shapes(
                     result: instantiate_type(&shape.result, &types),
                     effect: shape.effect.instantiate(&types, &BTreeMap::new()),
                 };
-                if let Some(provided) = actual.shapes.get(actual_formal.as_ref()) {
+                let givens = actual
+                    .requirements
+                    .iter()
+                    .chain(&actual.outer_requirements)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut solver =
+                    TraitSolver::new(traits, project, inference, &givens, actual.origin.clone())?;
+                mapped.normalize_types(&mut solver)?;
+                if let Some(mut provided) = actual.shapes.get(actual_formal.as_ref()).cloned() {
+                    provided.normalize_types(&mut solver)?;
+                    drop(solver);
                     for term in &provided.effect.0 {
                         if let EffectTerm::Formal(formal) = term
                             && actual
@@ -1677,6 +1827,7 @@ fn merge_contract_shapes(
         if header.contract_shapes.is_empty() {
             continue;
         }
+        let mut inputs = Vec::new();
         let mut selected: Option<BTreeMap<TypeFormal, CallableShape>> = None;
         for specs in &header.contract_shapes {
             let mut shapes = BTreeMap::new();
@@ -1717,6 +1868,7 @@ fn merge_contract_shapes(
                         &context,
                         shape.effect_upper.as_ref().unwrap(),
                         &format!("{json_path}.effect_upper"),
+                        &mut inputs,
                     )?
                 } else {
                     implicit[&(identity.clone(), spec.subject.clone())].clone()
@@ -1757,6 +1909,11 @@ fn merge_contract_shapes(
                 selected = Some(shapes);
             }
         }
+        headers
+            .get_mut(&identity)
+            .unwrap()
+            .semantic_inputs
+            .extend(inputs);
         headers.get_mut(&identity).unwrap().shapes = selected.unwrap();
     }
     Ok(())
@@ -1899,8 +2056,27 @@ pub(super) fn solve_effect_actuals(
             .get(formal)
             .cloned()
             .unwrap_or_else(|| CheckedType::Formal(Box::new(formal.clone())));
-        let (actual, _) =
+        let (mut actual, _) =
             require_shared_callable(&ty, caller, environment, inference, &givens, origin)?;
+        let mut shape = CallableShape {
+            parameters: shape
+                .parameters
+                .iter()
+                .map(|(ty, mode)| (instantiate_type(ty, types), *mode))
+                .collect(),
+            result: instantiate_type(&shape.result, types),
+            effect: shape.effect.instantiate(types, &BTreeMap::new()),
+        };
+        let mut solver = TraitSolver::new(
+            environment.traits,
+            environment.project,
+            inference,
+            &givens,
+            origin.clone(),
+        )?;
+        actual.normalize_types(&mut solver)?;
+        shape.normalize_types(&mut solver)?;
+        drop(solver);
         if actual.parameters.len() != shape.parameters.len() {
             return Err(source_diagnostic(
                 CheckDiagnosticKind::CallMismatch,
@@ -1920,19 +2096,17 @@ pub(super) fn solve_effect_actuals(
                     Vec::new(),
                 ));
             }
-            inference
-                .unify(actual, &instantiate_type(expected, types))
-                .map_err(|failure| {
-                    source_diagnostic(
-                        CheckDiagnosticKind::CallMismatch,
-                        display_unification_failure(&failure),
-                        origin.clone(),
-                        Vec::new(),
-                    )
-                })?;
+            inference.unify(actual, expected).map_err(|failure| {
+                source_diagnostic(
+                    CheckDiagnosticKind::CallMismatch,
+                    display_unification_failure(&failure),
+                    origin.clone(),
+                    Vec::new(),
+                )
+            })?;
         }
         inference
-            .unify(&actual.result, &instantiate_type(&shape.result, types))
+            .unify(&actual.result, &shape.result)
             .map_err(|failure| {
                 source_diagnostic(
                     CheckDiagnosticKind::CallMismatch,
@@ -1949,17 +2123,14 @@ pub(super) fn solve_effect_actuals(
             origin,
             caller,
         )?;
-        let expected = shape
-            .effect
-            .instantiate(types, &BTreeMap::new())
-            .reduce_methods(
-                environment,
-                schemes,
-                &BTreeMap::new(),
-                inference,
-                origin,
-                caller,
-            )?;
+        let expected = shape.effect.reduce_methods(
+            environment,
+            schemes,
+            &BTreeMap::new(),
+            inference,
+            origin,
+            caller,
+        )?;
         constraints.push((actual, expected));
     }
     let mut work = 0;
@@ -2095,6 +2266,20 @@ pub(super) struct CallableShape {
     pub(super) parameters: Vec<(CheckedType, ParameterMode)>,
     pub(super) result: CheckedType,
     pub(super) effect: CheckedEffect,
+}
+
+impl CallableShape {
+    pub(super) fn normalize_types(
+        &mut self,
+        solver: &mut TraitSolver<'_>,
+    ) -> Result<(), CheckDiagnostic> {
+        for (ty, _) in &mut self.parameters {
+            *ty = solver.normalize(ty)?;
+        }
+        self.result = solver.normalize(&self.result)?;
+        self.effect = self.effect.normalize_types(solver)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -2506,13 +2691,19 @@ enum SourceEffectFrame<'a> {
     },
 }
 
-fn source_effect_row(
+pub(super) struct SourceEffectScope<'a> {
+    pub(super) origin: &'a OriginRef,
+    pub(super) effect_formals: &'a [(Option<EntityId>, EffectFormal)],
+    pub(super) use_kind: EffectUse,
+}
+
+pub(super) fn source_effect_row(
     source: &ResolvedEffectSet,
-    header: &FunctionHeader,
+    scope: SourceEffectScope<'_>,
     normalizer: &mut SourceTypeNormalizer,
     project: &ResolvedProject,
     headers: &BTreeMap<EntityId, FunctionHeader>,
-    traits: &TraitEnvironment,
+    inputs: &mut Vec<LocatedInput>,
 ) -> Result<CheckedEffect, CheckDiagnostic> {
     let aliases = project
         .modules
@@ -2538,7 +2729,7 @@ fn source_effect_row(
             return Err(source_diagnostic(
                 CheckDiagnosticKind::Unsupported,
                 "incomplete source effect solve: 8192 expansion steps exhausted",
-                header.origin.clone(),
+                scope.origin.clone(),
                 Vec::new(),
             ));
         }
@@ -2578,38 +2769,23 @@ fn source_effect_row(
                         .and_then(|member| member.declaration.as_ref())
                         .expect("method effect references are exact"),
                 };
-                let origin = header.context.origin(effect.span);
+                let origin = SourceContext::from_origin(reference_origin(&effect.reference))
+                    .origin(effect.span);
                 let arguments = effect
                     .arguments
                     .iter()
                     .map(|ty| {
                         normalizer
-                            .normalize_with_formals(ty, &header.formal_by_identity)
+                            .normalize(ty)
                             .map(|ty| instantiate_type(&ty, &mapping))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if matches!(target.kind, EntityKind::Effect | EntityKind::EffectAlias) {
-                    let mapping = traits.owner_formals[target]
-                        .iter()
-                        .cloned()
-                        .zip(arguments.iter().cloned())
-                        .collect::<BTreeMap<_, _>>();
-                    let givens = header
-                        .requirements
-                        .iter()
-                        .chain(&header.outer_requirements)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let inference = TypeInference::default();
-                    let mut solver =
-                        TraitSolver::new(traits, project, &inference, &givens, origin.clone())?;
-                    for requirement in &traits.requirements[target] {
-                        solver.prove(&Requirement {
-                            subject: instantiate_type(&requirement.subject, &mapping),
-                            bound: instantiate_trait(&requirement.bound, &mapping),
-                            origin: requirement.origin.clone(),
-                        })?;
-                    }
+                    inputs.push(LocatedInput {
+                        exposed: false,
+                        origin: CheckOrigin::Source(origin.clone()),
+                        value: SemanticInput::EffectApplication(target.clone(), arguments.clone()),
+                    });
                 }
                 let term = match target.kind {
                     EntityKind::LanguageEffect => match target.name.as_str() {
@@ -2640,7 +2816,7 @@ fn source_effect_row(
                         EffectTerm::Handled(target.clone(), arguments)
                     }
                     EntityKind::EffectParameter => {
-                        let formal = header
+                        let formal = scope
                             .effect_formals
                             .iter()
                             .find(|(identity, _)| identity.as_ref() == Some(target))
@@ -2724,11 +2900,13 @@ fn source_effect_row(
         }
     }
     let row = values.pop().expect("one expanded source row");
-    row.validate_identity(&header.origin)?;
+    if matches!(scope.use_kind, EffectUse::Runtime) {
+        row.validate_identity(scope.origin)?;
+    }
     Ok(row)
 }
 
-fn closed_identity_type(ty: &CheckedType) -> bool {
+pub(super) fn closed_identity_type(ty: &CheckedType) -> bool {
     match ty {
         CheckedType::Infer(_) | CheckedType::Formal(_) | CheckedType::Projection(_) => false,
         CheckedType::Tuple(elements) => elements.iter().all(closed_identity_type),
@@ -2818,7 +2996,7 @@ pub(super) fn collect_operation_headers(
                             .normalize_with_formals(&operation.return_type, &formal_by_identity)?,
                         return_origin: CheckOrigin::Source(origin),
                         source_return_explicit: true,
-                        formation_evidence: Vec::new(),
+                        semantic_inputs: Vec::new(),
                         body: None,
                         requirements: Vec::new(),
                         outer_requirements: traits

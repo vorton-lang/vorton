@@ -63,6 +63,8 @@ Language intrinsic declaration 使用独立 `Language` origin，不通过隐藏 
 
 `check_project` 从同一 `ProjectSources` 执行 Resolver 与 declaration preparation，建立 source owner/header、Trait/impl 条件、normalized nominal/alias 与所选 callable contract。每个 body 只产生一次 constraints/draft；实际 direct、method、callback provider 和 effect-scheme 依赖共同形成未发布 SCC。参数、返回、关联类型、evidence、effect actual 与入口 mode 消费同一调用 mapping；尚缺的约束可以继续求解，已固定的 generic dictionary 不因具体 actual 的同名 inherent method 改选。全组闭合后才 final-zonk、泛化并原子发布，不能发布后回补或重新运行上游。
 
+声明及无 body 签名、body SCC 各有可失败的关闭入口。语义输入遍历携带实际 owner、source/contract origin 与公开接口范围，在 alias、关联投影和销毁 row 归约前检查原 operand；关联类型、shape、Effect actual、requirements 与普通参数使用同一形成检查。既定 givens 不包含待证明的形成条件；空证明结果也必须来自已经完成的检查。Type/effect actual 或泛化约束变化后，尚未发布的证明按最终约束重做。发布前检查 scheme binder、exact selection/mapping、mode 与清理 receipt；最终结果只组装完整声明与 body 集合的已闭合数据。
+
 Trait/projection selection 和 effect 展开采用显式 worklist、exact query 状态及确定逻辑上限。已有 given、primitive 和 source impl evidence 各自保留身份。Coherence 按真实 LibraryId、header/where 域检查 orphan 与可能重叠；未知不能冒充不相交或 no-impl。允许中间 actual 增大后闭合的有限证明，非法循环与未完成求解分开诊断。
 
 当前 opaque `CheckedProject` 保存闭合 callable scheme 与 bodyless signature、type/effect actual、selection/evidence、typed construction/field、literal、入口 mode 及唯一 typed body。正常与可能 failure 出口保存实际整值 owner、待移交 temporary 与已移交状态，generic cleanup 保留 `full_destruction(T)`，concrete 受支持 actual 按真实成员归约。销毁依赖用有限形状闭包保持 recursive nominal、phantom 和已知空 variant 的精度；typed cleanup 是语义义务，物理 CFG/slot/指令留给资源阶段。成功载荷不含 raw metavariable、待选 impl 或未定公开 mode。它没有公开查询 API，也不宣称完整 S/TypedHIR、handler、捕获/scoped callback、partial move、用户 Drop、Rc 或完整 core/std。

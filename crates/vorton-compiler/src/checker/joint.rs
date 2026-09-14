@@ -53,7 +53,7 @@ pub(super) struct TraitEnvironment {
     pub(super) owner_formals: BTreeMap<EntityId, Vec<TypeFormal>>,
 }
 
-fn declaration_identity<'a>(
+pub(super) fn declaration_identity<'a>(
     project: &'a ResolvedProject,
     declaration: &'a ResolvedDeclaration,
 ) -> Option<&'a EntityId> {
@@ -328,7 +328,7 @@ impl SourceTypeNormalizer {
     }
 }
 
-fn reference_origin(reference: &ResolvedReference) -> &OriginRef {
+pub(super) fn reference_origin(reference: &ResolvedReference) -> &OriginRef {
     match reference {
         ResolvedReference::Exact { occurrence, .. }
         | ResolvedReference::Selection { occurrence, .. } => occurrence,
@@ -668,10 +668,15 @@ enum SolveFrame {
     Remember(Query),
     Tuple(usize),
     Nominal(EntityId, usize),
+    Function(EntityId, Vec<TypeFormal>),
     Projection(ProjectionType),
     SelectedProjection {
         projection: Box<ProjectionType>,
         bound: TraitUse,
+    },
+    InherentProjection {
+        replacement: CheckedType,
+        count: usize,
     },
     EvidenceTypes {
         goal: TraitGoal,
@@ -715,6 +720,7 @@ pub(super) struct TraitSolver<'a> {
     origin: OriginRef,
     remaining: usize,
     answers: BTreeMap<Query, Answer>,
+    public_surface: bool,
 }
 
 impl<'a> TraitSolver<'a> {
@@ -733,6 +739,7 @@ impl<'a> TraitSolver<'a> {
             origin,
             remaining: SOLVE_WORK_LIMIT,
             answers: BTreeMap::new(),
+            public_surface: false,
         };
         let mut visited = BTreeSet::new();
         let mut index = 0;
@@ -749,6 +756,10 @@ impl<'a> TraitSolver<'a> {
             let definition = &environment.traits[&given.bound.declaration];
             let mapping = trait_mapping(definition, &given.subject, &given.bound.arguments);
             for requirement in &definition.requirements {
+                if !matches!(&requirement.subject, CheckedType::Formal(formal) if formal.as_ref() == &definition.self_type)
+                {
+                    continue;
+                }
                 let requirement = instantiate_requirement(requirement, &mapping);
                 if !visited.contains(&TraitGoal {
                     subject: requirement.subject.clone(),
@@ -758,7 +769,41 @@ impl<'a> TraitSolver<'a> {
                 }
             }
         }
+        for index in 0..solver.givens.len() {
+            let mut given = solver.givens[index].clone();
+            normalize_requirement(&mut given, &mut solver)?;
+            solver.givens[index] = given;
+        }
+        // Answers made while normalizing inputs can retain their old spelling.
+        // Subsequent proof results must use the completed dictionary inputs.
+        solver.answers.clear();
         Ok(solver)
+    }
+
+    pub(super) fn set_public_surface(&mut self, exposed: bool) {
+        if self.public_surface != exposed {
+            self.answers.clear();
+            self.public_surface = exposed;
+        }
+    }
+
+    fn require_public_associated(
+        &self,
+        member: &EntityId,
+        trait_owner: Option<&EntityId>,
+    ) -> Result<(), CheckDiagnostic> {
+        if self.public_surface
+            && !trait_owner.map_or_else(
+                || self.project.entities[member].public,
+                |owner| actual_public_exports(self.project).contains(owner),
+            )
+        {
+            return Err(self.diagnostic(format!(
+                "public type surface references private associated declaration `{}`",
+                member.name
+            )));
+        }
+        Ok(())
     }
 
     fn bounds_for_type(&mut self, ty: &CheckedType) -> Result<Vec<Requirement>, CheckDiagnostic> {
@@ -796,6 +841,7 @@ impl<'a> TraitSolver<'a> {
                 definition
                     .requirements
                     .iter()
+                    .filter(|requirement| matches!(&requirement.subject, CheckedType::Formal(formal) if formal.as_ref() == &definition.self_type))
                     .map(|requirement| instantiate_requirement(requirement, &mapping))
                     .filter(|requirement| {
                         !visited.contains(&(requirement.subject.clone(), requirement.bound.clone()))
@@ -894,61 +940,6 @@ impl<'a> TraitSolver<'a> {
         Ok(*evidence)
     }
 
-    pub(super) fn formation(
-        &mut self,
-        ty: &CheckedType,
-        nominals: &BTreeMap<EntityId, NominalDefinition>,
-    ) -> Result<Vec<Evidence>, CheckDiagnostic> {
-        let mut pending = vec![(self.normalize(ty)?, false)];
-        let mut evidence = Vec::new();
-        while let Some((ty, stored)) = pending.pop() {
-            self.charge()?;
-            match ty {
-                CheckedType::Nominal(nominal) => {
-                    let mapping = nominal.replacements(nominals);
-                    for requirement in self
-                        .environment
-                        .requirements
-                        .get(&nominal.declaration)
-                        .into_iter()
-                        .flatten()
-                    {
-                        evidence.push(self.prove(&instantiate_requirement(requirement, &mapping))?);
-                    }
-                    pending.extend(nominal.arguments.into_iter().map(|ty| (ty, true)));
-                }
-                CheckedType::Tuple(elements) => {
-                    pending.extend(elements.into_iter().map(|ty| (ty, true)))
-                }
-                CheckedType::Projection(projection) => {
-                    if let Some(bound) = &projection.bound {
-                        evidence.push(self.prove(&Requirement {
-                            subject: projection.receiver.clone(),
-                            bound: bound.clone(),
-                            origin: CheckOrigin::Source(self.origin.clone()),
-                        })?);
-                        pending.extend(bound.arguments.iter().cloned().map(|ty| (ty, true)));
-                        pending.extend(bound.associated.values().cloned().map(|ty| (ty, true)));
-                    }
-                    pending.push((projection.receiver, stored));
-                }
-                CheckedType::Function(_) if stored => {
-                    return Err(source_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        "function value storage inside an aggregate is outside this Checker",
-                        self.origin.clone(),
-                        Vec::new(),
-                    ));
-                }
-                CheckedType::Function(value) => {
-                    pending.extend(value.types.into_iter().map(|(_, ty)| (ty, false)))
-                }
-                _ => {}
-            }
-        }
-        Ok(evidence)
-    }
-
     fn solve(&mut self, root: Query) -> Result<Answer, CheckDiagnostic> {
         let mut frames = vec![SolveFrame::Enter(root)];
         let mut values = Vec::new();
@@ -996,6 +987,23 @@ impl<'a> TraitSolver<'a> {
                                     frames.push(SolveFrame::Projection(*projection));
                                     frames.push(SolveFrame::Enter(Query::Type(receiver)));
                                 }
+                                CheckedType::Function(value) => {
+                                    frames.push(SolveFrame::Function(
+                                        value.declaration,
+                                        value
+                                            .types
+                                            .iter()
+                                            .map(|(formal, _)| formal.clone())
+                                            .collect(),
+                                    ));
+                                    frames.extend(
+                                        value
+                                            .types
+                                            .into_iter()
+                                            .rev()
+                                            .map(|(_, ty)| SolveFrame::Enter(Query::Type(ty))),
+                                    );
+                                }
                                 other => values.push(Answer::Type(other)),
                             }
                         }
@@ -1038,8 +1046,113 @@ impl<'a> TraitSolver<'a> {
                         arguments,
                     }))));
                 }
+                SolveFrame::Function(declaration, formals) => {
+                    let types = take_types(&mut values, formals.len());
+                    values.push(Answer::Type(CheckedType::Function(Box::new(
+                        FunctionValue {
+                            declaration,
+                            types: formals.into_iter().zip(types).collect(),
+                        },
+                    ))));
+                }
                 SolveFrame::Projection(mut projection) => {
                     projection.receiver = take_types(&mut values, 1).pop().unwrap();
+                    if projection.bound.is_none() {
+                        let has_given =
+                            self.bounds_for_type(&projection.receiver)?
+                                .iter()
+                                .any(|given| {
+                                    self.environment.traits[&given.bound.declaration]
+                                        .associated
+                                        .keys()
+                                        .any(|member| {
+                                            member.name == projection.name
+                                                && projection
+                                                    .member
+                                                    .as_ref()
+                                                    .is_none_or(|selected| selected == member)
+                                        })
+                                });
+                        if !has_given {
+                            let mut candidates = Vec::new();
+                            let caller = module_for_origin(self.project, &self.origin)
+                                .expect("projection has a source module");
+                            let mut hidden = false;
+                            for implementation in self
+                                .environment
+                                .implementations
+                                .iter()
+                                .filter(|implementation| implementation.trait_use.is_none())
+                            {
+                                let Some((member, value)) =
+                                    implementation.associated.iter().find(|(member, _)| {
+                                        member.name == projection.name
+                                            && projection
+                                                .member
+                                                .as_ref()
+                                                .is_none_or(|selected| selected == *member)
+                                    })
+                                else {
+                                    continue;
+                                };
+                                let mut mapping = BTreeMap::new();
+                                if !match_type(
+                                    &implementation.target,
+                                    &projection.receiver,
+                                    &implementation.formals,
+                                    &mut mapping,
+                                ) {
+                                    continue;
+                                }
+                                if !self.project.entities[member].public
+                                    && !(caller.library() == member.module.library()
+                                        && caller.path().starts_with(member.module.path()))
+                                {
+                                    hidden = true;
+                                    continue;
+                                }
+                                candidates.push((
+                                    implementation,
+                                    member,
+                                    instantiate_type(value, &mapping),
+                                    mapping,
+                                ));
+                            }
+                            if candidates.len() > 1 {
+                                return Err(
+                                    self.diagnostic("ambiguous inherent associated selection")
+                                );
+                            }
+                            if let Some((implementation, member, replacement, mapping)) =
+                                candidates.pop()
+                            {
+                                self.require_public_associated(member, None)?;
+                                let requirements = implementation
+                                    .requirements
+                                    .iter()
+                                    .map(|requirement| {
+                                        instantiate_requirement(requirement, &mapping)
+                                    })
+                                    .collect::<Vec<_>>();
+                                frames.push(SolveFrame::InherentProjection {
+                                    replacement,
+                                    count: requirements.len(),
+                                });
+                                frames.extend(requirements.into_iter().rev().map(|requirement| {
+                                    SolveFrame::Enter(Query::evidence(TraitGoal {
+                                        subject: requirement.subject,
+                                        bound: requirement.bound,
+                                    }))
+                                }));
+                                continue;
+                            }
+                            if hidden {
+                                return Err(self.diagnostic(
+                                    "inherent associated type is private in this scope",
+                                ));
+                            }
+                        }
+                    }
                     let choices = self.projection_bounds(&projection)?;
                     let [(member, bound)] = choices.as_slice() else {
                         return Err(self.diagnostic(if choices.is_empty() {
@@ -1050,6 +1163,7 @@ impl<'a> TraitSolver<'a> {
                     };
                     projection.member = Some(member.clone());
                     projection.bound = Some(bound.clone());
+                    self.require_public_associated(member, Some(&bound.declaration))?;
                     let query = Query::evidence(TraitGoal {
                         subject: projection.receiver.clone(),
                         bound: bound.clone(),
@@ -1103,6 +1217,10 @@ impl<'a> TraitSolver<'a> {
                     } else {
                         values.push(Answer::Type(CheckedType::Projection(Box::new(projection))));
                     }
+                }
+                SolveFrame::InherentProjection { replacement, count } => {
+                    values.truncate(values.len() - count);
+                    frames.push(SolveFrame::Enter(Query::Type(replacement)));
                 }
                 SolveFrame::EvidenceTypes {
                     mut goal,
@@ -1448,80 +1566,6 @@ impl<'a> TraitSolver<'a> {
                     CheckedType::Int | CheckedType::Bool | CheckedType::Unit
                 ))
     }
-}
-
-pub(super) fn validate_declaration_types(
-    project: &ResolvedProject,
-    traits: &TraitEnvironment,
-    normalizer: &mut SourceTypeNormalizer,
-    headers: &mut BTreeMap<EntityId, FunctionHeader>,
-    inference: &TypeInference,
-) -> Result<(), CheckDiagnostic> {
-    for identity in normalizer.nominals.keys().cloned().collect::<Vec<_>>() {
-        let givens = traits
-            .requirements
-            .get(&identity)
-            .cloned()
-            .unwrap_or_default();
-        let mut updates = Vec::new();
-        let mut solver = TraitSolver::new(
-            traits,
-            project,
-            inference,
-            &givens,
-            entity_origin(&identity).unwrap(),
-        )?;
-        for (constructor, fields) in &normalizer.nominals[&identity].constructors {
-            for (index, field) in fields.fields.iter().enumerate() {
-                let ty = solver.normalize(&field.ty)?;
-                solver.formation(&ty, &normalizer.nominals)?;
-                updates.push((constructor.clone(), index, ty));
-            }
-        }
-        for (constructor, index, ty) in updates {
-            normalizer
-                .nominals
-                .get_mut(&identity)
-                .unwrap()
-                .constructors
-                .get_mut(&constructor)
-                .unwrap()
-                .fields[index]
-                .ty = ty;
-        }
-    }
-    for (identity, ty) in &normalizer.normalized_aliases {
-        TraitSolver::new(
-            traits,
-            project,
-            inference,
-            &[],
-            entity_origin(identity).unwrap(),
-        )?
-        .formation(ty, &normalizer.nominals)?;
-    }
-    for header in headers.values_mut() {
-        let givens = header
-            .requirements
-            .iter()
-            .chain(&header.outer_requirements)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut solver =
-            TraitSolver::new(traits, project, inference, &givens, header.origin.clone())?;
-        for ty in header
-            .parameters
-            .iter()
-            .map(|parameter| &parameter.ty)
-            .chain(std::iter::once(&header.return_type))
-        {
-            header
-                .formation_evidence
-                .extend(solver.formation(ty, &normalizer.nominals)?);
-        }
-    }
-    close_destruction_shapes(&mut normalizer.nominals);
-    Ok(())
 }
 
 pub(super) fn validate_public_requirements(
@@ -1985,7 +2029,7 @@ pub(super) fn collect_method_headers(
     Ok(())
 }
 
-fn type_is_public(ty: &CheckedType, exports: &BTreeSet<EntityId>) -> bool {
+pub(super) fn type_is_public(ty: &CheckedType, exports: &BTreeSet<EntityId>) -> bool {
     match ty {
         CheckedType::Nominal(nominal) => exports.contains(&nominal.declaration),
         CheckedType::Int
@@ -2002,9 +2046,21 @@ pub(super) fn validate_implementations(
     traits: &mut TraitEnvironment,
     headers: &mut BTreeMap<EntityId, FunctionHeader>,
     inference: &mut TypeInference,
+    obligations: &mut Vec<TypeObligation>,
 ) -> Result<(), CheckDiagnostic> {
     let mut targets = Vec::new();
     for implementation in &traits.implementations {
+        let origin = entity_origin(&implementation.identity).unwrap();
+        push_owner_obligation(
+            obligations,
+            implementation.identity.clone(),
+            origin.clone(),
+            vec![LocatedInput {
+                exposed: false,
+                origin: CheckOrigin::Source(origin),
+                value: SemanticInput::Type(implementation.target.clone(), TypeUse::Relation),
+            }],
+        );
         let mut solver = TraitSolver::new(
             traits,
             project,
@@ -2253,6 +2309,13 @@ pub(super) fn validate_implementations(
                 .chain(std::iter::once(&expected.return_type))
                 .map(|ty| solver.normalize(&instantiate_type(ty, &mapping)))
                 .collect::<Result<Vec<_>, _>>()?;
+            let actual_types = actual
+                .parameters
+                .iter()
+                .map(|parameter| &parameter.ty)
+                .chain(std::iter::once(&actual.return_type))
+                .map(|ty| solver.normalize(ty))
+                .collect::<Result<Vec<_>, _>>()?;
             drop(solver);
             let actual = headers.get_mut(member).unwrap();
             for (index, (parameter, expected_parameter)) in actual
@@ -2271,7 +2334,7 @@ pub(super) fn validate_implementations(
                     ));
                 }
                 inference
-                    .unify(&parameter.ty, &types[index])
+                    .unify(&actual_types[index], &types[index])
                     .map_err(|failure| {
                         source_diagnostic(
                             CheckDiagnosticKind::TypeMismatch,
@@ -2295,9 +2358,10 @@ pub(super) fn validate_implementations(
                 }
                 parameter.mode = Some(expected_mode.clone());
                 parameter.source_type_explicit = true;
+                parameter.ty = actual_types[index].clone();
             }
             inference
-                .unify(&actual.return_type, types.last().unwrap())
+                .unify(actual_types.last().unwrap(), types.last().unwrap())
                 .map_err(|failure| {
                     source_diagnostic(
                         CheckDiagnosticKind::TypeMismatch,
@@ -2306,6 +2370,7 @@ pub(super) fn validate_implementations(
                         vec![expected.origin.clone()],
                     )
                 })?;
+            actual.return_type = actual_types.last().unwrap().clone();
             actual.requirements = contract_requirements;
         }
     }
@@ -2405,51 +2470,6 @@ pub(super) fn signature_schemes(
     Ok(schemes)
 }
 
-pub(super) fn validate_group_values(
-    group: &[EntityId],
-    headers: &mut BTreeMap<EntityId, FunctionHeader>,
-    traits: &TraitEnvironment,
-    project: &ResolvedProject,
-    inference: &TypeInference,
-) -> Result<(), CheckDiagnostic> {
-    for identity in group {
-        let header = &headers[identity];
-        if contains_function_value(&inference.resolve(&header.return_type)) {
-            return Err(source_diagnostic(
-                CheckDiagnosticKind::Unsupported,
-                "general function value return is outside this Checker",
-                header.origin.clone(),
-                Vec::new(),
-            ));
-        }
-        let givens = header
-            .requirements
-            .iter()
-            .chain(&header.outer_requirements)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut proofs = Vec::new();
-        for (value, origin) in &header.value_uses {
-            let provider = &headers[&value.declaration];
-            let mapping = value.types.iter().cloned().collect();
-            let mut solver = TraitSolver::new(traits, project, inference, &givens, origin.clone())?;
-            for requirement in provider
-                .requirements
-                .iter()
-                .chain(&provider.outer_requirements)
-            {
-                proofs.push(solver.prove(&instantiate_requirement(requirement, &mapping))?);
-            }
-        }
-        headers
-            .get_mut(identity)
-            .unwrap()
-            .formation_evidence
-            .extend(proofs);
-    }
-    Ok(())
-}
-
 pub(super) fn contains_function_value(ty: &CheckedType) -> bool {
     let mut pending = vec![ty];
     while let Some(ty) = pending.pop() {
@@ -2470,23 +2490,76 @@ pub(super) fn normalize_headers(
     inference: &TypeInference,
 ) -> Result<(), CheckDiagnostic> {
     for header in headers.values_mut() {
-        let givens = header
-            .requirements
-            .iter()
-            .chain(&header.outer_requirements)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut solver =
-            TraitSolver::new(traits, project, inference, &givens, header.origin.clone())?;
-        for parameter in &mut header.parameters {
-            parameter.ty = solver.normalize(&parameter.ty)?;
+        normalize_header(project, traits, header, inference)?;
+    }
+    Ok(())
+}
+
+pub(super) fn normalize_header(
+    project: &ResolvedProject,
+    traits: &TraitEnvironment,
+    header: &mut FunctionHeader,
+    inference: &TypeInference,
+) -> Result<(), CheckDiagnostic> {
+    let givens = header
+        .requirements
+        .iter()
+        .chain(&header.outer_requirements)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut solver = TraitSolver::new(traits, project, inference, &givens, header.origin.clone())?;
+    for parameter in &mut header.parameters {
+        parameter.ty = solver.normalize(&parameter.ty)?;
+    }
+    header.return_type = solver.normalize(&header.return_type)?;
+    for parameter in &mut header.parameters {
+        if let Some(ty) = &mut parameter.callable_operand {
+            *ty = solver.normalize(ty)?;
         }
-        header.return_type = solver.normalize(&header.return_type)?;
+    }
+    for requirement in header
+        .requirements
+        .iter_mut()
+        .chain(&mut header.outer_requirements)
+    {
+        normalize_requirement(requirement, &mut solver)?;
+    }
+    for row in header
+        .effect_upper
+        .iter_mut()
+        .chain(&mut header.trait_upper)
+        .chain(&mut header.module_upper)
+        .chain(header.effect_caps.values_mut().flatten())
+    {
+        *row = row.normalize_types(&mut solver)?;
+    }
+    for shape in header.shapes.values_mut() {
+        shape.normalize_types(&mut solver)?;
     }
     Ok(())
 }
 
 type SelectedMethod = (EntityId, BTreeMap<TypeFormal, CheckedType>, Evidence);
+
+fn method_accessible(
+    member: &EntityId,
+    caller: &EntityId,
+    headers: &BTreeMap<EntityId, FunctionHeader>,
+    project: &ResolvedProject,
+) -> bool {
+    let entity = &project.entities[member];
+    entity.public
+        || headers
+            .get(member)
+            .is_some_and(|header| header.public_export)
+        || (member.module.library() == caller.module.library()
+            && caller.module.path().starts_with(member.module.path()))
+        || (headers.get(member).is_none()
+            && entity
+                .owner
+                .as_ref()
+                .is_some_and(|owner| actual_public_exports(project).contains(owner)))
+}
 
 fn select_method(
     call: &DraftCall,
@@ -2515,26 +2588,29 @@ fn select_method(
         return Ok(None);
     }
     let mut choices = BTreeMap::new();
-    if matches!(
-        receiver,
-        CheckedType::Formal(_) | CheckedType::Projection(_)
-    ) {
+    let mut inaccessible = Vec::new();
+    let mut fixed_dictionary = false;
+    {
         for given in solver.bounds_for_type(&receiver)? {
             let definition = &traits.traits[&given.bound.declaration];
             if let Some(member) = definition.methods.get(&selection.member.name) {
+                fixed_dictionary = true;
+                if !method_accessible(member, &call.caller, headers, project) {
+                    inaccessible.push(member.clone());
+                    continue;
+                }
+                let mapping = trait_mapping(definition, &receiver, &given.bound.arguments);
                 choices.insert(
-                    member.clone(),
-                    (
-                        trait_mapping(definition, &receiver, &given.bound.arguments),
-                        Evidence::Given {
-                            subject: receiver.clone(),
-                            bound: given.bound.clone(),
-                        },
-                    ),
+                    (member.clone(), mapping, Some(given.bound.clone())),
+                    Evidence::Given {
+                        subject: receiver.clone(),
+                        bound: given.bound.clone(),
+                    },
                 );
             }
         }
-    } else {
+    }
+    if !fixed_dictionary {
         for implementation in traits
             .implementations
             .iter()
@@ -2543,6 +2619,10 @@ fn select_method(
             let Some(member) = implementation.methods.get(&selection.member.name) else {
                 continue;
             };
+            if !method_accessible(member, &call.caller, headers, project) {
+                inaccessible.push(member.clone());
+                continue;
+            }
             let mut mapping = BTreeMap::new();
             if match_type(
                 &implementation.target,
@@ -2551,15 +2631,12 @@ fn select_method(
                 &mut mapping,
             ) {
                 choices.insert(
-                    member.clone(),
-                    (
-                        mapping.clone(),
-                        Evidence::Source {
-                            implementation: implementation.identity.clone(),
-                            mapping,
-                            premises: Vec::new(),
-                        },
-                    ),
+                    (member.clone(), mapping.clone(), None),
+                    Evidence::Source {
+                        implementation: implementation.identity.clone(),
+                        mapping,
+                        premises: Vec::new(),
+                    },
                 );
             }
         }
@@ -2571,6 +2648,10 @@ fn select_method(
                 let Some(member) = implementation.methods.get(&selection.member.name) else {
                     continue;
                 };
+                if !method_accessible(member, &call.caller, headers, project) {
+                    inaccessible.push(member.clone());
+                    continue;
+                }
                 let mut mapping = BTreeMap::new();
                 if !match_type(
                     &implementation.target,
@@ -2583,10 +2664,16 @@ fn select_method(
                 let bound = instantiate_trait(bound, &mapping);
                 let evidence = solver.prove(&Requirement {
                     subject: receiver.clone(),
-                    bound,
+                    bound: bound.clone(),
                     origin: CheckOrigin::Source(selection.member.origin.clone()),
                 })?;
-                choices.insert(member.clone(), (mapping, evidence));
+                if let Evidence::Source {
+                    mapping: actuals, ..
+                } = &evidence
+                {
+                    mapping = actuals.clone();
+                }
+                choices.insert((member.clone(), mapping, Some(bound)), evidence);
             }
             let roles = &project.core_roles;
             for role in [&roles.partial_eq, &roles.partial_ord, &roles.ord] {
@@ -2604,14 +2691,15 @@ fn select_method(
                 };
                 if solver.primitive_evidence(&goal) {
                     choices.insert(
-                        role.method.clone(),
                         (
+                            role.method.clone(),
                             trait_mapping(&traits.traits[&role.declaration], &receiver, &[]),
-                            Evidence::Primitive {
-                                subject: receiver.clone(),
-                                declaration: role.declaration.clone(),
-                            },
+                            Some(bound),
                         ),
+                        Evidence::Primitive {
+                            subject: receiver.clone(),
+                            declaration: role.declaration.clone(),
+                        },
                     );
                 }
             }
@@ -2620,16 +2708,23 @@ fn select_method(
     if choices.len() != 1 {
         return Err(source_diagnostic(
             CheckDiagnosticKind::TypeMismatch,
-            if choices.is_empty() {
+            if choices.is_empty() && !inaccessible.is_empty() {
+                "selected method is private in this scope"
+            } else if choices.is_empty() {
                 "method has no applicable evidence"
             } else {
                 "ambiguous method selection"
             },
             selection.member.origin.clone(),
-            choices.keys().filter_map(entity_origin).collect(),
+            choices
+                .keys()
+                .map(|(member, _, _)| member)
+                .chain(&inaccessible)
+                .filter_map(entity_origin)
+                .collect(),
         ));
     }
-    let (member, (mapping, evidence)) = choices.into_iter().next().unwrap();
+    let ((member, mapping, _), evidence) = choices.into_iter().next().unwrap();
     let header = headers.get(&member).ok_or_else(|| {
         source_diagnostic(
             CheckDiagnosticKind::Unsupported,
@@ -2646,19 +2741,6 @@ fn select_method(
         return Err(source_diagnostic(
             CheckDiagnosticKind::CallMismatch,
             "receiver method and associated function entry forms do not match",
-            selection.member.origin.clone(),
-            vec![header.origin.clone()],
-        ));
-    }
-    let entity = &project.entities[&member];
-    let accessible = entity.public
-        || header.public_export
-        || (member.module.library() == call.caller.module.library()
-            && call.caller.module.path().starts_with(member.module.path()));
-    if !accessible {
-        return Err(source_diagnostic(
-            CheckDiagnosticKind::TypeMismatch,
-            "selected method is private in this scope",
             selection.member.origin.clone(),
             vec![header.origin.clone()],
         ));
@@ -2931,21 +3013,31 @@ pub(super) fn next_binding_group(
             .iter_mut()
             .filter(|obligation| order.contains(&obligation.owner))
         {
-            let receiver = inference.resolve(&obligation.ty);
+            let origin = obligation.source_origin();
+            let receiver = match &obligation.kind {
+                TypeObligationKind::TupleProjection { receiver, .. }
+                | TypeObligationKind::FieldProjection { receiver, .. } => {
+                    inference.resolve(receiver)
+                }
+                TypeObligationKind::Formation(_)
+                | TypeObligationKind::Numeric(_)
+                | TypeObligationKind::Semantic(_) => continue,
+            };
             let resolved = match &mut obligation.kind {
                 TypeObligationKind::FieldProjection {
                     field,
                     result,
                     selected,
+                    ..
                 } if selected.is_none() => nominal_field_type(&receiver, field, project, nominals)?
                     .map(|(identity, ty)| {
                         *selected = Some(Box::new(identity));
                         (ty, result)
                     }),
-                TypeObligationKind::TupleProjection { index, result }
+                TypeObligationKind::TupleProjection { index, result, .. }
                     if !matches!(receiver, CheckedType::Infer(_)) =>
                 {
-                    tuple_field_type(&receiver, *index, &obligation.primary, &obligation.related)?
+                    tuple_field_type(&receiver, *index, &origin, &obligation.related)?
                         .map(|ty| (ty, result))
                 }
                 _ => None,
@@ -2955,7 +3047,7 @@ pub(super) fn next_binding_group(
                     source_diagnostic(
                         CheckDiagnosticKind::TypeMismatch,
                         display_unification_failure(&failure),
-                        obligation.primary.clone(),
+                        origin.clone(),
                         obligation.related.clone(),
                     )
                 })?;

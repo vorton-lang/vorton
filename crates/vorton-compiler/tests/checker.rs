@@ -51,6 +51,290 @@ fn check(root: &str) -> Result<vorton_compiler::CheckedProject, CheckDiagnostic>
 }
 
 #[test]
+fn joint_inputs_prove_formation_before_erasing_each_source_carrier() {
+    let prefix = "trait Mark {} struct Limited<T: Mark> { value: T } ";
+    for carrier in [
+        "trait Out { type Item = Limited<Int>; }",
+        "trait Out { type Item; } struct N {} impl Out for N { type Item = Limited<Int>; }",
+        "trait Accept<T> {} trait Out { type Item: Accept<Limited<Int>>; }",
+        "trait P {} impl P for Limited<Int> {}",
+        "trait Accept<T> {} fn f<U: Accept<Limited<Int>>>(value: &U) {}",
+        "trait Host { fn f<F: Fn + fn(Limited<Int>) -> Unit with {}>(self: &Self, callback: call F); }",
+        "trait Host { fn f<F: Fn + fn() -> Limited<Int> with {}>(self: &Self, callback: call F); }",
+        "trait Host { fn f(self: &Self) with {fail<Limited<Int>>}; }",
+        "fn f<F: Fn + fn() -> Unit with {fail<Limited<Int>>}>(callback: call F) {}",
+        "effect Signal<T> { fn ping() -> Unit; } fn f() with {Signal<Limited<Int>>} {}",
+        "effect alias Gone<T> = {}; fn f() with {Gone<Limited<Int>>} {}",
+        "effect alias Gone<T> = {}; effect alias Outer = {Gone<Limited<Int>>};",
+        "effect alias Gone<T> = {}; mod empty requires {super::Gone<super::Limited<Int>>} {}",
+        "fn f<T>(value: move T) -> T { value } fn bad() { let x: Limited<Int> = f(Limited { value: 1 }); }",
+        "trait Tick { fn tick(self: &Self) with {}; } impl<T: Mark> Tick for Limited<T> { fn tick(self: &Self) {} } fn f() with {Tick::tick<Limited<Int>>} {}",
+    ] {
+        let source = format!("{prefix}{carrier}");
+        let diagnostic = error(&source);
+        assert_eq!(
+            diagnostic.kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{carrier}: {diagnostic:?}"
+        );
+        assert!(
+            diagnostic.message.contains("Mark"),
+            "{carrier}: {diagnostic:?}"
+        );
+        check(&format!("{prefix} impl Mark for Int {{}} {carrier}"))
+            .unwrap_or_else(|error| panic!("formed control {carrier}: {error:?}"));
+    }
+    let diagnostic =
+        error("trait Mark {} trait Accept<T: Mark> {} fn invalid<U: Accept<Int>>(value: &U) {}");
+    assert!(
+        diagnostic.message.contains("Mark"),
+        "a requested formation condition is not a given: {diagnostic:?}"
+    );
+}
+
+#[test]
+fn joint_inputs_compound_givens_fix_the_dictionary_before_inherent_lookup() {
+    for subject in ["(T, Int)", "Holder<T>", "T::Item"] {
+        let source = format!(
+            r#"
+trait Read {{ fn read(self: &Self) -> Int with {{}}; }}
+trait Has {{ type Item; }}
+struct Holder<T> {{ value: T }}
+impl<T> Holder<T> {{ fn read(self: &Self) -> Bool {{ true }} }}
+fn helper<U: Read>(value: &U) -> Int with {{}} {{ value.read() }}
+trait Use<T: Has> {{
+    fn direct(self: &Self, value: &{subject}) -> Int with {{}};
+    fn indirect(self: &Self, value: &{subject}) -> Int with {{}};
+}}
+struct Carrier<T> {{ value: T }}
+impl<T: Has> Use<T> for Carrier<T> where {subject}: Read {{
+    fn direct(self: &Self, value: &{subject}) -> Int with {{}} {{ value.read() }}
+    fn indirect(self: &Self, value: &{subject}) -> Int with {{}} {{ helper(value) }}
+}}
+"#
+        );
+        check(&source).unwrap_or_else(|error| panic!("{subject}: {error:?}"));
+    }
+    let source = r#"
+trait Read<T> { fn read(self: &Self) -> Int; }
+fn ambiguous<U: Read<Int> + Read<Bool>>(value: &U) -> Int { value.read() }
+"#;
+    assert!(error(source).message.contains("ambiguous"));
+}
+
+#[test]
+fn joint_inputs_inherent_associated_types_keep_actuals_conditions_and_privacy() {
+    check("struct N {} impl N { type Item = Int; } fn value() -> N::Item { 1 }").unwrap();
+    check("pub struct N {} impl N { pub type Item = Int; } pub fn value() -> N::Item { 1 }")
+        .unwrap();
+    check("struct Box<T> { value: T } impl<T> Box<T> { type Item = T; fn identity(value: move Self::Item) -> Self::Item { value } } type IntBox = Box<Int>; fn value() -> IntBox::Item { 1 }").unwrap();
+    for source in [
+        "struct N {} impl N { type Item = Self::Item; } fn value() -> N::Item { 1 }",
+        "mod hidden { pub struct N {} impl N { type Item = Int; } } fn value() -> hidden::N::Item { 1 }",
+        "struct N {} impl N { type Item = Int; } fn value() -> N::Item<Int> { 1 }",
+        "pub struct N {} impl N { type Item = Int; } pub fn value() -> N::Item { 1 }",
+        "pub struct N {} trait Hidden { type Item; } impl Hidden for N { type Item = Int; } pub fn value() -> N::Item { 1 }",
+    ] {
+        assert!(check(source).is_err(), "{source}");
+    }
+    let source = "trait Read { fn read(self: &Self) -> Int; } struct N {} impl Read for N { fn read(self: &Self) -> Int { 1 } } mod hidden { trait Secret { fn read(self: &Self) -> Bool; } impl Secret for super::N { fn read(self: &Self) -> Bool { true } } } fn read() -> Int { N {}.read() }";
+    check(source).unwrap();
+    assert!(
+        error(&source.replace("impl Read for N { fn read(self: &Self) -> Int { 1 } }", ""))
+            .message
+            .contains("private")
+    );
+}
+
+#[test]
+fn joint_inputs_json_type_operands_close_before_row_reduction() {
+    let owners = BTreeMap::from([("app".to_owned(), APP)]);
+    let limited = r#"{"tag":"nominal","declaration":{"library":{"tag":"self"},"path":["Limited"],"kind":"struct"},"arguments":[{"tag":"primitive","name":"Int"}]}"#;
+    for term in [
+        format!(r#"{{"tag":"fail","payload":{limited}}}"#),
+        format!(r#"{{"tag":"full_destruction","type":{limited}}}"#),
+        format!(
+            r#"{{"tag":"handled","effect":{{"library":{{"tag":"self"}},"path":["Signal"],"kind":"effect"}},"arguments":[{limited}]}}"#
+        ),
+    ] {
+        let record = format!(
+            r#"{{"target":{},"set":{{"effect_upper":[{term}]}}}}"#,
+            function_target("f")
+        );
+        let source = "trait Mark {} struct Limited<T: Mark> { value: T } effect Signal<T> { fn ping() -> Unit; } fn f() {}";
+        let document = document(&record);
+        let diagnostic =
+            check_project(&project(source), &owners, vec![contract(&document)]).unwrap_err();
+        assert_eq!(
+            diagnostic.kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{term}: {diagnostic:?}"
+        );
+        assert!(diagnostic.message.contains("Mark"), "{diagnostic:?}");
+        assert!(
+            matches!(diagnostic.primary, Some(CheckOrigin::Contract { json_path, .. }) if json_path == "$.records[0].set.effect_upper[0]")
+        );
+        check_project(
+            &project(&format!("impl Mark for Int {{}} {source}")),
+            &owners,
+            vec![contract(&document)],
+        )
+        .unwrap();
+    }
+    let formal = function_formal("f", 0);
+    let callable = format!(
+        r#"{{"tag":"trait","subject":{formal},"bound":{{"trait":{{"library":{{"tag":"dependency","alias":"vorton_core"}},"path":["Fn"],"kind":"trait"}},"arguments":[],"associated_bindings":[]}}}}"#
+    );
+    let unit = r#"{"tag":"primitive","name":"Unit"}"#;
+    for (parameter, result, row) in [
+        (limited, unit, "".to_owned()),
+        (unit, limited, "".to_owned()),
+        (
+            unit,
+            unit,
+            format!(r#"{{"tag":"fail","payload":{limited}}}"#),
+        ),
+    ] {
+        let shape = format!(
+            r#"{{"tag":"callable_shape","subject":{formal},"shape":{{"parameters":[{{"type":{parameter},"mode":{{"tag":"fixed","mode":"borrow"}},"escape":"may_escape"}}],"result":{result},"effect_upper":[{row}]}}}}"#
+        );
+        let record = format!(
+            r#"{{"target":{},"type_parameters":["F"],"set":{{"generic_requirements":[{callable},{shape}]}}}}"#,
+            function_target("f")
+        );
+        let source =
+            "trait Mark {} struct Limited<T: Mark> { value: T } fn f<F>(callback: call F) {}";
+        let selected = contract(&document(&record));
+        let diagnostic = check_project(&project(source), &owners, vec![selected]).unwrap_err();
+        assert_eq!(
+            diagnostic.kind,
+            CheckDiagnosticKind::TypeMismatch,
+            "{diagnostic:?}"
+        );
+        assert!(diagnostic.message.contains("Mark"), "{diagnostic:?}");
+        assert!(matches!(
+            diagnostic.primary,
+            Some(CheckOrigin::Contract { .. })
+        ));
+        check_project(
+            &project(&format!("impl Mark for Int {{}} {source}")),
+            &owners,
+            vec![contract(&document(&record))],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn joint_inputs_handled_contracts_use_dependency_and_reexport_bindings() {
+    let owners = BTreeMap::from([("app".to_owned(), APP)]);
+    for (library, path) in [
+        (r#"{"tag":"self"}"#, "Alias"),
+        (r#"{"tag":"dependency","alias":"dep"}"#, "Signal"),
+    ] {
+        let mut sources = project("pub use dep::Signal as Alias; fn f() { Alias.ping(); }");
+        sources
+            .libraries
+            .get_mut(&APP)
+            .unwrap()
+            .dependencies
+            .insert("dep".to_owned(), DEPENDENCY);
+        sources.libraries.insert(
+            DEPENDENCY,
+            LibrarySources {
+                root: "pub effect Signal { fn ping() -> Unit; }".to_owned(),
+                modules: BTreeMap::new(),
+                dependencies: BTreeMap::from([("vorton_core".to_owned(), CORE)]),
+            },
+        );
+        let record = format!(
+            r#"{{"target":{},"set":{{"effect_upper":[{{"tag":"handled","effect":{{"library":{library},"path":["{path}"],"kind":"effect"}},"arguments":[]}}]}}}}"#,
+            function_target("f")
+        );
+        check_project(&sources, &owners, vec![contract(&document(&record))]).unwrap();
+    }
+}
+
+#[test]
+fn joint_inputs_handled_binding_and_main_guard_use_exact_effects() {
+    let owners = BTreeMap::from([("app".to_owned(), APP)]);
+    let handled = r#"{"tag":"handled","effect":{"library":{"tag":"self"},"path":["Signal"],"kind":"effect"},"arguments":[]}"#;
+    let method = r#"{"tag":"method_application","method":{"tag":"trait_member","kind":"method","owner":{"library":{"tag":"self"},"path":["Tick"],"kind":"trait"},"name":"tick"},"self":{"tag":"primitive","name":"Int"},"trait_type_arguments":[],"method_type_arguments":[],"effect_arguments":[]}"#;
+    for visibility in ["", "pub "] {
+        let source = format!(
+            "{visibility}effect Signal {{ fn ping() -> Unit; }} fn f() {{ Signal.ping(); }}"
+        );
+        let record = format!(
+            r#"{{"target":{},"set":{{"effect_upper":[{handled}]}}}}"#,
+            function_target("f")
+        );
+        check_project(
+            &project(&source),
+            &owners,
+            vec![contract(&document(&record))],
+        )
+        .unwrap();
+    }
+    let prefix = "effect Signal { fn ping() -> Unit; } trait Tick { fn tick(self: &Self) -> Unit; } impl Tick for Int { fn tick(self: &Self) -> Unit with {Signal} { Signal.ping() } }";
+    for upper in ["", " with {Tick::tick<Int>}"] {
+        let diagnostic = error(&format!("{prefix} fn main() -> Unit{upper} {{ 1.tick() }}"));
+        assert!(
+            diagnostic.message.contains("unhandled user effect"),
+            "{diagnostic:?}"
+        );
+    }
+    let record = format!(
+        r#"{{"target":{},"set":{{"effect_upper":[{method}]}}}}"#,
+        function_target("main")
+    );
+    let diagnostic = check_project(
+        &project(&format!("{prefix} fn main() {{ 1.tick(); }}")),
+        &owners,
+        vec![contract(&document(&record))],
+    )
+    .unwrap_err();
+    assert!(
+        diagnostic.message.contains("unhandled user effect"),
+        "{diagnostic:?}"
+    );
+    check(&format!(
+        "{prefix} struct N {{}} impl N {{ fn main(self: &Self) {{ 1.tick(); }} }}"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn joint_inputs_projection_actuals_normalize_in_shapes_rows_and_conformance() {
+    check(r#"
+trait Has { type Item; }
+struct N {}
+impl Has for N { type Item = Int; }
+fn apply<T: Has, F: Fn + fn(T::Item) -> Unit with {fail<T::Item>}>(owner: &T, callback: call F, value: &T::Item) -> Unit with {fail<T::Item>} { callback(value); }
+fn actual(value: &Int) -> Unit with {fail<Int>} {}
+fn use_it() -> Unit with {fail<Int>} { apply(N {}, actual, 1); }
+"#).unwrap();
+    check(r#"
+trait Has { type Item; }
+struct N {}
+impl Has for N { type Item = Int; }
+trait Apply<T: Has> { fn apply<F: Fn + fn(T::Item) -> Unit with {fail<T::Item>}>(self: &Self, callback: call F, value: &T::Item) -> Unit with {fail<T::Item>}; }
+struct X {}
+impl Apply<N> for X { fn apply<F: Fn + fn(Int) -> Unit with {fail<Int>}>(self: &Self, callback: call F, value: &Int) -> Unit with {fail<Int>} { callback(value); } }
+"#).unwrap();
+    check(
+        r#"
+trait Has { type Item; }
+struct N {}
+impl Has for N { type Item = Int; }
+effect alias Payload<T: Has> = {fail<T::Item>};
+fn f<T: Has>(owner: &T) -> Unit with {Payload<T>} {}
+fn use_it() -> Unit with {fail<Int>} { f(N {}); }
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn joint_finite_evidence_can_grow_before_it_closes() {
     check(
         r#"

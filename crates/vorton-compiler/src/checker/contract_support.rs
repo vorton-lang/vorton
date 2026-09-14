@@ -837,6 +837,7 @@ pub(super) fn contract_effect(
     context: &ContractTypeContext<'_>,
     row: &[contract::EffectTerm],
     path: &str,
+    inputs: &mut Vec<LocatedInput>,
 ) -> Result<CheckedEffect, CheckDiagnostic> {
     let mut result = CheckedEffect::default();
     for (index, term) in row.iter().enumerate() {
@@ -893,39 +894,6 @@ pub(super) fn contract_effect(
                         normalize_contract_type(context, &format!("{path}.arguments[{index}]"), ty)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let mapping = context.traits.owner_formals[&identity]
-                    .iter()
-                    .cloned()
-                    .zip(arguments.iter().cloned())
-                    .collect::<BTreeMap<_, _>>();
-                let givens = context
-                    .header
-                    .requirements
-                    .iter()
-                    .chain(&context.header.outer_requirements)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let inference = TypeInference::default();
-                let mut solver = TraitSolver::new(
-                    context.traits,
-                    context.project,
-                    &inference,
-                    &givens,
-                    context.header.origin.clone(),
-                )?;
-                for requirement in &context.traits.requirements[&identity] {
-                    solver.prove(&Requirement {
-                        subject: instantiate_type(&requirement.subject, &mapping),
-                        bound: instantiate_trait(&requirement.bound, &mapping),
-                        origin: CheckOrigin::Contract {
-                            document_index: context.document_index,
-                            json_path: path.clone(),
-                        },
-                    })?;
-                }
-                for ty in &arguments {
-                    solver.formation(ty, &context.normalizer.nominals)?;
-                }
                 EffectTerm::Handled(identity, arguments)
             }
             contract::EffectTerm::Fail { payload } => EffectTerm::Failure(normalize_contract_type(
@@ -1044,6 +1012,7 @@ pub(super) fn contract_effect(
                                 context,
                                 row,
                                 &format!("{path}.effect_arguments[{index}]"),
+                                inputs,
                             )
                         })
                         .collect::<Result<_, _>>()?,
@@ -1054,42 +1023,17 @@ pub(super) fn contract_effect(
             ),
             contract::EffectTerm::SelectedCall { callable } => {
                 let ty = normalize_contract_type(context, &format!("{path}.callable"), callable)?;
-                let givens = context
-                    .header
-                    .requirements
-                    .iter()
-                    .chain(&context.header.outer_requirements)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let requirement = Requirement {
-                    subject: ty.clone(),
-                    bound: TraitUse {
-                        declaration: context.project.core_roles.function.clone(),
-                        arguments: Vec::new(),
-                        associated: BTreeMap::new(),
-                    },
+                inputs.push(LocatedInput {
+                    exposed: false,
                     origin: CheckOrigin::Contract {
                         document_index: context.document_index,
                         json_path: path.clone(),
                     },
-                };
-                TraitSolver::new(
-                    context.traits,
-                    context.project,
-                    &TypeInference::default(),
-                    &givens,
-                    context.header.origin.clone(),
-                )?
-                .prove(&requirement)
-                .map_err(|diagnostic| {
-                    contract_diagnostic(
-                        CheckDiagnosticKind::Unsupported,
-                        diagnostic.message,
-                        context.document_index,
-                        &path,
-                        diagnostic.related,
-                    )
-                })?;
+                    value: SemanticInput::Effect(
+                        CheckedEffect::singleton(EffectTerm::SelectedCall(ty.clone())),
+                        EffectUse::Runtime,
+                    ),
+                });
                 if let CheckedType::Formal(formal) = &ty
                     && let Some(shape) = context.header.shapes.get(formal.as_ref())
                     && !shape
@@ -1103,6 +1047,17 @@ pub(super) fn contract_effect(
                 EffectTerm::SelectedCall(ty)
             }
         };
+        inputs.push(LocatedInput {
+            exposed: false,
+            origin: CheckOrigin::Contract {
+                document_index: context.document_index,
+                json_path: path.clone(),
+            },
+            value: SemanticInput::Effect(
+                CheckedEffect::singleton(normalized.clone()),
+                EffectUse::Runtime,
+            ),
+        });
         result.0.insert(normalized);
     }
     result.reduce_destruction(&context.normalizer.nominals, &context.header.origin)
@@ -1136,7 +1091,8 @@ pub(super) fn apply_contract_effects(
             .effect_upper
             .as_ref()
             .unwrap();
-        let row = contract_effect(&context, wire, &pending.path)?;
+        let mut inputs = Vec::new();
+        let row = contract_effect(&context, wire, &pending.path, &mut inputs)?;
         let origin = CheckOrigin::Contract {
             document_index: pending.document_index,
             json_path: pending.path.clone(),
@@ -1163,6 +1119,7 @@ pub(super) fn apply_contract_effects(
             ));
         }
         let header = headers.get_mut(&pending.target).unwrap();
+        header.semantic_inputs.extend(inputs);
         header.effect_upper = Some(row.clone());
         header.effect_origin = Some(origin.clone());
         selections
@@ -1252,10 +1209,11 @@ pub(super) fn contract_function_item(
 pub(super) fn normalize_contract_types(
     project: &ResolvedProject,
     traits: &TraitEnvironment,
-    headers: &BTreeMap<EntityId, FunctionHeader>,
+    headers: &mut BTreeMap<EntityId, FunctionHeader>,
     selections: &mut ContractSelections,
     inference: &TypeInference,
 ) -> Result<(), CheckDiagnostic> {
+    let mut inputs = Vec::new();
     let normalize = |identity: &EntityId,
                      ty: &CheckedType,
                      origin: &CheckOrigin|
@@ -1276,12 +1234,43 @@ pub(super) fn normalize_contract_types(
             })
     };
     for ((identity, _), (ty, origin)) in &mut selections.parameter_types {
+        inputs.push((
+            identity.clone(),
+            LocatedInput {
+                exposed: false,
+                origin: origin.clone(),
+                value: SemanticInput::Type(ty.clone(), TypeUse::Value),
+            },
+        ));
         *ty = normalize(identity, ty, origin)?;
     }
     for (identity, (ty, origin)) in &mut selections.return_types {
+        inputs.push((
+            identity.clone(),
+            LocatedInput {
+                exposed: false,
+                origin: origin.clone(),
+                value: SemanticInput::Type(ty.clone(), TypeUse::Return),
+            },
+        ));
         *ty = normalize(identity, ty, origin)?;
     }
     for (identity, parameter, ty, origin) in std::mem::take(&mut selections.type_alternatives) {
+        inputs.push((
+            identity.clone(),
+            LocatedInput {
+                exposed: false,
+                origin: origin.clone(),
+                value: SemanticInput::Type(
+                    ty.clone(),
+                    if parameter.is_some() {
+                        TypeUse::Value
+                    } else {
+                        TypeUse::Return
+                    },
+                ),
+            },
+        ));
         let (selected, previous) = if let Some(parameter) = parameter {
             &selections.parameter_types[&(identity.clone(), parameter)]
         } else {
@@ -1295,6 +1284,13 @@ pub(super) fn normalize_contract_types(
                 related: vec![previous.clone()],
             });
         }
+    }
+    for (identity, input) in inputs {
+        headers
+            .get_mut(&identity)
+            .unwrap()
+            .semantic_inputs
+            .push(input);
     }
     Ok(())
 }

@@ -118,7 +118,7 @@ let checked = check_project(
 
 当前 `check_project` 联合检查普通函数、Trait/impl、associated type、具名方法与 associated function、受约束的 HM 递归组、shared `Fn` 具名函数回调以及真实 Effect row。类型包括 scalar、formal、tuple、普通 struct/enum、非泛型透明 alias、合法关联投影和本期函数值。每个 body 只生成一次 draft；同一调用的 type/effect actual、owner、evidence 与 Borrow/Move 入口共同闭合。正常及可能失败退出保留整值 owner 和待移交 temporary 的清理责任，泛型完整销毁可保留 `full_destruction(T)` 关系。Format-1 可选择 ordinary/trait/impl callable 的受支持类型、mode、requirements 三态及 effect 条款。Handler/catch、捕获或 scoped callback、一般函数值返回/存储、Mut/partial move、用户 Drop、Rc、生成器及尚未支持的类型仍明确拒绝。完整边界见[当前 Checker API 支持说明](docs/lang-spec/type-system.md#当前-checker-api-支持边界)。
 
-`CheckedProject` 保留已闭合的 scheme、typed body、调用 mapping、名义声明与 actual、构造及字段身份，以及真实形成的类型、字面量值、callee、mode 和纯 effect，但不公开内部 ID 或通用查询面，也不代表完整接口、完整 Checker 或最终 TypedHIR。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
+`CheckedProject` 保留已闭合的 scheme、typed body、调用 mapping、名义声明与 actual、构造及字段身份，以及真实形成的类型、字面量值、callee、mode、Effect row 与已完成的检查结果。声明及无 body 签名、body 递归组均在关闭后发布；原始 source/contract operand 的形成条件不会随 alias 或投影归约而丢失。它不公开内部 ID 或通用查询面，也不代表完整接口、完整 Checker 或最终 TypedHIR。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
 
 ```powershell
 python .agents/scripts/validate_current_tree.py
