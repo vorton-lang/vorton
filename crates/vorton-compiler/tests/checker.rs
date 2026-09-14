@@ -82,6 +82,119 @@ fn document(records: &str) -> String {
 }
 
 #[test]
+fn nested_supported_expressions_fit_the_default_windows_stack() {
+    fn assert_checked(source: &str) {
+        let sources = project(source);
+        eprintln!("ENTER parse ({} bytes)", source.len());
+        drop(vorton_compiler::parse(source).unwrap());
+        eprintln!("ENTER resolve_project");
+        let resolved = vorton_compiler::resolve_project(&sources).unwrap();
+        assert!(format!("{resolved:?}").contains("library_count: 2"));
+        drop(resolved);
+        eprintln!("ENTER check_project");
+        let checked = check_project(&sources, &BTreeMap::new(), Vec::new()).unwrap();
+        assert!(format!("{checked:?}").contains("checked_function_count"));
+        drop(checked);
+        eprintln!("DROP check_project");
+    }
+
+    // The normal test thread is larger than the failing Windows main thread.
+    // Keep the complete public pipeline, observation, and Drop on its 1 MiB stack.
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            for depth in [14, 15, 16, 32] {
+                eprintln!("construct depth={depth}");
+                let source = format!(
+                    "struct Wrap<T> {{ value: T }} fn probe() {{ let result = {}1{}; }}",
+                    "Wrap { value: ".repeat(depth),
+                    " }".repeat(depth),
+                );
+                assert_checked(&source);
+            }
+
+            let mut source = "struct Wrap<T> { value: T } fn probe() { let value = 1;".to_owned();
+            for _ in 0..32 {
+                source.push_str(" let value = Wrap { value };");
+            }
+            source.push_str(" }");
+            assert_checked(&source);
+
+            for (declarations, prefix, suffix) in [
+                ("", "(", ")"),
+                ("", "(", ", 0)"),
+                ("fn identity(value: Int) -> Int { value } ", "identity(", ")"),
+                ("", "1 + (", ")"),
+                ("", "{ ", " }"),
+                ("", "if true { ", " } else { 0 }"),
+            ] {
+                for depth in [1, 32] {
+                    eprintln!("{prefix} depth={depth}");
+                    let source = format!(
+                        "{declarations}fn probe() {{ let result = {}1{}; }}",
+                        prefix.repeat(depth),
+                        suffix.repeat(depth),
+                    );
+                    assert_checked(&source);
+                }
+            }
+
+            let file = FileModulePath::new(["nested"]).unwrap();
+            for (leaf, expected, marker) in [
+                (
+                    "missing + later_missing",
+                    CheckDiagnosticKind::Project(Box::new(ProjectDiagnosticKind::UnresolvedName {
+                        namespace: vorton_compiler::NameNamespace::Value,
+                        name: "missing".to_owned(),
+                    })),
+                    "missing",
+                ),
+                (
+                    "OnlyInt { value: true }",
+                    CheckDiagnosticKind::TypeMismatch,
+                    "true",
+                ),
+            ] {
+                for depth in [1, 32] {
+                    let source = format!(
+                        "// 前\nstruct Wrap<T> {{ value: T }} struct OnlyInt {{ value: Int }} pub fn probe() {{ let result = {}{leaf}{}; }}",
+                        "Wrap { value: ".repeat(depth),
+                        " }".repeat(depth),
+                    );
+                    let mut sources = project("use nested::probe;");
+                    sources
+                        .libraries
+                        .get_mut(&APP)
+                        .unwrap()
+                        .modules
+                        .insert(file.clone(), source.clone());
+                    let diagnostic =
+                        check_project(&sources, &BTreeMap::new(), Vec::new()).unwrap_err();
+                    assert_eq!(diagnostic.kind, expected);
+                    let Some(CheckOrigin::Source(origin)) = &diagnostic.primary else {
+                        panic!("a real source origin is required: {diagnostic:?}")
+                    };
+                    assert_eq!(origin.library, APP);
+                    assert_eq!(origin.source, vorton_compiler::SourceRef::File(file.clone()));
+                    let start = source.find(marker).unwrap();
+                    assert_eq!(
+                        origin.span,
+                        vorton_compiler::ast::Span {
+                            start,
+                            end: start + marker.len(),
+                        }
+                    );
+                    eprintln!("RETURN diagnostic {diagnostic:?}");
+                    drop(diagnostic);
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn checks_real_typed_bodies_recursion_literals_aliases_and_copy_modes() {
     let source = r#"
 requires {};
