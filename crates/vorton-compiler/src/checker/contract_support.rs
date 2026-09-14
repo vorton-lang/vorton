@@ -1070,6 +1070,7 @@ pub(super) fn apply_contract_effects(
     headers: &mut BTreeMap<EntityId, FunctionHeader>,
     selections: &mut ContractSelections,
     documents: &[ContractDocument],
+    inference: &TypeInference,
 ) -> Result<(), CheckDiagnostic> {
     for pending in std::mem::take(&mut selections.pending_effects) {
         let context = ContractTypeContext {
@@ -1092,11 +1093,42 @@ pub(super) fn apply_contract_effects(
             .as_ref()
             .unwrap();
         let mut inputs = Vec::new();
-        let row = contract_effect(&context, wire, &pending.path, &mut inputs)?;
         let origin = CheckOrigin::Contract {
             document_index: pending.document_index,
             json_path: pending.path.clone(),
         };
+        let row = contract_effect(&context, wire, &pending.path, &mut inputs)?;
+        let givens = context
+            .header
+            .requirements
+            .iter()
+            .chain(&context.header.outer_requirements)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut solver = TraitSolver::new(
+            traits,
+            project,
+            inference,
+            &givens,
+            context.header.origin.clone(),
+        )?;
+        let row = row
+            .normalize_types(&mut solver)
+            .and_then(|row| row.reduce_destruction(&normalizer.nominals, &context.header.origin))
+            .map_err(|mut diagnostic| {
+                diagnostic.related.extend(diagnostic.primary.take());
+                diagnostic.primary = Some(origin.clone());
+                diagnostic
+            })?;
+        let source = context
+            .header
+            .effect_upper
+            .as_ref()
+            .map(|row| {
+                row.normalize_types(&mut solver)?
+                    .reduce_destruction(&normalizer.nominals, &context.header.origin)
+            })
+            .transpose()?;
         if let Some((previous, previous_origin)) = selections.effect_upper.get(&pending.target) {
             if previous != &row {
                 return Err(contract_diagnostic(
@@ -1107,8 +1139,8 @@ pub(super) fn apply_contract_effects(
                     vec![previous_origin.clone()],
                 ));
             }
-        } else if let Some(source) = &context.header.effect_upper
-            && source != &row
+        } else if let Some(source) = source
+            && source != row
         {
             return Err(contract_diagnostic(
                 CheckDiagnosticKind::Unsupported,

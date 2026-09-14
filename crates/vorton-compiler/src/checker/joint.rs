@@ -644,12 +644,23 @@ pub(super) enum Evidence {
 enum Query {
     Type(CheckedType),
     Evidence(Box<TraitGoal>),
+    Applicable(Box<Candidate>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Candidate {
+    Trait(TraitGoal),
+    Inherent {
+        implementation: EntityId,
+        mapping: BTreeMap<TypeFormal, CheckedType>,
+    },
 }
 
 #[derive(Clone)]
 enum Answer {
     Type(CheckedType),
     Evidence(Box<Evidence>),
+    Applicable(Option<Box<Evidence>>),
 }
 
 impl Query {
@@ -666,17 +677,23 @@ impl Answer {
 enum SolveFrame {
     Enter(Query),
     Remember(Query),
+    Applicability(usize),
     Tuple(usize),
     Nominal(EntityId, usize),
     Function(EntityId, Vec<TypeFormal>),
     Projection(ProjectionType),
+    TraitProjection(Box<ProjectionType>),
+    QualifiedProjection {
+        projection: Box<ProjectionType>,
+        choices: Vec<(EntityId, TraitUse)>,
+    },
+    QualifiedInherent {
+        projection: Box<ProjectionType>,
+        choices: Vec<(EntityId, CheckedType)>,
+    },
     SelectedProjection {
         projection: Box<ProjectionType>,
         bound: TraitUse,
-    },
-    InherentProjection {
-        replacement: CheckedType,
-        count: usize,
     },
     EvidenceTypes {
         goal: TraitGoal,
@@ -693,6 +710,12 @@ enum SolveFrame {
         mapping: BTreeMap<TypeFormal, CheckedType>,
         goal: TraitGoal,
         pattern: CheckedType,
+    },
+    CheckInferredBinding {
+        identity: EntityId,
+        mapping: BTreeMap<TypeFormal, CheckedType>,
+        goal: TraitGoal,
+        actual: CheckedType,
     },
     CheckAssociated {
         identity: EntityId,
@@ -711,6 +734,32 @@ enum SolveFrame {
 // The same counter includes projection expansion and candidate header matching.
 const SOLVE_WORK_LIMIT: usize = 8192;
 const SOLVE_TYPE_LIMIT: usize = 256;
+
+// Only a definite failure of a closed condition may unwind to this boundary.
+// Cycles, ambiguous selection and work exhaustion propagate as diagnostics.
+fn reject_inapplicable(
+    frames: &mut Vec<SolveFrame>,
+    values: &mut Vec<Answer>,
+    active: &mut BTreeSet<Query>,
+) -> bool {
+    let Some((index, base)) = frames.iter().enumerate().rev().find_map(|(index, frame)| {
+        if let SolveFrame::Applicability(base) = frame {
+            Some((index, *base))
+        } else {
+            None
+        }
+    }) else {
+        return false;
+    };
+    for frame in frames.drain(index..) {
+        if let SolveFrame::Remember(query) = frame {
+            active.remove(&query);
+        }
+    }
+    values.truncate(base);
+    values.push(Answer::Applicable(None));
+    true
+}
 
 pub(super) struct TraitSolver<'a> {
     environment: &'a TraitEnvironment,
@@ -940,6 +989,14 @@ impl<'a> TraitSolver<'a> {
         Ok(*evidence)
     }
 
+    fn applicable(&mut self, candidate: Candidate) -> Result<Option<Evidence>, CheckDiagnostic> {
+        let Answer::Applicable(evidence) = self.solve(Query::Applicable(Box::new(candidate)))?
+        else {
+            unreachable!()
+        };
+        Ok(evidence.map(|evidence| *evidence))
+    }
+
     fn solve(&mut self, root: Query) -> Result<Answer, CheckDiagnostic> {
         let mut frames = vec![SolveFrame::Enter(root)];
         let mut values = Vec::new();
@@ -957,6 +1014,40 @@ impl<'a> TraitSolver<'a> {
                     }
                     frames.push(SolveFrame::Remember(query.clone()));
                     match query {
+                        Query::Applicable(candidate) => {
+                            frames.push(SolveFrame::Applicability(values.len()));
+                            match *candidate {
+                                Candidate::Trait(goal) => {
+                                    frames.push(SolveFrame::Enter(Query::evidence(goal)))
+                                }
+                                Candidate::Inherent {
+                                    implementation,
+                                    mapping,
+                                } => {
+                                    let definition = self
+                                        .environment
+                                        .implementations
+                                        .iter()
+                                        .find(|item| item.identity == implementation)
+                                        .unwrap();
+                                    frames.push(SolveFrame::SourceEvidence {
+                                        identity: implementation,
+                                        mapping: mapping.clone(),
+                                        count: definition.requirements.len(),
+                                    });
+                                    frames.extend(definition.requirements.iter().rev().map(
+                                        |requirement| {
+                                            let requirement =
+                                                instantiate_requirement(requirement, &mapping);
+                                            SolveFrame::Enter(Query::evidence(TraitGoal {
+                                                subject: requirement.subject,
+                                                bound: requirement.bound,
+                                            }))
+                                        },
+                                    ));
+                                }
+                            }
+                        }
                         Query::Type(ty) => {
                             self.check_size(&ty)?;
                             match ty {
@@ -1034,6 +1125,12 @@ impl<'a> TraitSolver<'a> {
                             .clone(),
                     );
                     active.remove(&query);
+                }
+                SolveFrame::Applicability(_) => {
+                    let Answer::Evidence(evidence) = values.pop().unwrap() else {
+                        unreachable!()
+                    };
+                    values.push(Answer::Applicable(Some(evidence)));
                 }
                 SolveFrame::Tuple(count) => {
                     let elements = take_types(&mut values, count);
@@ -1118,42 +1215,111 @@ impl<'a> TraitSolver<'a> {
                                     mapping,
                                 ));
                             }
-                            if candidates.len() > 1 {
-                                return Err(
-                                    self.diagnostic("ambiguous inherent associated selection")
-                                );
-                            }
-                            if let Some((implementation, member, replacement, mapping)) =
-                                candidates.pop()
-                            {
-                                self.require_public_associated(member, None)?;
-                                let requirements = implementation
-                                    .requirements
+                            if !candidates.is_empty() {
+                                let queries = candidates
                                     .iter()
-                                    .map(|requirement| {
-                                        instantiate_requirement(requirement, &mapping)
+                                    .map(|(implementation, _, _, mapping)| {
+                                        Query::Applicable(Box::new(Candidate::Inherent {
+                                            implementation: implementation.identity.clone(),
+                                            mapping: mapping.clone(),
+                                        }))
                                     })
                                     .collect::<Vec<_>>();
-                                frames.push(SolveFrame::InherentProjection {
-                                    replacement,
-                                    count: requirements.len(),
+                                let choices = candidates
+                                    .into_iter()
+                                    .map(|(_, member, replacement, _)| {
+                                        (member.clone(), replacement)
+                                    })
+                                    .collect();
+                                frames.push(SolveFrame::QualifiedInherent {
+                                    projection: Box::new(projection),
+                                    choices,
                                 });
-                                frames.extend(requirements.into_iter().rev().map(|requirement| {
-                                    SolveFrame::Enter(Query::evidence(TraitGoal {
-                                        subject: requirement.subject,
-                                        bound: requirement.bound,
-                                    }))
-                                }));
+                                frames.extend(queries.into_iter().rev().map(SolveFrame::Enter));
                                 continue;
                             }
-                            if hidden {
+                            if hidden && self.projection_bounds(&projection)?.0.is_empty() {
                                 return Err(self.diagnostic(
                                     "inherent associated type is private in this scope",
                                 ));
                             }
                         }
                     }
-                    let choices = self.projection_bounds(&projection)?;
+                    frames.push(SolveFrame::TraitProjection(Box::new(projection)));
+                }
+                SolveFrame::QualifiedInherent {
+                    projection,
+                    choices,
+                } => {
+                    let results = values.split_off(values.len() - choices.len());
+                    let mut available = choices
+                        .into_iter()
+                        .zip(results)
+                        .filter_map(|(choice, result)| {
+                            let Answer::Applicable(proof) = result else {
+                                unreachable!()
+                            };
+                            proof.map(|_| choice)
+                        })
+                        .collect::<Vec<_>>();
+                    if available.len() > 1 {
+                        return Err(self.diagnostic("ambiguous inherent associated selection"));
+                    }
+                    if let Some((member, replacement)) = available.pop() {
+                        self.require_public_associated(&member, None)?;
+                        frames.push(SolveFrame::Enter(Query::Type(replacement)));
+                    } else {
+                        frames.push(SolveFrame::TraitProjection(projection));
+                    }
+                }
+                SolveFrame::QualifiedProjection {
+                    mut projection,
+                    choices,
+                } => {
+                    let results = values.split_off(values.len() - choices.len());
+                    let mut available = choices
+                        .into_iter()
+                        .zip(results)
+                        .filter_map(|(choice, result)| {
+                            let Answer::Applicable(proof) = result else {
+                                unreachable!()
+                            };
+                            proof.map(|proof| (choice, proof))
+                        })
+                        .collect::<Vec<_>>();
+                    if available.len() != 1 {
+                        return Err(self.diagnostic(if available.is_empty() {
+                            "associated selection has no trait evidence"
+                        } else {
+                            "ambiguous associated selection"
+                        }));
+                    }
+                    let ((member, bound), proof) = available.pop().unwrap();
+                    self.require_public_associated(&member, Some(&bound.declaration))?;
+                    projection.member = Some(member);
+                    projection.bound = Some(bound.clone());
+                    frames.push(SolveFrame::SelectedProjection { projection, bound });
+                    values.push(Answer::Evidence(proof));
+                }
+                SolveFrame::TraitProjection(mut projection) => {
+                    let (choices, fixed) = self.projection_bounds(&projection)?;
+                    if !fixed {
+                        let queries = choices
+                            .iter()
+                            .map(|(_, bound)| {
+                                Query::Applicable(Box::new(Candidate::Trait(TraitGoal {
+                                    subject: projection.receiver.clone(),
+                                    bound: bound.clone(),
+                                })))
+                            })
+                            .collect::<Vec<_>>();
+                        frames.push(SolveFrame::QualifiedProjection {
+                            projection,
+                            choices,
+                        });
+                        frames.extend(queries.into_iter().rev().map(SolveFrame::Enter));
+                        continue;
+                    }
                     let [(member, bound)] = choices.as_slice() else {
                         return Err(self.diagnostic(if choices.is_empty() {
                             "associated selection has no trait evidence"
@@ -1169,7 +1335,7 @@ impl<'a> TraitSolver<'a> {
                         bound: bound.clone(),
                     });
                     frames.push(SolveFrame::SelectedProjection {
-                        projection: Box::new(projection),
+                        projection,
                         bound: bound.clone(),
                     });
                     frames.push(SolveFrame::Enter(query));
@@ -1217,10 +1383,6 @@ impl<'a> TraitSolver<'a> {
                     } else {
                         values.push(Answer::Type(CheckedType::Projection(Box::new(projection))));
                     }
-                }
-                SolveFrame::InherentProjection { replacement, count } => {
-                    values.truncate(values.len() - count);
-                    frames.push(SolveFrame::Enter(Query::Type(replacement)));
                 }
                 SolveFrame::EvidenceTypes {
                     mut goal,
@@ -1301,6 +1463,15 @@ impl<'a> TraitSolver<'a> {
                         ) {
                             candidates.push((implementation, mapping));
                         }
+                    }
+                    if candidates.is_empty()
+                        && std::iter::once(&goal.subject)
+                            .chain(&goal.bound.arguments)
+                            .chain(goal.bound.associated.values())
+                            .all(closed_identity_type)
+                        && reject_inapplicable(&mut frames, &mut values, &mut active)
+                    {
+                        continue;
                     }
                     let [(implementation, mapping)] = candidates.as_slice() else {
                         return Err(self.diagnostic(if candidates.is_empty() {
@@ -1424,9 +1595,15 @@ impl<'a> TraitSolver<'a> {
                         .find(|item| item.identity == identity)
                         .unwrap();
                     if !match_type(&pattern, &actual, &implementation.formals, &mut mapping) {
-                        return Err(
-                            self.diagnostic("associated binding conflicts with impl type actuals")
-                        );
+                        let pattern = instantiate_type(&pattern, &mapping);
+                        frames.push(SolveFrame::CheckInferredBinding {
+                            identity,
+                            mapping,
+                            goal,
+                            actual,
+                        });
+                        frames.push(SolveFrame::Enter(Query::Type(pattern)));
+                        continue;
                     }
                     frames.push(SolveFrame::ExpandImpl {
                         identity,
@@ -1444,6 +1621,11 @@ impl<'a> TraitSolver<'a> {
                     if actuals.iter().zip(&expected).any(|(actual, expected)| {
                         !inferred_types_equal(actual, expected, self.inference)
                     }) {
+                        if actuals.iter().chain(&expected).all(closed_identity_type)
+                            && reject_inapplicable(&mut frames, &mut values, &mut active)
+                        {
+                            continue;
+                        }
                         return Err(self.diagnostic(
                             "impl associated assignment does not satisfy the requested binding",
                         ));
@@ -1459,6 +1641,47 @@ impl<'a> TraitSolver<'a> {
                             bound: requirement.bound,
                         }))
                     }));
+                }
+                SolveFrame::CheckInferredBinding {
+                    identity,
+                    mut mapping,
+                    goal,
+                    actual,
+                } => {
+                    let pattern = take_types(&mut values, 1).pop().unwrap();
+                    let implementation = self
+                        .environment
+                        .implementations
+                        .iter()
+                        .find(|item| item.identity == identity)
+                        .unwrap();
+                    if !match_type(&pattern, &actual, &implementation.formals, &mut mapping) {
+                        let instantiated = instantiate_type(&pattern, &mapping);
+                        if instantiated != pattern {
+                            frames.push(SolveFrame::CheckInferredBinding {
+                                identity,
+                                mapping,
+                                goal,
+                                actual,
+                            });
+                            frames.push(SolveFrame::Enter(Query::Type(instantiated)));
+                            continue;
+                        }
+                        if closed_identity_type(&pattern)
+                            && closed_identity_type(&actual)
+                            && reject_inapplicable(&mut frames, &mut values, &mut active)
+                        {
+                            continue;
+                        }
+                        return Err(
+                            self.diagnostic("associated binding conflicts with impl type actuals")
+                        );
+                    }
+                    frames.push(SolveFrame::ExpandImpl {
+                        identity,
+                        mapping,
+                        goal,
+                    });
                 }
                 SolveFrame::SourceEvidence {
                     identity,
@@ -1489,9 +1712,14 @@ impl<'a> TraitSolver<'a> {
     fn projection_bounds(
         &mut self,
         projection: &ProjectionType,
-    ) -> Result<Vec<(EntityId, TraitUse)>, CheckDiagnostic> {
+    ) -> Result<(Vec<(EntityId, TraitUse)>, bool), CheckDiagnostic> {
+        let caller = module_for_origin(self.project, &self.origin)
+            .expect("projection has a real source scope");
         if let (Some(member), Some(bound)) = (&projection.member, &projection.bound) {
-            return Ok(vec![(member.clone(), bound.clone())]);
+            if !member_accessible_in_module(member, &caller, self.project) {
+                return Err(self.diagnostic("associated type is private in this scope"));
+            }
+            return Ok((vec![(member.clone(), bound.clone())], true));
         }
         let mut choices = BTreeSet::new();
         for given in self.bounds_for_type(&projection.receiver)? {
@@ -1499,7 +1727,8 @@ impl<'a> TraitSolver<'a> {
                 .associated
                 .keys()
             {
-                if member.name == projection.name
+                if member_accessible_in_module(member, &caller, self.project)
+                    && member.name == projection.name
                     && projection
                         .member
                         .as_ref()
@@ -1509,6 +1738,7 @@ impl<'a> TraitSolver<'a> {
                 }
             }
         }
+        let fixed = !choices.is_empty();
         if choices.is_empty()
             && !matches!(
                 projection.receiver,
@@ -1532,7 +1762,8 @@ impl<'a> TraitSolver<'a> {
                     .associated
                     .keys()
                 {
-                    if member.name == projection.name
+                    if member_accessible_in_module(member, &caller, self.project)
+                        && member.name == projection.name
                         && projection
                             .member
                             .as_ref()
@@ -1543,7 +1774,7 @@ impl<'a> TraitSolver<'a> {
                 }
             }
         }
-        Ok(choices.into_iter().collect())
+        Ok((choices.into_iter().collect(), fixed))
     }
 
     fn primitive_evidence(&self, goal: &TraitGoal) -> bool {
@@ -1749,12 +1980,15 @@ fn match_type(
     mapping: &mut BTreeMap<TypeFormal, CheckedType>,
 ) -> bool {
     let mut pending = vec![(pattern, actual)];
+    // Keep other structural bindings when a projection is not yet comparable;
+    // the worklist can normalize it with those actuals before deciding failure.
+    let mut matched = true;
     while let Some((pattern, actual)) = pending.pop() {
         match (pattern, actual) {
             (CheckedType::Formal(formal), _) if formals.contains(formal) => {
                 if let Some(prior) = mapping.get(formal.as_ref()) {
                     if prior != actual {
-                        return false;
+                        matched = false;
                     }
                 } else {
                     mapping.insert(formal.as_ref().clone(), actual.clone());
@@ -1769,10 +2003,10 @@ fn match_type(
                 pending.extend(left.arguments.iter().zip(&right.arguments))
             }
             _ if pattern == actual => {}
-            _ => return false,
+            _ => matched = false,
         }
     }
-    true
+    matched
 }
 
 pub(super) fn collect_method_headers(
@@ -2547,18 +2781,25 @@ fn method_accessible(
     headers: &BTreeMap<EntityId, FunctionHeader>,
     project: &ResolvedProject,
 ) -> bool {
+    headers
+        .get(member)
+        .is_some_and(|header| header.public_export)
+        || member_accessible_in_module(member, &caller.module, project)
+}
+
+fn member_accessible_in_module(
+    member: &EntityId,
+    caller: &ModuleRef,
+    project: &ResolvedProject,
+) -> bool {
     let entity = &project.entities[member];
     entity.public
-        || headers
-            .get(member)
-            .is_some_and(|header| header.public_export)
-        || (member.module.library() == caller.module.library()
-            && caller.module.path().starts_with(member.module.path()))
-        || (headers.get(member).is_none()
-            && entity
-                .owner
-                .as_ref()
-                .is_some_and(|owner| actual_public_exports(project).contains(owner)))
+        || (member.module.library() == caller.library()
+            && caller.path().starts_with(member.module.path()))
+        || entity
+            .owner
+            .as_ref()
+            .is_some_and(|owner| actual_public_exports(project).contains(owner))
 }
 
 fn select_method(
@@ -2630,14 +2871,14 @@ fn select_method(
                 &implementation.formals,
                 &mut mapping,
             ) {
-                choices.insert(
-                    (member.clone(), mapping.clone(), None),
-                    Evidence::Source {
-                        implementation: implementation.identity.clone(),
-                        mapping,
-                        premises: Vec::new(),
-                    },
-                );
+                let Some(evidence) = solver.applicable(Candidate::Inherent {
+                    implementation: implementation.identity.clone(),
+                    mapping: mapping.clone(),
+                })?
+                else {
+                    continue;
+                };
+                choices.insert((member.clone(), mapping, None), evidence);
             }
         }
         if choices.is_empty() {
@@ -2662,11 +2903,13 @@ fn select_method(
                     continue;
                 }
                 let bound = instantiate_trait(bound, &mapping);
-                let evidence = solver.prove(&Requirement {
+                let Some(evidence) = solver.applicable(Candidate::Trait(TraitGoal {
                     subject: receiver.clone(),
                     bound: bound.clone(),
-                    origin: CheckOrigin::Source(selection.member.origin.clone()),
-                })?;
+                }))?
+                else {
+                    continue;
+                };
                 if let Evidence::Source {
                     mapping: actuals, ..
                 } = &evidence

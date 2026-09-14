@@ -1508,6 +1508,11 @@ pub(super) fn normalize_callable_shapes(
                     .normalize_with_formals(return_type, &header.formal_by_identity)?,
                 effect,
             };
+            inputs.push(LocatedInput {
+                exposed: false,
+                origin: CheckOrigin::Source(header.context.origin(source.span)),
+                value: SemanticInput::Shape(shape.clone()),
+            });
             if shapes.insert(formal.clone(), shape).is_some() {
                 return Err(source_diagnostic(
                     CheckDiagnosticKind::TypeMismatch,
@@ -1524,7 +1529,7 @@ pub(super) fn normalize_callable_shapes(
             .extend(inputs);
         headers.get_mut(&identity).unwrap().shapes = shapes;
     }
-    merge_contract_shapes(project, normalizer, headers, traits, documents)?;
+    merge_contract_shapes(project, normalizer, headers, traits, documents, inference)?;
     for implementation in &traits.implementations {
         let Some(bound) = &implementation.trait_use else {
             continue;
@@ -1762,6 +1767,7 @@ fn merge_contract_shapes(
     headers: &mut BTreeMap<EntityId, FunctionHeader>,
     traits: &TraitEnvironment,
     documents: &[ContractDocument],
+    inference: &TypeInference,
 ) -> Result<(), CheckDiagnostic> {
     let mut implicit = BTreeMap::new();
     for (identity, header) in headers.iter_mut() {
@@ -1828,6 +1834,22 @@ fn merge_contract_shapes(
             continue;
         }
         let mut inputs = Vec::new();
+        let givens = header
+            .requirements
+            .iter()
+            .chain(&header.outer_requirements)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut solver =
+            TraitSolver::new(traits, project, inference, &givens, header.origin.clone())?;
+        let mut source_shapes = header.shapes.clone();
+        for shape in source_shapes.values_mut() {
+            shape.normalize_types(&mut solver)?;
+            shape.effect = shape
+                .effect
+                .clone()
+                .reduce_destruction(&normalizer.nominals, &header.origin)?;
+        }
         let mut selected: Option<BTreeMap<TypeFormal, CallableShape>> = None;
         for specs in &header.contract_shapes {
             let mut shapes = BTreeMap::new();
@@ -1873,17 +1895,27 @@ fn merge_contract_shapes(
                 } else {
                     implicit[&(identity.clone(), spec.subject.clone())].clone()
                 };
-                if shapes
-                    .insert(
-                        spec.subject.clone(),
-                        CallableShape {
-                            parameters: spec.parameters.clone(),
-                            result: spec.result.clone(),
-                            effect,
-                        },
-                    )
-                    .is_some()
-                {
+                let mut shape = CallableShape {
+                    parameters: spec.parameters.clone(),
+                    result: spec.result.clone(),
+                    effect,
+                };
+                inputs.push(LocatedInput {
+                    exposed: false,
+                    origin: spec.origin.clone(),
+                    value: SemanticInput::Shape(shape.clone()),
+                });
+                shape
+                    .normalize_types(&mut solver)
+                    .map_err(|mut diagnostic| {
+                        diagnostic.related.extend(diagnostic.primary.take());
+                        diagnostic.primary = Some(spec.origin.clone());
+                        diagnostic
+                    })?;
+                shape.effect = shape
+                    .effect
+                    .reduce_destruction(&normalizer.nominals, &header.origin)?;
+                if shapes.insert(spec.subject.clone(), shape).is_some() {
                     return Err(contract_diagnostic(
                         CheckDiagnosticKind::ContractConflict,
                         "generic requirements repeat a callable shape",
@@ -1903,7 +1935,7 @@ fn merge_contract_shapes(
                     });
                 }
             } else {
-                if header.source_requirements_explicit && header.shapes != shapes {
+                if header.source_requirements_explicit && source_shapes != shapes {
                     return Err(CheckDiagnostic { kind: CheckDiagnosticKind::Unsupported, message: "different explicit source and contract callback requirements have no selected difference policy".to_owned(), primary: specs.first().map(|shape| shape.origin.clone()), related: vec![CheckOrigin::Source(header.origin.clone())] });
                 }
                 selected = Some(shapes);
@@ -2900,9 +2932,11 @@ pub(super) fn source_effect_row(
         }
     }
     let row = values.pop().expect("one expanded source row");
-    if matches!(scope.use_kind, EffectUse::Runtime) {
-        row.validate_identity(scope.origin)?;
-    }
+    inputs.push(LocatedInput {
+        exposed: false,
+        origin: CheckOrigin::Source(scope.origin.clone()),
+        value: SemanticInput::Effect(row.clone(), scope.use_kind),
+    });
     Ok(row)
 }
 
@@ -2911,6 +2945,7 @@ pub(super) fn closed_identity_type(ty: &CheckedType) -> bool {
         CheckedType::Infer(_) | CheckedType::Formal(_) | CheckedType::Projection(_) => false,
         CheckedType::Tuple(elements) => elements.iter().all(closed_identity_type),
         CheckedType::Nominal(nominal) => nominal.arguments.iter().all(closed_identity_type),
+        CheckedType::Function(value) => value.types.iter().all(|(_, ty)| closed_identity_type(ty)),
         _ => true,
     }
 }
@@ -2920,6 +2955,7 @@ pub(super) fn collect_operation_headers(
     normalizer: &mut SourceTypeNormalizer,
     headers: &mut BTreeMap<EntityId, FunctionHeader>,
     traits: &TraitEnvironment,
+    public_exports: &BTreeSet<EntityId>,
 ) -> Result<(), CheckDiagnostic> {
     for module in project.modules.values() {
         for declaration in module.body.iter().flat_map(|body| &body.declarations) {
@@ -2931,6 +2967,14 @@ pub(super) fn collect_operation_headers(
                 continue;
             };
             let owner = declaration.identity.as_ref().unwrap();
+            let public_export = public_exports.contains(owner);
+            if public_export {
+                validate_public_generic_types(
+                    type_parameters,
+                    public_exports,
+                    &normalizer.aliases,
+                )?;
+            }
             let outer_formals = type_parameters
                 .iter()
                 .map(|parameter| normalizer.source_formals[&parameter.binding.identity].clone())
@@ -2965,6 +3009,9 @@ pub(super) fn collect_operation_headers(
                             Vec::new(),
                         ));
                     };
+                    if public_export {
+                        validate_public_type_visibility(public_exports, ty, &normalizer.aliases)?;
+                    }
                     parameters.push(HeaderParameter {
                         binding: parameter.binding.identity.clone(),
                         span: parameter.span,
@@ -2981,13 +3028,20 @@ pub(super) fn collect_operation_headers(
                         }),
                     });
                 }
+                if public_export {
+                    validate_public_type_visibility(
+                        public_exports,
+                        &operation.return_type,
+                        &normalizer.aliases,
+                    )?;
+                }
                 headers.insert(
                     operation.identity.clone(),
                     FunctionHeader {
                         identity: operation.identity.clone(),
                         context,
                         origin: origin.clone(),
-                        public_export: declaration.public,
+                        public_export,
                         declared_formals: Vec::new(),
                         outer_formals: outer_formals.clone(),
                         formal_by_identity: formal_by_identity.clone(),

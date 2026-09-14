@@ -391,10 +391,12 @@ pub(super) fn check_semantic_inputs(
                     for term in &row.0 {
                         match term {
                             EffectTerm::Handled(_, arguments) => {
+                                let arguments = arguments
+                                    .iter()
+                                    .map(|ty| solver.normalize(ty))
+                                    .collect::<Result<Vec<_>, _>>()?;
                                 if matches!(use_kind, EffectUse::Runtime)
-                                    && arguments
-                                        .iter()
-                                        .any(|ty| !closed_identity_type(&inference.resolve(ty)))
+                                    && arguments.iter().any(|ty| !closed_identity_type(ty))
                                 {
                                     return Err(CheckDiagnostic { kind: CheckDiagnosticKind::TypeMismatch, message: "handled effect runtime identity requires closed concrete type actuals".to_owned(), primary: Some(origin.clone()), related: Vec::new() });
                                 }

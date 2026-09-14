@@ -574,7 +574,13 @@ fn check_prepared_project(
         &mut function_order,
         &mut headers,
     )?;
-    collect_operation_headers(project, &mut normalizer, &mut headers, &traits)?;
+    collect_operation_headers(
+        project,
+        &mut normalizer,
+        &mut headers,
+        &traits,
+        &public_exports,
+    )?;
     let mut contract_selections = apply_contract_documents(
         project,
         owners,
@@ -618,7 +624,9 @@ fn check_prepared_project(
         &mut headers,
         &mut contract_selections,
         &documents,
+        &inference,
     )?;
+    normalize_headers(project, &traits, &mut headers, &inference)?;
     finalize_effect_headers(project, &mut headers, &traits, &mut inference)?;
     let declarations = DeclarationClosure {
         project,
