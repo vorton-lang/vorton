@@ -87,3 +87,17 @@ jobs:
               exit 1
               ;;
           esac
+
+  validation-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: target/validation-downloads
+          key: verus-0.2026.09.13.671956e-x86-linux
+      - name: Self-test required validation tools
+        run: python tools/validation/run.py required --install

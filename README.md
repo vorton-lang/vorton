@@ -44,7 +44,7 @@ fn message() -> Str {
 
 ## 当前构建与 CI
 
-根 workspace 固定使用 Rust `1.98.0`。Compiler library 提供五个保持分层的入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 验证并解析显式纯内存库 DAG 及宿主指定的唯一官方 core，返回统一的 owned opaque `ResolvedProject`；`vorton_compiler::prepare_project(ResolvedProject)` 检查 supertrait 目标类别、trait inheritance cycle 与 effect alias cycle，返回 owned opaque `PreparedProject`；`vorton_compiler::decode_contract(&[u8])` 按 [contract format 1](docs/contract-format.md) 读取一份纯内存 JSON 输入，返回 owned opaque `ContractDocument` 或结构化 `ContractDiagnostic`；`vorton_compiler::check_project(&ProjectSources, &BTreeMap<String, LibraryId>, Vec<ContractDocument>)` 将真实项目与选定契约一起闭合为 owned opaque `CheckedProject`。契约读取成功只证明版本、读取 profile 与记录结构成立；owner／引用绑定、受支持 `set` 的一致性和函数体检查只在 `check_project` 中发生。项目阶段失败仍以原有 `ProjectDiagnosticKind` 和真实 origin 包在 `CheckDiagnostic` 中；`parse` 的签名与单 source 行为不依赖项目或契约输入。
+根 workspace 固定使用 Rust `1.98.1`。Compiler library 提供五个保持分层的入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 验证并解析显式纯内存库 DAG 及宿主指定的唯一官方 core，返回统一的 owned opaque `ResolvedProject`；`vorton_compiler::prepare_project(ResolvedProject)` 检查 supertrait 目标类别、trait inheritance cycle 与 effect alias cycle，返回 owned opaque `PreparedProject`；`vorton_compiler::decode_contract(&[u8])` 按 [contract format 1](docs/contract-format.md) 读取一份纯内存 JSON 输入，返回 owned opaque `ContractDocument` 或结构化 `ContractDiagnostic`；`vorton_compiler::check_project(&ProjectSources, &BTreeMap<String, LibraryId>, Vec<ContractDocument>)` 将真实项目与选定契约一起闭合为 owned opaque `CheckedProject`。契约读取成功只证明版本、读取 profile 与记录结构成立；owner／引用绑定、受支持 `set` 的一致性和函数体检查只在 `check_project` 中发生。项目阶段失败仍以原有 `ProjectDiagnosticKind` 和真实 origin 包在 `CheckDiagnostic` 中；`parse` 的签名与单 source 行为不依赖项目或契约输入。
 
 ```rust
 use std::collections::BTreeMap;
@@ -129,6 +129,8 @@ git diff --check <PR base SHA>...<exact candidate SHA>
 ```
 
 Governance CI 在 Ubuntu 上执行同一组命令；PR whitespace gate 检查 `pull_request.base.sha...pull_request.head.sha`，main push 检查 `before..after`。结构 gate、格式、lint、直接 compiler library 行为测试与 committed-diff whitespace 检查共同约束当前 candidate。
+
+Verus、Proptest 与显式 Kani 补充入口的固定版本、安装位置、正反自检和适用边界见[外部验证工具链](docs/validation-toolchain.md)。这些入口只验证工具本身可用，不构成 compiler correctness 证明。
 
 ## 参与工作
 
