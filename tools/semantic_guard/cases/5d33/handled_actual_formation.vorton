@@ -1,0 +1,1 @@
+trait Mark {} struct Limited<T: Mark> { value: T } effect Signal<T> { fn ping(value: &T) -> Unit; } fn f() -> Unit with {Signal<Limited<Int>>} {}

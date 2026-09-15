@@ -1,0 +1,1 @@
+trait Has {type Item;} impl Has for Int {type Item=Bool;} struct Box<T>{value:T} impl<T:Has<Item=U>,U> Box<T>{fn echo(self:&Self,v:move U)->U{v}} fn run()->Bool{Box{value:1}.echo(true)}

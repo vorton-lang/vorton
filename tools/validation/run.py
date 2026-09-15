@@ -319,7 +319,25 @@ def verus_report(output: str) -> dict[str, object]:
     return report
 
 
-def require_positive_verus(result: subprocess.CompletedProcess[str], target: Path) -> int:
+def reject_verus_escape_hatches(target: Path) -> None:
+    source = target.read_text(encoding="utf-8")
+    forbidden = re.search(
+        r"\b(?:assume|admit|axiom)\s*\(|assume_specification|external_body|"
+        r"verifier::(?:external|assume_termination)|verus::trusted",
+        source,
+    )
+    if forbidden:
+        raise ValidationError(
+            f"Verus proof source contains an unverified escape hatch: "
+            f"{target}: {forbidden.group(0)}"
+        )
+
+
+def require_positive_verus(
+    result: subprocess.CompletedProcess[str],
+    target: Path,
+    expected_functions: list[str] | None = None,
+) -> int:
     require_success(result, f"Verus positive target {target}")
     report = verus_report(command_output(result))
     verified = report.get("verified")
@@ -332,21 +350,26 @@ def require_positive_verus(result: subprocess.CompletedProcess[str], target: Pat
         or report.get("errors") != 0
     ):
         raise ValidationError(f"Verus positive target did not report a nonzero clean proof: {report}")
+    if expected_functions:
+        details = json_objects(command_output(result), "func-details")
+        if len(details) != 1 or not isinstance(details[0].get("func-details"), dict):
+            raise ValidationError("Verus run did not produce one function-details report")
+        functions = details[0]["func-details"]
+        missing = [
+            expected
+            for expected in expected_functions
+            if not any(name.endswith(f"::{expected}") for name in functions)
+        ]
+        if missing:
+            raise ValidationError(f"Verus run omitted designated proof targets: {missing}")
+        print(f"PROOF_TARGETS={','.join(expected_functions)}")
     print(f"VERDICT=POSITIVE_OK TOOL=Verus TARGET={target} VERIFIED={verified}")
     return verified
 
 
 def verus_self_test(executable: Path) -> None:
     positive = FIXTURES / "verus_positive.rs"
-    source = positive.read_text(encoding="utf-8")
-    forbidden = re.search(
-        r"\b(?:assume|admit|axiom)\s*\(|external_body|verifier::external",
-        source,
-    )
-    if forbidden:
-        raise ValidationError(
-            f"Verus positive fixture contains an unverified escape hatch: {forbidden.group(0)}"
-        )
+    reject_verus_escape_hatches(positive)
 
     positive_result = run_command([str(executable), "--output-json", str(positive)])
     require_positive_verus(positive_result, positive)
@@ -374,18 +397,33 @@ def verus_self_test(executable: Path) -> None:
     )
 
 
-def run_verus(allow_install: bool, files: list[Path]) -> None:
+def run_verus(
+    allow_install: bool,
+    files: list[Path],
+    proof_sources: list[Path],
+    expected_functions: list[str],
+) -> None:
     executable = locate_verus(allow_install)
     verus_build(executable)
     if not files:
+        if proof_sources or expected_functions:
+            raise ValidationError("proof sources and targets require one --file")
         verus_self_test(executable)
         return
+    if expected_functions and len(files) != 1:
+        raise ValidationError("designated proof targets require exactly one --file")
+    scanned: set[Path] = set()
+    for source in [*files, *proof_sources]:
+        resolved = source.resolve()
+        if not resolved.is_file():
+            raise ValidationError(f"Verus proof source does not exist: {resolved}")
+        if resolved not in scanned:
+            reject_verus_escape_hatches(resolved)
+            scanned.add(resolved)
     for target in files:
         resolved = target.resolve()
-        if not resolved.is_file():
-            raise ValidationError(f"Verus target does not exist: {resolved}")
         result = run_command([str(executable), "--output-json", str(resolved)])
-        require_positive_verus(result, resolved)
+        require_positive_verus(result, resolved, expected_functions)
 
 
 def proptest_version() -> None:
@@ -543,11 +581,12 @@ def run_kani_harness(
     binary: Path,
     environment: dict[str, str],
     harness: str,
+    target: Path = FIXTURES / "kani.rs",
 ) -> subprocess.CompletedProcess[str]:
     return run_command(
         [
             str(binary),
-            str(FIXTURES / "kani.rs"),
+            str(target),
             "--harness",
             harness,
             "--exact",
@@ -558,7 +597,7 @@ def run_kani_harness(
     )
 
 
-def run_kani(allow_install: bool) -> None:
+def run_kani(allow_install: bool, files: list[Path], harnesses: list[str]) -> None:
     if platform.system() != "Linux" or normalized_architecture() != "x86_64":
         raise ValidationError(
             "Kani self-test is an explicit x86_64 Linux/WSL supplement and is not supported here"
@@ -573,6 +612,30 @@ def run_kani(allow_install: bool) -> None:
             )
         install_kani(environment)
     kani_version(binary, environment)
+
+    if files:
+        if len(files) != 1 or not harnesses:
+            raise ValidationError("a Kani target requires one --file and at least one --harness")
+        target = files[0].resolve()
+        if not target.is_file():
+            raise ValidationError(f"Kani target does not exist: {target}")
+        for harness in harnesses:
+            result = run_kani_harness(binary, environment, harness, target)
+            require_success(result, f"Kani semantic target {harness}")
+            output = command_output(result)
+            if "VERIFICATION:- SUCCESSFUL" not in output or re.search(
+                r"Status: (?:FAILURE|UNDETERMINED)", output
+            ):
+                raise ValidationError(
+                    f"Kani semantic target {harness} did not complete successfully"
+                )
+            print(
+                f"VERDICT=POSITIVE_OK TOOL=Kani TARGET={target} HARNESS={harness} "
+                f"INPUT=u8<=2 UNWIND={KANI_UNWIND} JOBS=1 DEFAULT_CHECKS=enabled"
+            )
+        return
+    if harnesses:
+        raise ValidationError("--harness requires one Kani --file")
 
     positive = run_kani_harness(binary, environment, "kani_positive")
     require_success(positive, "Kani positive self-test")
@@ -616,26 +679,54 @@ def parse_arguments() -> argparse.Namespace:
         action="append",
         type=Path,
         default=[],
-        help="verify a nonzero-proof Verus file instead of running its fixtures",
+        help="verify an explicit Verus or Kani source file instead of tool fixtures",
+    )
+    parser.add_argument(
+        "--proof-source",
+        action="append",
+        type=Path,
+        default=[],
+        help="additional source whose proof escape hatches must be rejected",
+    )
+    parser.add_argument(
+        "--expect-function",
+        action="append",
+        default=[],
+        help="require a named function in the Verus function-details report",
+    )
+    parser.add_argument(
+        "--harness",
+        action="append",
+        default=[],
+        help="run a named harness from one explicit Kani --file",
     )
     return parser.parse_args()
 
 
 def main() -> int:
     arguments = parse_arguments()
-    if arguments.file and arguments.tool != "verus":
-        raise ValidationError("--file is supported only by the verus command")
+    if (arguments.proof_source or arguments.expect_function) and arguments.tool != "verus":
+        raise ValidationError("Verus proof source options require the verus command")
+    if arguments.harness and arguments.tool != "kani":
+        raise ValidationError("--harness is supported only by the Kani command")
+    if arguments.file and arguments.tool not in {"verus", "kani"}:
+        raise ValidationError("--file is supported only by the Verus and Kani commands")
 
     project_rust()
     if arguments.tool == "required":
-        run_verus(arguments.install, [])
+        run_verus(arguments.install, [], [], [])
         run_proptest()
     elif arguments.tool == "verus":
-        run_verus(arguments.install, arguments.file)
+        run_verus(
+            arguments.install,
+            arguments.file,
+            arguments.proof_source,
+            arguments.expect_function,
+        )
     elif arguments.tool == "proptest":
         run_proptest()
     else:
-        run_kani(arguments.install)
+        run_kani(arguments.install, arguments.file, arguments.harness)
     print(f"VALIDATION_TOOL_SELF_TEST={arguments.tool} RESULT=completed")
     return 0
 

@@ -1,0 +1,1 @@
+trait Has { type Item; } struct A {} impl Has for A { type Item = Int; } effect Signal<T> { fn send(value: &T) -> Unit; } fn source() -> Unit with {Signal<A::Item>} { Signal.send(1); }
