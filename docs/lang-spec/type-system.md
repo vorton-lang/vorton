@@ -25,6 +25,10 @@ Vorton 使用 Hindley-Milner 类型推断，并扩展 effect row 和 trait bound
 
 每个 body 只生成一次 constraints/draft。普通函数、方法和实际选中 scheme 的依赖共同形成未发布递归组；组内共享 monomorphic provisional 类型，组外实例化已发布 scheme。同一调用的参数、返回、type/effect actual、关联选择和 evidence 共用一次 mapping。类型尚未确定的调用可以等待组内其它约束，不能按方法名猜 receiver、重跑 body 或发布后回补。全部义务闭合后才 final-zonk、泛化并发布；polymorphic recursion、occurs-check 无限类型、无证据、非法 selection/projection cycle 和未完成求解保留不同诊断原因。持续增长的搜索受确定逻辑工作与状态上限约束，合法证明不要求每步 actual 缩小。
 
+已给定 dictionary 的关联承诺随等式传递。例如 `T: Has<Item = U>` 与 `Has::Item: Mark` 已保证 `U: Mark`；使用这个保证不增加 caller requirement。`T: Has` 也支持同一 dictionary 的定义等式 `Item = T::Item`。有限的嵌套承诺按所请求的 actual 查找证据，保留每一步原始 dictionary、trait actual 与关联成员，不预先展开未被请求的递归关联类型。
+
+Impl 的 outer actual 可由 receiver、关联 binding、同一次调用的参数、预期返回或已闭合 callback shape/payload 确定。待解 actual 与资格义务保留在已创建的调用实例中；参数、返回、Effect 和清理共同消费其完成结果。资格尚未证明时不发布成功 evidence，目标固定后的失败不触发改选。
+
 Literal、顺序 local binding/shadowing、tuple、block、if/else、return、scalar 算术、比较、直接/方法调用、无 spread 的 struct 与三种 enum 构造继续受检查。字段读取与借用保留真实 field identity；non-Copy 字段不能被部分移走。比较运算使用指定 core 的真实 trait/member 与 primitive 或 source evidence。普通 nominal 不因字段全为 Copy 或为空而获得 Copy；声明未开放的用户 Copy/Drop/Fn 能力也不能伪造 compiler evidence。
 
 Effect row 包括真实 system、handled、fail、mut、unsafe atom、显隐 effect formal、alias、method application 与完整销毁关系。有 body callable 检查实际 row `A` 不超过显式上界 `B` 并发布 `B`；省略时发布 `A`。Trait 无上界时保留所选 impl 的关联 row，有上界时调用使用该上界。Module ceiling 检查实际逃逸 row；有显式 module 授权的 `unsafe` block 只 discharge unsafe。Handled operation 和 `fail.raise` 提供实际非空来源，handled identity actual 必须闭合。

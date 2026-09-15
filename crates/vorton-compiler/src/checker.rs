@@ -608,7 +608,7 @@ fn check_prepared_project(
         &mut contract_selections,
         &inference,
     )?;
-    normalize_callable_shapes(
+    let mut effect_equalities = normalize_callable_shapes(
         project,
         &mut normalizer,
         &mut headers,
@@ -617,7 +617,7 @@ fn check_prepared_project(
         &documents,
     )?;
     normalize_effect_headers(project, &mut normalizer, &mut headers, &traits)?;
-    apply_contract_effects(
+    effect_equalities.extend(apply_contract_effects(
         project,
         &traits,
         &normalizer,
@@ -625,6 +625,16 @@ fn check_prepared_project(
         &mut contract_selections,
         &documents,
         &inference,
+    )?);
+    compare_contract_effects(
+        BodyEnvironment {
+            project,
+            headers: &headers,
+            traits: &traits,
+        },
+        &normalizer,
+        &inference,
+        effect_equalities,
     )?;
     normalize_headers(project, &traits, &mut headers, &inference)?;
     finalize_effect_headers(project, &mut headers, &traits, &mut inference)?;
@@ -665,6 +675,16 @@ fn check_prepared_project(
         )?;
         let value_uses = std::mem::take(&mut checker.value_uses);
         drop(checker);
+        let mut unknown_result = BTreeSet::new();
+        inference.unresolved_variables(&header.return_type, &mut unknown_result);
+        if unknown_result.is_empty() {
+            constrain_result_context(
+                &body.ty,
+                &header.return_type,
+                &mut inference,
+                &header.context.origin(body.span),
+            )?;
+        }
         drafts.insert(identity.clone(), body);
         headers.get_mut(identity).unwrap().value_uses = value_uses;
     }
@@ -794,6 +814,49 @@ fn origin_as_source(origin: &CheckOrigin, fallback: &OriginRef) -> OriginRef {
         CheckOrigin::Source(origin) => origin.clone(),
         CheckOrigin::Contract { .. } => fallback.clone(),
     }
+}
+
+fn link_inference_slots(
+    left: &CheckedType,
+    right: &CheckedType,
+    inference: &mut TypeInference,
+) -> Result<(), UnificationFailure> {
+    let mut pending = vec![(left.clone(), right.clone())];
+    while let Some((left, right)) = pending.pop() {
+        match (inference.resolve(&left), inference.resolve(&right)) {
+            (left @ CheckedType::Infer(_), right) | (left, right @ CheckedType::Infer(_)) => {
+                inference.unify(&left, &right)?
+            }
+            (CheckedType::Tuple(left), CheckedType::Tuple(right)) if left.len() == right.len() => {
+                pending.extend(left.into_iter().zip(right))
+            }
+            (CheckedType::Nominal(left), CheckedType::Nominal(right))
+                if left.declaration == right.declaration =>
+            {
+                pending.extend(left.arguments.into_iter().zip(right.arguments))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn constrain_result_context(
+    actual: &CheckedType,
+    expected: &CheckedType,
+    inference: &mut TypeInference,
+    origin: &OriginRef,
+) -> Result<(), CheckDiagnostic> {
+    // Fixed mismatches, divergence and ownership still use the materialized
+    // body's final check; this step only connects its unresolved result slots.
+    link_inference_slots(actual, expected, inference).map_err(|failure| {
+        source_diagnostic(
+            CheckDiagnosticKind::ReturnMismatch,
+            display_unification_failure(&failure),
+            origin.clone(),
+            Vec::new(),
+        )
+    })
 }
 
 fn display_unification_failure(failure: &UnificationFailure) -> String {
@@ -7679,6 +7742,7 @@ impl<'borrow> BodyChecker<'borrow> {
                         operand_type,
                     )]),
                     evidence: None,
+                    pending_impl: None,
                     proofs: Vec::new(),
                     effect_actuals: Vec::new(),
                     effect_dependencies: Vec::new(),
@@ -7828,6 +7892,7 @@ impl<'borrow> BodyChecker<'borrow> {
             selection: None,
             owner_mapping: BTreeMap::new(),
             evidence: None,
+            pending_impl: None,
             proofs: Vec::new(),
             effect_actuals: Vec::new(),
             effect_dependencies: Vec::new(),
@@ -9022,6 +9087,230 @@ fn broad() -> Unit with {fail<Int>} { ignore(actual) }
         assert!(
             call.effect_actuals.iter().all(|(_, row)| row.is_empty()),
             "unique least row must be empty after T = Int"
+        );
+    }
+
+    #[test]
+    fn associated_evidence_keeps_its_root_dictionary_and_original_input_domain() {
+        let source = "trait Mark { fn mark(self: &Self) -> Int with {}; } trait Has { type Item: Mark; } impl Mark for Int { fn mark(self: &Self) -> Int { self } } struct A {} impl Has for A { type Item = Int; } fn derived<T: Has<Item = U>, U>(owner: &T, value: &U) -> Int with {} { value.mark() } fn actual() -> Int with {} { derived(A {}, 1) }";
+        let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new()).unwrap();
+        let derived = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "derived")
+            .unwrap();
+        assert_eq!(derived.requirements.len(), 1);
+        assert_eq!(derived.requirements[0].bound.declaration.name, "Has");
+        let TypedExprKind::Call(call) = &derived.body.tail.as_ref().unwrap().kind else {
+            panic!("method call");
+        };
+        let Evidence::Given {
+            subject,
+            bound,
+            via,
+        } = call.evidence.as_deref().unwrap()
+        else {
+            panic!("derived dictionary");
+        };
+        assert_eq!(bound.declaration.name, "Mark");
+        assert_eq!(via.len(), 1);
+        let member = via[0].associated.as_ref().unwrap();
+        assert_eq!(member.name, "Item");
+        assert_eq!(
+            via[0].premise.bound.declaration,
+            derived.requirements[0].bound.declaration
+        );
+        assert_eq!(via[0].premise.subject, derived.requirements[0].subject);
+        assert_eq!(via[0].premise.bound.associated[member], *subject);
+        let actual = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "actual")
+            .unwrap();
+        let TypedExprKind::Call(call) = &actual.body.tail.as_ref().unwrap().kind else {
+            panic!("concrete consumer");
+        };
+        assert_eq!(
+            call.proofs.len(),
+            1,
+            "only the original Has requirement is passed by the caller"
+        );
+        let Evidence::Source { implementation, .. } = &call.proofs[0] else {
+            panic!("concrete Has evidence");
+        };
+        assert_eq!(
+            entity_origin(implementation).unwrap().span.start,
+            source.find("impl Has for A").unwrap()
+        );
+    }
+
+    #[test]
+    fn real_impl_premises_share_call_actuals_with_result_shape_and_minimum_row() {
+        let source = r#"
+trait Mark {}
+impl Mark for Int {}
+trait Make<T> { fn make(self: &Self) -> T with {fail<Bool>}; }
+trait Apply<T> { fn ignore<F: Fn + fn() -> Unit with {fail<T>, E}, effect E>(self: &Self, callback: call F) -> Unit with {E}; }
+trait Build<T> { fn build<F: Fn + fn() -> T with {}>(self: &Self, callback: call F) -> T with {}; }
+struct Host {}
+impl<T: Mark> Make<T> for Host { fn make(self: &Self) -> T with {fail<Bool>} { fail.raise(true) } }
+impl<T: Mark> Apply<T> for Host { fn ignore<F: Fn + fn() -> Unit with {fail<T>, E}, effect E>(self: &Self, callback: call F) -> Unit with {E} {} }
+impl<T: Mark> Build<T> for Host { fn build<F: Fn + fn() -> T with {}>(self: &Self, callback: call F) -> T with {} { callback() } }
+fn payload() -> Unit with {fail<Int>} {}
+fn value() -> Int with {} { 1 }
+fn by_result() -> Int { Host {}.make() }
+fn by_payload() -> Unit with {} { Host {}.ignore(payload) }
+fn by_shape() { Host {}.build(value) }
+"#;
+        let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new()).unwrap();
+        for name in ["by_result", "by_payload", "by_shape"] {
+            let caller = checked
+                .functions
+                .values()
+                .find(|function| function.identity.name == name)
+                .unwrap();
+            let TypedExprKind::Call(call) = &caller.body.tail.as_ref().unwrap().kind else {
+                panic!("actual call");
+            };
+            let CallInstantiation::Published(mapping) = &call.instantiation else {
+                panic!("one frozen mapping");
+            };
+            let Evidence::Source {
+                mapping: actuals,
+                premises,
+                ..
+            } = call.evidence.as_deref().unwrap()
+            else {
+                panic!("completed impl qualification");
+            };
+            for (formal, actual) in actuals {
+                assert_eq!(
+                    mapping.iter().find(|(known, _)| known == formal).unwrap().1,
+                    *actual
+                );
+            }
+            assert_eq!(
+                actuals.values().collect::<Vec<_>>(),
+                vec![&CheckedType::Int]
+            );
+            assert_eq!(premises.len(), 1);
+            let Evidence::Source { implementation, .. } = &premises[0] else {
+                panic!("real Mark premise");
+            };
+            assert_eq!(
+                entity_origin(implementation).unwrap().span.start,
+                source.find("impl Mark for Int").unwrap()
+            );
+            assert!(caller.requirements.is_empty());
+            if name == "by_payload" {
+                assert!(call.effect_actuals.iter().all(|(_, row)| row.is_empty()));
+                assert!(call.effect.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn selected_actuals_reach_method_effects_staged_and_transferred_cleanup() {
+        let source = r#"
+trait Mark {}
+impl Mark for Int {}
+trait Take<T> { fn take(self: move Self, value: move T) -> Unit; }
+struct Box<T> { value: T }
+impl<T: Mark> Take<T> for Box<T> { fn take(self: move Self, value: move T) -> Unit { risky(); } }
+fn risky() -> Unit with {fail<Bool>} {}
+fn staged<T: Mark>(owner: move Box<T>, value: move T) { owner.take({ risky(); value }); }
+trait Echo<T> { fn echo(self: &Self, value: move T) -> T with {fail<T>}; }
+struct Host {}
+impl<T: Mark> Echo<T> for Host { fn echo(self: &Self, value: move T) -> T with {fail<T>} { value } }
+fn payload() -> Int with {fail<Int>} { Host {}.echo(1) }
+"#;
+        let checked = check_project(&sources(source), &BTreeMap::new(), Vec::new()).unwrap();
+        let staged = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "staged")
+            .unwrap();
+        let risky = source.find("risky(); value").unwrap();
+        let staged_failure = staged
+            .body
+            .cleanups
+            .iter()
+            .find(|fact| {
+                matches!(fact.exit, CleanupExit::Failure) && fact.origin.span.start == risky
+            })
+            .unwrap();
+        assert!(staged_failure.state.temporaries.iter().any(|temporary| temporary.transfer && matches!(&temporary.owner, CheckedType::Nominal(nominal) if nominal.declaration.name == "Box")));
+        assert!(
+            staged_failure
+                .state
+                .bindings
+                .iter()
+                .find(|(identity, _)| identity.name == "value")
+                .unwrap()
+                .1
+                .availability
+                == Availability::Live
+        );
+        let outer = source.find("owner.take").unwrap();
+        let transferred = staged
+            .body
+            .cleanups
+            .iter()
+            .find(|fact| {
+                matches!(fact.exit, CleanupExit::Failure) && fact.origin.span.start == outer
+            })
+            .unwrap();
+        assert!(
+            transferred
+                .state
+                .temporaries
+                .iter()
+                .all(|temporary| !temporary.transfer)
+        );
+        for name in ["owner", "value"] {
+            assert!(
+                transferred
+                    .state
+                    .bindings
+                    .iter()
+                    .find(|(identity, _)| identity.name == name)
+                    .unwrap()
+                    .1
+                    .availability
+                    == Availability::Moved
+            );
+        }
+        assert!(staged.effect.0.iter().any(|term| matches!(term, EffectTerm::Destruction(CheckedType::Formal(formal)) if formal.name == "T")));
+        let payload = checked
+            .functions
+            .values()
+            .find(|function| function.identity.name == "payload")
+            .unwrap();
+        let TypedExprKind::Call(call) = &payload.body.tail.as_ref().unwrap().kind else {
+            panic!("actual method");
+        };
+        let CallInstantiation::Published(mapping) = &call.instantiation else {
+            panic!("one mapping");
+        };
+        let Evidence::Source {
+            mapping: evidence,
+            premises,
+            ..
+        } = call.evidence.as_deref().unwrap()
+        else {
+            panic!("impl evidence");
+        };
+        assert_eq!(premises.len(), 1);
+        for (formal, actual) in evidence {
+            assert_eq!(*actual, CheckedType::Int);
+            assert_eq!(
+                mapping.iter().find(|(key, _)| key == formal).unwrap().1,
+                *actual
+            );
+        }
+        assert_eq!(
+            call.effect,
+            CheckedEffect::singleton(EffectTerm::Failure(CheckedType::Int))
         );
     }
 

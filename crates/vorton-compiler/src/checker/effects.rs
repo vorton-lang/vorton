@@ -27,6 +27,129 @@ pub(super) enum EffectTerm {
 }
 
 impl CheckedEffect {
+    pub(super) fn declared_method_rows(
+        &self,
+        environment: BodyEnvironment<'_>,
+        inference: &TypeInference,
+        caller: &FunctionHeader,
+        origin: &OriginRef,
+    ) -> Result<Self, CheckDiagnostic> {
+        enum Step {
+            Row(CheckedEffect),
+            Term(EffectTerm),
+            Union(usize),
+            Apply {
+                method: Box<EntityId>,
+                types: Vec<(TypeFormal, CheckedType)>,
+                count: usize,
+            },
+            Leave(EntityId),
+        }
+        let givens = caller
+            .requirements
+            .iter()
+            .chain(&caller.outer_requirements)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut work = vec![Step::Row(self.clone())];
+        let mut values: Vec<CheckedEffect> = Vec::new();
+        let mut active = BTreeSet::new();
+        let mut used = 0;
+        while let Some(step) = work.pop() {
+            used += 1;
+            if used > 8192 {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::Unsupported,
+                    "incomplete declared method row normalization: 8192 steps exhausted",
+                    origin.clone(),
+                    Vec::new(),
+                ));
+            }
+            match step {
+                Step::Row(row) => {
+                    work.push(Step::Union(row.0.len()));
+                    work.extend(row.0.into_iter().rev().map(Step::Term));
+                }
+                Step::Union(count) => {
+                    let rows = values.split_off(values.len() - count);
+                    values.push(Self(rows.into_iter().flat_map(|row| row.0).collect()));
+                }
+                Step::Leave(identity) => {
+                    active.remove(&identity);
+                }
+                Step::Term(EffectTerm::Method {
+                    method,
+                    types,
+                    effects,
+                }) => {
+                    work.push(Step::Apply {
+                        method: Box::new(method),
+                        types,
+                        count: effects.len(),
+                    });
+                    work.extend(effects.into_iter().rev().map(Step::Row));
+                }
+                Step::Term(term) => values.push(Self::singleton(term)),
+                Step::Apply {
+                    method,
+                    types,
+                    count,
+                } => {
+                    let effects = values.split_off(values.len() - count);
+                    let header = &environment.headers[method.as_ref()];
+                    let explicit = if let Some(upper) = &header.effect_upper {
+                        let effect_mapping = header
+                            .effect_formals
+                            .iter()
+                            .map(|(_, formal)| formal.clone())
+                            .zip(effects.iter().cloned())
+                            .collect();
+                        Some((
+                            method.as_ref().clone(),
+                            upper.instantiate(&types.iter().cloned().collect(), &effect_mapping),
+                        ))
+                    } else if let Some((target, mapping, effect_mapping)) = method_actual(
+                        &method,
+                        &types,
+                        &effects,
+                        environment,
+                        inference,
+                        &givens,
+                        origin,
+                    )? {
+                        environment.headers[&target]
+                            .effect_upper
+                            .as_ref()
+                            .map(|upper| {
+                                (target.clone(), upper.instantiate(&mapping, &effect_mapping))
+                            })
+                    } else {
+                        None
+                    };
+                    if let Some((identity, row)) = explicit {
+                        if !active.insert(identity.clone()) {
+                            return Err(source_diagnostic(
+                                CheckDiagnosticKind::TypeMismatch,
+                                "explicit method effect upper bound contains a cycle",
+                                origin.clone(),
+                                active.iter().filter_map(entity_origin).collect(),
+                            ));
+                        }
+                        work.push(Step::Leave(identity));
+                        work.push(Step::Row(row));
+                    } else {
+                        values.push(Self::singleton(EffectTerm::Method {
+                            method: *method,
+                            types,
+                            effects,
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(values.pop().expect("one declared row"))
+    }
+
     pub(super) fn normalize_types(
         &self,
         solver: &mut TraitSolver<'_>,
@@ -1424,7 +1547,7 @@ pub(super) fn normalize_callable_shapes(
     traits: &TraitEnvironment,
     inference: &mut TypeInference,
     documents: &[ContractDocument],
-) -> Result<(), CheckDiagnostic> {
+) -> Result<Vec<ContractEffectEquality>, CheckDiagnostic> {
     let mut implicit = BTreeMap::new();
     for (identity, header) in headers.iter_mut() {
         for (index, (_, source)) in header.source_shapes.iter().enumerate() {
@@ -1529,7 +1652,8 @@ pub(super) fn normalize_callable_shapes(
             .extend(inputs);
         headers.get_mut(&identity).unwrap().shapes = shapes;
     }
-    merge_contract_shapes(project, normalizer, headers, traits, documents, inference)?;
+    let equalities =
+        merge_contract_shapes(project, normalizer, headers, traits, documents, inference)?;
     for implementation in &traits.implementations {
         let Some(bound) = &implementation.trait_use else {
             continue;
@@ -1750,7 +1874,7 @@ pub(super) fn normalize_callable_shapes(
             )?;
         }
     }
-    Ok(())
+    Ok(equalities)
 }
 
 fn shape_kind(shape: &crate::project::ResolvedShape) -> &crate::project::ResolvedShapeKind {
@@ -1768,7 +1892,8 @@ fn merge_contract_shapes(
     traits: &TraitEnvironment,
     documents: &[ContractDocument],
     inference: &TypeInference,
-) -> Result<(), CheckDiagnostic> {
+) -> Result<Vec<ContractEffectEquality>, CheckDiagnostic> {
+    let mut equalities = Vec::new();
     let mut implicit = BTreeMap::new();
     for (identity, header) in headers.iter_mut() {
         let missing = header
@@ -1925,19 +2050,43 @@ fn merge_contract_shapes(
                     ));
                 }
             }
-            if let Some(previous) = &selected {
-                if previous != &shapes {
-                    return Err(CheckDiagnostic {
+            let comparison = if let Some(previous) = &selected {
+                Some((
+                    previous,
+                    CheckDiagnostic {
                         kind: CheckDiagnosticKind::ContractConflict,
                         message: "partial records select different callback shapes".to_owned(),
                         primary: specs.first().map(|shape| shape.origin.clone()),
                         related: Vec::new(),
-                    });
-                }
+                    },
+                ))
+            } else if header.source_requirements_explicit {
+                Some((&source_shapes, CheckDiagnostic { kind: CheckDiagnosticKind::Unsupported, message: "different explicit source and contract callback requirements have no selected difference policy".to_owned(), primary: specs.first().map(|shape| shape.origin.clone()), related: vec![CheckOrigin::Source(header.origin.clone())] }))
             } else {
-                if header.source_requirements_explicit && source_shapes != shapes {
-                    return Err(CheckDiagnostic { kind: CheckDiagnosticKind::Unsupported, message: "different explicit source and contract callback requirements have no selected difference policy".to_owned(), primary: specs.first().map(|shape| shape.origin.clone()), related: vec![CheckOrigin::Source(header.origin.clone())] });
+                None
+            };
+            if let Some((previous, diagnostic)) = comparison {
+                if previous.len() != shapes.len()
+                    || previous.iter().any(|(subject, shape)| {
+                        shapes.get(subject).is_none_or(|other| {
+                            shape.parameters != other.parameters || shape.result != other.result
+                        })
+                    })
+                {
+                    return Err(diagnostic);
                 }
+                equalities.extend(
+                    previous
+                        .iter()
+                        .map(|(subject, shape)| ContractEffectEquality {
+                            owner: identity.clone(),
+                            left: shape.effect.clone(),
+                            right: shapes[subject].effect.clone(),
+                            diagnostic: diagnostic.clone(),
+                        }),
+                );
+            }
+            if selected.is_none() {
                 selected = Some(shapes);
             }
         }
@@ -1948,7 +2097,7 @@ fn merge_contract_shapes(
             .extend(inputs);
         headers.get_mut(&identity).unwrap().shapes = selected.unwrap();
     }
-    Ok(())
+    Ok(equalities)
 }
 
 fn closed_value_header(header: &FunctionHeader, inference: &TypeInference) -> bool {
@@ -2099,6 +2248,56 @@ pub(super) fn solve_effect_actuals(
             result: instantiate_type(&shape.result, types),
             effect: shape.effect.instantiate(types, &BTreeMap::new()),
         };
+        // The shared call's type slots receive ordinary shape and payload
+        // constraints before projection/evidence-dependent checks.
+        for (actual, expected) in actual
+            .parameters
+            .iter()
+            .map(|(ty, _)| ty)
+            .chain(std::iter::once(&actual.result))
+            .zip(
+                shape
+                    .parameters
+                    .iter()
+                    .map(|(ty, _)| ty)
+                    .chain(std::iter::once(&shape.result)),
+            )
+        {
+            link_inference_slots(actual, expected, inference).map_err(|failure| {
+                source_diagnostic(
+                    CheckDiagnosticKind::CallMismatch,
+                    display_unification_failure(&failure),
+                    origin.clone(),
+                    Vec::new(),
+                )
+            })?;
+        }
+        for actual in &actual.effect.0 {
+            for expected in &shape.effect.0 {
+                let pairs = match (actual, expected) {
+                    (EffectTerm::Failure(left), EffectTerm::Failure(right)) => vec![(left, right)],
+                    (EffectTerm::Handled(left, la), EffectTerm::Handled(right, ra))
+                        if left == right =>
+                    {
+                        la.iter().zip(ra).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                for (actual, expected) in pairs {
+                    link_inference_slots(actual, expected, inference).map_err(|failure| {
+                        source_diagnostic(
+                            CheckDiagnosticKind::TypeMismatch,
+                            format!(
+                                "effect payload conflict: {}",
+                                display_unification_failure(&failure)
+                            ),
+                            origin.clone(),
+                            Vec::new(),
+                        )
+                    })?;
+                }
+            }
+        }
         let mut solver = TraitSolver::new(
             environment.traits,
             environment.project,
@@ -3301,6 +3500,7 @@ impl BodyChecker<'_> {
             selection: None,
             owner_mapping: BTreeMap::new(),
             evidence: None,
+            pending_impl: None,
             proofs: Vec::new(),
             effect_actuals: Vec::new(),
             effect_dependencies: Vec::new(),

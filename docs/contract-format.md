@@ -23,9 +23,13 @@ Handled-effect references use the same frozen Effect namespace bindings as sourc
 
 Effect payloads and associated type arguments are normalized before closed handled-identity checks and source/partial equality checks, including rows inside callback shapes. Equivalent projections and concrete types therefore merge idempotently. Source Effect operation signatures use actual export/re-export paths for public visibility, with private aliases checked before type erasure.
 
+Effect selections are bound across all records before equivalent rows are compared. A method application with a fixed public upper bound uses that bound for comparison, including a trait-method bound supplied by another format-1 record. Provider/caller record order does not change the result. Original source and contract applications retain their operands and origins for formation, visibility and self-reference checks; equality does not replace those checks or select a policy for genuinely different explicit rows.
+
 Grouped records declare the callable's own `type_parameters` with the source arity. Trait/impl outer formals remain owned by that declaration; method binders have their own ordinals, and display names may be alpha-renamed. Selected types preserve the source-inferred relation. They cannot specialize an unresolved source generic relationship. Partial records share that relationship, normalize aliases and projections, and reject conflicting selections before publication.
 
 `generic_requirements` preserves three states: omission uses normal source rules, `[]` permits no added body requirements, and a selected conjunction `P` is checked and retained. Outer formation conditions and hard rules remain in force. Named-trait requirements and supported shared `Fn` callable shapes use the same evidence and type/effect actuals as source. Independent omitted shape rows retain independent formals.
+
+Promises implied by an existing dictionary, including associated bounds transported through its associated bindings, do not become additional caller requirements. The three selection states therefore keep the original input domain while body consumers use the derived evidence.
 
 Effect terms include system, handled, fail, mut and unsafe atoms, own effect formals, `method_application`, `full_destruction` and shared-Fn `selected_call`. Actual handled instances require closed concrete type arguments. Rows normalize aliases and method/callback applications, unify payloads, and participate in body, call and cleanup checks. An explicit upper bound remains the published row even for a pure body. Full destruction is a checked relationship over the whole value, not a free effect variable or an alias for a Drop hook.
 

@@ -154,7 +154,14 @@ impl LocatedInput {
                 ));
             }
             SemanticInput::Evidence(proof) => match proof {
-                Evidence::Given { subject, bound } => {
+                Evidence::Given {
+                    subject,
+                    bound,
+                    via,
+                } => {
+                    for step in via {
+                        push(SemanticInput::Requirement(step.premise.clone()));
+                    }
                     push(SemanticInput::Requirement(Requirement {
                         subject: subject.clone(),
                         bound: bound.clone(),

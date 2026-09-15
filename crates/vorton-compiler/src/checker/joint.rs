@@ -620,10 +620,222 @@ struct TraitGoal {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct GivenStep {
+    pub(super) premise: Requirement,
+    pub(super) associated: Option<EntityId>,
+}
+
+#[derive(Clone)]
+struct GivenFact {
+    requirement: Requirement,
+    via: Vec<GivenStep>,
+}
+
+enum BoundLookup<'a> {
+    Trait(&'a TraitUse),
+    Associated(&'a str),
+    Method(&'a str),
+}
+
+impl GivenFact {
+    fn evidence(&self) -> Evidence {
+        Evidence::Given {
+            subject: self.requirement.subject.clone(),
+            bound: self.requirement.bound.clone(),
+            via: self.via.clone(),
+        }
+    }
+
+    fn imply(&self, subject: CheckedType, bound: TraitUse, associated: Option<EntityId>) -> Self {
+        let mut via = self.via.clone();
+        via.push(GivenStep {
+            premise: self.requirement.clone(),
+            associated,
+        });
+        Self {
+            requirement: Requirement {
+                subject,
+                bound,
+                origin: self.requirement.origin.clone(),
+            },
+            via,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GivenDemand {
+    subject: Option<CheckedType>,
+    declaration: EntityId,
+    arguments: Vec<Option<CheckedType>>,
+    associated: BTreeMap<EntityId, CheckedType>,
+}
+
+impl GivenDemand {
+    fn matches(&self, fact: &GivenFact, inference: &TypeInference) -> bool {
+        let given = &fact.requirement;
+        self.declaration == given.bound.declaration
+            && self
+                .subject
+                .as_ref()
+                .is_none_or(|ty| inferred_types_equal(ty, &given.subject, inference))
+            && self
+                .arguments
+                .iter()
+                .zip(&given.bound.arguments)
+                .all(|(expected, actual)| {
+                    expected
+                        .as_ref()
+                        .is_none_or(|expected| inferred_types_equal(expected, actual, inference))
+                })
+            && self.associated.iter().all(|(member, expected)| {
+                let actual = given
+                    .bound
+                    .associated
+                    .get(member)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        CheckedType::Projection(Box::new(ProjectionType {
+                            receiver: given.subject.clone(),
+                            member: Some(member.clone()),
+                            name: member.name.clone(),
+                            bound: Some(given.bound.clone()),
+                        }))
+                    });
+                inferred_types_equal(&actual, expected, inference)
+            })
+    }
+}
+
+struct GivenRule {
+    owner: EntityId,
+    member: Option<EntityId>,
+    bound: TraitUse,
+}
+
+impl GivenRule {
+    fn predecessor(
+        &self,
+        demand: &GivenDemand,
+        environment: &TraitEnvironment,
+    ) -> Option<GivenDemand> {
+        if self.bound.declaration != demand.declaration {
+            return None;
+        }
+        let definition = &environment.traits[&self.owner];
+        let formals = std::iter::once(definition.self_type.clone())
+            .chain(definition.formals.iter().cloned())
+            .collect::<Vec<_>>();
+        let mut mapping = BTreeMap::new();
+        for (pattern, actual) in self.bound.arguments.iter().zip(&demand.arguments) {
+            if let Some(actual) = actual
+                && !match_type(pattern, actual, &formals, &mut mapping)
+            {
+                return None;
+            }
+        }
+        for (member, actual) in &demand.associated {
+            let pattern = self.bound.associated.get(member)?;
+            if !match_type(pattern, actual, &formals, &mut mapping) {
+                return None;
+            }
+        }
+        let mut associated = BTreeMap::new();
+        if let Some(subject) = &demand.subject {
+            if let Some(member) = &self.member {
+                if let CheckedType::Projection(projection) = subject
+                    && projection.member.as_ref() == Some(member)
+                    && let Some(bound) = &projection.bound
+                    && bound.declaration == self.owner
+                {
+                    if !match_type(
+                        &CheckedType::Formal(Box::new(definition.self_type.clone())),
+                        &projection.receiver,
+                        &formals,
+                        &mut mapping,
+                    ) {
+                        return None;
+                    }
+                    for (formal, actual) in definition.formals.iter().zip(&bound.arguments) {
+                        if !match_type(
+                            &CheckedType::Formal(Box::new(formal.clone())),
+                            actual,
+                            &formals,
+                            &mut mapping,
+                        ) {
+                            return None;
+                        }
+                    }
+                    associated = bound.associated.clone();
+                } else {
+                    associated.insert(member.clone(), subject.clone());
+                }
+            } else if !match_type(
+                &CheckedType::Formal(Box::new(definition.self_type.clone())),
+                subject,
+                &formals,
+                &mut mapping,
+            ) {
+                return None;
+            }
+        }
+        Some(GivenDemand {
+            subject: mapping.get(&definition.self_type).cloned(),
+            declaration: self.owner.clone(),
+            arguments: definition
+                .formals
+                .iter()
+                .map(|formal| mapping.get(formal).cloned())
+                .collect(),
+            associated,
+        })
+    }
+
+    fn apply(&self, parent: &GivenFact, environment: &TraitEnvironment) -> GivenFact {
+        let requirement = &parent.requirement;
+        let definition = &environment.traits[&self.owner];
+        let mapping = trait_mapping(
+            definition,
+            &requirement.subject,
+            &requirement.bound.arguments,
+        );
+        let subject = self.member.as_ref().map_or_else(
+            || requirement.subject.clone(),
+            |member| {
+                requirement
+                    .bound
+                    .associated
+                    .get(member)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        CheckedType::Projection(Box::new(ProjectionType {
+                            receiver: requirement.subject.clone(),
+                            member: Some(member.clone()),
+                            name: member.name.clone(),
+                            bound: Some(requirement.bound.clone()),
+                        }))
+                    })
+            },
+        );
+        parent.imply(
+            subject,
+            instantiate_trait(&self.bound, &mapping),
+            self.member.clone(),
+        )
+    }
+}
+
+struct GivenDemandNode {
+    facts: Vec<GivenFact>,
+    predecessors: Vec<(GivenDemand, usize)>,
+}
+
+#[derive(Debug, Clone)]
 pub(super) enum Evidence {
     Given {
         subject: CheckedType,
         bound: TraitUse,
+        via: Vec<GivenStep>,
     },
     Source {
         implementation: EntityId,
@@ -645,15 +857,20 @@ enum Query {
     Type(CheckedType),
     Evidence(Box<TraitGoal>),
     Applicable(Box<Candidate>),
+    CallCandidate(Box<Candidate>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Candidate {
-    Trait(TraitGoal),
-    Inherent {
-        implementation: EntityId,
-        mapping: BTreeMap<TypeFormal, CheckedType>,
-    },
+struct Candidate {
+    implementation: EntityId,
+    mapping: BTreeMap<TypeFormal, CheckedType>,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ProjectionChoice {
+    member: EntityId,
+    bound: TraitUse,
+    candidate: Option<Candidate>,
 }
 
 #[derive(Clone)]
@@ -661,6 +878,7 @@ enum Answer {
     Type(CheckedType),
     Evidence(Box<Evidence>),
     Applicable(Option<Box<Evidence>>),
+    Pending(Box<Candidate>),
 }
 
 impl Query {
@@ -678,6 +896,10 @@ enum SolveFrame {
     Enter(Query),
     Remember(Query),
     Applicability(usize),
+    CallApplicability {
+        base: usize,
+        identity: EntityId,
+    },
     Tuple(usize),
     Nominal(EntityId, usize),
     Function(EntityId, Vec<TypeFormal>),
@@ -685,7 +907,7 @@ enum SolveFrame {
     TraitProjection(Box<ProjectionType>),
     QualifiedProjection {
         projection: Box<ProjectionType>,
-        choices: Vec<(EntityId, TraitUse)>,
+        choices: Vec<ProjectionChoice>,
     },
     QualifiedInherent {
         projection: Box<ProjectionType>,
@@ -700,21 +922,25 @@ enum SolveFrame {
         associated: Vec<EntityId>,
     },
     Select(TraitGoal),
+    GivenAssociated {
+        given: GivenFact,
+        expected: Vec<CheckedType>,
+    },
     ExpandImpl {
         identity: EntityId,
         mapping: BTreeMap<TypeFormal, CheckedType>,
-        goal: TraitGoal,
+        goal: Option<TraitGoal>,
     },
     InferAssociated {
         identity: EntityId,
         mapping: BTreeMap<TypeFormal, CheckedType>,
-        goal: TraitGoal,
+        goal: Option<TraitGoal>,
         pattern: CheckedType,
     },
     CheckInferredBinding {
         identity: EntityId,
         mapping: BTreeMap<TypeFormal, CheckedType>,
-        goal: TraitGoal,
+        goal: Option<TraitGoal>,
         actual: CheckedType,
     },
     CheckAssociated {
@@ -743,7 +969,8 @@ fn reject_inapplicable(
     active: &mut BTreeSet<Query>,
 ) -> bool {
     let Some((index, base)) = frames.iter().enumerate().rev().find_map(|(index, frame)| {
-        if let SolveFrame::Applicability(base) = frame {
+        if let SolveFrame::Applicability(base) | SolveFrame::CallApplicability { base, .. } = frame
+        {
             Some((index, *base))
         } else {
             None
@@ -761,11 +988,45 @@ fn reject_inapplicable(
     true
 }
 
+fn suspend_call_candidate(
+    frames: &mut Vec<SolveFrame>,
+    values: &mut Vec<Answer>,
+    active: &mut BTreeSet<Query>,
+    candidate: Candidate,
+) -> bool {
+    let boundary = frames.iter().enumerate().rev().find(|(_, frame)| {
+        matches!(
+            frame,
+            SolveFrame::Applicability(_) | SolveFrame::CallApplicability { .. }
+        )
+    });
+    let Some((index, SolveFrame::CallApplicability { base, identity })) = boundary else {
+        return false;
+    };
+    if identity != &candidate.implementation {
+        return false;
+    }
+    let (index, base) = (index, *base);
+    for frame in frames.drain(index..) {
+        if let SolveFrame::Remember(query) = frame {
+            active.remove(&query);
+        }
+    }
+    values.truncate(base);
+    values.push(Answer::Pending(Box::new(candidate)));
+    true
+}
+
+enum SelectionEvidence {
+    Proven(Box<Evidence>),
+    Pending(Box<Candidate>),
+}
+
 pub(super) struct TraitSolver<'a> {
     environment: &'a TraitEnvironment,
     project: &'a ResolvedProject,
     inference: &'a TypeInference,
-    givens: Vec<Requirement>,
+    givens: Vec<GivenFact>,
     origin: OriginRef,
     remaining: usize,
     answers: BTreeMap<Query, Answer>,
@@ -784,43 +1045,25 @@ impl<'a> TraitSolver<'a> {
             environment,
             project,
             inference,
-            givens: givens.to_vec(),
+            givens: givens
+                .iter()
+                .cloned()
+                .map(|requirement| GivenFact {
+                    requirement,
+                    via: Vec::new(),
+                })
+                .collect(),
             origin,
             remaining: SOLVE_WORK_LIMIT,
             answers: BTreeMap::new(),
             public_surface: false,
         };
-        let mut visited = BTreeSet::new();
-        let mut index = 0;
-        while index < solver.givens.len() {
-            solver.charge()?;
-            let given = solver.givens[index].clone();
-            index += 1;
-            if !visited.insert(TraitGoal {
-                subject: given.subject.clone(),
-                bound: given.bound.clone(),
-            }) {
-                continue;
-            }
-            let definition = &environment.traits[&given.bound.declaration];
-            let mapping = trait_mapping(definition, &given.subject, &given.bound.arguments);
-            for requirement in &definition.requirements {
-                if !matches!(&requirement.subject, CheckedType::Formal(formal) if formal.as_ref() == &definition.self_type)
-                {
-                    continue;
-                }
-                let requirement = instantiate_requirement(requirement, &mapping);
-                if !visited.contains(&TraitGoal {
-                    subject: requirement.subject.clone(),
-                    bound: requirement.bound.clone(),
-                }) {
-                    solver.givens.push(requirement);
-                }
-            }
-        }
         for index in 0..solver.givens.len() {
             let mut given = solver.givens[index].clone();
-            normalize_requirement(&mut given, &mut solver)?;
+            normalize_requirement(&mut given.requirement, &mut solver)?;
+            for step in &mut given.via {
+                normalize_requirement(&mut step.premise, &mut solver)?;
+            }
             solver.givens[index] = given;
         }
         // Answers made while normalizing inputs can retain their old spelling.
@@ -855,51 +1098,137 @@ impl<'a> TraitSolver<'a> {
         Ok(())
     }
 
-    fn bounds_for_type(&mut self, ty: &CheckedType) -> Result<Vec<Requirement>, CheckDiagnostic> {
-        let mut bounds = self
-            .givens
+    fn bounds_for_type(
+        &mut self,
+        ty: &CheckedType,
+        lookup: BoundLookup<'_>,
+    ) -> Result<Vec<GivenFact>, CheckDiagnostic> {
+        let roots = self
+            .environment
+            .traits
             .iter()
-            .filter(|given| inferred_types_equal(&given.subject, ty, self.inference))
-            .cloned()
+            .filter_map(|(identity, definition)| {
+                let arguments = match &lookup {
+                    BoundLookup::Trait(bound) if identity == &bound.declaration => {
+                        bound.arguments.iter().cloned().map(Some).collect()
+                    }
+                    BoundLookup::Associated(name)
+                        if definition
+                            .associated
+                            .keys()
+                            .any(|member| member.name == *name) =>
+                    {
+                        vec![None; definition.formals.len()]
+                    }
+                    BoundLookup::Method(name) if definition.methods.contains_key(*name) => {
+                        vec![None; definition.formals.len()]
+                    }
+                    _ => return None,
+                };
+                Some(GivenDemand {
+                    subject: Some(ty.clone()),
+                    declaration: identity.clone(),
+                    arguments,
+                    associated: BTreeMap::new(),
+                })
+            })
             .collect::<Vec<_>>();
-        if let CheckedType::Projection(projection) = ty
-            && let (Some(member), Some(bound)) = (&projection.member, &projection.bound)
-        {
-            let definition = &self.environment.traits[&bound.declaration];
-            let mapping = trait_mapping(definition, &projection.receiver, &bound.arguments);
-            for bound in &definition.associated[member].0 {
-                bounds.push(Requirement {
-                    subject: ty.clone(),
-                    bound: instantiate_trait(bound, &mapping),
-                    origin: CheckOrigin::Source(entity_origin(member).unwrap()),
-                });
+        let mut rules = Vec::new();
+        for (identity, definition) in &self.environment.traits {
+            for requirement in &definition.requirements {
+                if matches!(&requirement.subject, CheckedType::Formal(formal) if formal.as_ref() == &definition.self_type)
+                {
+                    rules.push(GivenRule {
+                        owner: identity.clone(),
+                        member: None,
+                        bound: requirement.bound.clone(),
+                    });
+                }
+            }
+            for (member, (bounds, _)) in &definition.associated {
+                for bound in bounds {
+                    rules.push(GivenRule {
+                        owner: identity.clone(),
+                        member: Some(member.clone()),
+                        bound: bound.clone(),
+                    });
+                }
             }
         }
-        let mut index = 0;
-        let mut visited = BTreeSet::new();
-        while index < bounds.len() {
+        let mut pending = roots.clone();
+        let mut demands = BTreeMap::<GivenDemand, GivenDemandNode>::new();
+        while let Some(demand) = pending.pop() {
             self.charge()?;
-            let bound = bounds[index].clone();
-            index += 1;
-            if !visited.insert((bound.subject.clone(), bound.bound.clone())) {
+            if demands.contains_key(&demand) {
                 continue;
             }
-            let definition = &self.environment.traits[&bound.bound.declaration];
-            let mapping = trait_mapping(definition, &bound.subject, &bound.bound.arguments);
-            bounds.extend(
-                definition
-                    .requirements
-                    .iter()
-                    .filter(|requirement| matches!(&requirement.subject, CheckedType::Formal(formal) if formal.as_ref() == &definition.self_type))
-                    .map(|requirement| instantiate_requirement(requirement, &mapping))
-                    .filter(|requirement| {
-                        !visited.contains(&(requirement.subject.clone(), requirement.bound.clone()))
-                    }),
+            for ty in demand
+                .subject
+                .iter()
+                .chain(demand.arguments.iter().flatten())
+                .chain(demand.associated.values())
+            {
+                self.check_size(ty)?;
+            }
+            let facts = self
+                .givens
+                .iter()
+                .filter(|given| demand.matches(given, self.inference))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut predecessors = Vec::new();
+            // A fixed dictionary already given by this owner needs no
+            // speculative recursive expansion of its associated promises.
+            if facts.is_empty()
+                || demand.subject.is_none()
+                || demand.arguments.iter().any(Option::is_none)
+            {
+                for (index, rule) in rules.iter().enumerate() {
+                    if let Some(parent) = rule.predecessor(&demand, self.environment) {
+                        pending.push(parent.clone());
+                        predecessors.push((parent, index));
+                    }
+                }
+            }
+            demands.insert(
+                demand,
+                GivenDemandNode {
+                    facts,
+                    predecessors,
+                },
             );
         }
-        Ok(bounds
+        loop {
+            let mut progress = false;
+            for demand in demands.keys().cloned().collect::<Vec<_>>() {
+                let mut additions = Vec::new();
+                for (parent, rule) in &demands[&demand].predecessors {
+                    for given in &demands[parent].facts {
+                        self.charge()?;
+                        let fact = rules[*rule].apply(given, self.environment);
+                        if demand.matches(&fact, self.inference) {
+                            additions.push(fact);
+                        }
+                    }
+                }
+                let facts = &mut demands.get_mut(&demand).unwrap().facts;
+                for fact in additions {
+                    if !facts.iter().any(|known| {
+                        known.requirement.subject == fact.requirement.subject
+                            && known.requirement.bound == fact.requirement.bound
+                    }) {
+                        facts.push(fact);
+                        progress = true;
+                    }
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        Ok(roots
             .into_iter()
-            .filter(|bound| inferred_types_equal(&bound.subject, ty, self.inference))
+            .flat_map(|root| demands.remove(&root).unwrap().facts)
             .collect())
     }
 
@@ -911,7 +1240,7 @@ impl<'a> TraitSolver<'a> {
             related: self
                 .givens
                 .iter()
-                .map(|given| given.origin.clone())
+                .map(|given| given.requirement.origin.clone())
                 .collect(),
         }
     }
@@ -989,12 +1318,15 @@ impl<'a> TraitSolver<'a> {
         Ok(*evidence)
     }
 
-    fn applicable(&mut self, candidate: Candidate) -> Result<Option<Evidence>, CheckDiagnostic> {
-        let Answer::Applicable(evidence) = self.solve(Query::Applicable(Box::new(candidate)))?
-        else {
-            unreachable!()
-        };
-        Ok(evidence.map(|evidence| *evidence))
+    fn call_candidate(
+        &mut self,
+        candidate: Candidate,
+    ) -> Result<Option<SelectionEvidence>, CheckDiagnostic> {
+        match self.solve(Query::CallCandidate(Box::new(candidate)))? {
+            Answer::Applicable(evidence) => Ok(evidence.map(SelectionEvidence::Proven)),
+            Answer::Pending(candidate) => Ok(Some(SelectionEvidence::Pending(candidate))),
+            _ => unreachable!(),
+        }
     }
 
     fn solve(&mut self, root: Query) -> Result<Answer, CheckDiagnostic> {
@@ -1014,41 +1346,35 @@ impl<'a> TraitSolver<'a> {
                     }
                     frames.push(SolveFrame::Remember(query.clone()));
                     match query {
+                        Query::CallCandidate(candidate) => {
+                            frames.push(SolveFrame::CallApplicability {
+                                base: values.len(),
+                                identity: candidate.implementation.clone(),
+                            });
+                            let Candidate {
+                                implementation,
+                                mapping,
+                            } = *candidate;
+                            frames.push(SolveFrame::ExpandImpl {
+                                identity: implementation,
+                                mapping,
+                                goal: None,
+                            });
+                        }
                         Query::Applicable(candidate) => {
                             frames.push(SolveFrame::Applicability(values.len()));
-                            match *candidate {
-                                Candidate::Trait(goal) => {
-                                    frames.push(SolveFrame::Enter(Query::evidence(goal)))
-                                }
-                                Candidate::Inherent {
-                                    implementation,
-                                    mapping,
-                                } => {
-                                    let definition = self
-                                        .environment
-                                        .implementations
-                                        .iter()
-                                        .find(|item| item.identity == implementation)
-                                        .unwrap();
-                                    frames.push(SolveFrame::SourceEvidence {
-                                        identity: implementation,
-                                        mapping: mapping.clone(),
-                                        count: definition.requirements.len(),
-                                    });
-                                    frames.extend(definition.requirements.iter().rev().map(
-                                        |requirement| {
-                                            let requirement =
-                                                instantiate_requirement(requirement, &mapping);
-                                            SolveFrame::Enter(Query::evidence(TraitGoal {
-                                                subject: requirement.subject,
-                                                bound: requirement.bound,
-                                            }))
-                                        },
-                                    ));
-                                }
-                            }
+                            let Candidate {
+                                implementation,
+                                mapping,
+                            } = *candidate;
+                            frames.push(SolveFrame::ExpandImpl {
+                                identity: implementation,
+                                mapping,
+                                goal: None,
+                            });
                         }
                         Query::Type(ty) => {
+                            let ty = self.inference.resolve(&ty);
                             self.check_size(&ty)?;
                             match ty {
                                 CheckedType::Tuple(elements) => {
@@ -1126,7 +1452,7 @@ impl<'a> TraitSolver<'a> {
                     );
                     active.remove(&query);
                 }
-                SolveFrame::Applicability(_) => {
+                SolveFrame::Applicability(_) | SolveFrame::CallApplicability { .. } => {
                     let Answer::Evidence(evidence) = values.pop().unwrap() else {
                         unreachable!()
                     };
@@ -1155,21 +1481,24 @@ impl<'a> TraitSolver<'a> {
                 SolveFrame::Projection(mut projection) => {
                     projection.receiver = take_types(&mut values, 1).pop().unwrap();
                     if projection.bound.is_none() {
-                        let has_given =
-                            self.bounds_for_type(&projection.receiver)?
-                                .iter()
-                                .any(|given| {
-                                    self.environment.traits[&given.bound.declaration]
-                                        .associated
-                                        .keys()
-                                        .any(|member| {
-                                            member.name == projection.name
-                                                && projection
-                                                    .member
-                                                    .as_ref()
-                                                    .is_none_or(|selected| selected == member)
-                                        })
-                                });
+                        let has_given = self
+                            .bounds_for_type(
+                                &projection.receiver,
+                                BoundLookup::Associated(&projection.name),
+                            )?
+                            .iter()
+                            .any(|given| {
+                                self.environment.traits[&given.requirement.bound.declaration]
+                                    .associated
+                                    .keys()
+                                    .any(|member| {
+                                        member.name == projection.name
+                                            && projection
+                                                .member
+                                                .as_ref()
+                                                .is_none_or(|selected| selected == member)
+                                    })
+                            });
                         if !has_given {
                             let mut candidates = Vec::new();
                             let caller = module_for_origin(self.project, &self.origin)
@@ -1208,18 +1537,13 @@ impl<'a> TraitSolver<'a> {
                                     hidden = true;
                                     continue;
                                 }
-                                candidates.push((
-                                    implementation,
-                                    member,
-                                    instantiate_type(value, &mapping),
-                                    mapping,
-                                ));
+                                candidates.push((implementation, member, value.clone(), mapping));
                             }
                             if !candidates.is_empty() {
                                 let queries = candidates
                                     .iter()
                                     .map(|(implementation, _, _, mapping)| {
-                                        Query::Applicable(Box::new(Candidate::Inherent {
+                                        Query::Applicable(Box::new(Candidate {
                                             implementation: implementation.identity.clone(),
                                             mapping: mapping.clone(),
                                         }))
@@ -1259,7 +1583,12 @@ impl<'a> TraitSolver<'a> {
                             let Answer::Applicable(proof) = result else {
                                 unreachable!()
                             };
-                            proof.map(|_| choice)
+                            proof.map(|proof| {
+                                let Evidence::Source { mapping, .. } = proof.as_ref() else {
+                                    unreachable!()
+                                };
+                                (choice.0, instantiate_type(&choice.1, mapping))
+                            })
                         })
                         .collect::<Vec<_>>();
                     if available.len() > 1 {
@@ -1294,7 +1623,12 @@ impl<'a> TraitSolver<'a> {
                             "ambiguous associated selection"
                         }));
                     }
-                    let ((member, bound), proof) = available.pop().unwrap();
+                    let (choice, proof) = available.pop().unwrap();
+                    let Evidence::Source { mapping, .. } = proof.as_ref() else {
+                        unreachable!()
+                    };
+                    let member = choice.member;
+                    let bound = instantiate_trait(&choice.bound, mapping);
                     self.require_public_associated(&member, Some(&bound.declaration))?;
                     projection.member = Some(member);
                     projection.bound = Some(bound.clone());
@@ -1304,15 +1638,15 @@ impl<'a> TraitSolver<'a> {
                 SolveFrame::TraitProjection(mut projection) => {
                     let (choices, fixed) = self.projection_bounds(&projection)?;
                     if !fixed {
-                        let queries = choices
-                            .iter()
-                            .map(|(_, bound)| {
-                                Query::Applicable(Box::new(Candidate::Trait(TraitGoal {
-                                    subject: projection.receiver.clone(),
-                                    bound: bound.clone(),
-                                })))
-                            })
-                            .collect::<Vec<_>>();
+                        let queries =
+                            choices
+                                .iter()
+                                .map(|choice| {
+                                    Query::Applicable(Box::new(choice.candidate.clone().expect(
+                                        "non-given projection choices have an impl header",
+                                    )))
+                                })
+                                .collect::<Vec<_>>();
                         frames.push(SolveFrame::QualifiedProjection {
                             projection,
                             choices,
@@ -1320,13 +1654,15 @@ impl<'a> TraitSolver<'a> {
                         frames.extend(queries.into_iter().rev().map(SolveFrame::Enter));
                         continue;
                     }
-                    let [(member, bound)] = choices.as_slice() else {
+                    let [choice] = choices.as_slice() else {
                         return Err(self.diagnostic(if choices.is_empty() {
                             "associated selection has no trait evidence"
                         } else {
                             "ambiguous associated selection"
                         }));
                     };
+                    let member = &choice.member;
+                    let bound = &choice.bound;
                     projection.member = Some(member.clone());
                     projection.bound = Some(bound.clone());
                     self.require_public_associated(member, Some(&bound.declaration))?;
@@ -1400,20 +1736,49 @@ impl<'a> TraitSolver<'a> {
                     frames.push(SolveFrame::Select(goal));
                 }
                 SolveFrame::Select(goal) => {
-                    if let Some(given) =
-                        self.bounds_for_type(&goal.subject)?.iter().find(|given| {
-                            inferred_types_equal(&given.subject, &goal.subject, self.inference)
-                                && given.bound.declaration == goal.bound.declaration
-                                && given.bound.arguments == goal.bound.arguments
-                                && goal.bound.associated.iter().all(|(member, ty)| {
-                                    given.bound.associated.get(member) == Some(ty)
-                                })
+                    if let Some(given) = self
+                        .bounds_for_type(&goal.subject, BoundLookup::Trait(&goal.bound))?
+                        .into_iter()
+                        .find(|given| {
+                            inferred_types_equal(
+                                &given.requirement.subject,
+                                &goal.subject,
+                                self.inference,
+                            ) && given.requirement.bound.declaration == goal.bound.declaration
+                                && given.requirement.bound.arguments == goal.bound.arguments
                         })
                     {
-                        values.push(Answer::evidence(Evidence::Given {
-                            subject: goal.subject,
-                            bound: given.bound.clone(),
-                        }));
+                        let actuals = goal
+                            .bound
+                            .associated
+                            .keys()
+                            .map(|member| {
+                                given
+                                    .requirement
+                                    .bound
+                                    .associated
+                                    .get(member)
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        CheckedType::Projection(Box::new(ProjectionType {
+                                            receiver: goal.subject.clone(),
+                                            member: Some(member.clone()),
+                                            name: member.name.clone(),
+                                            bound: Some(given.requirement.bound.clone()),
+                                        }))
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                        frames.push(SolveFrame::GivenAssociated {
+                            given,
+                            expected: goal.bound.associated.into_values().collect(),
+                        });
+                        frames.extend(
+                            actuals
+                                .into_iter()
+                                .rev()
+                                .map(|actual| SolveFrame::Enter(Query::Type(actual))),
+                        );
                         continue;
                     }
                     if let CheckedType::Function(value) = &goal.subject
@@ -1487,8 +1852,22 @@ impl<'a> TraitSolver<'a> {
                     frames.push(SolveFrame::ExpandImpl {
                         identity: implementation.identity.clone(),
                         mapping: mapping.clone(),
-                        goal,
+                        goal: Some(goal),
                     });
+                }
+                SolveFrame::GivenAssociated { given, expected } => {
+                    let actuals = take_types(&mut values, expected.len());
+                    if actuals != expected {
+                        if actuals.iter().chain(&expected).all(closed_identity_type)
+                            && reject_inapplicable(&mut frames, &mut values, &mut active)
+                        {
+                            continue;
+                        }
+                        return Err(self.diagnostic(
+                            "given associated binding differs from the requested actual",
+                        ));
+                    }
+                    values.push(Answer::evidence(given.evidence()));
                 }
                 SolveFrame::ExpandImpl {
                     identity,
@@ -1519,6 +1898,18 @@ impl<'a> TraitSolver<'a> {
                             {
                                 return None;
                             }
+                            let mut unknown = BTreeSet::new();
+                            for ty in std::iter::once(&requirement.subject)
+                                .chain(&requirement.bound.arguments)
+                            {
+                                self.inference.unresolved_variables(
+                                    &instantiate_type(ty, &mapping),
+                                    &mut unknown,
+                                );
+                            }
+                            if !unknown.is_empty() {
+                                return None;
+                            }
                             requirement
                                 .bound
                                 .associated
@@ -1544,6 +1935,30 @@ impl<'a> TraitSolver<'a> {
                                 })
                         });
                         let Some((pattern, projection)) = inferred else {
+                            let mut unknown = BTreeSet::new();
+                            for ty in mapping.values() {
+                                self.inference.unresolved_variables(ty, &mut unknown);
+                            }
+                            let trait_formals = implementation
+                                .trait_use
+                                .iter()
+                                .flat_map(|bound| &bound.arguments)
+                                .flat_map(fixed_formals)
+                                .collect::<BTreeSet<_>>();
+                            if goal.is_none()
+                                && (!missing.is_disjoint(&trait_formals) || !unknown.is_empty())
+                                && suspend_call_candidate(
+                                    &mut frames,
+                                    &mut values,
+                                    &mut active,
+                                    Candidate {
+                                        implementation: identity.clone(),
+                                        mapping: mapping.clone(),
+                                    },
+                                )
+                            {
+                                continue;
+                            }
                             return Err(self.diagnostic("impl type formal is not determined by its header or associated binding"));
                         };
                         frames.push(SolveFrame::InferAssociated {
@@ -1560,10 +1975,33 @@ impl<'a> TraitSolver<'a> {
                         .iter()
                         .map(|requirement| instantiate_requirement(requirement, &mapping))
                         .collect::<Vec<_>>();
+                    let mut unknown = BTreeSet::new();
+                    for requirement in &requirements {
+                        for ty in std::iter::once(&requirement.subject)
+                            .chain(&requirement.bound.arguments)
+                            .chain(requirement.bound.associated.values())
+                        {
+                            self.inference.unresolved_variables(ty, &mut unknown);
+                        }
+                    }
+                    if goal.is_none()
+                        && !unknown.is_empty()
+                        && suspend_call_candidate(
+                            &mut frames,
+                            &mut values,
+                            &mut active,
+                            Candidate {
+                                implementation: identity.clone(),
+                                mapping: mapping.clone(),
+                            },
+                        )
+                    {
+                        continue;
+                    }
                     let actuals = goal
-                        .bound
-                        .associated
-                        .keys()
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|goal| goal.bound.associated.keys())
                         .map(|member| {
                             instantiate_type(&implementation.associated[member], &mapping)
                         })
@@ -1572,7 +2010,9 @@ impl<'a> TraitSolver<'a> {
                         identity,
                         mapping,
                         requirements,
-                        expected: goal.bound.associated.into_values().collect(),
+                        expected: goal
+                            .map(|goal| goal.bound.associated.into_values().collect())
+                            .unwrap_or_default(),
                     });
                     frames.extend(
                         actuals
@@ -1712,18 +2152,28 @@ impl<'a> TraitSolver<'a> {
     fn projection_bounds(
         &mut self,
         projection: &ProjectionType,
-    ) -> Result<(Vec<(EntityId, TraitUse)>, bool), CheckDiagnostic> {
+    ) -> Result<(Vec<ProjectionChoice>, bool), CheckDiagnostic> {
         let caller = module_for_origin(self.project, &self.origin)
             .expect("projection has a real source scope");
         if let (Some(member), Some(bound)) = (&projection.member, &projection.bound) {
             if !member_accessible_in_module(member, &caller, self.project) {
                 return Err(self.diagnostic("associated type is private in this scope"));
             }
-            return Ok((vec![(member.clone(), bound.clone())], true));
+            return Ok((
+                vec![ProjectionChoice {
+                    member: member.clone(),
+                    bound: bound.clone(),
+                    candidate: None,
+                }],
+                true,
+            ));
         }
         let mut choices = BTreeSet::new();
-        for given in self.bounds_for_type(&projection.receiver)? {
-            for member in self.environment.traits[&given.bound.declaration]
+        for given in self.bounds_for_type(
+            &projection.receiver,
+            BoundLookup::Associated(&projection.name),
+        )? {
+            for member in self.environment.traits[&given.requirement.bound.declaration]
                 .associated
                 .keys()
             {
@@ -1734,7 +2184,11 @@ impl<'a> TraitSolver<'a> {
                         .as_ref()
                         .is_none_or(|selected| selected == member)
                 {
-                    choices.insert((member.clone(), given.bound.clone()));
+                    choices.insert(ProjectionChoice {
+                        member: member.clone(),
+                        bound: given.requirement.bound.clone(),
+                        candidate: None,
+                    });
                 }
             }
         }
@@ -1769,7 +2223,14 @@ impl<'a> TraitSolver<'a> {
                             .as_ref()
                             .is_none_or(|selected| selected == member)
                     {
-                        choices.insert((member.clone(), instantiate_trait(bound, &mapping)));
+                        choices.insert(ProjectionChoice {
+                            member: member.clone(),
+                            bound: bound.clone(),
+                            candidate: Some(Candidate {
+                                implementation: implementation.identity.clone(),
+                                mapping: mapping.clone(),
+                            }),
+                        });
                     }
                 }
             }
@@ -2628,6 +3089,7 @@ pub(super) struct DraftCall {
     pub(super) selection: Option<MethodSelection>,
     pub(super) owner_mapping: BTreeMap<TypeFormal, CheckedType>,
     pub(super) evidence: Option<Evidence>,
+    pub(super) pending_impl: Option<EntityId>,
     pub(super) proofs: Vec<Evidence>,
     pub(super) effect_actuals: Vec<(EffectFormal, CheckedEffect)>,
     pub(super) effect_dependencies: Vec<EntityId>,
@@ -2704,6 +3166,20 @@ pub(super) fn signature_schemes(
     Ok(schemes)
 }
 
+pub(super) fn contains_projection(ty: &CheckedType) -> bool {
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        match ty {
+            CheckedType::Projection(_) => return true,
+            CheckedType::Tuple(elements) => pending.extend(elements),
+            CheckedType::Nominal(nominal) => pending.extend(&nominal.arguments),
+            CheckedType::Function(value) => pending.extend(value.types.iter().map(|(_, ty)| ty)),
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(super) fn contains_function_value(ty: &CheckedType) -> bool {
     let mut pending = vec![ty];
     while let Some(ty) = pending.pop() {
@@ -2773,7 +3249,11 @@ pub(super) fn normalize_header(
     Ok(())
 }
 
-type SelectedMethod = (EntityId, BTreeMap<TypeFormal, CheckedType>, Evidence);
+type SelectedMethod = (
+    EntityId,
+    BTreeMap<TypeFormal, CheckedType>,
+    SelectionEvidence,
+);
 
 fn method_accessible(
     member: &EntityId,
@@ -2832,21 +3312,25 @@ fn select_method(
     let mut inaccessible = Vec::new();
     let mut fixed_dictionary = false;
     {
-        for given in solver.bounds_for_type(&receiver)? {
-            let definition = &traits.traits[&given.bound.declaration];
+        for given in
+            solver.bounds_for_type(&receiver, BoundLookup::Method(&selection.member.name))?
+        {
+            let definition = &traits.traits[&given.requirement.bound.declaration];
             if let Some(member) = definition.methods.get(&selection.member.name) {
                 fixed_dictionary = true;
                 if !method_accessible(member, &call.caller, headers, project) {
                     inaccessible.push(member.clone());
                     continue;
                 }
-                let mapping = trait_mapping(definition, &receiver, &given.bound.arguments);
+                let mapping =
+                    trait_mapping(definition, &receiver, &given.requirement.bound.arguments);
                 choices.insert(
-                    (member.clone(), mapping, Some(given.bound.clone())),
-                    Evidence::Given {
-                        subject: receiver.clone(),
-                        bound: given.bound.clone(),
-                    },
+                    (
+                        member.clone(),
+                        mapping,
+                        Some(given.requirement.bound.clone()),
+                    ),
+                    SelectionEvidence::Proven(Box::new(given.evidence())),
                 );
             }
         }
@@ -2871,12 +3355,19 @@ fn select_method(
                 &implementation.formals,
                 &mut mapping,
             ) {
-                let Some(evidence) = solver.applicable(Candidate::Inherent {
+                let Some(evidence) = solver.call_candidate(Candidate {
                     implementation: implementation.identity.clone(),
                     mapping: mapping.clone(),
                 })?
                 else {
                     continue;
+                };
+                mapping = match &evidence {
+                    SelectionEvidence::Proven(proof) => match proof.as_ref() {
+                        Evidence::Source { mapping, .. } => mapping.clone(),
+                        _ => unreachable!(),
+                    },
+                    SelectionEvidence::Pending(candidate) => candidate.mapping.clone(),
                 };
                 choices.insert((member.clone(), mapping, None), evidence);
             }
@@ -2902,20 +3393,21 @@ fn select_method(
                 ) {
                     continue;
                 }
-                let bound = instantiate_trait(bound, &mapping);
-                let Some(evidence) = solver.applicable(Candidate::Trait(TraitGoal {
-                    subject: receiver.clone(),
-                    bound: bound.clone(),
-                }))?
+                let Some(evidence) = solver.call_candidate(Candidate {
+                    implementation: implementation.identity.clone(),
+                    mapping: mapping.clone(),
+                })?
                 else {
                     continue;
                 };
-                if let Evidence::Source {
-                    mapping: actuals, ..
-                } = &evidence
-                {
-                    mapping = actuals.clone();
-                }
+                mapping = match &evidence {
+                    SelectionEvidence::Proven(proof) => match proof.as_ref() {
+                        Evidence::Source { mapping, .. } => mapping.clone(),
+                        _ => unreachable!(),
+                    },
+                    SelectionEvidence::Pending(candidate) => candidate.mapping.clone(),
+                };
+                let bound = instantiate_trait(bound, &mapping);
                 choices.insert((member.clone(), mapping, Some(bound)), evidence);
             }
             let roles = &project.core_roles;
@@ -2939,10 +3431,10 @@ fn select_method(
                             trait_mapping(&traits.traits[&role.declaration], &receiver, &[]),
                             Some(bound),
                         ),
-                        Evidence::Primitive {
+                        SelectionEvidence::Proven(Box::new(Evidence::Primitive {
                             subject: receiver.clone(),
                             declaration: role.declaration.clone(),
-                        },
+                        })),
                     );
                 }
             }
@@ -2991,6 +3483,104 @@ fn select_method(
     Ok(Some((member, mapping, evidence)))
 }
 
+fn qualify_call_actuals(
+    call: &mut DraftCall,
+    replacements: &BTreeMap<TypeFormal, CheckedType>,
+    caller: &FunctionHeader,
+    traits: &TraitEnvironment,
+    project: &ResolvedProject,
+    inference: &mut TypeInference,
+) -> Result<(), CheckDiagnostic> {
+    if let Some(identity) = &call.pending_impl {
+        let implementation = traits
+            .implementations
+            .iter()
+            .find(|item| &item.identity == identity)
+            .unwrap();
+        let independent = fixed_formals(&implementation.target)
+            .into_iter()
+            .chain(
+                implementation
+                    .trait_use
+                    .iter()
+                    .flat_map(|bound| &bound.arguments)
+                    .flat_map(fixed_formals),
+            )
+            .collect::<BTreeSet<_>>();
+        let mapping = implementation
+            .formals
+            .iter()
+            .filter_map(|formal| {
+                replacements
+                    .get(formal)
+                    .map(|ty| (formal.clone(), inference.resolve(ty)))
+            })
+            .filter(|(formal, ty)| {
+                independent.contains(formal) || !matches!(ty, CheckedType::Infer(_))
+            })
+            .collect();
+        let givens = caller
+            .requirements
+            .iter()
+            .chain(&caller.outer_requirements)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut solver =
+            TraitSolver::new(traits, project, inference, &givens, call.origin.clone())?;
+        let evidence = solver.call_candidate(Candidate {
+            implementation: identity.clone(),
+            mapping,
+        })?;
+        drop(solver);
+        match evidence {
+            Some(SelectionEvidence::Proven(evidence)) => {
+                let Evidence::Source { mapping, .. } = evidence.as_ref() else {
+                    unreachable!()
+                };
+                for (formal, actual) in mapping {
+                    inference
+                        .unify(&replacements[formal], actual)
+                        .map_err(|failure| {
+                            source_diagnostic(
+                                CheckDiagnosticKind::CallMismatch,
+                                display_unification_failure(&failure),
+                                call.origin.clone(),
+                                Vec::new(),
+                            )
+                        })?;
+                }
+                call.owner_mapping = mapping.clone();
+                call.evidence = Some(*evidence);
+                call.pending_impl = None;
+            }
+            Some(SelectionEvidence::Pending(candidate)) => {
+                for (formal, actual) in &candidate.mapping {
+                    inference
+                        .unify(&replacements[formal], actual)
+                        .map_err(|failure| {
+                            source_diagnostic(
+                                CheckDiagnosticKind::CallMismatch,
+                                display_unification_failure(&failure),
+                                call.origin.clone(),
+                                Vec::new(),
+                            )
+                        })?;
+                }
+                call.owner_mapping.extend(candidate.mapping);
+            }
+            None => {
+                return Err(source_diagnostic(
+                    CheckDiagnosticKind::TypeMismatch,
+                    "selected impl cannot satisfy its header conditions",
+                    call.origin.clone(),
+                    vec![entity_origin(identity).unwrap()],
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn constrain_calls(
     calls: &mut [DraftCall],
     members: &BTreeSet<EntityId>,
@@ -3007,9 +3597,10 @@ pub(super) fn constrain_calls(
         if call.closed {
             continue;
         }
-        let Some(target) = &call.target else {
+        let Some(target) = call.target.clone() else {
             continue;
         };
+        let target = &target;
         if !members.contains(target) && !schemes.contains_key(target) {
             continue;
         }
@@ -3045,7 +3636,10 @@ pub(super) fn constrain_calls(
             let mapping = scheme
                 .quantified
                 .iter()
-                .filter(|formal| scheme.instantiation_formals.contains(*formal))
+                .filter(|formal| {
+                    scheme.instantiation_formals.contains(*formal)
+                        || (call.selection.is_some() && header.outer_formals.contains(formal))
+                })
                 .cloned()
                 .map(|formal| (formal, inference.fresh()))
                 .collect::<Vec<_>>();
@@ -3103,7 +3697,7 @@ pub(super) fn constrain_calls(
             .cloned()
             .collect::<Vec<_>>();
         for (actual, expected) in call.arguments.iter().zip(&parameters) {
-            if matches!(expected, CheckedType::Projection(_)) {
+            if contains_projection(expected) {
                 continue;
             }
             inference.satisfy(actual, expected).map_err(|failure| {
@@ -3114,6 +3708,44 @@ pub(super) fn constrain_calls(
                     vec![header.origin.clone()],
                 )
             })?;
+        }
+        call.instantiation = Some(instantiation.clone());
+        if !contains_projection(&result) {
+            inference
+                .satisfy(&result, &call.result)
+                .map_err(|failure| {
+                    source_diagnostic(
+                        CheckDiagnosticKind::ReturnMismatch,
+                        display_unification_failure(&failure),
+                        call.origin.clone(),
+                        vec![header.origin.clone()],
+                    )
+                })?;
+        }
+        qualify_call_actuals(call, &replacements, caller, traits, project, inference)?;
+        if header.shapes.keys().any(|formal| {
+            replacements
+                .get(formal)
+                .is_some_and(|ty| matches!(inference.resolve(ty), CheckedType::Infer(_)))
+        }) {
+            continue;
+        }
+        call.effect_actuals = solve_effect_actuals(
+            header,
+            caller,
+            &replacements,
+            BodyEnvironment {
+                project,
+                headers,
+                traits,
+            },
+            schemes,
+            inference,
+            &call.origin,
+        )?;
+        qualify_call_actuals(call, &replacements, caller, traits, project, inference)?;
+        if call.pending_impl.is_some() {
+            continue;
         }
         for (actual, expected) in call.arguments.iter().zip(&parameters) {
             let mut solver =
@@ -3128,19 +3760,6 @@ pub(super) fn constrain_calls(
                     vec![header.origin.clone()],
                 )
             })?;
-        }
-        call.instantiation = Some(instantiation.clone());
-        if !matches!(result, CheckedType::Projection(_)) {
-            inference
-                .satisfy(&result, &call.result)
-                .map_err(|failure| {
-                    source_diagnostic(
-                        CheckDiagnosticKind::CallMismatch,
-                        display_unification_failure(&failure),
-                        call.origin.clone(),
-                        vec![header.origin.clone()],
-                    )
-                })?;
         }
         let mut unresolved = BTreeSet::new();
         for requirement in header.requirements.iter().chain(&header.outer_requirements) {
@@ -3173,19 +3792,6 @@ pub(super) fn constrain_calls(
         if !unresolved.is_empty() {
             continue;
         }
-        call.effect_actuals = solve_effect_actuals(
-            header,
-            caller,
-            &replacements,
-            BodyEnvironment {
-                project,
-                headers,
-                traits,
-            },
-            schemes,
-            inference,
-            &call.origin,
-        )?;
         let mut solver =
             TraitSolver::new(traits, project, inference, &givens, call.origin.clone())?;
         let result = solver.normalize(&result)?;
@@ -3207,7 +3813,7 @@ pub(super) fn constrain_calls(
             .satisfy(&result, &call.result)
             .map_err(|failure| {
                 source_diagnostic(
-                    CheckDiagnosticKind::CallMismatch,
+                    CheckDiagnosticKind::ReturnMismatch,
                     display_unification_failure(&failure),
                     call.origin.clone(),
                     vec![header.origin.clone()],
@@ -3223,6 +3829,14 @@ pub(super) fn constrain_calls(
         call.effect_dependencies =
             row.dependencies(traits, project, headers, inference, &givens, &call.origin)?;
         call.instantiation = Some(instantiation);
+        if call.pending_impl.is_some() || (call.selection.is_some() && call.evidence.is_none()) {
+            return Err(source_diagnostic(
+                CheckDiagnosticKind::Unsupported,
+                "incomplete call qualification before publication",
+                call.origin.clone(),
+                Vec::new(),
+            ));
+        }
         call.closed = true;
     }
     Ok(())
@@ -3244,7 +3858,7 @@ pub(super) fn next_binding_group(
     } = environment;
     loop {
         let before = (
-            inference.substitutions.len(),
+            inference.revision,
             calls.iter().filter(|call| call.target.is_some()).count(),
             calls.iter().filter(|call| call.closed).count(),
             calls
@@ -3309,7 +3923,12 @@ pub(super) fn next_binding_group(
             {
                 call.target = Some(member);
                 call.owner_mapping = mapping;
-                call.evidence = Some(evidence);
+                match evidence {
+                    SelectionEvidence::Proven(evidence) => call.evidence = Some(*evidence),
+                    SelectionEvidence::Pending(candidate) => {
+                        call.pending_impl = Some(candidate.implementation)
+                    }
+                }
             }
         }
         for group in function_binding_groups(order, calls, headers) {
@@ -3367,7 +3986,7 @@ pub(super) fn next_binding_group(
             }
         }
         let after = (
-            inference.substitutions.len(),
+            inference.revision,
             calls.iter().filter(|call| call.target.is_some()).count(),
             calls.iter().filter(|call| call.closed).count(),
             calls
@@ -3382,7 +4001,13 @@ pub(super) fn next_binding_group(
                 .expect("an unclosed group has a pending call");
             return Err(source_diagnostic(
                 CheckDiagnosticKind::TypeMismatch,
-                "method selection remains undetermined after the available type constraints; an unknown receiver cannot be selected by method name",
+                if call.target.is_none() {
+                    "method selection remains undetermined after the available type constraints; an unknown receiver cannot be selected by method name"
+                } else if call.pending_impl.is_some() {
+                    "selected method qualification remains undetermined after the available call constraints"
+                } else {
+                    "selected call constraints remain undetermined before body closure"
+                },
                 call.origin.clone(),
                 Vec::new(),
             ));
@@ -3536,6 +4161,7 @@ impl BodyChecker<'_> {
             selection: Some(selection),
             owner_mapping: BTreeMap::new(),
             evidence: None,
+            pending_impl: None,
             proofs: Vec::new(),
             effect_actuals: Vec::new(),
             effect_dependencies: Vec::new(),
@@ -3558,7 +4184,18 @@ impl BodyChecker<'_> {
 
 pub(super) fn close_evidence(evidence: Evidence, closure: &BodyClosure<'_>) -> Evidence {
     match evidence {
-        Evidence::Given { subject, bound } => Evidence::Given {
+        Evidence::Given {
+            subject,
+            bound,
+            via,
+        } => Evidence::Given {
+            via: via
+                .into_iter()
+                .map(|step| GivenStep {
+                    premise: close_requirement(step.premise, closure),
+                    associated: step.associated,
+                })
+                .collect(),
             subject: closure.close_type(&subject),
             bound: TraitUse {
                 declaration: bound.declaration,

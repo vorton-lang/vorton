@@ -8,6 +8,13 @@ pub(super) struct PendingEffectContract {
     pub(super) record_index: usize,
 }
 
+pub(super) struct ContractEffectEquality {
+    pub(super) owner: EntityId,
+    pub(super) left: CheckedEffect,
+    pub(super) right: CheckedEffect,
+    pub(super) diagnostic: CheckDiagnostic,
+}
+
 pub(super) struct PendingRequirementsContract {
     pub(super) target: EntityId,
     pub(super) owner: LibraryId,
@@ -1071,7 +1078,8 @@ pub(super) fn apply_contract_effects(
     selections: &mut ContractSelections,
     documents: &[ContractDocument],
     inference: &TypeInference,
-) -> Result<(), CheckDiagnostic> {
+) -> Result<Vec<ContractEffectEquality>, CheckDiagnostic> {
+    let mut equalities = Vec::new();
     for pending in std::mem::take(&mut selections.pending_effects) {
         let context = ContractTypeContext {
             binding: ContractBindingContext {
@@ -1130,34 +1138,83 @@ pub(super) fn apply_contract_effects(
             })
             .transpose()?;
         if let Some((previous, previous_origin)) = selections.effect_upper.get(&pending.target) {
-            if previous != &row {
-                return Err(contract_diagnostic(
+            equalities.push(ContractEffectEquality {
+                owner: pending.target.clone(),
+                left: previous.clone(),
+                right: row.clone(),
+                diagnostic: contract_diagnostic(
                     CheckDiagnosticKind::ContractConflict,
                     "partial records select different effect upper bounds",
                     pending.document_index,
-                    pending.path,
+                    pending.path.clone(),
                     vec![previous_origin.clone()],
-                ));
-            }
-        } else if let Some(source) = source
-            && source != row
-        {
-            return Err(contract_diagnostic(
+                ),
+            });
+        } else if let Some(source) = source {
+            equalities.push(ContractEffectEquality {
+                owner: pending.target.clone(), left: source, right: row.clone(),
+                diagnostic: contract_diagnostic(
                 CheckDiagnosticKind::Unsupported,
                 "different explicit source and contract effect bounds have no selected difference policy",
                 pending.document_index,
-                pending.path,
+                pending.path.clone(),
                 vec![CheckOrigin::Source(context.header.origin.clone())],
-            ));
+                ),
+            });
         }
         let header = headers.get_mut(&pending.target).unwrap();
         header.semantic_inputs.extend(inputs);
-        header.effect_upper = Some(row.clone());
-        header.effect_origin = Some(origin.clone());
+        if header.effect_upper.is_none() {
+            header.effect_upper = Some(row.clone());
+            header.effect_origin = Some(origin.clone());
+        }
         selections
             .effect_upper
             .entry(pending.target)
             .or_insert((row, origin));
+    }
+    Ok(equalities)
+}
+
+pub(super) fn compare_contract_effects(
+    environment: BodyEnvironment<'_>,
+    normalizer: &SourceTypeNormalizer,
+    inference: &TypeInference,
+    equalities: Vec<ContractEffectEquality>,
+) -> Result<(), CheckDiagnostic> {
+    for equality in equalities {
+        let header = &environment.headers[&equality.owner];
+        let givens = header
+            .requirements
+            .iter()
+            .chain(&header.outer_requirements)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut solver = TraitSolver::new(
+            environment.traits,
+            environment.project,
+            inference,
+            &givens,
+            header.origin.clone(),
+        )?;
+        let mut normalize = |row: &CheckedEffect| {
+            row.normalize_types(&mut solver)?
+                .declared_method_rows(environment, inference, header, &header.origin)?
+                .normalize_types(&mut solver)?
+                .reduce_destruction(&normalizer.nominals, &header.origin)
+        };
+        let result = (|| {
+            Ok::<_, CheckDiagnostic>(normalize(&equality.left)? == normalize(&equality.right)?)
+        })();
+        match result {
+            Ok(true) => {}
+            Ok(false) => return Err(equality.diagnostic),
+            Err(mut diagnostic) => {
+                diagnostic.related.extend(diagnostic.primary.take());
+                diagnostic.primary = equality.diagnostic.primary;
+                return Err(diagnostic);
+            }
+        }
     }
     Ok(())
 }
