@@ -45,7 +45,7 @@ Proptest 是 `vorton-compiler` 的固定 dev-dependency，后续 property test �
 python tools/semantic_guard/self_test.py --install
 ```
 
-该入口直接验证 compiler 实际调用的 formal 等价类核心，要求 `formal_merge_allowed`、`merge_label` 与 `merge_classes` 三个指定目标出现在 Verus 报告中且 verified 总数非零；同时运行固定种子的生产核心 property、真实 `check_project` 正反性质，以及破坏核心、漏登记独立域、断开接线三个预期失败的隔离 mutant。Verus target 与实际核心是同一份 Rust 函数体；`assume`、`admit`、axiom、external body 等未验证逃生口会在执行证明前被拒绝。mutant 副本与构建输出使用新的 `target/semantic-guard/runs/` 子目录并保留，不改正式 checkout。
+该入口直接验证 compiler 实际调用的 formal 等价类核心，要求 `formal_merge_allowed`、`merge_label` 与 `merge_classes` 三个指定目标出现在 Verus 报告中且 verified 总数非零；同时运行固定种子的生产核心 property、真实 `check_project` 正反性质，以及破坏核心、漏登记独立域、断开接线三个预期失败的隔离 mutant。Verus target 与实际核心是同一份 Rust 函数体；`assume`、`admit`、axiom、external body 等未验证逃生口会在执行证明前被拒绝。mutant 副本与构建输出使用新的 `target/semantic-guard/runs/` 子目录并保留，不改正式 checkout。CI 以 `--expected-candidate <40-hex-sha>` 同时核对实际 checkout HEAD；PR 使用事件的 `pull_request.head.sha`，不采用默认 synthetic merge checkout。
 
 护栏自身或被证明核心变化时，额外运行历史错误对照：
 

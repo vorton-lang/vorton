@@ -29,4 +29,4 @@ Issue 恰好选择一个 type、一个 priority，并可选择零到多个 area�
 
 ## 当前 CI
 
-Governance CI 在 Ubuntu 上依次运行 current-tree 结构检查、Rust format、Clippy、workspace tests 与 Git whitespace gate，并以独立 job 运行所需的 Verus／Proptest 工具自检和语义护栏自验。精确命令以 [workflow](../.github/workflows/test.yml) 为准，工具与护栏边界见[外部验证工具链](validation-toolchain.md)。
+Governance CI 在 Ubuntu 上依次运行 current-tree 结构检查、Rust format、Clippy、workspace tests 与 Git whitespace gate，并以独立 job 在 PR head exact SHA 上运行所需的 Verus／Proptest 工具自检和语义护栏自验。精确命令以 [workflow](../.github/workflows/test.yml) 为准，工具与护栏边界见[外部验证工具链](validation-toolchain.md)。

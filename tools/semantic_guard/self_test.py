@@ -14,6 +14,7 @@ from common import (
     GuardError,
     ROOT,
     RUNS,
+    SHA_PATTERN,
     guard_identity,
     load_manifest,
     require_success,
@@ -33,6 +34,10 @@ def parse_arguments() -> argparse.Namespace:
         "--install",
         action="store_true",
         help="install the pinned Verus release if it is missing",
+    )
+    parser.add_argument(
+        "--expected-candidate",
+        help="require the checkout HEAD to equal this exact 40-hex candidate",
     )
     return parser.parse_args()
 
@@ -180,6 +185,14 @@ def run_mutants() -> None:
 def main() -> int:
     arguments = parse_arguments()
     baseline, dirty = guard_identity()
+    if arguments.expected_candidate is not None:
+        if SHA_PATTERN.fullmatch(arguments.expected_candidate) is None:
+            raise GuardError("--expected-candidate must be a 40-hex commit")
+        if baseline != arguments.expected_candidate:
+            raise GuardError(
+                f"semantic guard checkout {baseline} is not expected candidate "
+                f"{arguments.expected_candidate}"
+            )
     print(f"GUARD_BASELINE={baseline} DIRTY={str(dirty).lower()} PURPOSE=self-test")
     cases = load_manifest()
     print(

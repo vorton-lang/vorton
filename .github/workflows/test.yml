@@ -92,6 +92,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -102,4 +104,4 @@ jobs:
       - name: Self-test required validation tools
         run: python tools/validation/run.py required --install
       - name: Run semantic guard self-test
-        run: python tools/semantic_guard/self_test.py
+        run: python tools/semantic_guard/self_test.py --expected-candidate "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
