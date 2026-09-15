@@ -101,3 +101,5 @@ jobs:
           key: verus-0.2026.09.13.671956e-x86-linux
       - name: Self-test required validation tools
         run: python tools/validation/run.py required --install
+      - name: Run semantic guard self-test
+        run: python tools/semantic_guard/self_test.py

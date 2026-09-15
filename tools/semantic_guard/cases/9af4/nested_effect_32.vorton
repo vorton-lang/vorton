@@ -1,0 +1,4 @@
+trait T { fn run<effect E>(self: &Self) -> Unit with {E}; }
+struct A {}
+impl T for A { fn run<effect E>(self: &Self) -> Unit with {E} {} }
+fn nested() -> Unit with {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {T::run<A, effect {fs}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>}>} {}

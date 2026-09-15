@@ -1,0 +1,464 @@
+{
+  "schema_version": 1,
+  "evidence": {
+    "pull_request": "https://github.com/vorton-lang/vorton/pull/71",
+    "final_generic_domain_report": "https://github.com/vorton-lang/vorton/pull/71#issuecomment-5675559325",
+    "note": "Inputs were copied from the retained original verifier cases. Historical revisions are evidence fixtures, not current implementation authority."
+  },
+  "semantic_basis": {
+    "type-formation-public-boundary": ["docs/lang-spec/type-system.md", "docs/lang-spec/modules.md"],
+    "method-selection": ["docs/lang-spec/traits.md", "docs/lang-spec/modules.md"],
+    "associated-type-evidence": ["docs/lang-spec/traits.md", "docs/lang-spec/type-system.md"],
+    "instantiation-generic-domain": ["docs/lang-spec/type-system.md", "docs/design.md"],
+    "effect-consumers": ["docs/lang-spec/effects.md", "docs/design.md", "docs/contract-format.md"]
+  },
+  "cases": [
+    {
+      "id": "public-associated-bound-keeps-private-type",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/private_assoc_bound.vorton",
+      "finding": "initial-1 F1",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "public-associated-visible-control",
+      "role": "control",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/positive_assoc.vorton",
+      "finding": "initial-1 F1 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "public-callback-shape-keeps-private-type",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/private_shape.vorton",
+      "finding": "initial-1 F1 callback carrier",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "public-callback-visible-control",
+      "role": "control",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/positive_shape.vorton",
+      "finding": "initial-1 F1 callback control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "given-nested-associated-projection",
+      "role": "historical_failure",
+      "category": "associated-type-evidence",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/nested_projection.vorton",
+      "finding": "initial-1 F2",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "direct-associated-projection-control",
+      "role": "control",
+      "category": "associated-type-evidence",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/projection_control.vorton",
+      "finding": "initial-1 F2 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "finite-nested-method-effect-64",
+      "role": "historical_failure",
+      "category": "effect-consumers",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/nested_effect_64.vorton",
+      "stack_bytes": 1048576,
+      "finding": "initial-1 F3",
+      "historical": { "status": "product_crash" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "finite-nested-method-effect-32-control",
+      "role": "control",
+      "category": "effect-consumers",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/nested_effect_32.vorton",
+      "stack_bytes": 1048576,
+      "finding": "initial-1 F3 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "callback-payload-minimum",
+      "role": "historical_failure",
+      "category": "effect-consumers",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/inferred_payload_min.vorton",
+      "finding": "initial-1 F4",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "callback-fixed-payload-control",
+      "role": "control",
+      "category": "effect-consumers",
+      "historical_sha": "9af4f00ddca82726ab191d1883dff17909391707",
+      "source": "9af4/inferred_payload_control.vorton",
+      "finding": "initial-1 F4 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "tuple-where-dictionary",
+      "role": "historical_failure",
+      "category": "method-selection",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/tuple_where_dictionary.vorton",
+      "finding": "initial-2 V2-F1",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "formal-dictionary-control",
+      "role": "control",
+      "category": "method-selection",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/formal_dictionary_control.vorton",
+      "finding": "initial-2 V2-F1 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "associated-assignment-formation",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/assoc_assignment_formation.vorton",
+      "finding": "initial-2 V2-F2",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "associated-assignment-formation-control",
+      "role": "control",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/assoc_assignment_valid_control.vorton",
+      "finding": "initial-2 V2-F2 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "callback-shape-formation",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/callback_shape_formation.vorton",
+      "finding": "initial-2 V2-F2 callback carrier",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "failure-payload-formation",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/failure_payload_formation.vorton",
+      "finding": "initial-2 V2-F2 failure carrier",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "handled-effect-actual-formation",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/handled_actual_formation.vorton",
+      "finding": "initial-2 V2-F2 handled carrier",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "source-formation-carriers-control",
+      "role": "control",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/source_formation_control.vorton",
+      "finding": "initial-2 V2-F2 source carrier control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "contract-failure-payload-formation",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/contract_fail_formation.vorton",
+      "contract": "5d33/contract_fail_formation.json",
+      "finding": "initial-2 V2-F2 contract carrier",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "contract" }
+    },
+    {
+      "id": "contract-failure-payload-formation-control",
+      "role": "control",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/contract_fail_formation_control.vorton",
+      "contract": "5d33/contract_fail_formation.json",
+      "finding": "initial-2 V2-F2 contract carrier control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "main-method-application-upper",
+      "role": "historical_failure",
+      "category": "effect-consumers",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/main_scheme_handled.vorton",
+      "finding": "initial-2 V2-F3 normalization",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "main-direct-handled-control",
+      "role": "control",
+      "category": "effect-consumers",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/main_direct_handled_control.vorton",
+      "finding": "initial-2 V2-F3 rejection control",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "ordinary-method-named-main",
+      "role": "historical_failure",
+      "category": "effect-consumers",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/method_named_main.vorton",
+      "finding": "initial-2 V2-F3 entry identity",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "contract-handled-effect-binding",
+      "role": "historical_failure",
+      "category": "effect-consumers",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/contract_handled_upper.vorton",
+      "contract": "5d33/contract_handled_upper.json",
+      "finding": "initial-2 V2-F4",
+      "historical": { "status": "reject", "kind": "ContractBinding", "origin": "contract" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "source-handled-effect-control",
+      "role": "control",
+      "category": "effect-consumers",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/source_handled_upper_control.vorton",
+      "finding": "initial-2 V2-F4 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "invisible-private-trait-candidate",
+      "role": "historical_failure",
+      "category": "method-selection",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/private_trait_invisible_ambiguity.vorton",
+      "finding": "initial-2 V2-F5",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "visible-trait-candidate-control",
+      "role": "control",
+      "category": "method-selection",
+      "historical_sha": "5d33c83578a1e45f3e5973066e929ea84f261011",
+      "source": "5d33/visible_trait_control.vorton",
+      "finding": "initial-2 V2-F5 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "conditional-method-candidate-filter",
+      "role": "historical_failure",
+      "category": "method-selection",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/conditional_trait_method.vorton",
+      "finding": "recovery-1 RV1-F1",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "conditional-method-single-candidate-control",
+      "role": "control",
+      "category": "method-selection",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/conditional_trait_method_control.vorton",
+      "finding": "recovery-1 RV1-F1 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "handled-effect-projection-identity",
+      "role": "historical_failure",
+      "category": "effect-consumers",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/handled_projection.vorton",
+      "finding": "recovery-1 RV1-F2",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "handled-effect-concrete-identity-control",
+      "role": "control",
+      "category": "effect-consumers",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/handled_projection_control.vorton",
+      "finding": "recovery-1 RV1-F2 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "public-effect-private-return",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/public_effect_private_return.vorton",
+      "finding": "recovery-1 RV1-F3",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "TypeMismatch", "origin": "source" }
+    },
+    {
+      "id": "public-effect-visible-signature-control",
+      "role": "control",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/public_effect_visible_control.vorton",
+      "finding": "recovery-1 RV1-F3 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "private-module-public-effect",
+      "role": "historical_failure",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/private_module_pub_effect_unit.vorton",
+      "finding": "recovery-1 RV1-F4",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "private-effect-control",
+      "role": "control",
+      "category": "type-formation-public-boundary",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/private_effect_control.vorton",
+      "finding": "recovery-1 RV1-F4 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "equivalent-projection-effect-records",
+      "role": "historical_failure",
+      "category": "effect-consumers",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/row_projection_partial.vorton",
+      "contract": "80d2/row_projection_partial.json",
+      "finding": "recovery-1 RV1-F5",
+      "historical": { "status": "reject", "kind": "ContractConflict", "origin": "contract" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "duplicate-concrete-effect-records-control",
+      "role": "control",
+      "category": "effect-consumers",
+      "historical_sha": "80d29a45e6e8eab1c640b542ab7a26e4ea551e34",
+      "source": "80d2/row_partial_control.vorton",
+      "contract": "80d2/row_partial_control.json",
+      "finding": "recovery-1 RV1-F5 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "inherent-associated-bound-outer-actual",
+      "role": "historical_failure",
+      "category": "method-selection",
+      "historical_sha": "ff8a14755987b80437f33752647ba25181e29cce",
+      "source": "ff8a/inherent_inferred_outer_actual.vorton",
+      "finding": "recovery-2 F1",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "inherent-fixed-associated-bound-control",
+      "role": "control",
+      "category": "method-selection",
+      "historical_sha": "ff8a14755987b80437f33752647ba25181e29cce",
+      "source": "ff8a/inherent_fixed_binding.vorton",
+      "finding": "recovery-2 F1 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "associated-bound-survives-equality",
+      "role": "historical_failure",
+      "category": "associated-type-evidence",
+      "historical_sha": "ff8a14755987b80437f33752647ba25181e29cce",
+      "source": "ff8a/given_associated_bound_alias.vorton",
+      "finding": "recovery-2 F2",
+      "historical": { "status": "reject", "kind": "TypeMismatch", "origin": "source" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "associated-bound-direct-projection-control",
+      "role": "control",
+      "category": "associated-type-evidence",
+      "historical_sha": "ff8a14755987b80437f33752647ba25181e29cce",
+      "source": "ff8a/given_associated_bound_projection.vorton",
+      "finding": "recovery-2 F2 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "outer-and-method-formals-stay-independent",
+      "role": "historical_failure",
+      "category": "instantiation-generic-domain",
+      "historical_sha": "58cf9d96cb0d094410acf58eef237a5cb2536026",
+      "source": "58cf/cross_owner_trait_dictionary.vorton",
+      "finding": "extra verification F1",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "reject", "kind": "ReturnMismatch", "origin": "source" }
+    },
+    {
+      "id": "outer-and-method-distinct-control",
+      "role": "control",
+      "category": "instantiation-generic-domain",
+      "historical_sha": "58cf9d96cb0d094410acf58eef237a5cb2536026",
+      "source": "58cf/legitimate_outer_own_distinct.vorton",
+      "finding": "extra verification F1 control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    },
+    {
+      "id": "outer-and-method-same-actual-control",
+      "role": "control",
+      "category": "instantiation-generic-domain",
+      "historical_sha": "58cf9d96cb0d094410acf58eef237a5cb2536026",
+      "source": "58cf/outer_and_method_same_actual.vorton",
+      "finding": "extra verification F1 same-actual control",
+      "historical": { "status": "accept" },
+      "candidate": { "status": "accept" }
+    }
+  ]
+}

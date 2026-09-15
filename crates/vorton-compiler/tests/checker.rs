@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use proptest::prelude::*;
+use proptest::test_runner::{Config as ProptestConfig, RngSeed};
 use vorton_compiler::{
     CheckDiagnostic, CheckDiagnosticKind, CheckOrigin, FileModulePath, LibraryId, LibrarySources,
     ProjectDiagnosticKind, ProjectSources, check_project, decode_contract,
@@ -52,6 +54,55 @@ fn check(root: &str) -> Result<vorton_compiler::CheckedProject, CheckDiagnostic>
 
 fn error(root: &str) -> CheckDiagnostic {
     check(root).expect_err("the Checker should reject this source")
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 128,
+        failure_persistence: None,
+        max_shrink_iters: 1_024,
+        rng_seed: RngSeed::Fixed(0x0056_4f52_544f_4e74),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn semantic_guard_real_entry_preserves_declared_formal_domains(
+        parameter_count in 2_usize..7,
+        raw_left in 0_usize..32,
+        raw_right in 0_usize..32,
+    ) {
+        let left = raw_left % parameter_count;
+        let mut right = raw_right % parameter_count;
+        if left == right {
+            right = (right + 1) % parameter_count;
+        }
+        let formals = (0..parameter_count)
+            .map(|index| format!("T{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "fn invalid<{formals}>(value: T{left}) -> T{right} {{ value }}"
+        );
+        let diagnostic = check(&source)
+            .expect_err("a body cannot merge two independently declared formals");
+        prop_assert_eq!(diagnostic.kind, CheckDiagnosticKind::ReturnMismatch);
+    }
+}
+
+#[test]
+fn semantic_guard_real_entry_keeps_legal_call_and_recursive_alpha_mappings() {
+    check(
+        "fn pair<T, U>(left: T, right: U) -> (T, U) { (left, right) } \
+         fn same_actual() -> (Int, Int) { pair(1, 2) } \
+         fn left<T>(value: T, stop: Bool) -> T { \
+             if stop { value } else { right(value, true) } \
+         } \
+         fn right<U>(value: U, stop: Bool) -> U { \
+             if stop { value } else { left(value, true) } \
+         } \
+         fn distinct_actuals() -> (Int, Bool) { (left(1, false), right(true, false)) }",
+    )
+    .expect("call actuals may coincide and recursive alpha-correspondence stays legal");
 }
 
 fn contract(source: &str) -> vorton_compiler::ContractDocument {

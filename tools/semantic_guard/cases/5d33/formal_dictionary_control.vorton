@@ -1,0 +1,2 @@
+trait Read { fn read(self: &Self) -> Int; }
+fn f<T: Read>(x: &T) -> Int { x.read() }

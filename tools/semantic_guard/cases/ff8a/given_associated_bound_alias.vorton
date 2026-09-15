@@ -1,0 +1,2 @@
+trait Mark{fn mark(self:&Self)->Int with {};} trait Has{type Item:Mark;}
+fn f<T:Has<Item=U>,U>(x:&U)->Int with {} {x.mark()}
