@@ -46,7 +46,7 @@ Vorton 0.1 不支持 return-position `impl Trait`、opaque type 或由推断产�
 
 ### 0.1 方法签名边界
 
-Vorton 0.1 的 source trait member 只有方法签名，不允许函数体。Trait declaration 中出现 `{ ... }` 方法体必须稳定报错，并建议把实现写入每个 `impl Trait for Type`；每个 impl 必须显式提供 trait 的全部方法。该限制不删除 associated type default，也不影响编译器内建或 auto-derived 的 exact impl body。
+Vorton 0.1 的 source trait member 只有方法签名，不允许函数体。Trait declaration 中出现 `{ ... }` 方法体必须稳定报错，并建议把实现写入每个 `impl Trait for Type`；每个 impl 必须显式提供 trait 的全部方法。该限制不删除 associated type default，也不影响编译器内建或 显式派生的 exact impl body。
 
 ## 官方 core 协议轮廓
 
@@ -365,28 +365,11 @@ fn show_twice<T: Show>(value: T) -> Str {
 
 Vorton 0.1 不提供 `delegate` declaration。`delegate field: Trait` 必须产生语法错误；组合转发通过普通 `impl Trait for Type` 和显式 method call 表达。编译器不得生成 delegate owner、wrapper body 或专属 Core/ABI carrier。
 
-## Compiler-defined 结构实现
+## 显式结构派生
 
-编译器自动为所有 struct/enum 类型派生满足字段约束的以下 trait：
+结构派生需要显式请求，不再为每个 struct/enum 默认生成 trait evidence。生成的声明归调用方库/module，和手写 impl 一样经过名称、visibility、类型、effect 与 coherence 检查，并保留生成来源。当前 Checker 不实现生成器或 derive directive；普通 source impl 与已定义的 primitive/callable evidence 已进入联合检查。
 
-- **PartialEq**：当所有字段都实现 `PartialEq` 时自动派生。Struct 按字段声明顺序比较并在首个不相等字段短路；enum 先判断 variant，相异 variant 不相等，相同 variant 再按字段声明顺序比较。
-- **Eq**：当所有字段都实现 `Eq` 时自动派生，并与同一结构化 `PartialEq` 实现一致。`Eq` 没有新增方法。
-- **PartialOrd**：当所有字段都实现 `PartialOrd` 时自动派生。Struct 按字段声明顺序做词典序比较；enum 先按 variant 声明顺序比较，只有相同 variant 才比较字段。首个非 `Ordering::Equal` 或 `Option::None` 的字段结果就是整体结果，因此不会跳过含 NaN 字段产生的不可比结果。
-- **Ord**：当所有字段都实现 `Ord` 时自动派生，并与同一结构化 equality/partial ordering 一致；字段和 variant 顺序与 `PartialOrd` 相同。
-- **Hash**: 仅当该 struct/enum 同时走编译器的结构化 auto-Eq 路径，且所有字段都可获得 Hash evidence 时自动派生。Struct 按字段声明顺序组合 hash；enum 先组合稳定的 variant discriminator，再组合字段。已有 manual Eq 不会隐式获得结构化 Hash，避免 `Eq` / `Hash` coherence 失配。
-- **Clone**: 当所有字段都实现 Clone 时自动派生。
-- **Debug**: 当所有字段都实现 Debug 时自动派生。
-
-```vorton
-struct Reading { major: Int, sample: Float }
-enum Phase { Start(Float), End(Float) }
-```
-
-`Reading` 先比较 `major`，只有相等时才比较 `sample`；若后者含 NaN，partial ordering 立即得到 `Option::None`。`Phase` 的 `Start` 先于 `End`，相同 variant 才比较其中的 `Float`。两种类型都可获得结构化 `PartialEq`/`PartialOrd`，不能获得结构化 `Eq`/`Ord`。
-
-每种能力分别要求全部字段具有对应 trait；存在 `PartialEq` 或 `PartialOrd` 不会自动产生 `Eq` 或 `Ord`。派生按依赖 fixpoint 扩展到嵌套与递归用户类型。`Hash` 的基础 evidence 包括 `Int`、`Str` 与 `Bool`，不包括 `Float` 或 `Unit`；缺少所需 evidence 时保持 fail closed，并在 trait bound 被要求时产生类型错误。
-
-这些实现是 compiler-defined 的封闭语义，不对应 source attribute，也不是开放 derive 系统。Canonical 0.1 没有 `@` token、attribute grammar 或 source-level derive directive；其它 trait 需要普通显式 impl。
+每种派生能力仍要求相应字段 evidence，并遵守该 trait 的关系律。结构 equality/ordering 按字段声明顺序，enum 先区分 variant；Hash/Clone/Debug 使用各自的显式生成 body 和普通 core helper。存在 PartialEq/PartialOrd 不隐含 Eq/Ord，也不能仅凭成员全为 Copy 给普通 nominal 授予 Copy。显式 Clone 按类型定义复制行为，合法用户 Drop 不一概禁止 Clone；Copy 的资源资格是另一项检查。
 
 ## 限制
 

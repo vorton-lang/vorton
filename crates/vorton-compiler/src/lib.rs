@@ -69,19 +69,19 @@ pub fn prepare_project(project: ResolvedProject) -> Result<PreparedProject, Proj
 ///
 /// `owners` maps each document owner label to the real [`LibraryId`] in this
 /// project. An empty document list is valid, and unused owner mappings have no
-/// effect. The current narrow Checker accepts pure-value functions over `Int`,
-/// `Float`, `Bool`, `Unit`, `Never`, tuples, struct/enum applications, and
-/// non-generic transparent aliases. Nominals retain exact owners and actuals;
-/// construction, Copy field reads, borrowed fields, whole-value transfers, and
-/// cleanup proven empty from actual members are supported. It supports
-/// function-level HM inference and type formals, recursive binding groups,
-/// per-call instantiation, matching generic contract formals, and whole-binding
-/// Borrow/Move checks for supported generic and nominal values. Any reachable
-/// source or selected clause outside that subset returns
-/// [`CheckDiagnosticKind::Unsupported`] rather than being treated as checked.
-/// Success returns one owned opaque result containing closed schemes, typed
-/// bodies, call mappings, nominal definitions, construction and field identities,
-/// and the exact facts established during this call.
+/// effect. The Checker jointly closes ordinary functions, source traits and
+/// impls, associated types, methods, shared `Fn` named-function callbacks, and
+/// type/effect constraints. Supported values include scalar and formal types,
+/// tuples, struct/enum applications, non-generic transparent aliases, and
+/// associated projections. Every body produces one draft; recursive bindings,
+/// call actuals, evidence, effect rows, and Borrow/Move conventions close before
+/// publication. Normal and possible failure exits retain whole-owner and
+/// temporary cleanup facts, including formal full-destruction relationships.
+/// Handler/catch, captured or scoped callbacks, general function-value storage
+/// or return, Mut/partial-move operations, user Drop, Rc, and other unsupported
+/// source or contract forms return [`CheckDiagnosticKind::Unsupported`].
+/// Success returns an owned opaque result containing the facts established by
+/// this check; it does not expose a query API or a complete TypedHIR.
 pub fn check_project(
     sources: &ProjectSources,
     owners: &std::collections::BTreeMap<String, LibraryId>,
