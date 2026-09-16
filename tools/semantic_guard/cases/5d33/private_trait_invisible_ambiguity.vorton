@@ -1,0 +1,9 @@
+pub struct N {}
+mod hidden {
+    use super::N;
+    trait Secret { fn read(self: &Self) -> Int; }
+    impl Secret for N { fn read(self: &Self) -> Int { 0 } }
+}
+trait Read { fn read(self: &Self) -> Int; }
+impl Read for N { fn read(self: &Self) -> Int { 1 } }
+fn use_it() -> Int { N {}.read() }

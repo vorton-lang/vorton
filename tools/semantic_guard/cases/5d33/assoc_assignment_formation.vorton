@@ -1,0 +1,1 @@
+trait Mark {} struct Limited<T: Mark> { value: T } trait Out { type Item; } struct N {} impl Out for N { type Item = Limited<Int>; }

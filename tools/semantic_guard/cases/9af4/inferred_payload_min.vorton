@@ -1,0 +1,3 @@
+fn actual() -> Unit with {fail<Int>} {}
+fn ignore<T, F: Fn + fn() -> Unit with {fail<T>, E}, effect E>(callback: call F) -> Unit with {E} {}
+fn pure() -> Unit with {} { ignore(actual); }

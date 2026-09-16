@@ -1,0 +1,38 @@
+{
+  "format": "vorton.contract",
+  "format_version": 1,
+  "semantics_version": "0.1",
+  "owner": "app",
+  "records": [
+    {
+      "target": {
+        "tag": "declaration",
+        "declaration": {
+          "library": { "tag": "self" },
+          "path": ["f"],
+          "kind": "function"
+        }
+      },
+      "set": {
+        "effect_upper": [
+          { "tag": "fail", "payload": { "tag": "primitive", "name": "Int" } }
+        ]
+      }
+    },
+    {
+      "target": {
+        "tag": "declaration",
+        "declaration": {
+          "library": { "tag": "self" },
+          "path": ["f"],
+          "kind": "function"
+        }
+      },
+      "set": {
+        "effect_upper": [
+          { "tag": "fail", "payload": { "tag": "primitive", "name": "Int" } }
+        ]
+      }
+    }
+  ]
+}

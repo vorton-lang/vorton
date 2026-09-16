@@ -1,0 +1,6 @@
+pub trait Bound<T> {}
+pub struct Visible {}
+pub trait Host { type Item: Bound<Visible>; }
+pub trait Item { type Value; }
+pub struct A {}
+impl Item for A { type Value = Visible; }

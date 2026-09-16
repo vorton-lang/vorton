@@ -1,0 +1,5 @@
+trait Convert<T> { fn convert<U>(self: &Self, value: move U) -> T; }
+struct Box<T> { value: T }
+impl<T> Convert<T> for Box<T> { fn convert<U>(self: &Self, value: move U) -> T { value } }
+fn helper<R: Convert<Int>>(receiver: &R) -> Int { receiver.convert(true) }
+fn run() -> Int { helper(Box { value: 1 }) }

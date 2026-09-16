@@ -1,0 +1,6 @@
+trait Read { fn read(self: &Self) -> Int; }
+trait Use<T> { fn use_it(self: &Self, x: &(T, Int)) -> Int; }
+struct Wrap<T> { x: T }
+impl<T> Use<T> for Wrap<T> where (T, Int): Read {
+    fn use_it(self: &Self, x: &(T, Int)) -> Int { x.read() }
+}

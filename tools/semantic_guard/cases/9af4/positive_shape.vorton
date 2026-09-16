@@ -1,0 +1,2 @@
+pub struct Visible {}
+pub fn consume<F: Fn + fn(Visible) -> Unit with {}>(callback: call F) -> Unit with {} {}

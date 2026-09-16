@@ -1,0 +1,1 @@
+effect Signal { fn ping() -> Unit; } trait Tick { fn tick(self: &Self) -> Unit; } impl Tick for Int { fn tick(self: &Self) -> Unit with {Signal} { Signal.ping() } } fn main() -> Unit with {Tick::tick<Int>} { 1.tick() }

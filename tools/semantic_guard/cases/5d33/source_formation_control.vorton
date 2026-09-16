@@ -1,0 +1,7 @@
+trait Mark {}
+impl Mark for Int {}
+struct Limited<T: Mark> { value: T }
+effect Signal<T> { fn ping(value: &T) -> Unit; }
+fn callback<F: Fn + fn(Limited<Int>) -> Unit with {}>(value: call F) {}
+fn failure() -> Unit with {fail<Limited<Int>>} {}
+fn handled() -> Unit with {Signal<Limited<Int>>} {}

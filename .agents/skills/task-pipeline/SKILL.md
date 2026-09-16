@@ -98,6 +98,15 @@ Verification 必须是 fresh、read-only task，在 PR head SHA 对应的 clean 
 - SHA 错误、candidate 不可重现、缺 canonical gate 或证据身份不完整都不能得到 `PASS`。
 - Local Execution 与 Verification 的 whitespace gate 必须展开并记录 PR base、merge-base 和 exact candidate SHA，运行 `git diff --check <PR base SHA>...<exact candidate SHA>`。Governance CI 的 PR gate 使用 `pull_request.base.sha...pull_request.head.sha`，不能把 synthetic merge checkout 或 `GITHUB_SHA` 当作 PR-head candidate；main push gate 使用 `before..after`。为取得所需 commit objects 调整 checkout fetch 不得改变其它四个 compiler gate 的既有命令、职责或运行目标。端点、object 或有效比较范围不可得时必须失败，不得退回裸 `git diff --check`、`HEAD~1` 或空 diff。
 
+## 语义护栏
+
+- 每个工作单元的 Execution 与 fresh Verification 都必须在各自的 exact candidate 上运行 `python tools/semantic_guard/self_test.py`，记录命令、环境、candidate SHA 和结果。CI 的 `pull_request` job 必须显式 checkout `github.event.pull_request.head.sha` 并通过 `--expected-candidate` 核对实际 HEAD；不得把默认 merge ref、synthetic merge SHA 或 `GITHUB_SHA` 记为 PR-head 语义护栏证据。证明目标缺失、未完成、工具错误、property 失败或破坏对照未被拦截均为非通过；不能用静态检查或 validation tool 自检替代。
+- 合同涉及受保护的 #65 Trait、Effect、callback、cleanup、contract 或联合闭合支持面时，还必须从独立审定、clean 且固定 SHA 的 guard baseline checkout 运行 `python tools/semantic_guard/candidate.py --repository <candidate repository> --candidate <exact candidate SHA>`。裁决入口与 case manifest 取自 guard baseline，不取自被测 candidate；同时记录 baseline SHA 与 candidate SHA。Unsupported、前端／项目错误、产品崩溃、基础设施错误、缺项或未完成均为非通过，不能由 candidate 声明不适用。
+- 当前 main 尚未实现的 #65 场景只在普通护栏自验中明确为不适用，不计入语义通过。`candidate.py` 是声称支持该范围的实现候选验收入口，没有不适用路径。
+- 修改护栏 case、裁决入口、生产形式化核心或其接线时，Execution 与 Verification 还必须运行 `python tools/semantic_guard/history.py`，确认全部固定历史 exact commits 成功构建并重现其指定误判，合法对照仍得到指定结果。case 期望只来自采用的合同、规范和原始证据，不能从被测实现的输出反推；普通无关改动不重复构建历史 compiler。
+- 生产泛型核心的 Verus 证明和真实入口 Proptest 属于必执行自验。限定 `u8 <= 2`、unwind `4` 的 Kani 目标只在 Linux／WSL 上作为显式补充，由 `python tools/validation/run.py kani --install --file tools/semantic_guard/formal_merge_kani.rs --harness semantic_guard_kani_merge_small_domain` 执行；不得扩大输入或预算、关闭默认 safety checks，或把 Kani 基础设施失败说成产品反例。
+- 语义护栏不改变五项 canonical gate 的名称、命令或职责，也不改变失败路由、Verification 机会、merge 审核或紧急流程更新通道。所有结果仍按本 skill 绑定 exact SHA 并进入对应阶段报告。
+
 ## Debt Gate
 
 对净新增代码、测试、文档、依赖、配置和抽象逐项说明当前 consumer、承担的责任及更小替代为何不足。存在具体删除或合并方案，且实验能判断它是否仍满足同一合同时，Verifier 必须使用现有设施在可恢复的仓库外隔离副本实际验证，并记录命令、预期与实际；有价值的负向探针仍按 `EXPECTED_REJECT` 记录。已有明确结构或合同依据的必要内容可直接引用该依据，不要求重复制造显然会失败的删除实验，也不按删除次数、文件数或固定配额计完成。结构性、长期或影响验证的债务为 `BLOCK`；局部、可逆且不削弱 contract 的品味问题只记录，不阻塞。减少实验不能免除实际发现的 correctness 或 debt 问题。Finding 必须给出 contract/invariant、触发条件、期望与实际结果。

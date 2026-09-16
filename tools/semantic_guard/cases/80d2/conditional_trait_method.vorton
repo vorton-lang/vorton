@@ -1,0 +1,1 @@
+trait Mark {} trait Left { fn read(self: &Self) -> Int with {}; } trait Right { fn read(self: &Self) -> Int with {}; } struct Box<T> { value: T } impl<T: Mark> Left for Box<T> { fn read(self: &Self) -> Int { 1 } } impl Right for Box<Int> { fn read(self: &Self) -> Int { 2 } } fn use_it() -> Int with {} { Box { value: 1 }.read() }

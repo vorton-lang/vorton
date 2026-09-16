@@ -14,6 +14,8 @@ use crate::project::{
     ResolvedVariantFields, SourceRef, SupertraitTargetKind,
 };
 
+mod formal_merge;
+
 /// An owned resolved project whose declaration graph invariants have been checked.
 ///
 /// This type does not represent a fully checked program, effective signatures,
@@ -549,6 +551,9 @@ fn check_prepared_project(
     let project = &prepared.0;
     let mut inference = TypeInference::default();
     let mut normalizer = SourceTypeNormalizer::new(project);
+    for definition in normalizer.nominals.values() {
+        inference.register_independent_formals(&definition.formals);
+    }
     let public_exports = actual_public_exports(project);
     let (function_order, mut headers) =
         collect_supported_headers(project, &mut normalizer, &mut inference, &public_exports)?;
@@ -998,6 +1003,13 @@ fn function_generalization(
             CheckedType::Infer(variable),
         ));
     }
+    inference.register_independent_formals(
+        &generalized
+            .bindings
+            .iter()
+            .map(|(formal, _)| formal.clone())
+            .collect::<Vec<_>>(),
+    );
     let foreign_roots = referenced_formals
         .into_iter()
         .map(|formal| inference.formal_root(&formal))
@@ -1013,6 +1025,13 @@ fn function_generalization(
             ordinal,
             name: format!("T{ordinal}"),
         };
+        let mut local_domain = generalized
+            .bindings
+            .iter()
+            .map(|(formal, _)| formal.clone())
+            .collect::<Vec<_>>();
+        local_domain.push(local.clone());
+        inference.register_independent_formals(&local_domain);
         inference
             .unify_formals(foreign, local.clone())
             .expect("a foreign signature formal has no binder owned by this function");
@@ -1585,10 +1604,77 @@ struct TypeFormal {
 }
 
 #[derive(Default)]
+struct FormalRelations {
+    indexes: BTreeMap<TypeFormal, usize>,
+    formals: Vec<TypeFormal>,
+    classes: Vec<usize>,
+    independent: Vec<(usize, usize)>,
+}
+
+impl FormalRelations {
+    fn register(&mut self, formal: &TypeFormal) -> usize {
+        if let Some(index) = self.indexes.get(formal) {
+            return *index;
+        }
+        let index = self.formals.len();
+        self.indexes.insert(formal.clone(), index);
+        self.formals.push(formal.clone());
+        self.classes.push(index);
+        index
+    }
+
+    fn register_independent_formals(&mut self, formals: &[TypeFormal]) {
+        let indexes = formals
+            .iter()
+            .map(|formal| self.register(formal))
+            .collect::<Vec<_>>();
+        for (offset, left) in indexes.iter().enumerate() {
+            for right in &indexes[offset + 1..] {
+                let pair = if left <= right {
+                    (*left, *right)
+                } else {
+                    (*right, *left)
+                };
+                assert_ne!(
+                    self.classes[pair.0], self.classes[pair.1],
+                    "independent formals must be registered before body unification"
+                );
+                if !self.independent.contains(&pair) {
+                    self.independent.push(pair);
+                }
+            }
+        }
+    }
+
+    fn root(&self, formal: &TypeFormal) -> TypeFormal {
+        let Some(index) = self.indexes.get(formal) else {
+            return formal.clone();
+        };
+        self.formals[self.classes[*index]].clone()
+    }
+
+    fn equivalent(&self, left: &TypeFormal, right: &TypeFormal) -> bool {
+        if left == right {
+            return true;
+        }
+        let (Some(left), Some(right)) = (self.indexes.get(left), self.indexes.get(right)) else {
+            return false;
+        };
+        self.classes[*left] == self.classes[*right]
+    }
+
+    fn merge(&mut self, left: &TypeFormal, right: &TypeFormal) -> bool {
+        let left = self.register(left);
+        let right = self.register(right);
+        formal_merge::merge_classes(&mut self.classes, &self.independent, left, right)
+    }
+}
+
+#[derive(Default)]
 struct TypeInference {
     next_variable: u32,
     substitutions: BTreeMap<TypeVariable, CheckedType>,
-    formal_parents: BTreeMap<TypeFormal, TypeFormal>,
+    formal_relations: FormalRelations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1634,24 +1720,16 @@ impl TypeInference {
         }
     }
 
-    fn register_formal(&mut self, formal: &TypeFormal) {
-        self.formal_parents
-            .entry(formal.clone())
-            .or_insert_with(|| formal.clone());
+    fn register_independent_formals(&mut self, formals: &[TypeFormal]) {
+        self.formal_relations.register_independent_formals(formals);
     }
 
     fn formal_root(&self, formal: &TypeFormal) -> TypeFormal {
-        let mut current = formal.clone();
-        while let Some(parent) = self.formal_parents.get(&current)
-            && parent != &current
-        {
-            current = parent.clone();
-        }
-        current
+        self.formal_relations.root(formal)
     }
 
     fn formals_equivalent(&self, left: &TypeFormal, right: &TypeFormal) -> bool {
-        left == right || self.formal_root(left) == self.formal_root(right)
+        self.formal_relations.equivalent(left, right)
     }
 
     fn unify_formals(
@@ -1659,38 +1737,13 @@ impl TypeInference {
         left: TypeFormal,
         right: TypeFormal,
     ) -> Result<(), UnificationFailure> {
-        self.register_formal(&left);
-        self.register_formal(&right);
-        let left_root = self.formal_root(&left);
-        let right_root = self.formal_root(&right);
-        if left_root == right_root {
+        if self.formal_relations.merge(&left, &right) {
             return Ok(());
         }
-        let known = self.formal_parents.keys().cloned().collect::<Vec<_>>();
-        let left_members = known
-            .iter()
-            .filter(|formal| self.formal_root(formal) == left_root)
-            .collect::<Vec<_>>();
-        let right_members = known
-            .iter()
-            .filter(|formal| self.formal_root(formal) == right_root)
-            .collect::<Vec<_>>();
-        if left_members
-            .iter()
-            .any(|left| right_members.iter().any(|right| left.owner == right.owner))
-        {
-            return Err(UnificationFailure::Mismatch(
-                Box::new(CheckedType::Formal(Box::new(left))),
-                Box::new(CheckedType::Formal(Box::new(right))),
-            ));
-        }
-        let (root, child) = if left_root <= right_root {
-            (left_root, right_root)
-        } else {
-            (right_root, left_root)
-        };
-        self.formal_parents.insert(child, root);
-        Ok(())
+        Err(UnificationFailure::Mismatch(
+            Box::new(CheckedType::Formal(Box::new(left))),
+            Box::new(CheckedType::Formal(Box::new(right))),
+        ))
     }
 
     fn unify(&mut self, left: &CheckedType, right: &CheckedType) -> Result<(), UnificationFailure> {
@@ -2699,6 +2752,7 @@ fn collect_function_header(
             name: parameter.binding.identity.name.clone(),
         })
         .collect::<Vec<_>>();
+    inference.register_independent_formals(&declared_formals);
     let formal_by_identity = function
         .type_parameters
         .iter()

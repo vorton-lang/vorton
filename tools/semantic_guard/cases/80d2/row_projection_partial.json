@@ -1,0 +1,62 @@
+{
+  "format": "vorton.contract",
+  "format_version": 1,
+  "semantics_version": "0.1",
+  "owner": "app",
+  "records": [
+    {
+      "target": {
+        "tag": "declaration",
+        "declaration": {
+          "library": { "tag": "self" },
+          "path": ["f"],
+          "kind": "function"
+        }
+      },
+      "set": {
+        "effect_upper": [
+          {
+            "tag": "fail",
+            "payload": {
+              "tag": "associated",
+              "base": {
+                "tag": "nominal",
+                "declaration": {
+                  "library": { "tag": "self" },
+                  "path": ["A"],
+                  "kind": "struct"
+                },
+                "arguments": []
+              },
+              "trait": {
+                "trait": {
+                  "library": { "tag": "self" },
+                  "path": ["Has"],
+                  "kind": "trait"
+                },
+                "arguments": [],
+                "associated_bindings": []
+              },
+              "name": "Item"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "target": {
+        "tag": "declaration",
+        "declaration": {
+          "library": { "tag": "self" },
+          "path": ["f"],
+          "kind": "function"
+        }
+      },
+      "set": {
+        "effect_upper": [
+          { "tag": "fail", "payload": { "tag": "primitive", "name": "Int" } }
+        ]
+      }
+    }
+  ]
+}

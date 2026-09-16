@@ -1,0 +1,1 @@
+struct Hidden {} pub effect Signal { fn receive() -> Hidden; }
