@@ -1,12 +1,12 @@
 # 词法结构
 
-本页是 canonical 0.1 从字符到 token 的唯一 authority。语法结构、优先级和 AST 分类由[语法](syntax.md)定义；Lexer 不读取缩进、换行位置或标识符大小写来猜测语法角色。
+本页是从字符到 token 的唯一 authority。语法结构、优先级和 AST 分类由[语法](syntax.md)定义。Lexer 记录每个 token 之前是否有换行，供语法判断语句结束；它不读取缩进或标识符大小写来猜测语法角色。
 
 ## 扫描规则
 
 Lexer 从左到右扫描，并在当前位置选择可成立的最长 token。多字符运算符优先于其前缀；关键字只在完整标识符拼写相等时成立，例如 `move_value` 是一个 `Ident`，不是 `'move'` 后跟另一个 token。空白与注释被丢弃，其他字符必须形成下列 token，否则产生词法错误。
 
-除字符串、原始字符串和行注释内容外，canonical 0.1 源码只接受下文定义的 ASCII 标识符字符、数字、运算符和定界符。`@` 与独立 `#` 没有 token；`@derive(Json)`、`#[test]` 等形式因此在词法阶段非法，不能产生 attribute/derive AST 占位。
+除字符串、原始字符串和行注释内容外，源码只接受下文定义的 ASCII 标识符字符、数字、运算符和定界符。`@` 与独立 `#` 没有 token；`@derive(Json)`、`#[test]` 等形式因此在词法阶段非法，不能产生 attribute/derive AST 占位。
 
 ## 空白与注释
 
@@ -18,21 +18,7 @@ NonLineBreakChar ::= ⟨除 '\r'、'\n' 外的任意字符⟩
 EOF         ::= ⟨输入结束位置⟩
 ```
 
-`NonLineBreakChar` 表示除 `\r`、`\n` 外的任意字符。Vorton 只有 `//` 行注释，没有块注释。换行只会终止行注释，或作为原始字符串的内容；在其他位置它和空格、制表符完全等价，缩进没有语法意义。
-
-因此调用不受换行影响：
-
-```vorton
-callable
-(first, second);
-```
-
-这与 `callable(first, second);` 是同一次调用。若要表达两个语句，必须显式终止第一个：
-
-```vorton
-callable;
-(first, second);
-```
+`NonLineBreakChar` 表示除 `\r`、`\n` 外的任意字符。Vorton 只有 `//` 行注释，没有块注释。空白与注释不产生 token，但 Lexer 为每个 token 记录它与前一个 token 之间是否出现过换行，包括行注释结尾的换行。这个标记何时结束语句只由[语法](syntax.md#换行与语句结束)规定；缩进没有语法意义。
 
 ## 标识符与关键字
 
@@ -52,30 +38,28 @@ Lexer 只产生一种 `Ident`。首字母大小写不产生 type、value、varia
 fn       let      mut      move     const    struct   enum     match
 impl     effect   handle   with     if       else     catch
 return   for      in       pub      where    true     false    trait
-try      while    break    continue loop     use      as       extern
+while    break    continue loop     use      as       extern
 mod      super    requires unsafe
 ```
 
-`type`、`self`、`alias`、`generate`、`scoped` 和 `call` 是 contextual spelling：Lexer 仍把它们生成为 `Ident`，Parser 只在相应产生式中按精确拼写解释。后三者在普通 identifier 与 module-path segment 位置仍是普通名称。`test`、`delegate` 和 `sig` 是普通 `Ident`，canonical 0.1 没有 native-test 声明产生式。`where` 用于 trait impl header；`try` 保留但没有 canonical 0.1 语法产生式，因而不能作为标识符或静默占位。
+`type`、`self` 和 `alias` 是 contextual spelling：Lexer 仍把它们生成为 `Ident`，Parser 只在相应产生式中按精确拼写解释。`where` 用于 trait impl header。
 
 ## 运算符与定界符
 
-下列每项各产生一个 token；同一行内按最长匹配扫描，例如 `..=` 不拆成 `..` 与 `=`，`&&` 不拆成两个 `&`。
+下列每项各产生一个 token，按最长匹配扫描，例如 `..=` 不拆成 `..` 与 `=`。
 
 | 类别 | Token spelling |
 |------|----------------|
 | 算术 | `+` `-` `*` `/` `%` |
 | 比较 | `==` `!=` `<` `>` `<=` `>=` |
-| 参数 mode、逻辑与模式 | `&` `&&` `\|\|` `!` `\|` |
+| 逻辑与模式 | `&&` `\|\|` `!` `\|` |
 | 赋值 | `=` `+=` `-=` `*=` `/=` `%=` |
 | 范围 | `..` `..=` |
-| 访问与传播 | `.` `::` `?` |
+| 访问 | `.` `::` |
 | 箭头 | `->` `=>` |
 | 定界符 | `(` `)` `{` `}` `[` `]` `,` `:` `;` |
 
-`?` 只有一个 token。它可由语法用作 postfix expression；类型语法不消费它，因此 `T?` 不是类型拼写。
-
-`&` 也只有一个 token，并只由参数限定位置的固定 mode 消费；它不是普通 `TypeExpr` 的一部分，也不构成 unary borrow expression。
+单独的 `&` 与 `?` 不是 token。
 
 ## 数值字面量
 
@@ -84,7 +68,7 @@ IntLit   ::= Digit+
 FloatLit ::= Digit+ '.' Digit+
 ```
 
-canonical 0.1 只接受十进制数字，不接受 radix 前缀或数值后缀。浮点小数点两侧都必须有数字；`.5` 与 `5.` 非法。`1..2` 扫描为 `IntLit('1')`、`'..'`、`IntLit('2')`，不是浮点字面量。
+只接受十进制数字，不接受 radix 前缀或数值后缀。浮点小数点两侧都必须有数字；`.5` 与 `5.` 非法。`1..2` 扫描为 `IntLit('1')`、`'..'`、`IntLit('2')`，不是浮点字面量。
 
 ## 字符串字面量
 

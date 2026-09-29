@@ -24,7 +24,7 @@ pub struct ProjectSources {
 
 `LibraryId` 由宿主为本次输入指定，只区分库实例。它不是依赖别名、包名、版本、文件路径或 Compiler 按遍历顺序分配的 ordinal；不同输入中相同数值不承诺代表同一版本。一个 key 只有一份 `LibrarySources`，多条边指向同一 key 时消费同一库实例；源码相同但 ID 不同仍是两个库。
 
-`dependencies` 的 key 是所属库选择的直接依赖别名，value 必须是 `libraries` 中的真实库。别名是单个 ASCII `Ident`，不能是保留关键字或 `self`、`super`、`root`；contextual `type`、`alias`、`generate`、`scoped`、`call` 与 `_` 的既有规则保持。别名不是 OS 地址或联网定位信息，之后仍按 root Type namespace 的保留名与冲突规则检查。
+`dependencies` 的 key 是所属库选择的直接依赖别名，value 必须是 `libraries` 中的真实库。别名是单个 ASCII `Ident`，不能是保留关键字或 `self`、`super`、`root`；contextual `type`、`alias` 与 `_` 可以作别名。别名不是 OS 地址或联网定位信息，之后仍按 root Type namespace 的保留名与冲突规则检查。
 
 `core` 是宿主在本次输入中指定的唯一官方 core identity，必须是 `libraries` 的真实 key。宿主读取并传入与 compiler 配套的真实 core root source；Resolver 不提供缺省 ID，不按库名或 dependency alias 猜测，不读取磁盘，也不注入源码副本。允许 `entry == core`，用于单独检查 core。
 
@@ -34,7 +34,7 @@ Resolver 在读取 source 前验证整个显式图：`entry` 必须存在，随�
 
 每个库的 `modules` 以非空 identifier segment 序列为 key。Key 是该库内大小写敏感的抽象地址，不是文件名、扩展名、工作目录或操作系统路径。宿主负责把实际文件投影为这个输入；目录遍历、cwd、symlink、扩展名补全和 OS 错误不属于语言或 Resolver。
 
-File source key 的每个 segment 必须符合 ASCII `Ident` 字符规则，且不能是保留关键字或 `self`、`super`、`root`。Contextual `type`、`alias`、`generate`、`scoped`、`call` 与 `_` 仍可作 segment。平台文件名冲突由宿主 adapter 处理。
+File source key 的每个 segment 必须符合 ASCII `Ident` 字符规则，且不能是保留关键字或 `self`、`super`、`root`。Contextual `type`、`alias` 与 `_` 仍可作 segment。平台文件名冲突由宿主 adapter 处理。
 
 Key 的目录前缀形成没有 source body 的 synthetic module。例如某库仅提供 `parser::lexer` source 时，`parser` 仍是该库内可寻址的 module。一个路径可以同时拥有 body 和 child：`parser` 与 `parser::lexer` 可以都是 file source。一个库内逻辑路径至多拥有一个 body；file body 与 inline body 撞到同一路径、或两个 inline body 重复声明同一路径时拒绝，不支持 partial module 或静默合并。不同库可以使用相同 key，二者没有 identity 或 source 归属关系。
 
@@ -67,19 +67,19 @@ Compiler 先解析所有可达库各自的 root。之后每个库只有通过该
 - contextual `root::` 从当前源码所属库的 root 出发。`root` 仍是普通 `Ident` token，不新增 lexer token。
 
 ```vorton
-use parser::Token;
-use self::helpers::format;
-use super::shared::Config;
-use root::platform::clock;
+use parser::Token
+use self::helpers::format
+use super::shared::Config
+use root::platform::clock
 ```
 
 `LibraryId` 没有 source 拼写，也不能作为 path escape。每个直接依赖别名只在所属库的 root 建立一个默认不公开的 Type-namespace module binding，指向目标库的真实 root；它不把目标声明注入本地，也不向每个 child module 复制 alias table。Root source 可直接使用别名，child module 通过 `root::alias` 到达：
 
 ```vorton
-use model::Config;
+use model::Config
 
 mod feature {
-    use root::model::Config;
+    use root::model::Config
 }
 ```
 
@@ -96,8 +96,8 @@ Lexical/nominal root 与已知 declaration 必须 exact。Enum constructor 等�
 ### 单 entity 与分组导入
 
 ```vorton
-use parser::Token;
-use parser::{Lexer, parse as parse_token};
+use parser::Token
+use parser::{Lexer, parse as parse_token}
 ```
 
 每个 `use` item 必须跨合法 namespace 唯一对应一个 exact entity。若同一 spelling 同时可指 module、function 或其他不同 entity，单项、分组、alias 与 `pub use` 都报歧义；一次 `use` 不会同时向多个 namespace 注入名称。
@@ -105,13 +105,13 @@ use parser::{Lexer, parse as parse_token};
 ### Module-only binding
 
 ```vorton
-use parser;
-use parser as syntax;
+use parser
+use parser as syntax
 
 fn read(token: syntax::Token) {}
 ```
 
-`use parser;` 只把 `parser` module 本身绑定到当前 Type namespace，不导入其全部 symbol。Module 可以用 `as` 改名。0.1 没有 glob import。
+`use parser` 只把 `parser` module 本身绑定到当前 Type namespace，不导入其全部 symbol。Module 可以用 `as` 改名。0.1 没有 glob import。
 
 ### Enum constructor
 
@@ -126,8 +126,8 @@ Option::None
 只有显式导入才建立 bare constructor binding：
 
 ```vorton
-use Shape::{Circle, Rect};
-use Option::{Some, None};
+use Shape::{Circle, Rect}
+use Option::{Some, None}
 ```
 
 导入或 re-export enum 本身不会隐式导入、导出或注入其 constructors。
@@ -156,7 +156,7 @@ pub struct Point { pub x: Int, y: Int }
 合法 `pub use` facade 可以公开 private module 中的 `pub` item，但不能把 private item 变成 public：
 
 ```vorton
-pub use hidden::greet;
+pub use hidden::greet
 
 mod hidden {
     pub fn greet() -> Str { "hello" }
@@ -168,15 +168,15 @@ mod hidden {
 Public constructor export 必须保持 owner closure：当前 facade 的最终 public Type exports 中必须包含 constructor 的 exact owner enum。Owner 与 constructor 可由不同 import、使用不同 alias、按任意声明顺序送达；缺 owner 时在 constructor re-export 处报错，Compiler 不会自动 re-export owner。
 
 ```vorton
-pub use root::leaf::Shape as PublicShape;
-pub use root::leaf::Shape::{Circle as MakeCircle}; // 合法
+pub use root::leaf::Shape as PublicShape
+pub use root::leaf::Shape::{Circle as MakeCircle}   // 合法
 ```
 
 Public struct 的 private field 可以包含 private nominal type；外部 source 可以持有该 public value，但不能访问 private field 或命名 private representation。Public signature、pub field 与 public enum payload 的完整 interface visibility 由 Checker 在类型信息完备后检查。
 
 ## Inline `mod` 与 capability
 
-Inline module 可嵌套，并可在开头的全部 `use` 之后包含普通 declaration 与 `generate` module item：
+Inline module 可嵌套，并可在开头的全部 `use` 之后包含普通 declaration：
 
 ```vorton
 mod math requires {} {
@@ -188,27 +188,25 @@ mod math requires {} {
 }
 ```
 
-File body 的第一项 `requires {effects};` 与 inline `mod name requires {effects}` 都给 module 设置 effect ceiling。省略 ceiling 时普通 system/handled/fail/mut 不增加额外限制，但 `unsafe` 许可从不隐式获得。`requires {}` 只允许 pure computation；单一 `mut` marker 对 caller/capture state 的修改参与 ceiling，局部 `let mut` rebind 仍保持局部。Extern declaration 与 unsafe primitive 还必须满足 [Effect 规范](effects.md)中的专用规则。
+File body 的第一项 `requires {effects}` 与 inline `mod name requires {effects}` 都给 module 设置能力上限：module 内函数实际使用的 effect 必须在上限之内。省略上限时 system、handled 与 `fail` effect 不受额外限制，但 `unsafe` 许可从不隐式获得。`requires {}` 只允许不使用任何 effect 的计算。通过 `mut` 参数修改调用方数据不是 effect，不受上限限制。Extern declaration 与 unsafe primitive 还必须满足 [Effect 规范](effects.md)中的专用规则。
 
 ## Module graph 与 ResolvedAST
 
 Resolver 在一个 owned 结果中保留 entry、指定 core、可达的直接依赖图，以及已核对 core declaration/member 的 exact 角色引用；它统一闭合这些库的 module graph、declaration index 和 import/export fixed point，再执行 body-name 检查和有限 core profile 检查。可以按依赖顺序消费已经闭合的名称 export，但不各跑一次单库 Resolver 后拼接结果。一个库内部的普通 module 可以相互引用，包括父 module 令 child source 可达、child 引用父 declaration；库依赖必须是 DAG 不会禁止这些库内回边。只要每条 import 最终唯一到达真实 source 或 Language intrinsic entity，module 回边本身不是错误。
 
-当前 generation 阶段尚未接入 `resolve_project`。全部可达库的全部可达 source 通过 frontend 且 module graph 已检查后，只要 inventory 含 `GenerateItem`，入口就在 declaration index／import／body-name 之前返回 generation-stage unsupported 诊断，绝不返回伪完整 `ResolvedProject`。依赖库 root 中的请求即使未被 consumer `use` 也会拒绝；未达 file source 与不可达库不扫描。多个请求按 `LibraryId`、logical module path、`generate` keyword 的 UTF-8 span 与稳定错误规则选首个。该临时拒绝只描述当前 stage 边界，generation 实现接入时由对应合同移除。
-
 仅由 import/re-export 相互转发、没有任何真实 declaration origin 的无解环仍报错。该规则不放宽 effect alias 循环、trait 继承循环或 Checker 中其他非法递归。
 
 ResolvedAST 为每个 source module、lexical/nominal declaration、owner、generic/local binding、import 与引用保存含 `LibraryId` 的 exact identity。Re-export 转发原 identity；同一声明经 dependency diamond 多次送达仍幂等，不同库的声明即使文本相同也不合并。Language intrinsic entity 使用独立 Language origin；core enum/trait、member、Self、generic 与引用保持指定 core 的真实 source origin。依赖类型的 member/associated selection 保存 occurrence、已知 exact base/owner、选择 spelling 及其正确库来源，留给 Checker 冻结最终 target。ResolvedAST 之后不得重新 parse 或执行第二套 lexical resolver。
 
-Core profile 检查只覆盖当前 Resolver 可从 ResolvedAST 直接判定的固定声明轮廓：公开 source kind、泛型 arity、variant/member、supertrait、parameter mode、exact type/effect reference 与 associated-type relation。缺失角色不制造 span；不合格声明或 member 指向真实 core source origin。该结果不证明 impl conformance、type/effect 推断、Copy/Drop 资格、dispatch、derive 或执行语义。
+Core profile 检查只覆盖当前 Resolver 可从 ResolvedAST 直接判定的固定声明轮廓：公开 source kind、泛型 arity、variant/member、supertrait、parameter mode、exact type/effect reference 与 associated-type relation。缺失角色不制造 span；不合格声明或 member 指向真实 core source origin。该结果不证明 impl conformance、type/effect 推断、Drop 资格、dispatch 或执行语义。
 
-项目每次只返回一个结构化首错，不暴露 partial ResolvedAST。阶段优先级依次为库图输入、全部可达 source frontend、module graph、当前 generation-stage support、declaration/index、import/export 与 body-name；source 阶段同类错误按 `LibraryId`、logical module path、primary UTF-8 byte span 与稳定错误类别排序。普通 primary/related origin 均为 `LibraryId + SourceRef + UTF-8 byte span`。物理 source key、名称 spelling、map 插入顺序、拓扑遍历、table/subpass 或全局计数器不能改变结果；related origins 同样保持稳定顺序。
+项目每次只返回一个结构化首错，不暴露 partial ResolvedAST。阶段优先级依次为库图输入、全部可达 source frontend、module graph、declaration/index、import/export 与 body-name；source 阶段同类错误按 `LibraryId`、logical module path、primary UTF-8 byte span 与稳定错误类别排序。普通 primary/related origin 均为 `LibraryId + SourceRef + UTF-8 byte span`。物理 source key、名称 spelling、map 插入顺序、拓扑遍历、table/subpass 或全局计数器不能改变结果；related origins 同样保持稳定顺序。
 
 ## 0.1 限制
 
 - 不支持 first-class module；
 - 不支持 glob import；
 - 不支持 scoped visibility；
-- 不提供 `sig` declaration 或 module-signature conformance；
+- 不提供 module signature；
 - Compiler library 不提供 OS loader、package manager 或 source discovery adapter。
 - 依赖别名只表达宿主已经给定的直接边，不提供 package registry、版本选择或联网解析。
