@@ -1,0 +1,6 @@
+fn foo() -> Int with {io} {
+    42
+}
+fn main() {
+    foo()
+}

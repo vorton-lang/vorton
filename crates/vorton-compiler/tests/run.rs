@@ -4,7 +4,9 @@
 //!
 //! - `<name>.expected`: the exact standard output;
 //! - `<name>.panic`: the exact standard error of a program that must panic
-//!   and exit with code 101.
+//!   and exit with code 101;
+//! - `<name>.error`: the category and line of the first diagnostic of a program
+//!   that must not compile, such as `TypeMismatch 3`.
 //!
 //! Programs are built with the runtime's leak check, so a program that ends
 //! normally also fails if it did not release every string exactly once.
@@ -13,7 +15,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use vorton_compiler::{compile_to_c, native, single_file_project};
+use vorton_compiler::diagnostic::FrontendDiagnosticKind;
+use vorton_compiler::{
+    CompileError, ProjectDiagnosticKind, compile_to_c, native, single_file_project,
+};
 
 #[test]
 fn run_programs_match_their_expectations() {
@@ -55,8 +60,25 @@ fn run_one(compiler: &str, work: &Path, program: &Path) -> Result<(), String> {
     let source = fs::read_to_string(program).unwrap();
     let expected_stdout = read_expectation(&program.with_extension("expected"));
     let expected_panic = read_expectation(&program.with_extension("panic"));
+    let expected_error = read_expectation(&program.with_extension("error"));
+    if let Some(expected) = expected_error {
+        return match compile_to_c(&single_file_project(&source)) {
+            Ok(_) => Err(format!("compiled, but expected {}", expected.trim())),
+            Err(error) => {
+                let actual = describe(&source, &error);
+                if actual == expected.trim() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "expected {}, got {actual}: {error:?}",
+                        expected.trim()
+                    ))
+                }
+            }
+        };
+    }
     if expected_stdout.is_none() && expected_panic.is_none() {
-        return Err("no .expected or .panic file".to_owned());
+        return Err("no .expected, .panic or .error file".to_owned());
     }
 
     let c_source = compile_to_c(&single_file_project(&source))
@@ -104,4 +126,36 @@ fn read_expectation(path: &Path) -> Option<String> {
 
 fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n")
+}
+
+/// Names a compile error by its diagnostic category and the line it points at.
+fn describe(source: &str, error: &CompileError) -> String {
+    let (category, origin) = match error {
+        CompileError::Check(diagnostic) => (format!("{:?}", diagnostic.kind), &diagnostic.primary),
+        CompileError::Project(diagnostic) => {
+            let category = match &diagnostic.kind {
+                ProjectDiagnosticKind::Frontend(FrontendDiagnosticKind::Lexical(kind)) => {
+                    format!("Lexical({kind:?})")
+                }
+                ProjectDiagnosticKind::Frontend(FrontendDiagnosticKind::Layout(kind)) => {
+                    format!("Layout({kind:?})")
+                }
+                ProjectDiagnosticKind::Frontend(FrontendDiagnosticKind::UnexpectedToken {
+                    ..
+                }) => "UnexpectedToken".to_owned(),
+                kind => {
+                    let debug = format!("{kind:?}");
+                    debug[..debug.find([' ', '(', '{']).unwrap_or(debug.len())].to_owned()
+                }
+            };
+            (category, &diagnostic.primary)
+        }
+    };
+    match origin {
+        Some(origin) => {
+            let line = source[..origin.span.start].matches('\n').count() + 1;
+            format!("{category} {line}")
+        }
+        None => category,
+    }
 }

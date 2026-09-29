@@ -1,0 +1,7 @@
+fn bad1() -> Str {
+    42
+}
+
+fn bad2() -> Int {
+    "hello"
+}

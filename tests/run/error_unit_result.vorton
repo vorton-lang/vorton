@@ -1,0 +1,9 @@
+fn caller_bad() -> Str {
+    callee_unit()
+}
+
+fn callee_unit() {
+    42
+}
+
+fn main() {}

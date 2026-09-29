@@ -204,25 +204,6 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         signatures.insert(identity.clone(), signature);
     }
 
-    let main = declarations
-        .iter()
-        .position(|(identity, _, _)| {
-            identity.module == ModuleRef::root(project.entry)
-                && identity.kind == EntityKind::Function
-                && identity.name == "main"
-        })
-        .filter(|&index| {
-            let (identity, _, _) = &declarations[index];
-            let signature = &signatures[identity];
-            signature.parameters.is_empty() && signature.result == Type::Unit
-        })
-        .ok_or_else(|| CheckDiagnostic {
-            kind: CheckDiagnosticKind::MissingMain,
-            primary: None,
-            message: "the entry library needs `fn main()` without parameters that returns `Unit`"
-                .to_owned(),
-        })?;
-
     let mut functions = Vec::new();
     for (identity, function, origin) in &declarations {
         let signature = &signatures[identity];
@@ -249,6 +230,25 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             body,
         });
     }
+    let main = declarations
+        .iter()
+        .position(|(identity, _, _)| {
+            identity.module == ModuleRef::root(project.entry)
+                && identity.kind == EntityKind::Function
+                && identity.name == "main"
+        })
+        .filter(|&index| {
+            let (identity, _, _) = &declarations[index];
+            let signature = &signatures[identity];
+            signature.parameters.is_empty() && signature.result == Type::Unit
+        })
+        .ok_or_else(|| CheckDiagnostic {
+            kind: CheckDiagnosticKind::MissingMain,
+            primary: None,
+            message: "the entry library needs `fn main()` without parameters that returns `Unit`"
+                .to_owned(),
+        })?;
+
     Ok(Program { functions, main })
 }
 

@@ -1,0 +1,5 @@
+fn returns_int() -> Int {
+    "not an int"
+}
+
+fn main() {}

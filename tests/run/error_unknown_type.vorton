@@ -1,0 +1,3 @@
+fn main() {
+    let x: FooBar = 42
+}
