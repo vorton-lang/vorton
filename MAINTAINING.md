@@ -32,5 +32,5 @@
 - Codex：纯机械任务用 `gpt-6-sol`，需要思考的任务用 `gpt-6-astra`；effort 用 `medium` 或 `high`。仓库的 `.codex/config.toml` 默认只读，派发时显式放开写权限：
 
   ```text
-  codex exec -m <model> -c model_reasoning_effort="<effort>" -c agents.enabled=false -s workspace-write -C <repo> --ephemeral --ignore-user-config -o <reply-file> -
+  codex exec -m <model> -c model_reasoning_effort="<effort>" -c agents.enabled=false -s workspace-write -C <repo> --ephemeral -o <reply-file> -
   ```
