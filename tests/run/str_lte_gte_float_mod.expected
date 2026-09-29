@@ -1,0 +1,14 @@
+abc_le_abd=true
+abd_le_abc=false
+abc_le_abc=true
+a_le_ab=true
+ab_le_a=false
+abc_ge_abc=true
+abd_ge_abc=true
+abc_ge_abd=false
+ab_ge_a=true
+a_ge_ab=false
+fmod_1.5_0.5=0
+fmod_7.5_2.0=1.5
+fmod_10.0_3.0=1
+fmod_5.5_5.5=0

@@ -4,8 +4,9 @@ use crate::ast::*;
 use crate::project::*;
 
 const LANGUAGE_TYPES: &[&str] = &[
-    "Int", "Float", "Str", "Bool", "Unit", "Never", "List", "Range", "Ptr",
+    "Int", "Float", "Str", "Bool", "Unit", "Never", "List", "Map", "Range", "Ptr",
 ];
+const LANGUAGE_FUNCTIONS: &[&str] = &["print", "assert", "panic"];
 const CORE_ENUMS: &[&str] = &["Option", "Ordering"];
 const CORE_TRAITS: &[&str] = &[
     "PartialEq",
@@ -846,6 +847,9 @@ impl ResolverState {
         }
         for name in LANGUAGE_EFFECTS {
             self.insert_language_entity(Namespace::Effect, EntityKind::LanguageEffect, name, None);
+        }
+        for name in LANGUAGE_FUNCTIONS {
+            self.insert_language_entity(Namespace::Value, EntityKind::LanguageFunction, name, None);
         }
         let fail = language_id(Namespace::Effect, EntityKind::LanguageEffect, "fail", None);
         self.insert_language_member(

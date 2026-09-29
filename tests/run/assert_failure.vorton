@@ -1,0 +1,6 @@
+fn main() {
+    assert(1 < 2, "never shown")
+    print("before")
+    assert(2 < 1, "two is not less than one")
+    print("after")
+}

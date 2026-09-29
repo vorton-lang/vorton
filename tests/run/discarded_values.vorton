@@ -1,0 +1,22 @@
+// Values in statement position are discarded, including branch values.
+fn one() -> Int {
+    1
+}
+
+fn words() -> Str {
+    "words ${one()}"
+}
+
+fn forever() -> Int {
+    loop {
+        return 5
+    }
+}
+
+fn main() {
+    one()
+    words()
+    if one() == 1 { one() } else { 2 }
+    if true { words() } else { "other" }
+    print(forever())
+}

@@ -47,6 +47,10 @@ LibraryId(7) root source
 
 每个库的 root 本身是 exact module entity。Source module、具名 declaration、owner、generic/local binding 与引用的 identity 包含所属 `LibraryId` 和完整逻辑 module path；不同库中 path、source、span 与 leaf spelling 都相同也不能合并。Primitive type 与 effect 等 intrinsic declaration 保持独立 `Language` origin；Option、Ordering 与 core trait 则保留指定 core 的普通 source identity。Target symbol encoding 不是 module identity。
 
+## 程序入口
+
+可执行程序从 entry 库 root 中的 `fn main()` 开始：它没有参数，返回 `Unit`。`main` 正常返回时程序以退出码 0 结束。
+
 ## 可达 source
 
 Compiler 先解析所有可达库各自的 root。之后每个库只有通过该库已解析 source 中实际 `use` / `pub use` 路径可达的 file body 才被解析；同一已解析 source 内的全部 inline module 一并进入该库闭包。依赖边已经使目标库 root 进入闭包，不需要 source `use` 才启动该库。

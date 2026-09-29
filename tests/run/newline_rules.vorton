@@ -1,0 +1,17 @@
+// A line break ends a statement unless the line ends with an operator,
+// or the next line starts with `.`, `else`, `catch` or `with`.
+fn main() {
+    let total = 1 +
+        2
+    print(total)
+    let a = 10
+    -a
+    print(a)
+    print("one"); print("two")
+    if total > 2 {
+        print("big")
+    }
+    else {
+        print("small")
+    }
+}

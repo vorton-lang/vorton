@@ -16,6 +16,12 @@ use crate::project::{
 )]
 pub struct PreparedProject(ResolvedProject);
 
+impl PreparedProject {
+    pub(crate) fn project(&self) -> &ResolvedProject {
+        &self.0
+    }
+}
+
 pub(crate) fn prepare_project(
     project: ResolvedProject,
 ) -> Result<PreparedProject, ProjectDiagnostic> {

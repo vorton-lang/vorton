@@ -1,50 +1,58 @@
 # Vorton
 
-Vorton 是一门面向 native 应用开发的编程语言，也是其编译器与仓库的统一名称。源码保持接近 Python 的低标注体验，编译器负责推断类型、effect、trait 约束与资源行为，并把无法证明的边界显式暴露出来。这里的“接近 Python”只指低标注体验；换行和缩进不参与语法。
+Vorton 是一门给 LLM 写、给人定边界的 native 语言：代码主要由 agent 产出，正确性由编译器保证，人只掌握模块、接口与能力这一层。设计公理见[设计哲学](docs/philosophy.md)。
 
-当前 compiler 以 Rust 为宿主，`crates/vorton-compiler` 是唯一实现；目标与顺序见 [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones)。
+编译器用 Rust 编写，经 C11 生成 native 程序。目标与顺序见 [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones)。
 
-## Vorton 语言一瞥
+## 现在能运行的程序
 
 ```vorton
-enum Shape {
-    Circle(Float),
-    Rect(Float, Float),
-}
-
-fn area(shape: Shape) -> Float {
-    match shape {
-        Shape::Circle(r) => 3.14159 * r * r,
-        Shape::Rect(w, h) => w * h,
+fn label(n: Int) -> Str {
+    if n % 3 == 0 {
+        return "fizz"
     }
+    "n=${n}"
 }
 
-fn sample() -> Float {
-    area(Shape::Rect(3.0, 4.0))
-}
-```
-
-Effect 也参与推断，并可由词法 handler 替换：
-
-```vorton
-effect Greeting {
-    fn word() -> Str;
-}
-
-fn greet() -> Str with {Greeting} {
-    "${Greeting.word()}, Vorton"
-}
-
-fn message() -> Str {
-    handle { greet() } with {
-        Greeting.word() => "hello",
+fn main() {
+    let mut i = 1
+    while i <= 5 {
+        print(label(i))
+        i += 1
     }
 }
 ```
 
-## 当前状态
+```text
+cargo run --bin vorton -- run program.vorton
+```
 
-正在按 [Milestone](https://github.com/vorton-lang/vorton/milestones) 重建：每个 Milestone 结束时，都有一批新程序能从源码编译成 native 并运行。当前 Rust workspace 固定使用 Rust `1.98.1`，`crates/vorton-compiler` 提供三个入口：`parse` 把单个源文件解析成 AST，`resolve_project` 解析纯内存的多库项目并完成名称解析，`prepare_project` 检查 trait 继承与 effect alias 无环。类型检查、代码生成与 runtime 正在按 Milestone 1 重建。
+需要 clang 或 gcc；也可以用 `VORTON_CC` 指定 C 编译器。当前支持的范围见[编译器设计](docs/design.md#当前支持范围)。
+
+## 目标语言一瞥
+
+普通数据是值：赋值和传参是逻辑拷贝，底层引用计数，只在修改共享数据时才复制。要修改调用方的数据，签名和调用处都写 `mut`：
+
+```vorton
+struct Enemy { name: Str, hp: Int }
+
+fn damage_all(enemies: mut List<Enemy>, amount: Int) {
+    for e in mut enemies {
+        e.hp -= amount
+    }
+}
+
+fn main() {
+    let mut enemies = [Enemy { name: "slime", hp: 10 }]
+    let before = enemies
+    damage_all(mut enemies, 3)
+    print("${before[0].hp} -> ${enemies[0].hp}")   // 10 -> 7
+}
+```
+
+完整规则见[语言规范](docs/lang-spec/README.md)。
+
+## 检查
 
 本地检查与 CI 运行同样三项：
 
@@ -54,14 +62,16 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
+`cargo test` 会把 [`tests/run/`](tests/run) 下的每个程序编译成 native 并比对输出，所以同样需要 C 编译器。
+
 ## 参与工作
 
 角色、用户保留事项与维护方式见 [`AGENTS.md`](AGENTS.md) 和 [`MAINTAINING.md`](MAINTAINING.md)。
 
 ## 文档
 
-- [语言规范](docs/lang-spec/README.md)：Vorton 公开语法与语义（正在按新哲学重写）
-- [设计哲学](docs/philosophy.md)：语言公理与仲裁层级
-- [编译器与 runtime 设计](docs/design.md)：目标架构和不变量
+- [设计哲学](docs/philosophy.md)：语言公理与仲裁依据
+- [语言规范](docs/lang-spec/README.md)：公开语法与语义
+- [编译器设计](docs/design.md)：管线、runtime 与测试
 - [Agent 入口](AGENTS.md)：角色、仲裁顺序与用户保留事项
 - [维护手册](MAINTAINING.md)：日常工作、记录、汇报与外包派发

@@ -41,6 +41,16 @@ Vorton 采用局部双向类型推断：具名函数的签名写出，函数体�
 
 这些短名在 Type namespace 中不能被其他声明、import 或类型参数遮蔽；它们不是关键字，不影响 Value 与 Effect namespace 的同名绑定。
 
+以下函数由语言直接提供，在 Value namespace 中可以被遮蔽：
+
+| 函数 | 含义 |
+|---|---|
+| `print(value)` | 把 `value` 的文本形式和一个换行写到标准输出；`value` 实现 `Display`。带 `console` effect |
+| `assert(condition: Bool, message: Str)` | `condition` 为 `false` 时 panic，panic 信息包含 `message` |
+| `panic(message: Str) -> Never` | 以 `message` panic |
+
+两个参数都按普通调用从左到右求值，因此 `assert` 的 `message` 总会被求值。
+
 List 字面量产生 `List<T>`，range 表达式产生 `Range<Int>`。`Ptr<T>` 只在 `unsafe` 中使用；0.1 中 `Ptr` 与非 RC 的 `extern type` 不能出现在泛型聚合的元素类型里（例如 `List<Ptr<T>>`）。
 
 ### Private 字段
@@ -178,7 +188,7 @@ t.hp -= 1                   // 错误：修改结果从未被读取；就地修�
 - **调用**：实参按参数模式检查。只读参数接受任意表达式；`mut` 参数要求 `mut place`；`move` 参数要求 `move name`。
 - **字段与构造**：struct 构造必须给出全部字段，且不能有多余字段；`..base` 用给定的值补齐其余字段。
 - **List 字面量**：所有元素同型。**Range**：`a..b` 与 `a..=b` 的两端都是 `Int`。
-- **代码块、`if`、`match`**：值的规则见[语法](syntax.md#代码块与语句)。`if` 与 `match` 的各分支必须同型；没有 `else` 的 `if` 类型为 `Unit`。`match` 必须穷尽，见[模式匹配](patterns.md)。
+- **代码块、`if`、`match`**：值的规则见[语法](syntax.md#代码块与语句)。控制无法越过的代码块类型为 `Never`：其中某一项是 `return`、`break`、`continue`，或类型为 `Never` 的表达式，或没有 `break` 的 `loop`。`if` 与 `match` 的各分支必须同型；没有 `else` 的 `if` 类型为 `Unit`。`match` 必须穷尽，见[模式匹配](patterns.md)。
 - **字符串插值**：`"${e}"` 中的 `e` 要求实现 `Display`，结果为 `Str`。
 - **`catch`、`handle`**：见 [Effect 系统](effects.md)。
 - **`for x in coll`**：`coll` 实现 `Iterable`；`Range<Int>` 直接编译为计数循环。
@@ -220,6 +230,8 @@ let overflow = -min                   // 运行时 panic
 | `-0.0 % 2.0` | `-0.0` |
 | NaN 参与、被除数无限、或除数为零 | NaN |
 | 被除数有限、除数无限 | 被除数本身 |
+
+`Float` 的文本形式（`Display`）与 ECMAScript 的 `Number::toString` 相同：取能精确读回同一个值的最短十进制数字；科学记数法的十进制指数 e 满足 −7 < e < 21 时用普通写法，否则用指数写法。例如 `100.0` 写作 `100`，`0.001` 写作 `0.001`，`0.0000001` 写作 `1e-7`，`1e21` 写作 `1e+21`；NaN 写作 `NaN`，无穷写作 `Infinity` 与 `-Infinity`，`-0.0` 写作 `0`。`Int` 写作十进制，`Bool` 写作 `true` 与 `false`。
 
 浮点字面量按精确十进制值恰好舍入一次到 binary64；舍入为 Infinity 时报错。优化不得隐式融合为 FMA、保留额外中间精度或把 subnormal 刷成零。不提供浮点异常标志与可切换的舍入模式。
 

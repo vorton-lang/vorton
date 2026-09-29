@@ -488,6 +488,7 @@ pub(crate) enum EntityKind {
     EffectOperation,
     LanguageType,
     LanguageEffect,
+    LanguageFunction,
     InherentImpl,
     TraitImpl,
     Closure,
