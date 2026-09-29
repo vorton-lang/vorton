@@ -42,83 +42,9 @@ fn message() -> Str {
 }
 ```
 
-## 当前构建与 CI
+## 当前状态
 
-根 workspace 固定使用 Rust `1.98.1`。Compiler library 提供五个保持分层的入口：`vorton_compiler::parse(&str)` 返回完整 surface AST 或结构化 frontend diagnostic；`vorton_compiler::resolve_project(&ProjectSources)` 验证并解析显式纯内存库 DAG 及宿主指定的唯一官方 core，返回统一的 owned opaque `ResolvedProject`；`vorton_compiler::prepare_project(ResolvedProject)` 检查 supertrait 目标类别、trait inheritance cycle 与 effect alias cycle，返回 owned opaque `PreparedProject`；`vorton_compiler::decode_contract(&[u8])` 按 [contract format 1](docs/contract-format.md) 读取一份纯内存 JSON 输入，返回 owned opaque `ContractDocument` 或结构化 `ContractDiagnostic`；`vorton_compiler::check_project(&ProjectSources, &BTreeMap<String, LibraryId>, Vec<ContractDocument>)` 将真实项目与选定契约一起闭合为 owned opaque `CheckedProject`。契约读取成功只证明版本、读取 profile 与记录结构成立；owner／引用绑定、受支持 `set` 的一致性和函数体检查只在 `check_project` 中发生。项目阶段失败仍以原有 `ProjectDiagnosticKind` 和真实 origin 包在 `CheckDiagnostic` 中；`parse` 的签名与单 source 行为不依赖项目或契约输入。
-
-```rust
-use std::collections::BTreeMap;
-use vorton_compiler::{
-    LibraryId, LibrarySources, ProjectSources, prepare_project, resolve_project,
-};
-
-let app = LibraryId(0);
-let model = LibraryId(1);
-let core = LibraryId(2);
-let core_source = std::fs::read_to_string("core/root.vorton").expect("bundled core source");
-let sources = ProjectSources {
-    entry: app,
-    core,
-    libraries: BTreeMap::from([
-        (
-            app,
-            LibrarySources {
-                root: "use model::Number; fn run(value: &Number) -> Int { value.value }".to_owned(),
-                modules: BTreeMap::new(),
-                dependencies: BTreeMap::from([
-                    ("model".to_owned(), model),
-                    ("foundation".to_owned(), core),
-                ]),
-            },
-        ),
-        (
-            model,
-            LibrarySources {
-                root: "pub struct Number { pub value: Int }".to_owned(),
-                modules: BTreeMap::new(),
-                dependencies: BTreeMap::from([("runtime".to_owned(), core)]),
-            },
-        ),
-        (
-            core,
-            LibrarySources {
-                root: core_source,
-                modules: BTreeMap::new(),
-                dependencies: BTreeMap::new(),
-            },
-        ),
-    ]),
-};
-let resolved = resolve_project(&sources).expect("project resolves");
-let prepared = prepare_project(resolved).expect("declaration graphs are valid");
-```
-
-契约内容由宿主读取并直接作为字节传入；reader 不读取文件名、cwd、环境或网络：
-
-```rust
-use vorton_compiler::{check_project, decode_contract};
-
-let contract_bytes = br#"{
-  "format": "vorton.contract",
-  "format_version": 1,
-  "semantics_version": "0.1",
-  "owner": "app",
-  "records": []
-}"#;
-let contract = decode_contract(contract_bytes).expect("contract structure is readable");
-let checked = check_project(
-    &sources,
-    &BTreeMap::from([("app".to_owned(), app)]),
-    vec![contract],
-)
-.expect("the selected narrow source and contract subset checks together");
-```
-
-`LibraryId` 只区分本次输入中的库实例；依赖别名由每个 `LibrarySources` 明确给出。宿主读取仓库唯一的 [`core/root.vorton`](core/root.vorton)，把它作为 `core` 对应库的真实 root source 传入；每个可达非 core 库都必须以自己选择的别名直接依赖该 ID。Resolver 不读取磁盘，也不按别名或 ID 数值猜测 core。`PreparedProject` 完整保留名称层结果，并只额外证明 supertrait 指向真实 named trait、trait inheritance graph 与 effect alias declaration graph 无环。
-
-当前 `check_project` 支持普通 module／inline-module 纯函数的受限 HM 推断，包括函数泛型、内部参数与返回类型推断、函数泛化、递归组和逐调用实例化；普通局部 `let` 保持 monotype。类型包括 `Int`、`Float`、`Bool`、`Unit`、`Never`、formal、tuple、struct/enum 应用及受支持的非泛型 alias。名义类型保留真实 owner 与 actual，支持 struct 和三种 enum 构造、Copy 字段读取、字段借用及整值移交；实际成员清理已能证明为空时可正常退出。它核对双边泛型 contract、Borrow/Move mode、空 effect 上界和空 generic requirements；尚需未知泛型清理、部分移动或非空 requirement/effect 等超出支持面的用法返回 `CheckDiagnosticKind::Unsupported`。完整边界见[当前 Checker API 支持说明](docs/lang-spec/type-system.md#当前-checker-api-支持边界)。
-
-`CheckedProject` 保留已闭合的 scheme、typed body、调用 mapping、名义声明与 actual、构造及字段身份，以及真实形成的类型、字面量值、callee、mode 和纯 effect，但不公开内部 ID 或通用查询面，也不代表完整接口、完整 Checker 或最终 TypedHIR。
+正在按 [Milestone](https://github.com/vorton-lang/vorton/milestones) 重建：每个 Milestone 结束时，都有一批新程序能从源码编译成 native 并运行。当前 Rust workspace 固定使用 Rust `1.98.1`，`crates/vorton-compiler` 提供三个入口：`parse` 把单个源文件解析成 AST，`resolve_project` 解析纯内存的多库项目并完成名称解析，`prepare_project` 检查 trait 继承与 effect alias 无环。类型检查、代码生成与 runtime 正在按 Milestone 1 重建。
 
 本地检查与 CI 运行同样三项：
 
@@ -134,8 +60,7 @@ cargo test --workspace --locked
 
 ## 文档
 
-- [语言规范](docs/lang-spec/README.md)：Vorton 当前公开语法与语义
-- [契约输入格式](docs/contract-format.md)：纯内存 contract format 1 与额外 wire profile
+- [语言规范](docs/lang-spec/README.md)：Vorton 公开语法与语义（正在按新哲学重写）
 - [设计哲学](docs/philosophy.md)：语言公理与仲裁层级
 - [编译器与 runtime 设计](docs/design.md)：目标架构和不变量
 - [Agent 入口](AGENTS.md)：角色、仲裁顺序与用户保留事项

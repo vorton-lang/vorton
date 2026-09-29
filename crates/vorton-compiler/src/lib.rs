@@ -1,9 +1,8 @@
-//! Canonical Vorton frontend, contract reader, project resolver, declaration preparation, and Checker.
+//! Canonical Vorton frontend, project resolver, and declaration preparation.
 
-mod checker;
-mod contract;
 mod lexer;
 mod parser;
+mod prepare;
 mod project;
 mod resolver;
 
@@ -11,11 +10,8 @@ pub mod ast;
 pub mod diagnostic;
 
 pub use ast::Program;
-pub use checker::{
-    CheckDiagnostic, CheckDiagnosticKind, CheckOrigin, CheckedProject, PreparedProject,
-};
-pub use contract::{ContractDiagnostic, ContractDiagnosticKind, ContractDocument};
 pub use diagnostic::FrontendDiagnostic;
+pub use prepare::PreparedProject;
 pub use project::{
     CoreRoleDiagnostic, CoreRoleIssue, FileModulePath, FileModulePathError,
     FileModulePathErrorKind, LibraryId, LibrarySources, NameNamespace, OriginRef,
@@ -31,15 +27,6 @@ pub use project::{
 pub fn parse(source: &str) -> Result<Program, FrontendDiagnostic> {
     let tokens = lexer::lex(source)?;
     parser::parse(tokens, source.len())
-}
-
-/// Decodes one in-memory Vorton contract document without binding it to source.
-///
-/// Success guarantees the supported UTF-8 JSON profile, format version, and
-/// record structure only. The returned document is owned and opaque; this
-/// entry point does not resolve contract references or check source semantics.
-pub fn decode_contract(source: &[u8]) -> Result<ContractDocument, ContractDiagnostic> {
-    contract::decode_contract(source)
 }
 
 /// Validates and resolves a platform-independent, in-memory Vorton library DAG
@@ -61,31 +48,5 @@ pub fn resolve_project(sources: &ProjectSources) -> Result<ResolvedProject, Proj
 /// that trait inheritance and effect-alias declaration graphs are acyclic. It
 /// does not check signatures or bodies, expand aliases, or produce typed HIR.
 pub fn prepare_project(project: ResolvedProject) -> Result<PreparedProject, ProjectDiagnostic> {
-    checker::prepare_project(project)
-}
-
-/// Resolves and checks one closed in-memory project together with selected
-/// format-1 contract documents.
-///
-/// `owners` maps each document owner label to the real [`LibraryId`] in this
-/// project. An empty document list is valid, and unused owner mappings have no
-/// effect. The current narrow Checker accepts pure-value functions over `Int`,
-/// `Float`, `Bool`, `Unit`, `Never`, tuples, struct/enum applications, and
-/// non-generic transparent aliases. Nominals retain exact owners and actuals;
-/// construction, Copy field reads, borrowed fields, whole-value transfers, and
-/// cleanup proven empty from actual members are supported. It supports
-/// function-level HM inference and type formals, recursive binding groups,
-/// per-call instantiation, matching generic contract formals, and whole-binding
-/// Borrow/Move checks for supported generic and nominal values. Any reachable
-/// source or selected clause outside that subset returns
-/// [`CheckDiagnosticKind::Unsupported`] rather than being treated as checked.
-/// Success returns one owned opaque result containing closed schemes, typed
-/// bodies, call mappings, nominal definitions, construction and field identities,
-/// and the exact facts established during this call.
-pub fn check_project(
-    sources: &ProjectSources,
-    owners: &std::collections::BTreeMap<String, LibraryId>,
-    documents: Vec<ContractDocument>,
-) -> Result<CheckedProject, CheckDiagnostic> {
-    checker::check_project(sources, owners, documents)
+    prepare::prepare_project(project)
 }
