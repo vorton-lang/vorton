@@ -1,1 +1,0 @@
-pub struct Visible {} pub effect Signal { fn send(value: &Visible) -> Visible; }

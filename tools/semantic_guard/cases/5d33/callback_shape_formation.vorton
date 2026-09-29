@@ -1,1 +1,0 @@
-trait Mark {} struct Limited<T: Mark> { value: T } fn f<F: Fn + fn(Limited<Int>) -> Unit with {}>(callback: call F) {}

@@ -1,24 +1,30 @@
-# Vorton Agent Entry
+# Vorton Agent 入口
 
-## 语言与 authority
+- 对话与解释用中文；术语、代码、命令保留英文。
+- 仓库是 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)。编译器用 Rust 1.98.1 编写，唯一实现是 `crates/vorton-compiler`。Self-host 不在目标内。
+- 仲裁顺序：[`docs/philosophy.md`](docs/philosophy.md) > [`docs/lang-spec/`](docs/lang-spec/README.md) > [`docs/design.md`](docs/design.md) > 代码。后三者正在向 2026-09-29 的新哲学对齐；发现冲突时以哲学为准，并报告冲突。
+- Git 历史只是历史，不是当前规范，也不是验证证据。
 
-- 所有对话回复、解释和讨论使用中文；技术术语、代码和命令可保留英文。
-- 当前仓库是 [`vorton-lang/vorton`](https://github.com/vorton-lang/vorton)。[GitHub Milestones](https://github.com/vorton-lang/vorton/milestones) 是持久目标与目标顺序的唯一真值；阶段采用的 GitHub Issue 原生正文修订是当前范围、设计、验收与依赖的 immutable execution contract；完成历史只查 PR 与 Git。
-- 所有仓库变更、PR verification 与 merge 路由必须完整读取并遵守 [`task-pipeline`](.agents/skills/task-pipeline/SKILL.md)；它是唯一任务 lifecycle authority。
-- 语言公理见 [`docs/philosophy.md`](docs/philosophy.md)，稳定设计见 [`docs/design.md`](docs/design.md)，用户规范见 [`docs/lang-spec/`](docs/lang-spec/)。GitHub Milestone、模板和标签入口见 [`docs/workflow.md`](docs/workflow.md)。
+## 角色
 
-## 当前项目事实
+- **用户**：项目所有者，只决定下面列出的宏观事项。
+- **维护者**：唯一写入者，按 [`MAINTAINING.md`](MAINTAINING.md) 工作。
+- **外包**：由维护者派发的 agent。只做派发内容写明的事；不 commit、不 push、不写 GitHub、不删文件；范围外的问题只报告，不修。
 
-- Vorton compiler 的当前宿主语言是 Rust；工作按 Milestone 顺序先闭合 `source → token → AST → diagnostic`，再推进 checker、IR、ownership、C11 后端与 CLI。
-- 当前 tree 的唯一 compiler implementation authority 是 `crates/vorton-compiler`；library 同时保留单 source `parse` 与纯内存项目 `resolve_project` 入口；根 Rust workspace 固定使用 Rust `1.98.1`，真实 compiler gate 由 Governance CI 执行。
-- 当前 tree 只以其中实际存在的规范、治理入口与实现为 authority；Git 历史中的源码、测试、文档和构建产物不构成当前实现或验证证据。
-- 目标管线是 Lexer → Parser → AST → Resolver/ResolvedAST → Checker（HM + effects）→ HIR → Core/Flow ResourcePlanner → RcIR → C11 → native。具体阶段与 ABI/ownership 不变量只以稳定设计和语言规范为准。
-- Self-host 不属于当前目标；只有语言与外部宿主编译器稳定后，经用户新决定才可加入。
+## 只由用户决定
 
-## 用户保留决定
+- 设计哲学、语言公开语义与保证
+- Milestone 的目标与顺序、0.1 范围、平台支持
+- 新增外部依赖或工具链、删除整个子系统
+- 治理本身：本文件与 `MAINTAINING.md`
+- 推送 `main` 以外的 GitHub 写入（Issue、Milestone、release、仓库设置）、改写历史、不可恢复的删除
 
-以下事项只由用户拍板：语言公开语义与保证、breaking API/ABI、平台支持、新 P0、重大路线与显著投入、Issue 创建、repository transfer/rename、外部写入、release、历史重写和不可恢复删除。
+## 检查
 
-## Security 边界
+提交前以下三项全部通过；CI 运行同样三项。
 
-本仓库是单人项目。没有当前可复现问题或用户明确需求时，不主动建设或规划 GitHub App、token broker、webhook、权限矩阵、CODEOWNERS、安全 ruleset、签名、供应链扫描、sandbox、secret 基础设施或 untrusted-fork 模型。Compiler crash、wrong-code、UB、数据损坏和 ownership/RC 错误按普通 correctness 处理。
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```

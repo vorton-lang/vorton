@@ -1,15 +1,10 @@
 #:schema https://developers.openai.com/codex/config-schema.json
 
-# GPT-5.6 Sol is required for this repository. ChatGPT-authenticated Codex
-# currently caps it at 272k even though the API model supports a 1.05M window.
-model = "gpt-5.6-sol"
-model_reasoning_effort = "max"
-
-sandbox_mode = "danger-full-access"
+# 本仓库只有维护者写入。Codex 默认只读；作为外包被派发时，由派发命令显式放开写权限。
+# 纯机械任务用 gpt-6-sol，需要思考的任务用 gpt-6-astra。
+model = "gpt-6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
 
 [agents]
-enabled = true
-max_concurrent_threads_per_session = 8
-default_subagent_model = "gpt-5.6-sol"
-default_subagent_reasoning_effort = "max"
-interrupt_message = true
+enabled = false

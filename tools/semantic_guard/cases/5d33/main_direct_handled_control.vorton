@@ -1,1 +1,0 @@
-effect Signal { fn ping() -> Unit; } fn main() -> Unit { Signal.ping() }

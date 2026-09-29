@@ -1,1 +1,0 @@
-trait Has { type Item; } struct A {} impl Has for A { type Item = Int; } fn f() -> Unit {}

@@ -1,1 +1,0 @@
-trait Mark {} impl Mark for Int {} struct Limited<T: Mark> { value: T } fn f() -> Unit {}

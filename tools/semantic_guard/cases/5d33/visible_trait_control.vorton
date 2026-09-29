@@ -1,1 +1,0 @@
-pub struct N {} trait Read { fn read(self: &Self) -> Int; } impl Read for N { fn read(self: &Self) -> Int { 1 } } fn use_it() -> Int { N {}.read() }

@@ -1,2 +1,0 @@
-struct Hidden {}
-pub fn consume<F: Fn + fn(Hidden) -> Unit with {}>(callback: call F) -> Unit with {} {}

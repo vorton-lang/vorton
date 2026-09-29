@@ -1,1 +1,0 @@
-mod inside { struct Hidden {} effect Signal { fn receive() -> Hidden; } }

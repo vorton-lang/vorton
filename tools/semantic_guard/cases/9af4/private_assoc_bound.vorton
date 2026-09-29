@@ -1,3 +1,0 @@
-pub trait Bound<T> {}
-struct Hidden {}
-pub trait Host { type Item: Bound<Hidden>; }

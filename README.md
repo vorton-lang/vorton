@@ -2,7 +2,7 @@
 
 Vorton 是一门面向 native 应用开发的编程语言，也是其编译器与仓库的统一名称。源码保持接近 Python 的低标注体验，编译器负责推断类型、effect、trait 约束与资源行为，并把无法证明的边界显式暴露出来。这里的“接近 Python”只指低标注体验；换行和缩进不参与语法。
 
-当前 compiler 以 Rust 为宿主，`crates/vorton-compiler` 是唯一实现 authority；持久目标与顺序见 [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones)，当前可执行工作见 [GitHub Issues](https://github.com/vorton-lang/vorton/issues)，阶段采用的 Issue 原生正文修订是 immutable execution contract。只有 current tree 中实际存在的规范、治理入口和实现属于当前 authority；Git 历史只保存历史。
+当前 compiler 以 Rust 为宿主，`crates/vorton-compiler` 是唯一实现；目标与顺序见 [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones)。
 
 ## Vorton 语言一瞥
 
@@ -118,27 +118,19 @@ let checked = check_project(
 
 当前 `check_project` 支持普通 module／inline-module 纯函数的受限 HM 推断，包括函数泛型、内部参数与返回类型推断、函数泛化、递归组和逐调用实例化；普通局部 `let` 保持 monotype。类型包括 `Int`、`Float`、`Bool`、`Unit`、`Never`、formal、tuple、struct/enum 应用及受支持的非泛型 alias。名义类型保留真实 owner 与 actual，支持 struct 和三种 enum 构造、Copy 字段读取、字段借用及整值移交；实际成员清理已能证明为空时可正常退出。它核对双边泛型 contract、Borrow/Move mode、空 effect 上界和空 generic requirements；尚需未知泛型清理、部分移动或非空 requirement/effect 等超出支持面的用法返回 `CheckDiagnosticKind::Unsupported`。完整边界见[当前 Checker API 支持说明](docs/lang-spec/type-system.md#当前-checker-api-支持边界)。
 
-`CheckedProject` 保留已闭合的 scheme、typed body、调用 mapping、名义声明与 actual、构造及字段身份，以及真实形成的类型、字面量值、callee、mode 和纯 effect，但不公开内部 ID 或通用查询面，也不代表完整接口、完整 Checker 或最终 TypedHIR。运行完整本地 gate；把 whitespace 命令中的两个占位符展开为真实的 PR base 与 exact candidate 40-hex SHA：
+`CheckedProject` 保留已闭合的 scheme、typed body、调用 mapping、名义声明与 actual、构造及字段身份，以及真实形成的类型、字面量值、callee、mode 和纯 effect，但不公开内部 ID 或通用查询面，也不代表完整接口、完整 Checker 或最终 TypedHIR。
+
+本地检查与 CI 运行同样三项：
 
 ```powershell
-python .agents/scripts/validate_current_tree.py
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-git diff --check <PR base SHA>...<exact candidate SHA>
 ```
-
-Governance CI 在 Ubuntu 上执行同一组命令；PR whitespace gate 检查 `pull_request.base.sha...pull_request.head.sha`，main push 检查 `before..after`。结构 gate、格式、lint、直接 compiler library 行为测试与 committed-diff whitespace 检查共同约束当前 candidate。
-
-Verus、Proptest 与显式 Kani 补充入口的固定版本、安装位置、正反自检和适用边界见[外部验证工具链](docs/validation-toolchain.md)。这些入口只验证工具本身可用，不构成 compiler correctness 证明。
 
 ## 参与工作
 
-- [GitHub Milestones](https://github.com/vorton-lang/vorton/milestones) 保存持久目标与目标顺序。
-- [GitHub Issues](https://github.com/vorton-lang/vorton/issues) 保存当前工作；阶段采用的原生正文修订是 immutable execution contract。
-- 所有仓库任务使用 [三阶段 task pipeline](.agents/skills/task-pipeline/SKILL.md)。
-- 模板、标签与 [Ideas Discussion #1](https://github.com/vorton-lang/vorton/discussions/1) 的入口见 [GitHub 工作入口](docs/workflow.md)。
-- 完成历史只查 PR 与 Git；不建立本地 roadmap 或 backlog。
+角色、用户保留事项与维护方式见 [`AGENTS.md`](AGENTS.md) 和 [`MAINTAINING.md`](MAINTAINING.md)。
 
 ## 文档
 
@@ -146,4 +138,5 @@ Verus、Proptest 与显式 Kani 补充入口的固定版本、安装位置、正
 - [契约输入格式](docs/contract-format.md)：纯内存 contract format 1 与额外 wire profile
 - [设计哲学](docs/philosophy.md)：语言公理与仲裁层级
 - [编译器与 runtime 设计](docs/design.md)：目标架构和不变量
-- [Agent 入口](AGENTS.md)：项目事实、authority 与用户保留边界
+- [Agent 入口](AGENTS.md)：角色、仲裁顺序与用户保留事项
+- [维护手册](MAINTAINING.md)：日常工作、记录、汇报与外包派发

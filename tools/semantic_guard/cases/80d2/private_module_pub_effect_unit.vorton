@@ -1,1 +1,0 @@
-mod inside { pub effect Signal { fn receive() -> Unit; } }

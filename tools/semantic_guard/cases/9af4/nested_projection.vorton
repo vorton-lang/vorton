@@ -1,3 +1,0 @@
-trait Inner { type Value; }
-trait Outer { type Item: Inner<Value = Int>; }
-fn value<T: Outer>(x: &T) -> T::Item::Value { 1 }
