@@ -1,4 +1,4 @@
-//! Public typed surface AST for canonical Vorton 0.1.
+//! Public typed surface AST for Vorton 0.1.
 
 /// A UTF-8 byte half-open interval in the source passed to [`crate::parse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -53,7 +53,7 @@ pub struct Program {
     pub span: Span,
     pub requires: Option<FileRequires>,
     pub uses: Vec<UseDeclaration>,
-    pub items: Vec<ModuleItem>,
+    pub items: Vec<Declaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,21 +85,6 @@ pub struct UseItem {
 
 pub type Declaration = Spanned<DeclarationKind>;
 
-/// A root or inline-module item in original source order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModuleItem {
-    Declaration(Box<Declaration>),
-    Generate(GenerateItem),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GenerateItem {
-    pub span: Span,
-    pub keyword_span: Span,
-    pub context: Identifier,
-    pub body: Block,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declared<T> {
     pub visibility: Option<Visibility>,
@@ -124,13 +109,7 @@ pub enum DeclarationKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDeclaration {
-    pub const_span: Option<Span>,
-    pub name: Identifier,
-    pub type_parameters: Vec<TypeParameter>,
-    pub effect_parameters: Vec<EffectParameter>,
-    pub parameters: Vec<NamedParameter>,
-    pub return_type: Option<Box<ReturnAnnotation>>,
-    pub effects: Option<EffectSet>,
+    pub signature: FunctionSignature,
     pub body: Block,
 }
 
@@ -139,53 +118,29 @@ pub struct FunctionSignature {
     pub name: Identifier,
     pub type_parameters: Vec<TypeParameter>,
     pub effect_parameters: Vec<EffectParameter>,
-    pub parameters: Vec<NamedParameter>,
+    pub parameters: Vec<Parameter>,
     pub return_type: Option<TypeExpr>,
     pub effects: Option<EffectSet>,
 }
 
+/// One named parameter.
+///
+/// Named functions and trait methods always carry `ty`, except for a bare
+/// `self` receiver. Closure and handler parameters may omit it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamedParameter {
+pub struct Parameter {
     pub span: Span,
     pub name: Identifier,
-    pub annotation: Option<ParameterType>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParameterType {
-    pub span: Span,
-    pub escape: Option<EscapeQualifier>,
     pub mode: Option<Spanned<ParameterMode>>,
-    pub kind: ParameterTypeKind,
+    pub ty: Option<TypeExpr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParameterMode {
-    /// A fixed `&T` parameter mode.
-    Borrow,
-    /// A fixed `&mut T` parameter mode.
-    MutBorrow,
-    /// A fixed `move T` parameter mode.
+    /// `x: mut T`: in-place access to the caller's place.
+    Mut,
+    /// `x: move T`: takes the caller's resource.
     Move,
-    /// A `call F` source selection resolved to a fixed mode by the checker.
-    Call,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EscapeQualifier {
-    pub span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParameterTypeKind {
-    Type(TypeExpr),
-    Shape(ShapeExpr),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReturnAnnotation {
-    Type(TypeExpr),
-    Shape(ShapeExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,7 +269,7 @@ pub struct EffectDeclaration {
 pub struct EffectOperation {
     pub span: Span,
     pub name: Identifier,
-    pub parameters: Vec<NamedParameter>,
+    pub parameters: Vec<Parameter>,
     pub return_type: TypeExpr,
 }
 
@@ -353,20 +308,14 @@ pub struct ModuleDeclaration {
     pub name: Identifier,
     pub requires: Option<EffectSet>,
     pub uses: Vec<UseDeclaration>,
-    pub items: Vec<ModuleItem>,
+    pub items: Vec<Declaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParameter {
     pub span: Span,
     pub name: Identifier,
-    pub bounds: Vec<GenericBound>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GenericBound {
-    Named(NamedType),
-    Shape(ShapeExpr),
+    pub bounds: Vec<NamedType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -400,30 +349,22 @@ pub enum TypeKind {
     Named(NamedTypeKind),
     Grouped(Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
+    Function(FunctionType),
 }
 
-/// A direct constraint on an actual callable type, not a storage type.
+/// `fn(P, ...) -> R with {...}`; an omitted return type means `Unit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallableShape {
-    pub parameters: Vec<ShapeParameter>,
-    pub return_type: TypeExpr,
+pub struct FunctionType {
+    pub parameters: Vec<FunctionTypeParameter>,
+    pub return_type: Option<Box<TypeExpr>>,
     pub effects: Option<EffectSet>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShapeParameter {
+pub struct FunctionTypeParameter {
     pub span: Span,
-    pub escape: Option<EscapeQualifier>,
     pub mode: Option<Spanned<ParameterMode>>,
     pub ty: TypeExpr,
-}
-
-pub type ShapeExpr = Spanned<ShapeKind>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ShapeKind {
-    Callable(CallableShape),
-    Grouped(Box<ShapeExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,7 +382,6 @@ pub enum EffectKind {
         arguments: Vec<TypeExpr>,
         effect_arguments: Vec<EffectRowArgument>,
     },
-    Mutation,
     Unsafe,
 }
 
@@ -451,6 +391,8 @@ pub struct EffectRowArgument {
     pub effects: EffectSet,
 }
 
+/// A statement sequence whose value is `tail` when the last item is an
+/// expression, and `Unit` otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub span: Span,
@@ -458,24 +400,19 @@ pub struct Block {
     pub tail: Option<Box<Expr>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Statement {
-    pub span: Span,
-    pub kind: StatementKind,
-    pub terminator: StatementTerminator,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StatementTerminator {
-    Explicit(Span),
-    Implicit,
-}
+pub type Statement = Spanned<StatementKind>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatementKind {
     Let {
         binding: LetBinding,
         value: Expr,
+    },
+    /// `let t = mut place`: an in-place alias.
+    Alias {
+        name: Identifier,
+        annotation: Option<TypeExpr>,
+        place: PlaceExpr,
     },
     Return(Option<Expr>),
     Break,
@@ -488,7 +425,7 @@ pub enum StatementKind {
     Expression(Expr),
     IfLet {
         pattern: Pattern,
-        value: Expr,
+        value: Operand,
         then_branch: Block,
         else_branch: Option<Block>,
     },
@@ -498,7 +435,7 @@ pub enum StatementKind {
     },
     For {
         binding: ForBinding,
-        iterable: Expr,
+        iterable: Operand,
         body: Block,
     },
     Loop(Block),
@@ -520,11 +457,31 @@ pub enum ForBinding {
     Tuple { span: Span, names: Vec<Identifier> },
 }
 
+/// The subject of `for ... in`, `match` and `if let`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operand {
+    Value(Box<Expr>),
+    /// `mut place`: in-place, exclusive access for the construct's duration.
+    MutPlace {
+        span: Span,
+        place: PlaceExpr,
+    },
+}
+
+/// A syntactic place: a local name followed by field, tuple-field and index
+/// projections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaceExpr {
     pub span: Span,
     pub root: Identifier,
-    pub fields: Vec<Identifier>,
+    pub projections: Vec<PlaceProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceProjection {
+    Field(Identifier),
+    TupleField(StringValue),
+    Index(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,7 +523,7 @@ pub enum ExprKind {
         else_branch: Option<Box<Expr>>,
     },
     Match {
-        scrutinee: Box<Expr>,
+        scrutinee: Operand,
         arms: Vec<MatchArm>,
     },
     Handle {
@@ -588,7 +545,6 @@ pub enum ExprKind {
         operator: Spanned<BinaryOperator>,
         right: Box<Expr>,
     },
-    Propagate(Box<Expr>),
     Call {
         callee: Box<Expr>,
         arguments: Vec<CallArgument>,
@@ -648,17 +604,16 @@ pub enum ConstructEntryKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallArgument {
     Expression(Expr),
-    Mode {
+    /// `mut place` for a `mut` parameter.
+    Mut {
         span: Span,
-        mode: Spanned<CallAssertionMode>,
         place: PlaceExpr,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallAssertionMode {
-    Mut,
-    Move,
+    /// `move name` for a `move` parameter.
+    Move {
+        span: Span,
+        name: Identifier,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -713,20 +668,7 @@ pub enum PatternKind {
         path: Path,
         fields: Option<PatternFields>,
     },
-    QualifiedBinding(QualifiedBinding),
     Tuple(Vec<Pattern>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QualifiedBinding {
-    pub name: Identifier,
-    pub mode: Spanned<BindingMode>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindingMode {
-    Mut,
-    Move,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -750,35 +692,14 @@ pub struct Handler {
     pub span: Span,
     pub effect: Path,
     pub operation: Identifier,
-    pub parameters: Vec<NamedParameter>,
+    pub parameters: Vec<Parameter>,
     pub body: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosureExpression {
-    pub captures: Option<CaptureList>,
-    pub parameters: Vec<NamedParameter>,
-    pub return_type: Option<Box<ReturnAnnotation>>,
+    pub parameters: Vec<Parameter>,
+    pub return_type: Option<Box<TypeExpr>>,
     pub effects: Option<EffectSet>,
     pub body: Block,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CaptureList {
-    pub span: Span,
-    pub captures: Vec<CaptureParameter>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CaptureParameter {
-    pub span: Span,
-    pub mode: Option<Spanned<CaptureMode>>,
-    pub name: Identifier,
-    pub annotation: Option<TypeExpr>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureMode {
-    Mut,
-    Move,
 }

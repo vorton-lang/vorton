@@ -15,6 +15,20 @@ pub enum FrontendDiagnosticKind {
         found: FoundToken,
         expected: Vec<ExpectedToken>,
     },
+    Layout(LayoutDiagnosticKind),
+    /// An assignment target or `mut` operand is not a local name followed by
+    /// field, tuple-field or index projections.
+    ExpectedPlace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutDiagnosticKind {
+    /// A line break ends the item before this token, which cannot start a new item.
+    UnexpectedLineBreak,
+    /// Two items of a statement sequence are neither on separate lines nor separated by `;`.
+    MissingSeparator,
+    /// A `;` or `,` separator ends a line or directly precedes the closing delimiter.
+    TrailingSeparator,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +71,20 @@ impl FrontendDiagnostic {
         Self {
             span,
             kind: FrontendDiagnosticKind::Lexical(kind),
+        }
+    }
+
+    pub(crate) const fn layout(span: Span, kind: LayoutDiagnosticKind) -> Self {
+        Self {
+            span,
+            kind: FrontendDiagnosticKind::Layout(kind),
+        }
+    }
+
+    pub(crate) const fn expected_place(span: Span) -> Self {
+        Self {
+            span,
+            kind: FrontendDiagnosticKind::ExpectedPlace,
         }
     }
 

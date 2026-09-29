@@ -78,7 +78,7 @@ fn public_project_api_resolves_owned_sources_and_preserves_frontend_origin() {
             (
                 DEPENDENCY,
                 LibrarySources {
-                    root: "pub use api::answer;".to_owned(),
+                    root: "pub use api::answer".to_owned(),
                     modules: BTreeMap::from([(
                         api.clone(),
                         "pub fn answer() -> Int { 42 }".to_owned(),
@@ -107,7 +107,7 @@ fn public_project_api_resolves_owned_sources_and_preserves_frontend_origin() {
             (
                 DEPENDENCY,
                 LibrarySources {
-                    root: "use api;".to_owned(),
+                    root: "use api".to_owned(),
                     modules: BTreeMap::from([(api.clone(), "@bad".to_owned())]),
                     dependencies: BTreeMap::new(),
                 },
@@ -161,7 +161,7 @@ fn diagnostic_origins_distinguish_consumer_and_dependency_sources() {
             (
                 APP,
                 LibrarySources {
-                    root: "use dep::Both;".to_owned(),
+                    root: "use dep::Both".to_owned(),
                     modules: BTreeMap::new(),
                     dependencies: BTreeMap::from([("dep".to_owned(), DEPENDENCY)]),
                 },
@@ -169,7 +169,7 @@ fn diagnostic_origins_distinguish_consumer_and_dependency_sources() {
             (
                 DEPENDENCY,
                 LibrarySources {
-                    root: "pub struct Both {} pub fn Both() {}".to_owned(),
+                    root: "pub struct Both {}; pub fn Both() {}".to_owned(),
                     modules: BTreeMap::new(),
                     dependencies: BTreeMap::new(),
                 },
@@ -202,83 +202,6 @@ fn contextual_frontend_spellings_remain_valid_file_module_segments() {
 }
 
 #[test]
-fn generate_is_rejected_after_frontend_and_module_graph_but_before_name_resolution() {
-    let hidden = FileModulePath::new(["generate"]).expect("contextual module key");
-    resolve_project(&project(
-        "fn main() {}",
-        BTreeMap::from([(hidden.clone(), "generate hidden {}".to_owned())]),
-    ))
-    .expect("an unreachable generate item does not enter the project closure");
-
-    let diagnostic = resolve_project(&project(
-        "use generate;",
-        BTreeMap::from([(hidden.clone(), "generate reachable {}".to_owned())]),
-    ))
-    .expect_err("a reachable generate item requires the later generation stage");
-    assert_eq!(diagnostic.kind, ProjectDiagnosticKind::GenerateUnsupported);
-    assert_eq!(
-        diagnostic.primary.expect("generate origin").source,
-        SourceRef::File(hidden)
-    );
-
-    let source = "fn broken() { missing } generate ctx {}";
-    let diagnostic = resolve_project(&project(source, BTreeMap::new()))
-        .expect_err("generate rejection precedes declaration and body-name checks");
-    assert_eq!(diagnostic.kind, ProjectDiagnosticKind::GenerateUnsupported);
-    let primary = diagnostic.primary.expect("generate keyword origin");
-    let generate_start = source.find("generate").expect("generate spelling");
-    assert_eq!(primary.source, SourceRef::Root);
-    assert_eq!(primary.span.start, generate_start);
-    assert_eq!(primary.span.end, generate_start + "generate".len());
-
-    let broken = FileModulePath::new(["broken"]).expect("module key");
-    let diagnostic = resolve_project(&project(
-        "use broken; generate ctx {}",
-        BTreeMap::from([(broken.clone(), "@".to_owned())]),
-    ))
-    .expect_err("reachable frontend failure precedes generate rejection");
-    assert!(matches!(
-        diagnostic.kind,
-        ProjectDiagnosticKind::Frontend(_)
-    ));
-    assert_eq!(
-        diagnostic.primary.expect("frontend origin").source,
-        SourceRef::File(broken)
-    );
-
-    let clash = FileModulePath::new(["clash"]).expect("module key");
-    let diagnostic = resolve_project(&project(
-        "generate ctx {} mod clash {}",
-        BTreeMap::from([(clash, String::new())]),
-    ))
-    .expect_err("module graph failure precedes generate rejection");
-    assert!(matches!(
-        diagnostic.kind,
-        ProjectDiagnosticKind::ModuleBodyConflict { .. }
-    ));
-}
-
-#[test]
-fn multiple_generate_items_use_logical_module_then_utf8_span_order() {
-    let first = FileModulePath::new(["a"]).expect("module key");
-    let later = FileModulePath::new(["z"]).expect("module key");
-    let first_source = "// λ\nfn unresolved() { missing } generate first {} generate second {}";
-    let diagnostic = resolve_project(&project(
-        "use z; use a;",
-        BTreeMap::from([
-            (later, "generate at_zero {}".to_owned()),
-            (first.clone(), first_source.to_owned()),
-        ]),
-    ))
-    .expect_err("reachable generate inventory should choose one stable diagnostic");
-    assert_eq!(diagnostic.kind, ProjectDiagnosticKind::GenerateUnsupported);
-    let primary = diagnostic.primary.expect("generate origin");
-    assert_eq!(primary.source, SourceRef::File(first));
-    let start = first_source.find("generate").expect("first generate");
-    assert_eq!(primary.span.start, start);
-}
-
-#[test]
 fn prepares_core_and_exact_multilibrary_declarations_without_checking_bodies_or_arity() {
     prepare(&ProjectSources {
         entry: CORE,
@@ -296,19 +219,19 @@ fn prepares_core_and_exact_multilibrary_declarations_without_checking_bodies_or_
                 APP,
                 LibrarySources {
                     root: r#"
-use dep::Base as First;
-use dep::Base as Second;
-use dep::IO as IO1;
-use dep::IO as IO2;
-use other::Base as Other;
-use other::IO as OtherIO;
+use dep::Base as First
+use dep::Base as Second
+use dep::IO as IO1
+use dep::IO as IO2
+use other::Base as Other
+use other::IO as OtherIO
 
 trait Combined: First + Second + Other {}
 trait Generic<T> {}
 trait DeferredArity: Generic<Int, Str> {}
-effect alias CombinedIO = {IO1, IO2, OtherIO};
-effect alias GenericEffect<T> = {fs};
-effect alias DeferredEffectArity = {GenericEffect<Int, Str>};
+effect alias CombinedIO = {IO1, IO2, OtherIO}
+effect alias GenericEffect<T> = {fs}
+effect alias DeferredEffectArity = {GenericEffect<Int, Str>}
 
 fn deferred_body_check() -> Int { "checked later" }
 "#
@@ -323,10 +246,10 @@ fn deferred_body_check() -> Int { "checked later" }
             (
                 DEPENDENCY,
                 LibrarySources {
-                    root: "pub use api::Base; pub use api::IO;".to_owned(),
+                    root: "pub use api::Base; pub use api::IO".to_owned(),
                     modules: BTreeMap::from([(
                         api,
-                        "pub trait Base {} pub effect alias IO = {fs};".to_owned(),
+                        "pub trait Base {}; pub effect alias IO = {fs}".to_owned(),
                     )]),
                     dependencies: BTreeMap::new(),
                 },
@@ -335,7 +258,7 @@ fn deferred_body_check() -> Int { "checked later" }
                 LibraryId(2),
                 LibrarySources {
                     root: "use dep::Base as Parent; use dep::IO as ParentIO; \
-                           pub trait Base: Parent {} pub effect alias IO = {ParentIO};"
+                           pub trait Base: Parent {}; pub effect alias IO = {ParentIO}"
                         .to_owned(),
                     modules: BTreeMap::new(),
                     dependencies: BTreeMap::from([("dep".to_owned(), DEPENDENCY)]),
@@ -359,13 +282,13 @@ fn invalid_supertraits_report_the_resolved_type_category_and_real_origins() {
             false,
         ),
         (
-            "struct Parent {} trait Bad: Parent {}",
+            "struct Parent {}; trait Bad: Parent {}",
             SupertraitTargetKind::Struct,
             "Parent",
             true,
         ),
         (
-            "enum Parent { Item } trait Bad: Parent {}",
+            "enum Parent { Item }; trait Bad: Parent {}",
             SupertraitTargetKind::Enum,
             "Parent",
             true,
@@ -395,13 +318,13 @@ fn invalid_supertraits_report_the_resolved_type_category_and_real_origins() {
             true,
         ),
         (
-            "trait Has { type Item; } trait Bad: Has::Item {}",
+            "trait Has { type Item }; trait Bad: Has::Item {}",
             SupertraitTargetKind::AssociatedType,
             "Has::Item",
             true,
         ),
         (
-            "trait Has { type Item; } trait Bad<T: Has>: T::Item {}",
+            "trait Has { type Item }; trait Bad<T: Has>: T::Item {}",
             SupertraitTargetKind::TypeDependentSelection,
             "T::Item",
             false,
@@ -436,7 +359,7 @@ fn trait_cycles_are_exact_and_do_not_reject_acyclic_diamonds() {
     assert_eq!(&self_cycle[primary.span.start..primary.span.end], "Loop");
     assert_eq!(diagnostic.related.len(), 1);
 
-    let mutual_cycle = "trait A: B {} trait B: A {}";
+    let mutual_cycle = "trait A: B {}; trait B: A {}";
     let diagnostic = preparation_error(mutual_cycle);
     assert_eq!(
         diagnostic.kind,
@@ -453,7 +376,7 @@ fn trait_cycles_are_exact_and_do_not_reject_acyclic_diamonds() {
 
     let definitions = FileModulePath::new(["definitions"]).expect("module key");
     let sources = project(
-        "pub use definitions::Base as Alias;",
+        "pub use definitions::Base as Alias",
         BTreeMap::from([(
             definitions.clone(),
             "pub trait Base: root::Alias {}".to_owned(),
@@ -472,19 +395,19 @@ fn trait_cycles_are_exact_and_do_not_reject_acyclic_diamonds() {
         SourceRef::File(definitions)
     );
 
-    prepare_root("trait A {} trait B: A {} trait C: A {} trait D: B + C {}")
+    prepare_root("trait A {}; trait B: A {}; trait C: A {}; trait D: B + C {}")
         .expect("a shared acyclic diamond is legal");
 }
 
 #[test]
 fn effect_alias_cycles_include_nested_method_scheme_row_actuals_only() {
-    let self_cycle = "effect alias Loop<T> = {Loop<Int>};";
+    let self_cycle = "effect alias Loop<T> = {Loop<Int>}";
     let diagnostic = preparation_error(self_cycle);
     assert_eq!(diagnostic.kind, ProjectDiagnosticKind::EffectAliasCycle);
     let primary = diagnostic.primary.expect("self-reference origin");
     assert_eq!(&self_cycle[primary.span.start..primary.span.end], "Loop");
 
-    let mutual_cycle = "effect alias A = {B}; effect alias B = {A};";
+    let mutual_cycle = "effect alias A = {B}; effect alias B = {A}";
     let diagnostic = preparation_error(mutual_cycle);
     assert_eq!(diagnostic.kind, ProjectDiagnosticKind::EffectAliasCycle);
     let primary = diagnostic.primary.expect("first stable cycle edge");
@@ -497,10 +420,10 @@ fn effect_alias_cycles_include_nested_method_scheme_row_actuals_only() {
 
     let definitions = FileModulePath::new(["definitions"]).expect("module key");
     let sources = project(
-        "pub use definitions::Loop as Alias;",
+        "pub use definitions::Loop as Alias",
         BTreeMap::from([(
             definitions.clone(),
-            "pub effect alias Loop = {root::Alias};".to_owned(),
+            "pub effect alias Loop = {root::Alias}".to_owned(),
         )]),
     );
     let diagnostic = match prepare(&sources) {
@@ -515,9 +438,9 @@ fn effect_alias_cycles_include_nested_method_scheme_row_actuals_only() {
 
     let nested_cycle = r#"
 trait Scheme {
-    fn apply<effect E>(self: Self) -> Unit with {E};
+    fn apply<effect E>(self) -> Unit with {E}
 }
-effect alias Nested = {Scheme::apply<Int, effect {Nested}>};
+effect alias Nested = {Scheme::apply<Int, effect {Nested}>}
 "#;
     let diagnostic = preparation_error(nested_cycle);
     assert_eq!(diagnostic.kind, ProjectDiagnosticKind::EffectAliasCycle);
@@ -528,9 +451,9 @@ effect alias Nested = {Scheme::apply<Int, effect {Nested}>};
     );
 
     prepare_root(
-        "effect Plain { fn op() -> Unit; } \
+        "effect Plain { fn op() -> Unit }; \
          effect alias Safe = {Plain, Scheme::apply<Int>}; \
-         trait Scheme { fn apply(self: Self) -> Unit with {Safe}; } \
+         trait Scheme { fn apply(self) -> Unit with {Safe} }; \
          fn keep<effect E>() -> Unit with {E} {}",
     )
     .expect("ordinary effects, formals, and method scheme declarations are not alias edges");
@@ -540,7 +463,7 @@ effect alias Nested = {Scheme::apply<Int, effect {Nested}>};
 fn preparation_uses_phase_then_library_and_logical_module_order_for_the_first_error() {
     let diagnostic = preparation_error(
         "effect alias EffectLoop = {EffectLoop}; \
-         trait TraitLoop: TraitLoop {} \
+         trait TraitLoop: TraitLoop {}; \
          trait Bad: Int {}",
     );
     assert!(matches!(
@@ -558,19 +481,19 @@ fn preparation_uses_phase_then_library_and_logical_module_order_for_the_first_er
     let a = FileModulePath::new(["a"]).expect("module key");
     let z = FileModulePath::new(["z"]).expect("module key");
     let reverse = project(
-        "use z; use a;",
+        "use z; use a",
         BTreeMap::from([
-            (z, "effect alias Z = {Z};".to_owned()),
-            (a.clone(), "effect alias A = {A};".to_owned()),
+            (z, "effect alias Z = {Z}".to_owned()),
+            (a.clone(), "effect alias A = {A}".to_owned()),
         ]),
     );
     let forward = project(
-        "use z; use a;",
+        "use z; use a",
         BTreeMap::from([
-            (a.clone(), "effect alias A = {A};".to_owned()),
+            (a.clone(), "effect alias A = {A}".to_owned()),
             (
                 FileModulePath::new(["z"]).expect("module key"),
-                "effect alias Z = {Z};".to_owned(),
+                "effect alias Z = {Z}".to_owned(),
             ),
         ]),
     );
@@ -607,7 +530,7 @@ fn preparation_uses_phase_then_library_and_logical_module_order_for_the_first_er
             (
                 LibraryId(2),
                 LibrarySources {
-                    root: "effect alias Later = {Later};".to_owned(),
+                    root: "effect alias Later = {Later}".to_owned(),
                     modules: BTreeMap::new(),
                     dependencies: BTreeMap::new(),
                 },
@@ -615,7 +538,7 @@ fn preparation_uses_phase_then_library_and_logical_module_order_for_the_first_er
             (
                 DEPENDENCY,
                 LibrarySources {
-                    root: "effect alias First = {First};".to_owned(),
+                    root: "effect alias First = {First}".to_owned(),
                     modules: BTreeMap::new(),
                     dependencies: BTreeMap::new(),
                 },

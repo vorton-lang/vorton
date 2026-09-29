@@ -12,19 +12,14 @@ const CORE_TRAITS: &[&str] = &[
     "Eq",
     "PartialOrd",
     "Ord",
-    "Clone",
-    "Copy",
     "Drop",
     "Display",
     "Debug",
     "Hash",
-    "FnOnce",
-    "FnMut",
-    "Fn",
     "Iterator",
     "Iterable",
 ];
-const LANGUAGE_EFFECTS: &[&str] = &["console", "fs", "process", "fail", "mut", "unsafe"];
+const LANGUAGE_EFFECTS: &[&str] = &["console", "fs", "process", "fail", "unsafe"];
 
 #[derive(Clone, Copy)]
 enum ExpectedCoreVariant {
@@ -38,9 +33,6 @@ pub(crate) fn resolve_project(
     let reachable_libraries = validate_library_graph(sources)?;
     let parsed = parse_reachable_sources(sources, &reachable_libraries)?;
     let modules = build_module_graph(sources, &reachable_libraries, &parsed)?;
-    if let Some(diagnostic) = first_generate_diagnostic(&modules) {
-        return Err(diagnostic);
-    }
     let dependencies = reachable_libraries
         .iter()
         .map(|library| {
@@ -396,7 +388,7 @@ fn discovery_snapshot(
 fn collect_discovery_items(
     module: &ModuleRef,
     module_uses: &[UseDeclaration],
-    items: &[ModuleItem],
+    items: &[Declaration],
     modules: &mut BTreeSet<ModuleRef>,
     uses: &mut Vec<(ModuleRef, UseDeclaration)>,
 ) {
@@ -406,10 +398,7 @@ fn collect_discovery_items(
             .cloned()
             .map(|use_declaration| (module.clone(), use_declaration)),
     );
-    for item in items {
-        let ModuleItem::Declaration(declaration) = item else {
-            continue;
-        };
+    for declaration in items {
         if let DeclarationKind::Module(declared) = &declaration.kind {
             let child = module.child(&declared.item.name.text);
             modules.insert(child.clone());
@@ -597,7 +586,6 @@ struct ModuleBodyAst {
     requires: Option<EffectSet>,
     uses: Vec<UseDeclaration>,
     declarations: Vec<Declaration>,
-    generates: Vec<GenerateItem>,
 }
 
 struct ModuleInfo {
@@ -605,18 +593,6 @@ struct ModuleInfo {
     file_body_present: bool,
     declared_at: Option<OriginRef>,
     public: bool,
-}
-
-fn split_module_items(items: &[ModuleItem]) -> (Vec<Declaration>, Vec<GenerateItem>) {
-    let mut declarations = Vec::new();
-    let mut generates = Vec::new();
-    for item in items {
-        match item {
-            ModuleItem::Declaration(declaration) => declarations.push(declaration.as_ref().clone()),
-            ModuleItem::Generate(generate) => generates.push(generate.clone()),
-        }
-    }
-    (declarations, generates)
 }
 
 fn build_module_graph(
@@ -662,7 +638,6 @@ fn build_module_graph(
     }
 
     for (module, parsed_source) in parsed {
-        let (declarations, generates) = split_module_items(&parsed_source.program.items);
         let body = ModuleBodyAst {
             origin: parsed_source.origin.clone(),
             span: parsed_source.program.span,
@@ -672,8 +647,7 @@ fn build_module_graph(
                 .as_ref()
                 .map(|requires| requires.effects.clone()),
             uses: parsed_source.program.uses.clone(),
-            declarations,
-            generates,
+            declarations: parsed_source.program.items.clone(),
         };
         modules
             .entry(module.clone())
@@ -704,14 +678,11 @@ fn build_module_graph(
 fn register_inline_modules(
     parent: &ModuleRef,
     source: &SourceRef,
-    items: &[ModuleItem],
+    items: &[Declaration],
     modules: &mut BTreeMap<ModuleRef, ModuleInfo>,
 ) -> Vec<(ModuleRef, ProjectDiagnostic)> {
     let mut diagnostics = Vec::new();
-    for item in items {
-        let ModuleItem::Declaration(declaration) = item else {
-            continue;
-        };
+    for declaration in items {
         let DeclarationKind::Module(declared) = &declaration.kind else {
             continue;
         };
@@ -761,14 +732,12 @@ fn register_inline_modules(
         }
         entry.declared_at = Some(origin);
         entry.public = declared.visibility.is_some();
-        let (declarations, generates) = split_module_items(&declared.item.items);
         entry.body = Some(ModuleBodyAst {
             origin: source.clone(),
             span: declaration.span,
             requires: declared.item.requires.clone(),
             uses: declared.item.uses.clone(),
-            declarations,
-            generates,
+            declarations: declared.item.items.clone(),
         });
         diagnostics.extend(register_inline_modules(
             &module,
@@ -778,33 +747,6 @@ fn register_inline_modules(
         ));
     }
     diagnostics
-}
-
-fn first_generate_diagnostic(
-    modules: &BTreeMap<ModuleRef, ModuleInfo>,
-) -> Option<ProjectDiagnostic> {
-    let diagnostics = modules
-        .iter()
-        .flat_map(|(module, info)| {
-            info.body.iter().flat_map(move |body| {
-                body.generates.iter().map(move |generate| {
-                    (
-                        module.clone(),
-                        ProjectDiagnostic {
-                            kind: ProjectDiagnosticKind::GenerateUnsupported,
-                            primary: Some(OriginRef {
-                                library: module.library(),
-                                source: body.origin.clone(),
-                                span: generate.keyword_span,
-                            }),
-                            related: Vec::new(),
-                        },
-                    )
-                })
-            })
-        })
-        .collect();
-    first_stage_diagnostic(diagnostics)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -958,15 +900,10 @@ impl ResolverState {
             eq: self.require_core_empty_trait("Eq")?,
             partial_ord: self.require_core_method_trait("PartialOrd", "partial_cmp")?,
             ord: self.require_core_method_trait("Ord", "cmp")?,
-            clone: self.require_core_method_trait("Clone", "clone")?,
-            copy: self.require_core_empty_trait("Copy")?,
             drop: self.require_core_method_trait("Drop", "drop")?,
             display: self.require_core_method_trait("Display", "to_str")?,
             debug: self.require_core_method_trait("Debug", "debug")?,
             hash: self.require_core_method_trait("Hash", "hash")?,
-            fn_once: self.require_core_empty_trait("FnOnce")?,
-            fn_mut: self.require_core_empty_trait("FnMut")?,
-            function: self.require_core_empty_trait("Fn")?,
             iterator: self.require_core_iterator()?,
             iterable: self.require_core_iterable()?,
         })
@@ -1573,9 +1510,11 @@ impl ResolverState {
         let mut seen = BTreeMap::<(Namespace, String), OriginRef>::new();
         for member in members {
             let (name, namespace, kind) = match &member.kind {
-                ImplMemberKind::Function(function) => {
-                    (&function.name, Namespace::Value, EntityKind::Method)
-                }
+                ImplMemberKind::Function(function) => (
+                    &function.signature.name,
+                    Namespace::Value,
+                    EntityKind::Method,
+                ),
                 ImplMemberKind::AssociatedType(associated) => (
                     &associated.name,
                     Namespace::Type,
@@ -2413,16 +2352,6 @@ fn validate_core_profile(
         &roles.ord.declaration,
         &[&roles.eq, &roles.partial_ord.declaration],
     )?;
-    let clone_members =
-        validate_core_trait_supertraits(core, body, "Clone", &roles.clone.declaration, &[])?;
-    let copy_members = validate_core_trait_supertraits(
-        core,
-        body,
-        "Copy",
-        &roles.copy,
-        &[&roles.clone.declaration],
-    )?;
-    debug_assert!(copy_members.is_empty());
     let drop_members =
         validate_core_trait_supertraits(core, body, "Drop", &roles.drop.declaration, &[])?;
     let display_members =
@@ -2431,15 +2360,6 @@ fn validate_core_profile(
         validate_core_trait_supertraits(core, body, "Debug", &roles.debug.declaration, &[])?;
     let hash_members =
         validate_core_trait_supertraits(core, body, "Hash", &roles.hash.declaration, &[])?;
-    let fn_once_members =
-        validate_core_trait_supertraits(core, body, "FnOnce", &roles.fn_once, &[])?;
-    debug_assert!(fn_once_members.is_empty());
-    let fn_mut_members =
-        validate_core_trait_supertraits(core, body, "FnMut", &roles.fn_mut, &[&roles.fn_once])?;
-    debug_assert!(fn_mut_members.is_empty());
-    let fn_members =
-        validate_core_trait_supertraits(core, body, "Fn", &roles.function, &[&roles.fn_mut])?;
-    debug_assert!(fn_members.is_empty());
     let iterator_members =
         validate_core_trait_supertraits(core, body, "Iterator", &roles.iterator.declaration, &[])?;
     let iterable_members =
@@ -2456,7 +2376,7 @@ fn validate_core_profile(
         "eq",
         &roles.partial_eq.method,
         partial_eq_members,
-        &[ParameterMode::Borrow, ParameterMode::Borrow],
+        &[None, None],
         CoreMethodEffect::ClosedEmpty,
     )?;
     require_core_self_parameter(core, "PartialEq", "eq", &roles.partial_eq, 0, parameters[0])?;
@@ -2476,7 +2396,7 @@ fn validate_core_profile(
         "partial_cmp",
         &roles.partial_ord.method,
         partial_ord_members,
-        &[ParameterMode::Borrow, ParameterMode::Borrow],
+        &[None, None],
         CoreMethodEffect::ClosedEmpty,
     )?;
     require_core_self_parameter(
@@ -2514,7 +2434,7 @@ fn validate_core_profile(
         "cmp",
         &roles.ord.method,
         ord_members,
-        &[ParameterMode::Borrow, ParameterMode::Borrow],
+        &[None, None],
         CoreMethodEffect::ClosedEmpty,
     )?;
     require_core_self_parameter(core, "Ord", "cmp", &roles.ord, 0, parameters[0])?;
@@ -2523,27 +2443,13 @@ fn validate_core_profile(
         resolved_type_is_exact(ty, &roles.ordering.declaration)
     })?;
 
-    let (parameters, result) = validate_core_method_header(
-        core,
-        "Clone",
-        "clone",
-        &roles.clone.method,
-        clone_members,
-        &[ParameterMode::Borrow],
-        CoreMethodEffect::Inferred,
-    )?;
-    require_core_self_parameter(core, "Clone", "clone", &roles.clone, 0, parameters[0])?;
-    require_core_return_type(core, "Clone", "clone", &roles.clone.method, result, |ty| {
-        resolved_type_is_self(ty, &roles.clone.declaration)
-    })?;
-
     validate_simple_core_method(
         core,
         "Drop",
         "drop",
         &roles.drop,
         drop_members,
-        ParameterMode::MutBorrow,
+        Some(ParameterMode::Mut),
         &unit_type,
     )?;
     validate_simple_core_method(
@@ -2552,7 +2458,7 @@ fn validate_core_profile(
         "to_str",
         &roles.display,
         display_members,
-        ParameterMode::Borrow,
+        None,
         &str_type,
     )?;
     validate_simple_core_method(
@@ -2561,7 +2467,7 @@ fn validate_core_profile(
         "debug",
         &roles.debug,
         debug_members,
-        ParameterMode::Borrow,
+        None,
         &str_type,
     )?;
     validate_simple_core_method(
@@ -2570,7 +2476,7 @@ fn validate_core_profile(
         "hash",
         &roles.hash,
         hash_members,
-        ParameterMode::Borrow,
+        None,
         &int_type,
     )?;
 
@@ -2600,7 +2506,7 @@ fn validate_core_profile(
         "next",
         &roles.iterator.next,
         iterator_members,
-        &[ParameterMode::MutBorrow],
+        &[Some(ParameterMode::Mut)],
         CoreMethodEffect::Inferred,
     )?;
     require_core_self_parameter(
@@ -2683,7 +2589,7 @@ fn validate_core_profile(
         "iter",
         &roles.iterable.iter,
         iterable_members,
-        &[ParameterMode::Move],
+        &[None],
         CoreMethodEffect::Inferred,
     )?;
     let iterable_method = CoreMethodRole {
@@ -2771,9 +2677,9 @@ fn validate_core_method_header<'a>(
     member_name: &str,
     identity: &EntityId,
     members: &'a [ResolvedTraitMember],
-    expected_modes: &[ParameterMode],
+    expected_modes: &[Option<ParameterMode>],
     expected_effect: CoreMethodEffect,
-) -> Result<(Vec<&'a ResolvedType>, &'a ResolvedType), ProjectDiagnostic> {
+) -> Result<(Vec<Option<&'a ResolvedType>>, &'a ResolvedType), ProjectDiagnostic> {
     let member = members
         .iter()
         .find(|member| member.identity == *identity)
@@ -2831,17 +2737,7 @@ fn validate_core_method_header<'a>(
         signature.parameters.iter().zip(expected_modes).enumerate()
     {
         let actual_mode = parameter.mode.map(|(_, mode)| mode);
-        let effective_mode = actual_mode.unwrap_or(ParameterMode::Borrow);
-        if parameter.escape.is_some() {
-            return Err(core_role_diagnostic(
-                core,
-                role,
-                Some(member_name),
-                CoreRoleIssue::ParameterEscape { index },
-                identity,
-            ));
-        }
-        if effective_mode != *expected_mode {
+        if actual_mode != *expected_mode {
             return Err(core_role_diagnostic(
                 core,
                 role,
@@ -2854,7 +2750,8 @@ fn validate_core_method_header<'a>(
                 identity,
             ));
         }
-        let Some(ResolvedParameterAnnotation::Type(ty)) = parameter.annotation.as_ref() else {
+        // Only a bare self receiver omits its type, which is then Self.
+        if parameter.annotation.is_none() && index != 0 {
             return Err(core_role_diagnostic(
                 core,
                 role,
@@ -2862,8 +2759,8 @@ fn validate_core_method_header<'a>(
                 CoreRoleIssue::ParameterType { index },
                 identity,
             ));
-        };
-        parameter_types.push(ty);
+        }
+        parameter_types.push(parameter.annotation.as_ref());
     }
     let Some(result) = signature.return_type.as_ref() else {
         return Err(core_role_diagnostic(
@@ -2899,9 +2796,9 @@ fn require_core_self_parameter(
     member: &str,
     method: &CoreMethodRole,
     index: usize,
-    ty: &ResolvedType,
+    ty: Option<&ResolvedType>,
 ) -> Result<(), ProjectDiagnostic> {
-    if resolved_type_is_self(ty, &method.declaration) {
+    if ty.is_none_or(|ty| resolved_type_is_self(ty, &method.declaration)) {
         Ok(())
     } else {
         Err(core_role_diagnostic(
@@ -2941,7 +2838,7 @@ fn validate_simple_core_method(
     member: &str,
     method: &CoreMethodRole,
     members: &[ResolvedTraitMember],
-    mode: ParameterMode,
+    mode: Option<ParameterMode>,
     result_type: &EntityId,
 ) -> Result<(), ProjectDiagnostic> {
     let (parameters, result) = validate_core_method_header(
@@ -3063,7 +2960,7 @@ fn resolved_named_type(ty: &ResolvedType) -> Option<&ResolvedNamedType> {
     match &ty.kind {
         ResolvedTypeKind::Named(named) => Some(named),
         ResolvedTypeKind::Grouped(inner) => resolved_named_type(inner),
-        ResolvedTypeKind::Tuple(_) => None,
+        ResolvedTypeKind::Tuple(_) | ResolvedTypeKind::Function { .. } => None,
     }
 }
 
@@ -3442,10 +3339,10 @@ impl<'state> BodyResolver<'state> {
                     let identity = source_id(
                         &self.module,
                         &self.source,
-                        function.name.span,
+                        function.signature.name.span,
                         Namespace::Value,
                         EntityKind::Method,
-                        &function.name.text,
+                        &function.signature.name.text,
                         Some(owner.clone()),
                     );
                     let function = self.resolve_function(function, &identity)?;
@@ -3613,18 +3510,19 @@ impl<'state> BodyResolver<'state> {
     ) -> Result<ResolvedFunction, ProjectDiagnostic> {
         let owner = owner_key_from_entity(identity);
         let previous_owner = std::mem::replace(&mut self.owner, owner.clone());
+        let signature = &function.signature;
         let (type_parameters, effect_parameters) = self.push_callable_parameters(
-            &function.type_parameters,
-            &function.effect_parameters,
+            &signature.type_parameters,
+            &signature.effect_parameters,
             owner.clone(),
         )?;
-        let (parameters, value_scope) = self.resolve_parameters(&function.parameters, owner)?;
-        let return_type = function
+        let (parameters, value_scope) = self.resolve_parameters(&signature.parameters, owner)?;
+        let return_type = signature
             .return_type
             .as_ref()
-            .map(|return_type| self.resolve_return_annotation(return_type).map(Box::new))
+            .map(|return_type| self.resolve_type(return_type))
             .transpose()?;
-        let effects = function
+        let effects = signature
             .effects
             .as_ref()
             .map(|effects| self.resolve_effect_set(effects))
@@ -3636,7 +3534,6 @@ impl<'state> BodyResolver<'state> {
         self.effect_scopes.pop();
         self.owner = previous_owner;
         Ok(ResolvedFunction {
-            const_span: function.const_span,
             type_parameters,
             effect_parameters,
             parameters,
@@ -3785,16 +3682,7 @@ impl<'state> BodyResolver<'state> {
             let mut bounds = Vec::new();
             let mut failed = false;
             for bound in &parameter.bounds {
-                let result = match bound {
-                    GenericBound::Named(bound) => self
-                        .resolve_named_type(bound)
-                        .map(Box::new)
-                        .map(ResolvedGenericBound::Named),
-                    GenericBound::Shape(bound) => {
-                        self.resolve_shape(bound).map(ResolvedGenericBound::Shape)
-                    }
-                };
-                match result {
+                match self.resolve_named_type(bound) {
                     Ok(bound) => bounds.push(bound),
                     Err(diagnostic) => {
                         failed = true;
@@ -3894,7 +3782,7 @@ impl<'state> BodyResolver<'state> {
 
     fn resolve_parameters(
         &mut self,
-        parameters: &[NamedParameter],
+        parameters: &[Parameter],
         owner: OwnerKey,
     ) -> Result<(Vec<ResolvedParameter>, BTreeMap<String, EntityId>), ProjectDiagnostic> {
         let mut scope = BTreeMap::new();
@@ -3920,29 +3808,15 @@ impl<'state> BodyResolver<'state> {
                 });
             }
             self.insert_scoped_entity(identity.clone());
-            let (escape, mode, annotation) = match &parameter.annotation {
-                Some(annotation) => {
-                    let resolved = match &annotation.kind {
-                        ParameterTypeKind::Type(ty) => {
-                            ResolvedParameterAnnotation::Type(self.resolve_type(ty)?)
-                        }
-                        ParameterTypeKind::Shape(shape) => {
-                            ResolvedParameterAnnotation::Shape(self.resolve_shape(shape)?)
-                        }
-                    };
-                    (
-                        annotation.escape.map(|escape| escape.span),
-                        annotation.mode.as_ref().map(|mode| (mode.span, mode.kind)),
-                        Some(resolved),
-                    )
-                }
-                None => (None, None, None),
-            };
+            let annotation = parameter
+                .ty
+                .as_ref()
+                .map(|ty| self.resolve_type(ty))
+                .transpose()?;
             resolved.push(ResolvedParameter {
                 span: parameter.span,
                 binding: ResolvedBinding { origin, identity },
-                escape,
-                mode,
+                mode: parameter.mode.as_ref().map(|mode| (mode.span, mode.kind)),
                 annotation,
             });
         }
@@ -4203,55 +4077,34 @@ impl BodyResolver<'_> {
                     .map(|element| self.resolve_type(element))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-        };
-        Ok(ResolvedType {
-            span: ty.span,
-            kind,
-        })
-    }
-
-    fn resolve_shape(&mut self, shape: &ShapeExpr) -> Result<ResolvedShape, ProjectDiagnostic> {
-        let kind = match &shape.kind {
-            ShapeKind::Callable(callable) => ResolvedShapeKind::Callable {
-                parameters: callable
+            TypeKind::Function(function) => ResolvedTypeKind::Function {
+                parameters: function
                     .parameters
                     .iter()
                     .map(|parameter| {
-                        Ok(ResolvedShapeParameter {
+                        Ok(ResolvedFunctionTypeParameter {
                             span: parameter.span,
-                            escape: parameter.escape.map(|escape| escape.span),
                             mode: parameter.mode.as_ref().map(|mode| (mode.span, mode.kind)),
                             ty: self.resolve_type(&parameter.ty)?,
                         })
                     })
                     .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
-                return_type: Box::new(self.resolve_type(&callable.return_type)?),
-                effects: callable
+                return_type: function
+                    .return_type
+                    .as_ref()
+                    .map(|ty| self.resolve_type(ty).map(Box::new))
+                    .transpose()?,
+                effects: function
                     .effects
                     .as_ref()
                     .map(|effects| self.resolve_effect_set(effects))
                     .transpose()?,
             },
-            ShapeKind::Grouped(inner) => {
-                ResolvedShapeKind::Grouped(Box::new(self.resolve_shape(inner)?))
-            }
         };
-        Ok(ResolvedShape {
-            span: shape.span,
+        Ok(ResolvedType {
+            span: ty.span,
             kind,
         })
-    }
-
-    fn resolve_return_annotation(
-        &mut self,
-        annotation: &ReturnAnnotation,
-    ) -> Result<ResolvedReturnAnnotation, ProjectDiagnostic> {
-        match annotation {
-            ReturnAnnotation::Type(ty) => self.resolve_type(ty).map(ResolvedReturnAnnotation::Type),
-            ReturnAnnotation::Shape(shape) => self
-                .resolve_shape(shape)
-                .map(ResolvedReturnAnnotation::Shape),
-        }
     }
 
     fn resolve_named_type(
@@ -4348,15 +4201,6 @@ impl BodyResolver<'_> {
                         .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
                 )
             }
-            EffectKind::Mutation => (
-                ResolvedReference::Exact {
-                    occurrence: self.origin(effect.span),
-                    target: language_id(Namespace::Effect, EntityKind::LanguageEffect, "mut", None),
-                    self_reference: None,
-                },
-                Vec::new(),
-                Vec::new(),
-            ),
             EffectKind::Unsafe => (
                 ResolvedReference::Exact {
                     occurrence: self.origin(effect.span),
@@ -5084,6 +4928,28 @@ impl BodyResolver<'_> {
                     }
                 }
             },
+            StatementKind::Alias {
+                name,
+                annotation,
+                place,
+            } => {
+                let annotation = annotation
+                    .as_ref()
+                    .map(|annotation| self.resolve_type(annotation))
+                    .transpose()?;
+                let place = self.resolve_place(place)?;
+                let binding =
+                    self.make_value_binding(name, name.span, EntityKind::Local, self.owner.clone());
+                self.value_scopes
+                    .last_mut()
+                    .expect("let appears in a block scope")
+                    .insert(name.text.clone(), binding.identity.clone());
+                ResolvedStatementKind::Alias {
+                    binding,
+                    annotation,
+                    place,
+                }
+            }
             StatementKind::Return(value) => ResolvedStatementKind::Return(
                 value
                     .as_ref()
@@ -5111,7 +4977,7 @@ impl BodyResolver<'_> {
                 else_branch,
             } => {
                 let (pattern, bindings) = self.resolve_single_pattern(pattern)?;
-                let value = self.resolve_expr(value)?;
+                let value = self.resolve_operand(value)?;
                 let then_branch = self.resolve_block_with_bindings(then_branch, bindings)?;
                 let else_branch = else_branch
                     .as_ref()
@@ -5159,7 +5025,7 @@ impl BodyResolver<'_> {
                     }
                     resolved_bindings.push(resolved);
                 }
-                let iterable = self.resolve_expr(iterable)?;
+                let iterable = self.resolve_operand(iterable)?;
                 let body = self.resolve_block_with_bindings(body, bindings)?;
                 ResolvedStatementKind::For {
                     bindings: resolved_bindings,
@@ -5172,24 +5038,47 @@ impl BodyResolver<'_> {
         Ok(ResolvedStatement {
             span: statement.span,
             kind,
-            terminator: statement.terminator.clone(),
         })
     }
 
-    fn resolve_place(&self, place: &PlaceExpr) -> Result<ResolvedPlace, ProjectDiagnostic> {
+    fn resolve_operand(&mut self, operand: &Operand) -> Result<ResolvedOperand, ProjectDiagnostic> {
+        match operand {
+            Operand::Value(value) => {
+                Ok(ResolvedOperand::Value(Box::new(self.resolve_expr(value)?)))
+            }
+            Operand::MutPlace { span, place } => Ok(ResolvedOperand::MutPlace {
+                span: *span,
+                place: Box::new(self.resolve_place(place)?),
+            }),
+        }
+    }
+
+    fn resolve_place(&mut self, place: &PlaceExpr) -> Result<ResolvedPlace, ProjectDiagnostic> {
         let path = single_identifier_path(&place.root);
+        let root = self.resolve_path(&path, ExpectedName::Value)?;
+        let mut projections = Vec::new();
+        for projection in &place.projections {
+            projections.push(match projection {
+                PlaceProjection::Field(field) => {
+                    ResolvedPlaceProjection::Field(Box::new(ResolvedSelection {
+                        origin: self.origin(field.span),
+                        name: field.text.clone(),
+                        declaration: None,
+                    }))
+                }
+                PlaceProjection::TupleField(index) => ResolvedPlaceProjection::TupleField {
+                    index: index.value.clone(),
+                    origin: self.origin(index.span),
+                },
+                PlaceProjection::Index(index) => {
+                    ResolvedPlaceProjection::Index(Box::new(self.resolve_expr(index)?))
+                }
+            });
+        }
         Ok(ResolvedPlace {
             span: place.span,
-            root: self.resolve_path(&path, ExpectedName::Value)?,
-            fields: place
-                .fields
-                .iter()
-                .map(|field| ResolvedSelection {
-                    origin: self.origin(field.span),
-                    name: field.text.clone(),
-                    declaration: None,
-                })
-                .collect(),
+            root,
+            projections,
         })
     }
 
@@ -5247,9 +5136,9 @@ impl BodyResolver<'_> {
                 else_branch,
             } => self.resolve_if_expression(condition, then_branch, else_branch.as_deref()),
             ExprKind::Match { scrutinee, arms } => {
-                self.resolve_expr(scrutinee).and_then(|scrutinee| {
+                self.resolve_operand(scrutinee).and_then(|scrutinee| {
                     Ok(ResolvedExprKind::Match {
-                        scrutinee: Box::new(scrutinee),
+                        scrutinee,
                         arms: arms
                             .iter()
                             .map(|arm| self.resolve_match_arm(arm))
@@ -5293,9 +5182,6 @@ impl BodyResolver<'_> {
                 operator,
                 right,
             } => self.resolve_binary_expression(left, operator, right),
-            ExprKind::Propagate(inner) => self
-                .resolve_expr(inner)
-                .map(|inner| ResolvedExprKind::Propagate(Box::new(inner))),
             ExprKind::Call { callee, arguments } => self.resolve_call_expression(callee, arguments),
             ExprKind::Index { receiver, index } => {
                 self.resolve_expr(receiver).and_then(|receiver| {
@@ -5463,10 +5349,13 @@ impl BodyResolver<'_> {
             CallArgument::Expression(expression) => {
                 ResolvedCallArgument::Expression(self.resolve_expr(expression)?)
             }
-            CallArgument::Mode { span, mode, place } => ResolvedCallArgument::Mode {
+            CallArgument::Mut { span, place } => ResolvedCallArgument::Mut {
                 span: *span,
-                mode: (mode.span, mode.kind),
                 place: self.resolve_place(place)?,
+            },
+            CallArgument::Move { span, name } => ResolvedCallArgument::Move {
+                span: *span,
+                reference: self.resolve_path(&single_identifier_path(name), ExpectedName::Value)?,
             },
         })
     }
@@ -5519,37 +5408,6 @@ impl BodyResolver<'_> {
         span: Span,
         closure: &ClosureExpression,
     ) -> Result<ResolvedClosure, ProjectDiagnostic> {
-        let mut seen_captures = BTreeMap::<String, OriginRef>::new();
-        let mut captures = Vec::new();
-        if let Some(list) = &closure.captures {
-            for capture in &list.captures {
-                let origin = self.origin(capture.name.span);
-                if let Some(previous) =
-                    seen_captures.insert(capture.name.text.clone(), origin.clone())
-                {
-                    return Err(ProjectDiagnostic {
-                        kind: ProjectDiagnosticKind::DuplicateBinding {
-                            name: capture.name.text.clone(),
-                        },
-                        primary: Some(origin),
-                        related: vec![previous],
-                    });
-                }
-                captures.push(ResolvedCapture {
-                    span: capture.span,
-                    mode: capture.mode.as_ref().map(|mode| (mode.span, mode.kind)),
-                    reference: self.resolve_path(
-                        &single_identifier_path(&capture.name),
-                        ExpectedName::Value,
-                    )?,
-                    annotation: capture
-                        .annotation
-                        .as_ref()
-                        .map(|annotation| self.resolve_type(annotation))
-                        .transpose()?,
-                });
-            }
-        }
         let owner = OwnerKey {
             module: self.module.clone(),
             source: self.source.clone(),
@@ -5562,7 +5420,7 @@ impl BodyResolver<'_> {
         let return_type = closure
             .return_type
             .as_ref()
-            .map(|return_type| self.resolve_return_annotation(return_type).map(Box::new))
+            .map(|return_type| self.resolve_type(return_type))
             .transpose()?;
         let effects = closure
             .effects
@@ -5574,7 +5432,6 @@ impl BodyResolver<'_> {
         self.value_scopes.pop();
         self.owner = previous_owner;
         Ok(ResolvedClosure {
-            captures,
             parameters,
             return_type,
             effects,
@@ -5655,18 +5512,6 @@ impl BodyResolver<'_> {
                     .map(|element| self.resolve_pattern(element, anchor, expected, bindings, seen))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-            PatternKind::QualifiedBinding(qualified) => {
-                ResolvedPatternKind::Binding(ResolvedPatternBinding {
-                    binding: self.pattern_binding(
-                        &qualified.name,
-                        anchor,
-                        expected,
-                        bindings,
-                        seen,
-                    )?,
-                    qualifier: Some((qualified.mode.span, qualified.mode.kind)),
-                })
-            }
             PatternKind::Path { path, fields }
                 if fields.is_none()
                     && path.segments.len() == 1
@@ -5686,11 +5531,9 @@ impl BodyResolver<'_> {
                         fields: None,
                     }
                 } else {
-                    ResolvedPatternKind::Binding(ResolvedPatternBinding {
-                        binding: self
-                            .pattern_binding(identifier, anchor, expected, bindings, seen)?,
-                        qualifier: None,
-                    })
+                    ResolvedPatternKind::Binding(
+                        self.pattern_binding(identifier, anchor, expected, bindings, seen)?,
+                    )
                 }
             }
             PatternKind::Path { path, fields } => {
@@ -5738,16 +5581,13 @@ impl BodyResolver<'_> {
                     } else {
                         ResolvedPattern {
                             span: field.name.span,
-                            kind: ResolvedPatternKind::Binding(ResolvedPatternBinding {
-                                binding: self.pattern_binding(
-                                    &field.name,
-                                    anchor,
-                                    expected,
-                                    bindings,
-                                    seen,
-                                )?,
-                                qualifier: None,
-                            }),
+                            kind: ResolvedPatternKind::Binding(self.pattern_binding(
+                                &field.name,
+                                anchor,
+                                expected,
+                                bindings,
+                                seen,
+                            )?),
                         }
                     };
                     resolved.push(ResolvedNamedPatternField { member, pattern });
@@ -5864,8 +5704,8 @@ fn single_identifier_path(identifier: &Identifier) -> Path {
 
 fn pattern_binding_origin(pattern: &ResolvedPattern, name: &str) -> Option<OriginRef> {
     match &pattern.kind {
-        ResolvedPatternKind::Binding(binding) if binding.binding.identity.name == name => {
-            Some(binding.binding.origin.clone())
+        ResolvedPatternKind::Binding(binding) if binding.identity.name == name => {
+            Some(binding.origin.clone())
         }
         ResolvedPatternKind::Tuple(patterns) | ResolvedPatternKind::Or(patterns) => patterns
             .iter()
@@ -6081,7 +5921,7 @@ fn declaration_entity(
 ) -> Option<(EntityId, bool)> {
     let (name, namespace, kind, public) = match &declaration.kind {
         DeclarationKind::Function(declared) => (
-            &declared.item.name,
+            &declared.item.signature.name,
             Namespace::Value,
             EntityKind::Function,
             declared.visibility.is_some(),
@@ -6263,15 +6103,10 @@ fn core_role_bindings(roles: &CoreRoles) -> BTreeMap<String, EntityId> {
         ("Eq", &roles.eq),
         ("PartialOrd", &roles.partial_ord.declaration),
         ("Ord", &roles.ord.declaration),
-        ("Clone", &roles.clone.declaration),
-        ("Copy", &roles.copy),
         ("Drop", &roles.drop.declaration),
         ("Display", &roles.display.declaration),
         ("Debug", &roles.debug.declaration),
         ("Hash", &roles.hash.declaration),
-        ("FnOnce", &roles.fn_once),
-        ("FnMut", &roles.fn_mut),
-        ("Fn", &roles.function),
         ("Iterator", &roles.iterator.declaration),
         ("Iterable", &roles.iterable.declaration),
     ]
@@ -6471,7 +6306,6 @@ fn diagnostic_kind_rank(kind: &ProjectDiagnosticKind) -> u8 {
         ProjectDiagnosticKind::Frontend(_) => 6,
         ProjectDiagnosticKind::InvalidModuleName { .. } => 7,
         ProjectDiagnosticKind::ModuleBodyConflict { .. } => 8,
-        ProjectDiagnosticKind::GenerateUnsupported => 9,
         ProjectDiagnosticKind::PathEscapesRoot => 10,
         ProjectDiagnosticKind::InvalidPath => 11,
         ProjectDiagnosticKind::NameConflict { .. } => 12,
@@ -6715,18 +6549,12 @@ mod tests {
         }
     }
 
-    fn parameter_type(annotation: &ResolvedParameterAnnotation) -> &ResolvedType {
-        match annotation {
-            ResolvedParameterAnnotation::Type(ty) => ty,
-            ResolvedParameterAnnotation::Shape(_) => panic!("expected an actual parameter type"),
-        }
+    fn parameter_type(annotation: &ResolvedType) -> &ResolvedType {
+        annotation
     }
 
-    fn actual_return_type(annotation: &ResolvedReturnAnnotation) -> &ResolvedType {
-        match annotation {
-            ResolvedReturnAnnotation::Type(ty) => ty,
-            ResolvedReturnAnnotation::Shape(_) => panic!("expected an actual return type"),
-        }
+    fn actual_return_type(annotation: &ResolvedType) -> &ResolvedType {
+        annotation
     }
 
     #[test]
@@ -6763,19 +6591,14 @@ mod tests {
             &roles.eq,
             &roles.partial_ord.declaration,
             &roles.ord.declaration,
-            &roles.clone.declaration,
-            &roles.copy,
             &roles.drop.declaration,
             &roles.display.declaration,
             &roles.debug.declaration,
             &roles.hash.declaration,
-            &roles.fn_once,
-            &roles.fn_mut,
-            &roles.function,
             &roles.iterator.declaration,
             &roles.iterable.declaration,
         ];
-        assert_eq!(declarations.len(), CORE_ENUMS.len() + CORE_TRAITS.len());
+        assert_eq!(CORE_ENUMS.len() + CORE_TRAITS.len(), declarations.len());
         assert!(declarations.iter().all(|identity| {
             identity.module == ModuleRef::root(TEST_CORE)
                 && matches!(
@@ -6803,7 +6626,7 @@ mod tests {
                 .iter()
                 .filter(|identity| identity.kind == EntityKind::Trait)
                 .count(),
-            15
+            10
         );
 
         let members = [
@@ -6815,7 +6638,6 @@ mod tests {
             (&roles.partial_eq.method, &roles.partial_eq.declaration),
             (&roles.partial_ord.method, &roles.partial_ord.declaration),
             (&roles.ord.method, &roles.ord.declaration),
-            (&roles.clone.method, &roles.clone.declaration),
             (&roles.drop.method, &roles.drop.declaration),
             (&roles.display.method, &roles.display.declaration),
             (&roles.debug.method, &roles.debug.declaration),
@@ -7027,9 +6849,9 @@ mod tests {
             "struct Option {}",
             "enum Ordering {}",
             "trait PartialEq {}",
-            "type Copy = Int;",
+            "type Eq = Int",
             "fn bad<Display>() {}",
-            "trait Bad { type Iterable; }",
+            "trait Bad { type Iterable }",
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
                 .expect_err("a protected core Type binding cannot be replaced");
@@ -7045,7 +6867,7 @@ mod tests {
             );
         }
         resolve_project(&project(
-            "fn Option() -> Int { 1 } effect Display {} fn keep() -> Int { Option() }",
+            "fn Option() -> Int { 1 }; effect Display {}; fn keep() -> Int { Option() }",
             vec![],
         ))
         .expect("the protected spellings remain independent in Value and Effect namespaces");
@@ -7053,10 +6875,8 @@ mod tests {
 
     #[test]
     fn missing_core_role_has_no_fabricated_source_span() {
-        let source = replaced_core_source(
-            "pub trait Display {\n    fn to_str(self: &Self) -> Str;\n}\n\n",
-            "",
-        );
+        let source =
+            replaced_core_source("pub trait Display {\n    fn to_str(self) -> Str\n}\n\n", "");
         let diagnostic = resolve_project(&project_with_core_source(source))
             .expect_err("a required role cannot be synthesized");
         assert_eq!(
@@ -7074,8 +6894,8 @@ mod tests {
     fn rejects_wrong_core_declaration_category() {
         assert_invalid_core(
             replaced_core_source(
-                "pub trait Display {\n    fn to_str(self: &Self) -> Str;\n}",
-                "pub type Display = Str;",
+                "pub trait Display {\n    fn to_str(self) -> Str\n}",
+                "pub type Display = Str",
             ),
             "Display",
             None,
@@ -7099,13 +6919,13 @@ mod tests {
     #[test]
     fn rejects_missing_or_wrong_core_members() {
         assert_invalid_core(
-            replaced_core_source("    fn debug(self: &Self) -> Str;\n", ""),
+            replaced_core_source("    fn debug(self) -> Str\n", ""),
             "Debug",
             None,
             CoreRoleIssue::MemberSet,
         );
         assert_invalid_core(
-            replaced_core_source("    fn hash(self: &Self) -> Int;", "    type hash;"),
+            replaced_core_source("    fn hash(self) -> Int", "    type hash"),
             "Hash",
             Some("hash"),
             CoreRoleIssue::MemberKind,
@@ -7115,34 +6935,25 @@ mod tests {
     #[test]
     fn rejects_wrong_core_receiver_and_result_profiles() {
         assert_invalid_core(
-            replaced_core_source(
-                "fn clone(self: &Self) -> Self;",
-                "fn clone(value: &Self) -> Self;",
-            ),
-            "Clone",
-            Some("clone"),
+            replaced_core_source("fn to_str(self) -> Str", "fn to_str(value: Self) -> Str"),
+            "Display",
+            Some("to_str"),
             CoreRoleIssue::Receiver,
         );
         assert_invalid_core(
-            replaced_core_source(
-                "fn drop(self: &mut Self) -> Unit;",
-                "fn drop(self: &Self) -> Unit;",
-            ),
+            replaced_core_source("fn drop(self: mut Self) -> Unit", "fn drop(self) -> Unit"),
             "Drop",
             Some("drop"),
             CoreRoleIssue::ParameterMode {
                 index: 0,
-                expected: ParameterMode::MutBorrow,
-                actual: Some(ParameterMode::Borrow),
+                expected: Some(ParameterMode::Mut),
+                actual: None,
             },
         );
         assert_invalid_core(
-            replaced_core_source(
-                "fn clone(self: &Self) -> Self;",
-                "fn clone(self: &Self) -> Bool;",
-            ),
-            "Clone",
-            Some("clone"),
+            replaced_core_source("fn to_str(self) -> Str", "fn to_str(self) -> Bool"),
+            "Display",
+            Some("to_str"),
             CoreRoleIssue::ReturnType,
         );
     }
@@ -7151,20 +6962,17 @@ mod tests {
     fn rejects_wrong_core_effect_profile() {
         assert_invalid_core(
             replaced_core_source(
-                "fn eq(self: &Self, other: &Self) -> Bool with {};",
-                "fn eq(self: &Self, other: &Self) -> Bool;",
+                "fn eq(self, other: Self) -> Bool with {}",
+                "fn eq(self, other: Self) -> Bool",
             ),
             "PartialEq",
             Some("eq"),
             CoreRoleIssue::EffectProfile,
         );
         assert_invalid_core(
-            replaced_core_source(
-                "fn clone(self: &Self) -> Self;",
-                "fn clone(self: &Self) -> Self with {};",
-            ),
-            "Clone",
-            Some("clone"),
+            replaced_core_source("fn to_str(self) -> Str", "fn to_str(self) -> Str with {}"),
+            "Display",
+            Some("to_str"),
             CoreRoleIssue::EffectProfile,
         );
     }
@@ -7184,13 +6992,13 @@ mod tests {
             CoreRoleIssue::VariantSet,
         );
         assert_invalid_core(
-            replaced_core_source("pub trait Copy: Clone {}", "pub trait Copy {}"),
-            "Copy",
+            replaced_core_source("pub trait Eq: PartialEq {}", "pub trait Eq {}"),
+            "Eq",
             None,
             CoreRoleIssue::Supertraits,
         );
         assert_invalid_core(
-            replaced_core_source("type Iter: Iterator<Item = Self::Item>;", "type Iter;"),
+            replaced_core_source("type Iter: Iterator<Item = Self::Item>", "type Iter"),
             "Iterable",
             Some("Iter"),
             CoreRoleIssue::AssociatedTypeBounds,
@@ -7215,11 +7023,11 @@ mod tests {
             ),
             (
                 right,
-                library("pub use shared::Shared;", vec![], vec![("shared", shared)]),
+                library("pub use shared::Shared", vec![], vec![("shared", shared)]),
             ),
             (
                 left,
-                library("pub use shared::Shared;", vec![], vec![("shared", shared)]),
+                library("pub use shared::Shared", vec![], vec![("shared", shared)]),
             ),
             (
                 app,
@@ -7626,7 +7434,7 @@ mod tests {
                 (
                     dependency,
                     library(
-                        "pub use local::Remote;",
+                        "pub use local::Remote",
                         vec![(vec!["local"], "pub struct Remote {}")],
                         vec![],
                     ),
@@ -7659,7 +7467,7 @@ mod tests {
                     app,
                     library("fn main() {}", vec![], vec![("dep", dependency)]),
                 ),
-                (dependency, library("use super::missing;", vec![], vec![])),
+                (dependency, library("use super::missing", vec![], vec![])),
             ],
         ))
         .expect_err("super cannot cross a dependency root");
@@ -7681,7 +7489,7 @@ mod tests {
                 (
                     app,
                     library(
-                        "use api::Public; use api::facade::Public as ViaFacade; use api::Choice; use api::One; fn make(left: Public, right: ViaFacade) -> Choice { One(1) } mod feature { use root::api::Public; fn nested(value: Public) {} }",
+                        "use api::Public; use api::facade::Public as ViaFacade; use api::Choice; use api::One; fn make(left: Public, right: ViaFacade) -> Choice { One(1) }; mod feature { use root::api::Public; fn nested(value: Public) {} }",
                         vec![],
                         vec![("api", facade)],
                     ),
@@ -7689,7 +7497,7 @@ mod tests {
                 (
                     facade,
                     library(
-                        "pub use actual::Public; pub use actual as facade; pub use actual::Choice; pub use actual::Choice::{One};",
+                        "pub use actual::Public; pub use actual as facade; pub use actual::Choice; pub use actual::Choice::{One}",
                         vec![],
                         vec![("actual", origin)],
                     ),
@@ -7697,7 +7505,7 @@ mod tests {
                 (
                     origin,
                     library(
-                        "pub struct Public {} struct Private {} pub enum Choice { One(Int) }",
+                        "pub struct Public {}; struct Private {}; pub enum Choice { One(Int) }",
                         vec![],
                         vec![],
                     ),
@@ -7767,7 +7575,7 @@ mod tests {
                 (
                     app,
                     library(
-                        "mod feature { use actual::Public; }",
+                        "mod feature { use actual::Public }",
                         vec![],
                         vec![("actual", origin)],
                     ),
@@ -7782,7 +7590,7 @@ mod tests {
                 if path == "actual::Public"
         ));
 
-        for source in ["use api::actual::Public;", "use actual::Public;"] {
+        for source in ["use api::actual::Public", "use actual::Public"] {
             let diagnostic = resolve_project(&graph(
                 app,
                 vec![
@@ -7807,7 +7615,7 @@ mod tests {
             vec![
                 (
                     app,
-                    library("use actual::Private;", vec![], vec![("actual", origin)]),
+                    library("use actual::Private", vec![], vec![("actual", origin)]),
                 ),
                 (origin, library("struct Private {}", vec![], vec![])),
             ],
@@ -7824,7 +7632,7 @@ mod tests {
                 (
                     facade,
                     library(
-                        "pub use actual::Choice::{One};",
+                        "pub use actual::Choice::{One}",
                         vec![],
                         vec![("actual", origin)],
                     ),
@@ -7897,7 +7705,7 @@ mod tests {
 
         let app = LibraryId(1);
         let dependency = LibraryId(2);
-        for source in ["use dep::hidden::T;", "use dep::hidden::{T as PrivateT};"] {
+        for source in ["use dep::hidden::T", "use dep::hidden::{T as PrivateT}"] {
             let diagnostic = resolve_project(&graph(
                 app,
                 vec![
@@ -8014,7 +7822,7 @@ mod tests {
                 (
                     app,
                     library(
-                        "use first::same::Item; use second::same::Item;",
+                        "use first::same::Item; use second::same::Item",
                         vec![],
                         vec![("first", first), ("second", second)],
                     ),
@@ -8039,7 +7847,7 @@ mod tests {
                 (
                     app,
                     library(
-                        "use secret::deeper;",
+                        "use secret::deeper",
                         vec![(
                             vec!["secret", "deeper"],
                             "use root::first::secret::hidden; fn local() { hidden() }",
@@ -8050,7 +7858,7 @@ mod tests {
                 (
                     first,
                     library(
-                        "use secret;",
+                        "use secret",
                         vec![(vec!["secret"], "fn hidden() {}")],
                         vec![],
                     ),
@@ -8081,7 +7889,7 @@ mod tests {
                 (
                     app,
                     library(
-                        "use dep::original; fn wrapper(value: Int) -> Int { original(value) } fn deferred(value: dep::Packet::Item) {}",
+                        "use dep::original; fn wrapper(value: Int) -> Int { original(value) }; fn deferred(value: dep::Packet::Item) {}",
                         vec![],
                         vec![("dep", dependency)],
                     ),
@@ -8089,7 +7897,7 @@ mod tests {
                 (
                     dependency,
                     library(
-                        "pub struct Packet { pub value: Int } impl Packet { pub fn keep(self: Self) -> Self { self } } pub fn choose<T>(value: T::Item) -> T::Item { value } pub fn original(value: Int) -> Int { value }",
+                        "pub struct Packet { pub value: Int }; impl Packet { pub fn keep(self) -> Self { self } }; pub fn choose<T>(value: T::Item) -> T::Item { value }; pub fn original(value: Int) -> Int { value }",
                         vec![],
                         vec![],
                     ),
@@ -8236,11 +8044,7 @@ mod tests {
         let frontend = resolve_project(&project_with_reachable_libraries(vec![
             (
                 first,
-                library(
-                    "generate pending {} mod clash {}",
-                    vec![(vec!["clash"], "")],
-                    vec![],
-                ),
+                library("mod clash {}", vec![(vec!["clash"], "")], vec![]),
             ),
             (second, library("@bad", vec![], vec![])),
         ]))
@@ -8253,29 +8057,21 @@ mod tests {
                 first,
                 library("mod clash {}", vec![(vec!["clash"], "")], vec![]),
             ),
-            (second, library("generate pending {}", vec![], vec![])),
+            (second, library("fn bad() { missing }", vec![], vec![])),
         ]))
-        .expect_err("module graph runs globally before generation support");
+        .expect_err("module graph runs globally before body-name resolution");
         assert!(matches!(
             module_graph.kind,
             ProjectDiagnosticKind::ModuleBodyConflict { .. }
         ));
         assert_eq!(module_graph.primary.expect("module origin").library, first);
 
-        let generation = resolve_project(&project_with_reachable_libraries(vec![
-            (first, library("fn bad() { missing }", vec![], vec![])),
-            (second, library("generate pending {}", vec![], vec![])),
-        ]))
-        .expect_err("generation support is checked before declaration and body names");
-        assert_eq!(generation.kind, ProjectDiagnosticKind::GenerateUnsupported);
-        assert_eq!(generation.primary.expect("generate origin").library, second);
-
         let declaration = resolve_project(&project_with_reachable_libraries(vec![
             (
                 first,
-                library("fn duplicate() {} fn duplicate() {}", vec![], vec![]),
+                library("fn duplicate() {}; fn duplicate() {}", vec![], vec![]),
             ),
-            (second, library("use missing;", vec![], vec![])),
+            (second, library("use missing", vec![], vec![])),
         ]))
         .expect_err("declaration indexing precedes imports in every library");
         assert!(matches!(
@@ -8290,7 +8086,7 @@ mod tests {
 
         let import = resolve_project(&project_with_reachable_libraries(vec![
             (first, library("fn bad() { missing }", vec![], vec![])),
-            (second, library("use absent;", vec![], vec![])),
+            (second, library("use absent", vec![], vec![])),
         ]))
         .expect_err("import/export precedes body-name resolution globally");
         assert!(matches!(
@@ -8324,27 +8120,32 @@ mod tests {
                 .find("missing_low")
                 .expect("missing name byte offset")
         );
-
-        let reachable_generate = resolve_project(&graph(
+        let reachable_failure = resolve_project(&graph(
             TEST_LIBRARY,
             vec![
                 (
                     TEST_LIBRARY,
                     library("fn main() {}", vec![], vec![("dep", second)]),
                 ),
-                (first, library("generate unreachable {}", vec![], vec![])),
-                (second, library("generate reachable {}", vec![], vec![])),
+                (
+                    first,
+                    library("fn unreachable() { missing }", vec![], vec![]),
+                ),
+                (
+                    second,
+                    library("fn reachable() { missing }", vec![], vec![]),
+                ),
             ],
         ))
-        .expect_err("a reachable dependency root is scanned even when its alias is unused");
+        .expect_err("a reachable dependency root is resolved even when its alias is unused");
+        assert!(matches!(
+            reachable_failure.kind,
+            ProjectDiagnosticKind::UnresolvedName { ref name, .. } if name == "missing"
+        ));
         assert_eq!(
-            reachable_generate.kind,
-            ProjectDiagnosticKind::GenerateUnsupported
-        );
-        assert_eq!(
-            reachable_generate
+            reachable_failure
                 .primary
-                .expect("reachable generate origin")
+                .expect("reachable body origin")
                 .library,
             second
         );
@@ -8355,8 +8156,8 @@ mod tests {
         let mut sources = project(
             r#"
 fn choose<T: Eq>(value: T) -> Option<T> {
-    let old = value;
-    let value = old;
+    let old = value
+    let value = old
     Option::Some(value)
 }
 "#,
@@ -8436,7 +8237,7 @@ fn choose<T: Eq>(value: T) -> Option<T> {
                 .is_some_and(|module| module.body.is_none())
         );
 
-        let diagnostic = resolve_project(&project("use bad;", vec![(vec!["bad"], "@not_vorton")]))
+        let diagnostic = resolve_project(&project("use bad", vec![(vec!["bad"], "@not_vorton")]))
             .expect_err("reachable bad source fails");
         assert!(matches!(
             diagnostic.kind,
@@ -8466,7 +8267,7 @@ fn choose<T: Eq>(value: T) -> Option<T> {
     fn combines_file_inline_and_synthetic_modules_with_modern_paths() {
         let sources = project(
             r#"
-use tree::leaf::read;
+use tree::leaf::read
 pub fn root_value() -> Int { 1 }
 fn main() -> Int { read() }
 "#,
@@ -8474,7 +8275,7 @@ fn main() -> Int { read() }
                 (
                     vec!["tree"],
                     r#"
-use root::root_value;
+use root::root_value
 pub fn helper() -> Int { root_value() }
 pub mod inline { pub fn plus() -> Int { super::helper() } }
 "#,
@@ -8482,8 +8283,8 @@ pub mod inline { pub fn plus() -> Int { super::helper() } }
                 (
                     vec!["tree", "leaf"],
                     r#"
-use super::helper;
-use super::inline::plus;
+use super::helper
+use super::inline::plus
 pub fn local() -> Int { 1 }
 pub fn read() -> Int { self::local() + helper() + plus() }
 "#,
@@ -8495,7 +8296,7 @@ pub fn read() -> Int { self::local() + helper() + plus() }
             assert!(!module_body(&resolved, &path).declarations.is_empty());
         }
 
-        let diagnostic = resolve_project(&project("use super::missing;", vec![]))
+        let diagnostic = resolve_project(&project("use super::missing", vec![]))
             .expect_err("a relative path cannot escape the anonymous root");
         assert_eq!(diagnostic.kind, ProjectDiagnosticKind::PathEscapesRoot);
     }
@@ -8514,7 +8315,7 @@ pub fn read() -> Int { self::local() + helper() + plus() }
         ));
 
         let diagnostic = resolve_project(&project(
-            "mod z { mod dup {} mod dup {} } mod a { mod dup {} mod dup {} }",
+            "mod z { mod dup {}; mod dup {} }; mod a { mod dup {}; mod dup {} }",
             vec![],
         ))
         .expect_err("module-graph conflicts use logical path order");
@@ -8528,7 +8329,7 @@ pub fn read() -> Int { self::local() + helper() + plus() }
     #[test]
     fn module_import_binds_only_the_module_and_supports_aliases() {
         let shadowed = resolve_project(&project(
-            "mod tools { pub fn run() {} } fn test(tools: Int) { tools::run() }",
+            "mod tools { pub fn run() {} }; fn test(tools: Int) { tools::run() }",
             vec![],
         ))
         .expect("non-container local Value does not hide a qualified module prefix");
@@ -8573,8 +8374,8 @@ pub fn read() -> Int { self::local() + helper() + plus() }
     #[test]
     fn rejects_cross_namespace_import_ambiguity() {
         let diagnostic = resolve_project(&project(
-            "use names::Same;",
-            vec![(vec!["names"], "pub struct Same {} pub fn Same() {}")],
+            "use names::Same",
+            vec![(vec!["names"], "pub struct Same {}; pub fn Same() {}")],
         ))
         .expect_err("one use item cannot import multiple namespaces");
         assert!(matches!(
@@ -8589,8 +8390,8 @@ pub fn read() -> Int { self::local() + helper() + plus() }
             "use left::item; use right::item; fn main() -> Int { item() }",
             vec![
                 (vec!["leaf"], "pub fn item() -> Int { 1 }"),
-                (vec!["left"], "pub use root::leaf::item;"),
-                (vec!["right"], "pub use root::leaf::item;"),
+                (vec!["left"], "pub use root::leaf::item"),
+                (vec!["right"], "pub use root::leaf::item"),
             ],
         ))
         .expect("same exact declaration delivered twice is one binding");
@@ -8602,7 +8403,7 @@ pub fn read() -> Int { self::local() + helper() + plus() }
         assert_eq!(root_values.len(), 1);
 
         let diagnostic = resolve_project(&project(
-            "use left::item; use right::item; use missing;",
+            "use left::item; use right::item; use missing",
             vec![
                 (vec!["left"], "pub fn item() -> Int { 1 }"),
                 (vec!["right"], "pub fn item() -> Int { 2 }"),
@@ -8637,10 +8438,10 @@ pub fn read() -> Int { self::local() + helper() + plus() }
         .expect("module back-edges with real declarations resolve");
 
         let diagnostic = resolve_project(&project(
-            "use a::missing;",
+            "use a::missing",
             vec![
-                (vec!["a"], "pub use root::b::missing;"),
-                (vec!["b"], "pub use root::a::missing;"),
+                (vec!["a"], "pub use root::b::missing"),
+                (vec!["b"], "pub use root::a::missing"),
             ],
         ))
         .expect_err("forwarding cycle without a declaration has no origin");
@@ -8662,7 +8463,7 @@ pub fn read() -> Int { self::local() + helper() + plus() }
         .expect("facade can expose a public item from its private module");
 
         let diagnostic = resolve_project(&project(
-            "use facade;",
+            "use facade",
             vec![(vec!["facade"], "pub use private; fn private() -> Int { 1 }")],
         ))
         .expect_err("re-export cannot make a private item public");
@@ -8681,20 +8482,20 @@ pub fn read() -> Int { self::local() + helper() + plus() }
             (vec!["leaf"], "pub enum Shape { Circle, Rect(Int) }"),
             (
                 vec!["facade"],
-                "pub use root::leaf::Shape; pub use root::leaf::Shape::{Circle};",
+                "pub use root::leaf::Shape; pub use root::leaf::Shape::{Circle}",
             ),
         ];
         resolve_project(&project(
-            "use facade::{Shape, Circle}; fn main() { match Circle { Circle => (), _ => (), } }",
+            "use facade::{Shape, Circle}; fn main() { match Circle { Circle => (), _ => ()} }",
             modules.clone(),
         ))
         .expect("owner and explicitly imported constructor resolve");
 
         let diagnostic = resolve_project(&project(
-            "use facade;",
+            "use facade",
             vec![
                 (vec!["leaf"], "pub enum Shape { Circle, Rect(Int) }"),
-                (vec!["facade"], "pub use root::leaf::Shape::{Circle};"),
+                (vec!["facade"], "pub use root::leaf::Shape::{Circle}"),
             ],
         ))
         .expect_err("public constructor export requires exact owner export");
@@ -8704,10 +8505,10 @@ pub fn read() -> Int { self::local() + helper() + plus() }
         ));
 
         let diagnostic = resolve_project(&project(
-            "use facade::Circle;",
+            "use facade::Circle",
             vec![
                 (vec!["leaf"], "pub enum Shape { Circle }"),
-                (vec!["facade"], "pub use root::leaf::Shape;"),
+                (vec!["facade"], "pub use root::leaf::Shape"),
             ],
         ))
         .expect_err("re-exporting enum alone does not inject constructors");
@@ -8721,11 +8522,11 @@ pub fn read() -> Int { self::local() + helper() + plus() }
     fn core_constructors_require_explicit_import_and_keep_source_owners() {
         let resolved = resolve_project(&project(
             r#"
-use test_core::Option as Maybe;
-use Maybe::{Some, None};
-use Ordering::Less;
+use test_core::Option as Maybe
+use Maybe::{Some, None}
+use Ordering::Less
 fn make(value: Int) -> Maybe<Int> {
-    match None { None => Some(value), _ => Some(value), }
+    match None { None => Some(value), _ => Some(value)}
 }
 fn first() -> Ordering { Less }
 "#,
@@ -8754,7 +8555,7 @@ fn first() -> Ordering { Less }
         let make = function(module_body(&resolved, &[]), "make");
         assert_eq!(
             exact(named_type_reference(actual_return_type(
-                make.return_type.as_deref().expect("aliased Option return")
+                make.return_type.as_ref().expect("aliased Option return")
             ))),
             &resolved.core_roles.option.declaration
         );
@@ -8786,7 +8587,7 @@ fn first() -> Ordering { Less }
         let diagnostic = resolve_project(&project(
             r#"
 fn leak(value: Option<Int>) {
-    if let Option::Some(inner) = value { inner; }
+    if let Option::Some(inner) = value { inner }
     inner
 }
 "#,
@@ -8798,7 +8599,7 @@ fn leak(value: Option<Int>) {
             ProjectDiagnosticKind::UnresolvedName { ref name, .. } if name == "inner"
         ));
         let diagnostic = resolve_project(&project(
-            "fn leak_loop() { for item in [1] { item; } item }",
+            "fn leak_loop() { for item in [1] { item }; item }",
             vec![],
         ))
         .expect_err("for binding is loop-local");
@@ -8811,7 +8612,7 @@ fn leak(value: Option<Int>) {
             r#"
 enum Choice { Left(Int), Right(Int) }
 fn read(value: Choice) -> Int {
-    match value { Choice::Left(item) | Choice::Right(item) => item, }
+    match value { Choice::Left(item) | Choice::Right(item) => item}
 }
 "#,
             vec![],
@@ -8836,12 +8637,12 @@ fn read(value: Choice) -> Int {
             let ResolvedPatternKind::Binding(binding) = &fields[0].kind else {
                 panic!("payload binding");
             };
-            binding.binding.identity.clone()
+            binding.identity.clone()
         };
         assert_eq!(binder(&alternatives[0]), binder(&alternatives[1]));
 
         let diagnostic = resolve_project(&project(
-            "fn bad(value: Int) { match value { left | right => (), } }",
+            "fn bad(value: Int) { match value { left | right => ()} }",
             vec![],
         ))
         .expect_err("or alternatives need the same binding set");
@@ -8854,8 +8655,8 @@ fn read(value: Choice) -> Int {
     #[test]
     fn qualified_constructor_patterns_require_exact_declarations() {
         for source in [
-            "enum E { A } fn f(value: E) { match value { E::Missing => (), } }",
-            "enum E { A(Int) } fn f(value: E) { match value { E::Missing(x) => x, } }",
+            "enum E { A }; fn f(value: E) { match value { E::Missing => ()} }",
+            "enum E { A(Int) }; fn f(value: E) { match value { E::Missing(x) => x} }",
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
                 .expect_err("constructor-shaped pattern cannot defer a missing constructor");
@@ -8869,7 +8670,7 @@ fn read(value: Choice) -> Int {
         }
 
         let diagnostic = resolve_project(&project(
-            "struct Packet { value: Int } fn bad(packet: Packet) { match packet { Packet { value } => value, } }",
+            "struct Packet { value: Int }; fn bad(packet: Packet) { match packet { Packet { value } => value} }",
             vec![],
         ))
         .expect_err("pattern construction is reserved for exact enum constructors");
@@ -8883,7 +8684,7 @@ fn read(value: Choice) -> Int {
     fn construct_roots_filter_namespaces_and_closed_fields_are_exact() {
         let resolved = resolve_project(&project(
             r#"
-use Choice::Build;
+use Choice::Build
 enum Choice { Build { value: Int } }
 struct Packet { value: Int }
 fn from_constructor<Build>(value: Int) { Build { value } }
@@ -8919,7 +8720,7 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
         }
 
         let diagnostic = resolve_project(&project(
-            "struct Packet { value: Int } fn bad() { Packet { missing: 1 } }",
+            "struct Packet { value: Int }; fn bad() { Packet { missing: 1 } }",
             vec![],
         ))
         .expect_err("a closed nominal field set cannot defer a missing member");
@@ -8929,7 +8730,7 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
         ));
 
         let diagnostic = resolve_project(&project(
-            "enum E { V { good: Int } } fn f(value: E) { match value { E::V { missing: Missing::Ctor } => (), } }",
+            "enum E { V { good: Int } }; fn f(value: E) { match value { E::V { missing: Missing::Ctor } => ()} }",
             vec![],
         ))
         .expect_err("the earlier closed field error wins over its nested pattern error");
@@ -8939,11 +8740,11 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
         ));
         assert_eq!(
             diagnostic.primary.expect("unknown field origin").span,
-            Span::new(65, 72)
+            Span::new(66, 73)
         );
 
         let diagnostic = resolve_project(&project(
-            "use Choice::Build; enum Choice { Build { value: Int } } struct Build { value: Int } fn bad() { Build { value: 1 } }",
+            "use Choice::Build; enum Choice { Build { value: Int } }; struct Build { value: Int }; fn bad() { Build { value: 1 } }",
             vec![],
         ))
         .expect_err("two valid construct targets in different namespaces stay ambiguous");
@@ -8953,7 +8754,7 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
         ));
 
         let resolved = resolve_project(&project(
-            "use Choice::Self; enum Choice { Self { value: Int } } fn value_self(value: Int) { Self { value } }",
+            "use Choice::Self; enum Choice { Self { value: Int } }; fn value_self(value: Int) { Self { value } }",
             vec![],
         ))
         .expect("missing Type Self does not erase a legal Value constructor");
@@ -8975,7 +8776,7 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
         ));
 
         let diagnostic = resolve_project(&project(
-            "use Choice::Self; enum Choice { Self { value: Int } } struct Owner { value: Int } impl Owner { fn make(value: Int) { Self { value } } }",
+            "use Choice::Self; enum Choice { Self { value: Int } }; struct Owner { value: Int }; impl Owner { fn make(value: Int) { Self { value } } }",
             vec![],
         ))
         .expect_err("Type Self and Value Self remain independent construct candidates");
@@ -8989,7 +8790,7 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
     fn type_position_rejects_known_value_member() {
         for (source, expected_name) in [
             (
-                "trait T { fn method(self: Self); } fn f(value: T::method) {}",
+                "trait T { fn method(self) }; fn f(value: T::method) {}",
                 "method",
             ),
             ("fn f(value: PartialEq::eq) {}", "eq"),
@@ -9006,7 +8807,7 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
         }
 
         let diagnostic = resolve_project(&project(
-            "trait T { type Item; } fn f() { T::Item }",
+            "trait T { type Item }; fn f() { T::Item }",
             vec![],
         ))
         .expect_err("a known Type member is not a Value selection");
@@ -9022,11 +8823,11 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
     #[test]
     fn generic_self_and_capture_rules_resolve_without_type_selection() {
         for source in [
-            "trait Rel<T> {} struct Foo {} impl Rel<Self> for Foo {}",
-            "trait Rel<T> {} struct Foo<T> {} impl<T: Rel<Self>> Foo<Self> {}",
-            "trait Rel<T> {} struct Foo<T: Rel<Self>> {}",
-            "trait Rel<T> {} enum Foo<T: Rel<Self>> {}",
-            "trait Rel<T> {} trait Foo<T: Rel<Self>> { fn keep<U: Rel<Self>>(value: Self); }",
+            "trait Rel<T> {}; struct Foo {}; impl Rel<Self> for Foo {}",
+            "trait Rel<T> {}; struct Foo<T> {}; impl<T: Rel<Self>> Foo<Self> {}",
+            "trait Rel<T> {}; struct Foo<T: Rel<Self>> {}",
+            "trait Rel<T> {}; enum Foo<T: Rel<Self>> {}",
+            "trait Rel<T> {}; trait Foo<T: Rel<Self>> { fn keep<U: Rel<Self>>(value: Self) }",
         ] {
             resolve_project(&project(source, vec![]))
                 .expect("impl Self covers trait signature, target, and generic bounds");
@@ -9036,12 +8837,12 @@ fn from_struct(Packet: Int) { Packet { value: 1 } }
             r#"
 struct Boxed<T> { value: T }
 impl<T: Eq> Boxed<T> {
-    fn get(self: Self) -> T {
-        let closure = fn [self]() -> T { self.value };
+    fn get(self) -> T {
+        let closure = fn() -> T { self.value }
         closure()
     }
 }
-trait Identity<T> { fn identity(self: Self) -> T; }
+trait Identity<T> { fn identity(self) -> T }
 "#,
             vec![],
         ))
@@ -9070,17 +8871,17 @@ trait Identity<T> { fn identity(self: Self) -> T; }
         );
 
         let diagnostic = resolve_project(&project(
-            "fn bad<T: Eq>() { let closure = fn [missing]() { missing; }; }",
+            "fn bad<T: Eq>() { let closure = fn() { missing } }",
             vec![],
         ))
-        .expect_err("explicit capture resolves in the outer value scope");
+        .expect_err("closure body resolves in the outer value scope");
         assert!(matches!(
             diagnostic.kind,
             ProjectDiagnosticKind::UnresolvedName { ref name, .. } if name == "missing"
         ));
 
         let diagnostic = resolve_project(&project(
-            "struct Boxed<T> { value: T } impl<T> Boxed<T> { fn bad<T>() {} }",
+            "struct Boxed<T> { value: T }; impl<T> Boxed<T> { fn bad<T>() {} }",
             vec![],
         ))
         .expect_err("member generic cannot shadow visible impl generic");
@@ -9096,13 +8897,13 @@ trait Identity<T> { fn identity(self: Self) -> T; }
             r#"
 enum Choice { Ready }
 impl Choice {
-    fn read(value: Self) { match value { Self::Ready => (), } }
+    fn read(value: Self) { match value { Self::Ready => ()} }
 }
 struct Packet { value: Int }
 impl Packet {
     fn make(value: Int) -> Self { Self { value } }
 }
-trait Make { fn make(value: Int) -> Self; }
+trait Make { fn make(value: Int) -> Self }
 impl Make for Packet {
     fn make(value: Int) -> Self { Self { value } }
 }
@@ -9272,8 +9073,8 @@ impl<T> Boxed<T> {
     fn type_dependent_member_selection_keeps_exact_base_without_faking_target() {
         let resolved = resolve_project(&project(
             r#"
-mod T { pub type Item = Int; }
-trait HasItem { type Item; fn get(self: Self) -> Item; }
+mod T { pub type Item = Int }
+trait HasItem { type Item; fn get(self) -> Item }
 fn read<T: HasItem>(value: T) -> T::Item { value.get() }
 fn shadow<T>(T: Int) { T::member }
 struct Concrete {}
@@ -9401,18 +9202,18 @@ fn language(value: Iterable::Item) {}
         let categorized = resolve_project(&project(
             r#"
 enum E { V }
-impl E { type V = Int; }
+impl E { type V = Int }
 fn enum_member(value: E::V) {}
 struct Box { Item: Int }
-impl Box { type Item = Int; }
+impl Box { type Item = Int }
 fn struct_member(value: Box::Item) {}
-trait Parent { type Item; }
-trait Child: Parent { fn Item(self: Self); }
+trait Parent { type Item }
+trait Child: Parent { fn Item(self) }
 fn inherited_member(value: Child::Item) {}
 trait Outer {
-    type Item;
-    fn direct(value: Item::Nested);
-    fn via_self(value: Self::Item::Nested);
+    type Item
+    fn direct(value: Item::Nested)
+    fn via_self(value: Self::Item::Nested)
 }
 "#,
             vec![],
@@ -9510,7 +9311,7 @@ trait Outer {
         }
 
         let diagnostic = resolve_project(&project(
-            "trait Closed { fn V(self: Self); } fn take(value: Closed::V) {}",
+            "trait Closed { fn V(self) }; fn take(value: Closed::V) {}",
             vec![],
         ))
         .expect_err("a closed wrong-category member cannot manufacture a Type candidate");
@@ -9530,7 +9331,7 @@ trait Outer {
         ));
 
         let diagnostic = resolve_project(&project(
-            "trait Source { type Item; } fn f<T: Source<Missing = Int>>(value: T) {}",
+            "trait Source { type Item }; fn f<T: Source<Missing = Int>>(value: T) {}",
             vec![],
         ))
         .expect_err("a closed trait owner cannot defer an unknown associated binding");
@@ -9550,7 +9351,7 @@ trait Outer {
         );
 
         resolve_project(&project(
-            "trait Parent { type Item; } trait Child: Parent {} fn keep<T: Child<Item = Int>>(value: T) {}",
+            "trait Parent { type Item }; trait Child: Parent {}; fn keep<T: Child<Item = Int>>(value: T) {}",
             vec![],
         ))
         .expect("a supertrait member set stays pending until inherited selection is complete");
@@ -9559,28 +9360,28 @@ trait Outer {
     #[test]
     fn resolves_callable_effect_formals_method_schemes_and_implicit_positions() {
         let root = r#"
-use api::Query;
+use api::Query
 
-fn run<T: Query, F: Fn + fn(Str) -> Unit with {E}, effect E, effect Tail>(
+fn run<T: Query, F: Display, effect E, effect Tail>(
     source: T,
-    callback: call F
+    callback: F
 ) -> Unit with {Query::fetch<T, F, effect {E, fs}, effect {Tail}>} {
     source.fetch(callback)
 }
 "#;
         let defs = r#"
 pub trait Fetch {
-    fn fetch<U, F: Fn + fn(U) -> Unit with {Callback}, G: Fn + fn(Int) -> Unit, effect Callback, effect Extra>(
+    fn fetch<U, F: Display, G: Debug, effect Callback, effect Extra>(
         self,
-        callback: call F,
+        callback: fn(U) -> Unit with {Callback},
         nested: G
-    ) -> Unit;
+    ) -> Unit
 }
 "#;
         let resolved = resolve_project(&project(
             root,
             vec![
-                (vec!["api"], "pub use root::defs::Fetch as Query;"),
+                (vec!["api"], "pub use root::defs::Fetch as Query"),
                 (vec!["defs"], defs),
             ],
         ))
@@ -9609,21 +9410,18 @@ pub trait Fetch {
                 "fetch"
             );
         }
-        let ResolvedGenericBound::Named(callable_trait) = &method.type_parameters[1].bounds[0]
-        else {
-            panic!("F starts with its callable trait bound")
-        };
-        assert_eq!(exact(&callable_trait.reference).name, "Fn");
-        let ResolvedGenericBound::Shape(callback_shape) = &method.type_parameters[1].bounds[1]
-        else {
-            panic!("F retains its callable shape bound")
-        };
-        let ResolvedShapeKind::Callable {
+        let callable_trait = &method.type_parameters[1].bounds[0];
+        assert_eq!(exact(&callable_trait.reference).name, "Display");
+        let ResolvedTypeKind::Function {
             effects: Some(callback_effects),
             ..
-        } = &callback_shape.kind
+        } = &method.parameters[1]
+            .annotation
+            .as_ref()
+            .expect("callback type")
+            .kind
         else {
-            panic!("callback shape with an effect row expected")
+            panic!("callback function type with an effect row expected")
         };
         assert_eq!(
             exact(&callback_effects.effects[0].reference),
@@ -9633,16 +9431,12 @@ pub trait Fetch {
         let callback = method.parameters[1]
             .annotation
             .as_ref()
-            .expect("callback type is present");
-        let call_start =
-            defs.find("callback: call").expect("call mode source") + "callback: ".len();
+            .expect("callback type");
+        assert!(method.parameters[1].mode.is_none());
+        let start = defs.find("fn(U)").expect("function type source");
         assert_eq!(
-            method.parameters[1].mode,
-            Some((Span::new(call_start, call_start + 4), ParameterMode::Call))
-        );
-        assert_eq!(
-            exact(named_type_reference(parameter_type(callback))).name,
-            "F"
+            callback.span,
+            Span::new(start, start + "fn(U) -> Unit with {Callback}".len())
         );
         let nested = method.parameters[2]
             .annotation
@@ -9695,19 +9489,18 @@ pub trait Fetch {
     }
 
     #[test]
-    fn transports_const_shapes_modes_where_and_qualified_bindings() {
+    fn transports_function_types_modes_where_and_bindings() {
         let source = r#"
 trait Contract {}
 struct Target<T> { value: T }
-impl<T, G: Fn, F: Fn + fn(scoped &T, call G) -> T with {mut}> Contract for Target<T>
-where (T, T): Eq + Debug, T::Item: Eq, {
-    const fn run(
-        callback: scoped call F,
-        state: &mut T,
+impl<T, G: Debug, F: Display> Contract for Target<T> where (T, T): Eq + Debug, T::Item: Eq, {
+    fn run(
+        callback: F,
+        state: mut T,
         owned: move T,
-        direct: fn(&T) -> T,
-    ) -> (fn(call G) -> T with {mut}) with {mut} {
-        match state { mut value | move value => value }
+        direct: fn(T, mut T, move G) -> T with {fs},
+    ) -> (fn(G) -> T with {fs}) with {fs} {
+        match state { value | value => value }
     }
 }
 "#;
@@ -9733,60 +9526,42 @@ where (T, T): Eq + Debug, T::Item: Eq, {
         ));
         assert_eq!(where_clause.predicates[0].bounds.len(), 2);
 
-        let ResolvedGenericBound::Shape(shape) = &implementation.type_parameters[2].bounds[1]
-        else {
-            panic!("F callable shape bound expected")
-        };
-        let ResolvedShapeKind::Callable {
-            parameters,
-            effects: Some(effects),
-            ..
-        } = &shape.kind
-        else {
-            panic!("callable shape carrier expected")
-        };
-        let scoped_start = source.find("scoped &T").expect("scoped shape parameter");
-        assert_eq!(
-            parameters[0].escape,
-            Some(Span::new(scoped_start, scoped_start + "scoped".len()))
-        );
-        assert_eq!(
-            parameters[0].mode.as_ref().unwrap().1,
-            ParameterMode::Borrow
-        );
-        assert_eq!(parameters[1].mode.as_ref().unwrap().1, ParameterMode::Call);
-        assert!(effects.effects[0].arguments.is_empty());
-        assert_eq!(exact(&effects.effects[0].reference).name, "mut");
-
         let ResolvedImplMemberKind::Function(method) = &implementation.members[0].kind else {
-            panic!("const impl method expected")
+            panic!("impl method expected")
         };
-        let const_span = method.const_span.expect("const span");
-        assert_eq!(&source[const_span.start..const_span.end], "const");
-        assert!(method.parameters[0].escape.is_some());
-        assert_eq!(
-            method.parameters[0].mode.as_ref().unwrap().1,
-            ParameterMode::Call
-        );
+        assert!(method.parameters[0].mode.is_none());
         assert_eq!(
             method.parameters[1].mode.as_ref().unwrap().1,
-            ParameterMode::MutBorrow
+            ParameterMode::Mut
         );
         assert_eq!(
             method.parameters[2].mode.as_ref().unwrap().1,
             ParameterMode::Move
         );
-        assert!(matches!(
-            method.parameters[3].annotation,
-            Some(ResolvedParameterAnnotation::Shape(_))
-        ));
-        let Some(ResolvedReturnAnnotation::Shape(factory)) = method.return_type.as_deref() else {
-            panic!("factory return shape expected")
+        let mode_span = method.parameters[1].mode.as_ref().unwrap().0;
+        assert_eq!(&source[mode_span.start..mode_span.end], "mut");
+        let ResolvedTypeKind::Function {
+            parameters,
+            effects: Some(effects),
+            ..
+        } = &method.parameters[3]
+            .annotation
+            .as_ref()
+            .expect("direct function type")
+            .kind
+        else {
+            panic!("function type carrier expected")
         };
-        let ResolvedShapeKind::Grouped(factory) = &factory.kind else {
+        assert!(parameters[0].mode.is_none());
+        assert_eq!(parameters[1].mode.as_ref().unwrap().1, ParameterMode::Mut);
+        assert_eq!(parameters[2].mode.as_ref().unwrap().1, ParameterMode::Move);
+        assert!(effects.effects[0].arguments.is_empty());
+        assert_eq!(exact(&effects.effects[0].reference).name, "fs");
+        let factory = method.return_type.as_ref().expect("factory return type");
+        let ResolvedTypeKind::Grouped(factory) = &factory.kind else {
             panic!("factory grouping expected")
         };
-        assert!(matches!(factory.kind, ResolvedShapeKind::Callable { .. }));
+        assert!(matches!(factory.kind, ResolvedTypeKind::Function { .. }));
 
         let match_tail = method.body.tail.as_deref().expect("match tail");
         let ResolvedExprKind::Match { arms, .. } = &match_tail.kind else {
@@ -9795,22 +9570,12 @@ where (T, T): Eq + Debug, T::Item: Eq, {
         let ResolvedPatternKind::Or(alternatives) = &arms[0].pattern.kind else {
             panic!("or pattern expected")
         };
-        let qualifiers = alternatives
-            .iter()
-            .map(|alternative| {
-                let ResolvedPatternKind::Binding(binding) = &alternative.kind else {
-                    panic!("qualified binding expected")
-                };
-                binding.qualifier.expect("qualifier").1
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(qualifiers, [BindingMode::Mut, BindingMode::Move]);
         let first = match &alternatives[0].kind {
-            ResolvedPatternKind::Binding(binding) => &binding.binding.identity,
+            ResolvedPatternKind::Binding(binding) => &binding.identity,
             _ => unreachable!(),
         };
         let second = match &alternatives[1].kind {
-            ResolvedPatternKind::Binding(binding) => &binding.binding.identity,
+            ResolvedPatternKind::Binding(binding) => &binding.identity,
             _ => unreachable!(),
         };
         assert_eq!(
@@ -9839,7 +9604,7 @@ where (T, T): Eq + Debug, T::Item: Eq, {
             Span::new(8, 15)
         );
 
-        let signature_source = "trait Api { fn f<T: Missing, effect E, effect E>(); }";
+        let signature_source = "trait Api { fn f<T: Missing, effect E, effect E>() }";
         let signature_diagnostic = resolve_project(&project(signature_source, vec![]))
             .expect_err("signature generic diagnostics use the same source ordering");
         assert!(matches!(
@@ -9859,10 +9624,10 @@ where (T, T): Eq + Debug, T::Item: Eq, {
         );
 
         resolve_project(&project(
-            "fn f<T: Fn + fn() -> Unit with {E}, effect E>(callback: call T) {}",
+            "fn f<T: Display, effect E>(callback: fn() -> Unit with {E}) {}",
             vec![],
         ))
-        .expect("type bounds can still reference a later effect formal");
+        .expect("function parameter types can reference effect formals");
     }
 
     #[test]
@@ -9875,22 +9640,22 @@ where (T, T): Eq + Debug, T::Item: Eq, {
             ),
             ("fn bad<effect E>(value: E) {}", NameNamespace::Type, "E"),
             (
-                "trait Fetch { fn fetch(self); } fn bad<T>() with {T::fetch<T>} {}",
+                "trait Fetch { fn fetch(self) }; fn bad<T>() with {T::fetch<T>} {}",
                 NameNamespace::Effect,
                 "fetch",
             ),
             (
-                "trait Fetch { fn fetch(self); } fn bad() with {Fetch::missing<Int>} {}",
+                "trait Fetch { fn fetch(self) }; fn bad() with {Fetch::missing<Int>} {}",
                 NameNamespace::Effect,
                 "missing",
             ),
             (
-                "use Fetch::fetch; trait Fetch { fn fetch(self); } fn bad() with {fetch<Int>} {}",
+                "use Fetch::fetch; trait Fetch { fn fetch(self) }; fn bad() with {fetch<Int>} {}",
                 NameNamespace::Effect,
                 "fetch",
             ),
             (
-                "effect Reader<T> {} fn bad<effect E>() with {Reader<Int, effect {E}>} {}",
+                "effect Reader<T> {}; fn bad<effect E>() with {Reader<Int, effect {E}>} {}",
                 NameNamespace::Effect,
                 "Reader",
             ),
@@ -9937,7 +9702,7 @@ where (T, T): Eq + Debug, T::Item: Eq, {
     fn effect_operation_receiver_is_exact_and_cross_namespace_ambiguity_is_rejected() {
         let resolved = resolve_project(&project(
             r#"
-effect Logger { fn log(value: Int) -> Unit; }
+effect Logger { fn log(value: Int) -> Unit }
 fn write() -> Unit with {Logger} { Logger.log(1) }
 "#,
             vec![],
@@ -9990,7 +9755,7 @@ fn write() -> Unit with {Logger} { Logger.log(1) }
 
         let diagnostic = resolve_project(&project(
             r#"
-effect Source { fn read() -> Int; }
+effect Source { fn read() -> Int }
 fn Source() -> Int { 1 }
 fn ambiguous() -> Int { Source.read() }
 "#,
@@ -10003,13 +9768,13 @@ fn ambiguous() -> Int { Source.read() }
         ));
 
         resolve_project(&project(
-            "effect Source {} fn Source() -> Int { 1 } fn selected() { Source.missing() } fn local(console: Int) { console.missing() }",
+            "effect Source {}; fn Source() -> Int { 1 }; fn selected() { Source.missing() }; fn local(console: Int) { console.missing() }",
             vec![],
         ))
         .expect("an Effect without the requested operation does not steal a Value receiver");
 
         let diagnostic = resolve_project(&project(
-            "effect Empty {} fn bad() { Empty.missing() }",
+            "effect Empty {}; fn bad() { Empty.missing() }",
             vec![],
         ))
         .expect_err("known custom effect cannot invent an operation");
@@ -10022,8 +9787,8 @@ fn ambiguous() -> Int { Source.read() }
             "fn bad(value: console::Item) {}",
             "effect alias IO = {console}; fn bad(value: IO::Item) {}",
             "fn bad() { console::missing }",
-            "effect Named {} fn bad(value: Named::Item) {}",
-            "effect Named { fn operation() -> Unit; } fn bad() { Named::operation() }",
+            "effect Named {}; fn bad(value: Named::Item) {}",
+            "effect Named { fn operation() -> Unit }; fn bad() { Named::operation() }",
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
                 .expect_err("Effect identities cannot serve as type-relative selection bases");
@@ -10034,7 +9799,7 @@ fn ambiguous() -> Int { Source.read() }
         }
 
         resolve_project(&project(
-            "fn ok<T>(value: T::Item) {} fn host() -> Unit with {console} { () }",
+            "fn ok<T>(value: T::Item) {}; fn host() -> Unit with {console} { () }",
             vec![],
         ))
         .expect("generic selection and language effects remain legal in their own contexts");
@@ -10069,7 +9834,7 @@ fn ambiguous() -> Int { Source.read() }
         resolve_project(&project("fn Int() -> Int { 1 }", vec![]))
             .expect("same spelling in value namespace is independent");
         resolve_project(&project(
-            "fn Self() -> Int { 1 } fn call() -> Int { Self() }",
+            "fn Self() -> Int { 1 }; fn call() -> Int { Self() }",
             vec![],
         ))
         .expect("special Type spelling does not occupy the Value namespace");
@@ -10092,12 +9857,12 @@ fn ambiguous() -> Int { Source.read() }
         }
 
         resolve_project(&project(
-            "type Item = Int; fn eq() -> Int { 1 } fn raise(value: Int) -> Int { value } fn call(value: Item) -> Int { eq() + raise(value) }",
+            "type Item = Int; fn eq() -> Int { 1 }; fn raise(value: Int) -> Int { value }; fn call(value: Item) -> Int { eq() + raise(value) }",
             vec![],
         ))
         .expect("source root bindings do not conflict with owner-scoped core or Language members");
         resolve_project(&project(
-            "use PartialEq::eq; use Iterable::Item; use fail::raise; fn call(value: Item) { eq; raise(value); }",
+            "use PartialEq::eq; use Iterable::Item; use fail::raise; fn call(value: Item) { eq; raise(value) }",
             vec![],
         ))
         .expect("explicit owner-member imports still bind their exact Language entities");
@@ -10114,14 +9879,14 @@ fn ambiguous() -> Int { Source.read() }
             "enum Bad<Int> {}",
             "trait Bad<Int> {}",
             "effect Bad<Int> {}",
-            "effect alias Bad<Int> = {};",
-            "extern fn bad<Int>() with {};",
-            "extern type Bad<Int>;",
-            "type Bad<Int> = Int;",
-            "struct Box {} impl<Int> Box {}",
-            "trait Named {} struct Box {} impl<Int> Named for Box {}",
-            "struct Box {} impl Box { fn bad<Int>() {} }",
-            "trait Named { fn bad<Int>(); }",
+            "effect alias Bad<Int> = {}",
+            "extern fn bad<Int>() with {}",
+            "extern type Bad<Int>",
+            "type Bad<Int> = Int",
+            "struct Box {}; impl<Int> Box {}",
+            "trait Named {}; struct Box {}; impl<Int> Named for Box {}",
+            "struct Box {}; impl Box { fn bad<Int>() {} }",
+            "trait Named { fn bad<Int>() }",
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
                 .expect_err("every generic declaration entry reserves protected Type names");
@@ -10141,7 +9906,7 @@ fn ambiguous() -> Int { Source.read() }
         for source in [
             "mod Int {}",
             "effect console {}",
-            "use defs::Named as console;",
+            "use defs::Named as console",
         ] {
             let modules = if source.starts_with("use ") {
                 vec![(vec!["defs"], "pub effect Named {}")]
@@ -10157,13 +9922,13 @@ fn ambiguous() -> Int { Source.read() }
         }
 
         resolve_project(&project(
-            "effect Int {} effect Self {} fn console() {} fn Self() -> Int { 1 } fn ok() -> Unit with {Self} { () }",
+            "effect Int {}; effect Self {}; fn console() {}; fn Self() -> Int { 1 }; fn ok() -> Unit with {Self} { () }",
             vec![],
         ))
         .expect("Language and Self spellings remain legal in other namespaces");
 
         let diagnostic = resolve_project(&project(
-            "use types::Thing as Self;",
+            "use types::Thing as Self",
             vec![(vec!["types"], "pub struct Thing {}")],
         ))
         .expect_err("import cannot occupy owner-scoped Self in the Type namespace");
@@ -10175,9 +9940,9 @@ fn ambiguous() -> Int { Source.read() }
         );
 
         for source in [
-            "trait Bad { type Self; }",
-            "struct Bad {} impl Bad { type Self = Bad; }",
-            "trait Named { type Item; } struct Bad {} impl Named for Bad { type Self = Bad; }",
+            "trait Bad { type Self }",
+            "struct Bad {}; impl Bad { type Self = Bad }",
+            "trait Named { type Item }; struct Bad {}; impl Named for Bad { type Self = Bad }",
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
                 .expect_err("owner-scoped Type declaration cannot occupy Self");
@@ -10189,9 +9954,9 @@ fn ambiguous() -> Int { Source.read() }
             );
         }
         for source in [
-            "trait Bad { type Int; }",
-            "struct Bad {} impl Bad { type Int = Bad; }",
-            "trait Named { type Item; } struct Bad {} impl Named for Bad { type Int = Bad; }",
+            "trait Bad { type Int }",
+            "struct Bad {}; impl Bad { type Int = Bad }",
+            "trait Named { type Item }; struct Bad {}; impl Named for Bad { type Int = Bad }",
         ] {
             let diagnostic = resolve_project(&project(source, vec![]))
                 .expect_err("owner-scoped Type declaration cannot redefine a language type");
@@ -10227,7 +9992,7 @@ fn ambiguous() -> Int { Source.read() }
             .expect("project resolves independently of insertion order");
         assert_eq!(left, right);
 
-        let bad_root = "use z;".to_owned();
+        let bad_root = "use z".to_owned();
         let left_error = resolve_project(&single_library_project(
             bad_root.clone(),
             left_source_maps(),
@@ -10241,7 +10006,7 @@ fn ambiguous() -> Int { Source.read() }
     #[test]
     fn declaration_conflicts_are_ordered_by_source_span_not_spelling() {
         let diagnostic = resolve_project(&project(
-            "fn z() {} fn z() {} struct S { field: Int, field: Int }",
+            "fn z() {}; fn z() {}; struct S { field: Int, field: Int }",
             vec![],
         ))
         .expect_err("the earliest declaration conflict wins");
@@ -10265,12 +10030,12 @@ fn ambiguous() -> Int { Source.read() }
             vec![OriginRef {
                 library: TEST_LIBRARY,
                 source: SourceRef::Root,
-                span: Span::new(13, 14),
+                span: Span::new(14, 15),
             }]
         );
 
         let diagnostic = resolve_project(&project(
-            "fn generic<T: Missing, T>() {} fn later() { missing_later }",
+            "fn generic<T: Missing, T>() {}; fn later() { missing_later }",
             vec![],
         ))
         .expect_err("an earlier generic bound beats a later table-level duplicate");
@@ -10280,7 +10045,7 @@ fn ambiguous() -> Int { Source.read() }
         ));
 
         let diagnostic = resolve_project(&project(
-            "use z; use a;",
+            "use z; use a",
             vec![
                 (vec!["z"], "fn body() { missing_z }"),
                 (vec!["a"], "fn body() { missing_a }"),
@@ -10297,7 +10062,7 @@ fn ambiguous() -> Int { Source.read() }
         );
 
         let diagnostic = resolve_project(&project(
-            "fn first() { missing_first } fn second() { missing_second }",
+            "fn first() { missing_first }; fn second() { missing_second }",
             vec![],
         ))
         .expect_err("sibling body units use source span rather than declaration spelling");

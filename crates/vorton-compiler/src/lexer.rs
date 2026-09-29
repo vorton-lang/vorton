@@ -7,6 +7,8 @@ use crate::diagnostic::{
 pub(crate) struct Token {
     pub(crate) kind: TokenKind,
     pub(crate) span: Span,
+    /// Whether a line break separates this token from the previous one.
+    pub(crate) newline_before: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +44,6 @@ pub(crate) enum TokenKind {
     True,
     False,
     Trait,
-    Try,
     While,
     Break,
     Continue,
@@ -65,7 +66,6 @@ pub(crate) enum TokenKind {
     Greater,
     LessEqual,
     GreaterEqual,
-    Amp,
     AndAnd,
     OrOr,
     Bang,
@@ -80,7 +80,6 @@ pub(crate) enum TokenKind {
     DotDotEqual,
     Dot,
     ColonColon,
-    Question,
     Arrow,
     FatArrow,
     LParen,
@@ -128,7 +127,6 @@ pub(crate) enum Tag {
     True,
     False,
     Trait,
-    Try,
     While,
     Break,
     Continue,
@@ -151,7 +149,6 @@ pub(crate) enum Tag {
     Greater,
     LessEqual,
     GreaterEqual,
-    Amp,
     AndAnd,
     OrOr,
     Bang,
@@ -166,7 +163,6 @@ pub(crate) enum Tag {
     DotDotEqual,
     Dot,
     ColonColon,
-    Question,
     Arrow,
     FatArrow,
     LParen,
@@ -215,7 +211,6 @@ impl TokenKind {
             Self::True => Tag::True,
             Self::False => Tag::False,
             Self::Trait => Tag::Trait,
-            Self::Try => Tag::Try,
             Self::While => Tag::While,
             Self::Break => Tag::Break,
             Self::Continue => Tag::Continue,
@@ -238,7 +233,6 @@ impl TokenKind {
             Self::Greater => Tag::Greater,
             Self::LessEqual => Tag::LessEqual,
             Self::GreaterEqual => Tag::GreaterEqual,
-            Self::Amp => Tag::Amp,
             Self::AndAnd => Tag::AndAnd,
             Self::OrOr => Tag::OrOr,
             Self::Bang => Tag::Bang,
@@ -253,7 +247,6 @@ impl TokenKind {
             Self::DotDotEqual => Tag::DotDotEqual,
             Self::Dot => Tag::Dot,
             Self::ColonColon => Tag::ColonColon,
-            Self::Question => Tag::Question,
             Self::Arrow => Tag::Arrow,
             Self::FatArrow => Tag::FatArrow,
             Self::LParen => Tag::LParen,
@@ -311,7 +304,6 @@ impl Tag {
             Self::True => "true",
             Self::False => "false",
             Self::Trait => "trait",
-            Self::Try => "try",
             Self::While => "while",
             Self::Break => "break",
             Self::Continue => "continue",
@@ -334,7 +326,6 @@ impl Tag {
             Self::Greater => ">",
             Self::LessEqual => "<=",
             Self::GreaterEqual => ">=",
-            Self::Amp => "&",
             Self::AndAnd => "&&",
             Self::OrOr => "||",
             Self::Bang => "!",
@@ -349,7 +340,6 @@ impl Tag {
             Self::DotDotEqual => "..=",
             Self::Dot => ".",
             Self::ColonColon => "::",
-            Self::Question => "?",
             Self::Arrow => "->",
             Self::FatArrow => "=>",
             Self::LParen => "(",
@@ -395,11 +385,13 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendDiagnostic> {
         bytes: source.as_bytes(),
         position: 0,
         tokens: Vec::new(),
+        saw_newline: false,
     };
     lexer.lex_top_level()?;
     lexer.tokens.push(Token {
         kind: TokenKind::Eof,
         span: Span::new(source.len(), source.len()),
+        newline_before: lexer.saw_newline,
     });
     Ok(lexer.tokens)
 }
@@ -409,6 +401,7 @@ struct Lexer<'source> {
     bytes: &'source [u8],
     position: usize,
     tokens: Vec<Token>,
+    saw_newline: bool,
 }
 
 impl Lexer<'_> {
@@ -500,11 +493,9 @@ impl Lexer<'_> {
             b'<' => TokenKind::Less,
             b'>' => TokenKind::Greater,
             b'!' => TokenKind::Bang,
-            b'&' => TokenKind::Amp,
             b'|' => TokenKind::Pipe,
             b'=' => TokenKind::Equal,
             b'.' => TokenKind::Dot,
-            b'?' => TokenKind::Question,
             b'(' => TokenKind::LParen,
             b')' => TokenKind::RParen,
             b'{' => TokenKind::LBrace,
@@ -700,6 +691,9 @@ impl Lexer<'_> {
             while self.position < self.bytes.len()
                 && matches!(self.bytes[self.position], b' ' | b'\t' | b'\r' | b'\n')
             {
+                if matches!(self.bytes[self.position], b'\r' | b'\n') {
+                    self.saw_newline = true;
+                }
                 self.position += 1;
             }
             if self.starts_with(b"//") {
@@ -723,6 +717,7 @@ impl Lexer<'_> {
         self.tokens.push(Token {
             kind,
             span: Span::new(start, self.position),
+            newline_before: std::mem::take(&mut self.saw_newline),
         });
     }
 
@@ -783,7 +778,6 @@ fn keyword(spelling: &str) -> Option<TokenKind> {
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "trait" => TokenKind::Trait,
-        "try" => TokenKind::Try,
         "while" => TokenKind::While,
         "break" => TokenKind::Break,
         "continue" => TokenKind::Continue,
@@ -819,9 +813,9 @@ mod tests {
     #[test]
     fn scans_every_fixed_token() {
         let source = "fn let mut move const struct enum match impl effect handle with if else \
-            catch return for in pub where true false trait try while break continue loop \
+            catch return for in pub where true false trait while break continue loop \
             use as extern mod super requires unsafe \
-            + - * / % == != < > <= >= & && || ! | = += -= *= /= %= .. ..= . :: ? -> => \
+            + - * / % == != < > <= >= && || ! | = += -= *= /= %= .. ..= . :: -> => \
             ( ) { } [ ] , : ;";
         assert_eq!(
             tags(source),
@@ -849,7 +843,6 @@ mod tests {
                 Tag::True,
                 Tag::False,
                 Tag::Trait,
-                Tag::Try,
                 Tag::While,
                 Tag::Break,
                 Tag::Continue,
@@ -872,7 +865,6 @@ mod tests {
                 Tag::Greater,
                 Tag::LessEqual,
                 Tag::GreaterEqual,
-                Tag::Amp,
                 Tag::AndAnd,
                 Tag::OrOr,
                 Tag::Bang,
@@ -887,7 +879,6 @@ mod tests {
                 Tag::DotDotEqual,
                 Tag::Dot,
                 Tag::ColonColon,
-                Tag::Question,
                 Tag::Arrow,
                 Tag::FatArrow,
                 Tag::LParen,

@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ast::{
-    AssignmentOperator, BinaryOperator, BindingMode, CallAssertionMode, CaptureMode, ParameterMode,
-    RawStringDelimiter, Span, StatementTerminator, UnaryOperator,
+    AssignmentOperator, BinaryOperator, ParameterMode, RawStringDelimiter, Span, UnaryOperator,
 };
 use crate::diagnostic::FrontendDiagnosticKind;
 
@@ -188,8 +187,6 @@ pub enum ProjectDiagnosticKind {
         core: LibraryId,
     },
     Frontend(FrontendDiagnosticKind),
-    /// A reachable `generate` item requires the later generation stage.
-    GenerateUnsupported,
     InvalidModuleName {
         name: String,
     },
@@ -318,11 +315,8 @@ pub enum CoreRoleIssue {
     Receiver,
     ParameterMode {
         index: usize,
-        expected: ParameterMode,
+        expected: Option<ParameterMode>,
         actual: Option<ParameterMode>,
-    },
-    ParameterEscape {
-        index: usize,
     },
     ParameterType {
         index: usize,
@@ -543,15 +537,10 @@ pub(crate) struct CoreRoles {
     pub(crate) eq: EntityId,
     pub(crate) partial_ord: CoreMethodRole,
     pub(crate) ord: CoreMethodRole,
-    pub(crate) clone: CoreMethodRole,
-    pub(crate) copy: EntityId,
     pub(crate) drop: CoreMethodRole,
     pub(crate) display: CoreMethodRole,
     pub(crate) debug: CoreMethodRole,
     pub(crate) hash: CoreMethodRole,
-    pub(crate) fn_once: EntityId,
-    pub(crate) fn_mut: EntityId,
-    pub(crate) function: EntityId,
     pub(crate) iterator: CoreIteratorRole,
     pub(crate) iterable: CoreIterableRole,
 }
@@ -686,11 +675,10 @@ pub(crate) enum ResolvedDeclarationKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedFunction {
-    pub(crate) const_span: Option<Span>,
     pub(crate) type_parameters: Vec<ResolvedTypeParameter>,
     pub(crate) effect_parameters: Vec<ResolvedEffectParameter>,
     pub(crate) parameters: Vec<ResolvedParameter>,
-    pub(crate) return_type: Option<Box<ResolvedReturnAnnotation>>,
+    pub(crate) return_type: Option<ResolvedType>,
     pub(crate) effects: Option<ResolvedEffectSet>,
     pub(crate) body: ResolvedBlock,
 }
@@ -709,34 +697,15 @@ pub(crate) struct ResolvedFunctionSignature {
 pub(crate) struct ResolvedParameter {
     pub(crate) span: Span,
     pub(crate) binding: ResolvedBinding,
-    pub(crate) escape: Option<Span>,
     pub(crate) mode: Option<(Span, ParameterMode)>,
-    pub(crate) annotation: Option<ResolvedParameterAnnotation>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResolvedParameterAnnotation {
-    Type(ResolvedType),
-    Shape(ResolvedShape),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResolvedReturnAnnotation {
-    Type(ResolvedType),
-    Shape(ResolvedShape),
+    pub(crate) annotation: Option<ResolvedType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedTypeParameter {
     pub(crate) span: Span,
     pub(crate) binding: ResolvedBinding,
-    pub(crate) bounds: Vec<ResolvedGenericBound>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResolvedGenericBound {
-    Named(Box<ResolvedNamedType>),
-    Shape(ResolvedShape),
+    pub(crate) bounds: Vec<ResolvedNamedType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -890,28 +859,16 @@ pub(crate) enum ResolvedTypeKind {
     Named(Box<ResolvedNamedType>),
     Grouped(Box<ResolvedType>),
     Tuple(Vec<ResolvedType>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedShape {
-    pub(crate) span: Span,
-    pub(crate) kind: ResolvedShapeKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResolvedShapeKind {
-    Callable {
-        parameters: Vec<ResolvedShapeParameter>,
-        return_type: Box<ResolvedType>,
+    Function {
+        parameters: Vec<ResolvedFunctionTypeParameter>,
+        return_type: Option<Box<ResolvedType>>,
         effects: Option<ResolvedEffectSet>,
     },
-    Grouped(Box<ResolvedShape>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedShapeParameter {
+pub(crate) struct ResolvedFunctionTypeParameter {
     pub(crate) span: Span,
-    pub(crate) escape: Option<Span>,
     pub(crate) mode: Option<(Span, ParameterMode)>,
     pub(crate) ty: ResolvedType,
 }
@@ -947,7 +904,6 @@ pub(crate) struct ResolvedBlock {
 pub(crate) struct ResolvedStatement {
     pub(crate) span: Span,
     pub(crate) kind: ResolvedStatementKind,
-    pub(crate) terminator: StatementTerminator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -957,6 +913,11 @@ pub(crate) enum ResolvedStatementKind {
         mutable: Option<Span>,
         annotation: Option<ResolvedType>,
         value: ResolvedExpr,
+    },
+    Alias {
+        binding: ResolvedBinding,
+        annotation: Option<ResolvedType>,
+        place: ResolvedPlace,
     },
     Return(Option<ResolvedExpr>),
     Break,
@@ -969,7 +930,7 @@ pub(crate) enum ResolvedStatementKind {
     Expression(ResolvedExpr),
     IfLet {
         pattern: ResolvedPattern,
-        value: ResolvedExpr,
+        value: ResolvedOperand,
         then_branch: ResolvedBlock,
         else_branch: Option<ResolvedBlock>,
     },
@@ -979,17 +940,33 @@ pub(crate) enum ResolvedStatementKind {
     },
     For {
         bindings: Vec<ResolvedBinding>,
-        iterable: ResolvedExpr,
+        iterable: ResolvedOperand,
         body: ResolvedBlock,
     },
     Loop(ResolvedBlock),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedOperand {
+    Value(Box<ResolvedExpr>),
+    MutPlace {
+        span: Span,
+        place: Box<ResolvedPlace>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedPlace {
     pub(crate) span: Span,
     pub(crate) root: ResolvedReference,
-    pub(crate) fields: Vec<ResolvedSelection>,
+    pub(crate) projections: Vec<ResolvedPlaceProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedPlaceProjection {
+    Field(Box<ResolvedSelection>),
+    TupleField { index: String, origin: OriginRef },
+    Index(Box<ResolvedExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1025,7 +1002,7 @@ pub(crate) enum ResolvedExprKind {
         else_branch: Option<Box<ResolvedExpr>>,
     },
     Match {
-        scrutinee: Box<ResolvedExpr>,
+        scrutinee: ResolvedOperand,
         arms: Vec<ResolvedMatchArm>,
     },
     Handle {
@@ -1047,7 +1024,6 @@ pub(crate) enum ResolvedExprKind {
         operator: (Span, BinaryOperator),
         right: Box<ResolvedExpr>,
     },
-    Propagate(Box<ResolvedExpr>),
     Call {
         callee: Box<ResolvedExpr>,
         arguments: Vec<ResolvedCallArgument>,
@@ -1091,10 +1067,13 @@ pub(crate) enum ResolvedConstructEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResolvedCallArgument {
     Expression(ResolvedExpr),
-    Mode {
+    Mut {
         span: Span,
-        mode: (Span, CallAssertionMode),
         place: ResolvedPlace,
+    },
+    Move {
+        span: Span,
+        reference: ResolvedReference,
     },
 }
 
@@ -1119,19 +1098,13 @@ pub(crate) enum ResolvedPatternKind {
     Float(String),
     String(String),
     Boolean(bool),
-    Binding(ResolvedPatternBinding),
+    Binding(ResolvedBinding),
     Constructor {
         target: ResolvedReference,
         fields: Option<ResolvedPatternFields>,
     },
     Tuple(Vec<ResolvedPattern>),
     Or(Vec<ResolvedPattern>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedPatternBinding {
-    pub(crate) binding: ResolvedBinding,
-    pub(crate) qualifier: Option<(Span, BindingMode)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1160,17 +1133,8 @@ pub(crate) struct ResolvedHandler {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedClosure {
-    pub(crate) captures: Vec<ResolvedCapture>,
     pub(crate) parameters: Vec<ResolvedParameter>,
-    pub(crate) return_type: Option<Box<ResolvedReturnAnnotation>>,
+    pub(crate) return_type: Option<ResolvedType>,
     pub(crate) effects: Option<ResolvedEffectSet>,
     pub(crate) body: ResolvedBlock,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedCapture {
-    pub(crate) span: Span,
-    pub(crate) mode: Option<(Span, CaptureMode)>,
-    pub(crate) reference: ResolvedReference,
-    pub(crate) annotation: Option<ResolvedType>,
 }

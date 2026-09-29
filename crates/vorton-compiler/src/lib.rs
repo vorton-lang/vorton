@@ -34,9 +34,7 @@ pub fn parse(source: &str) -> Result<Program, FrontendDiagnostic> {
 ///
 /// Every source identity and source-backed diagnostic retains its owning
 /// [`LibraryId`]. Every reachable non-core library must directly depend on the
-/// supplied core identity. Reachable `generate` items currently return
-/// [`ProjectDiagnosticKind::GenerateUnsupported`] after frontend and module
-/// graph checks, before declaration or body-name resolution.
+/// supplied core identity.
 pub fn resolve_project(sources: &ProjectSources) -> Result<ResolvedProject, ProjectDiagnostic> {
     resolver::resolve_project(sources)
 }
