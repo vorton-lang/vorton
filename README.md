@@ -75,3 +75,4 @@ cargo test --workspace --locked
 - [编译器设计](docs/design.md)：管线、runtime 与测试
 - [Agent 入口](AGENTS.md)：角色、仲裁顺序与用户保留事项
 - [维护手册](MAINTAINING.md)：日常工作、记录、汇报与外包派发
+- [审计指引](AUDITING.md)：外部审计查什么、怎么挂 Issue
