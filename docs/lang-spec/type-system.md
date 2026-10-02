@@ -1,6 +1,6 @@
 # 类型系统
 
-Vorton 采用局部双向类型推断：具名函数的签名写出，函数体内推断。类型检查同时追踪 effect row（见 [Effect 系统](effects.md)）与 trait bound（见 [Trait 系统](traits.md)）。类型表达式、参数与调用的产生式见[语法](syntax.md)；本页只规定语义。
+Vorton 采用局部双向类型推断：具名函数的签名写出，函数体内推断。类型检查同时追踪注入的 effect（见 [Effect 系统](effects.md)）与 trait bound（见 [Trait 系统](traits.md)）；能力由编译器另行推断，不属于类型。类型表达式、参数与调用的产生式见[语法](syntax.md)；本页只规定语义。
 
 ## 类型
 
@@ -10,7 +10,7 @@ Vorton 采用局部双向类型推断：具名函数的签名写出，函数体�
 |------|------|
 | `Int` | 固定 64 位有符号整数，范围 −2^63 至 2^63−1 |
 | `Float` | IEEE 754 binary64 浮点数 |
-| `Str` | 字符串 |
+| `Str` | 不可变字符串 |
 | `Bool` | 布尔值 |
 | `Unit` | 唯一值为 `()` 的单位类型 |
 | `Never` | 底类型，没有值 |
@@ -27,7 +27,7 @@ Vorton 采用局部双向类型推断：具名函数的签名写出，函数体�
 
 ### 函数类型
 
-`fn(P₁, ..., Pₙ) -> R with ε` 是普通类型，可以作为参数、返回值、字段、容器元素与类型实参。参数可以带 `mut`／`move` 模式；两个函数类型相等，当且仅当参数个数、参数类型与模式、返回类型分别相等；effect 的匹配规则见 [Effect 系统](effects.md)。函数值不支持 `==`。
+`fn(P₁, ..., Pₙ) -> R with ε` 是普通类型，可以作为参数、返回值、字段、容器元素与类型实参。参数与返回值可以带借出方式 `&` 或 `&mut`。两个函数类型相等，当且仅当参数个数、各参数的类型与借出方式、返回类型与借出方式分别相等；effect 的匹配规则见 [Effect 系统](effects.md)。函数值不支持 `==`。
 
 ### Option 与 Ordering
 
@@ -35,9 +35,9 @@ Vorton 采用局部双向类型推断：具名函数的签名写出，函数体�
 
 ### Language intrinsic 与 core 角色
 
-以下类型由语言直接提供，不来自任何源文件：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`List<T>`、`Map<K, V>`、`Range<T>`、`Ptr<T>`。
+以下类型由语言直接提供，不来自任何源文件：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`List<T>`、`Map<K, V>`、`Range<T>`、`Region`、`Handle<T>`、`Shared<T>`、`Weak<T>`、`Cell<T>`、`Ptr<T>`。
 
-`Option`、`Ordering`，以及 trait `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Display`、`Debug`、`Drop`、`Iterator`、`Iterable` 由宿主指定的唯一官方 core root 声明。
+`Option`、`Ordering`，以及 trait `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Display`、`Debug`、`Drop`、`Clone`、`Copy`、`Iterator`、`Iterable` 由宿主指定的唯一官方 core root 声明。
 
 这些短名在 Type namespace 中不能被其他声明、import 或类型参数遮蔽；它们不是关键字，不影响 Value 与 Effect namespace 的同名绑定。
 
@@ -45,11 +45,13 @@ Vorton 采用局部双向类型推断：具名函数的签名写出，函数体�
 
 | 函数 | 含义 |
 |---|---|
-| `print(value)` | 把 `value` 的文本形式和一个换行写到标准输出；`value` 实现 `Display`。带 `console` effect |
+| `print(value)` | 把 `value` 的文本形式和一个换行写到标准输出；`value` 实现 `Display`。需要 `console` 能力 |
 | `assert(condition: Bool, message: Str)` | `condition` 为 `false` 时 panic，panic 信息包含 `message` |
 | `panic(message: Str) -> Never` | 以 `message` panic |
+| `replace(place: &mut T, value: T) -> T` | 把 `value` 放进 `place`，返回原来的内容 |
+| `swap(a: &mut T, b: &mut T)` | 交换两个位置的内容 |
 
-两个参数都按普通调用从左到右求值，因此 `assert` 的 `message` 总会被求值。
+`print` 的实参与方法调用的 receiver 一样自动只读借出，调用处不写 `&`。实参按普通调用从左到右求值，因此 `assert` 的 `message` 总会被求值。
 
 List 字面量产生 `List<T>`，range 表达式产生 `Range<Int>`。`Ptr<T>` 只在 `unsafe` 中使用；0.1 中 `Ptr` 与非 RC 的 `extern type` 不能出现在泛型聚合的元素类型里（例如 `List<Ptr<T>>`）。
 
@@ -57,126 +59,232 @@ List 字面量产生 `List<T>`，range 表达式产生 `Range<Int>`。`Ptr<T>` �
 
 字段的 visibility 与编译器所需的布局信息分离。Public struct 的 private 字段可以包含 private 类型；只有 private 类型进入 public 签名、pub 字段或 public enum payload 时才报错。
 
-## 值与资源
+## 值与实体
 
 ### 值
 
-普通数据是**值**：数值、`Str`、tuple、不含资源的 struct 与 enum、`List`、`Map`、函数值。
+**值**没有身份：`Int`、`Float`、`Bool`、`Unit`、`Str`、`Handle<T>`、`Range<Int>`，以及字段、payload 与元素全部是值的 struct、enum、tuple，和只捕获值的函数值。
 
-- 赋值、传参、返回、存进字段或容器，都是逻辑上的拷贝。之后修改任何一份，其他各份不受影响。
-- 值之间没有引用，因此不会形成环。图结构用 arena 加下标或句柄表达。
-- 底层用引用计数实现：唯一持有时原地修改，共享时写时复制。值何时释放不可观察。
+- 赋值、传参、返回、存进字段或容器，都是拷贝。原来那份照样可用，之后修改任何一份都不影响另一份。
+- 值类型实现编译器定义的 `Copy`，用户不能为其他类型实现它。泛型代码中，只有 `T: Copy` 的变量在移交后还能继续使用。
+- `Str` 不可变。拼接与插值产生新的 `Str`。
 
-```vorton
-let a = [1, 2, 3]
-let mut b = a
-b.push(4)            // a 仍是 [1, 2, 3]
-```
+### 实体
 
-### 资源
+**实体**有身份：`List`、`Map`、`Region`、`Shared`、`Weak`、`Cell`、实现 `Drop` 的类型，以及字段、payload、元素或捕获中含有实体的类型。
 
-实现 `Drop` 的类型是**资源**；字段、payload、元素或捕获中含有资源的 struct、enum、tuple、容器与闭包，本身也是资源。
+- 实体不会被隐式复制。不加标记的赋值、传参、返回与存储都是**移交**：移交之后，原来的名字不能再使用，除非重新赋值。需要副本时显式调用 `clone()`，要求类型实现 `Clone`。
+- 实体的所有者是一个变量、另一个实体（作为字段、payload 或元素），或一个 Region。所有者结束时实体释放：
+  - 同一作用域中的局部变量，在作用域结束时按声明的逆序释放；
+  - 实体先释放自己，再按声明顺序释放字段；
+  - Region 释放时，其中的实体按插入的逆序释放；
+  - 已经移交出去的实体不在原处释放。
+- 实现 `Drop` 的实体在释放时先调用 `drop`。`Drop::drop` 的 effect 限制见 [Effect 系统](effects.md)。
 
-- 资源不能复制。赋值、传参、返回与存储都是移交；移交之后，原来的名字不能再使用。
-- 资源在所属作用域结束时释放，同一作用域中按声明的逆序；已经移交出去的资源不在原处释放。`Drop::drop` 的 effect 限制见 [Effect 系统](effects.md)。
-- 资源作为泛型实参时的规则待定。
+只有局部变量与按值传入的参数可以整体移走。不能从字段（`a.b`）、下标（`xs[i]`）或借出中移走实体。要取出这些位置里的实体，用 `replace`、`swap`、容器的 `remove`，或者移走整个所有者再用模式解构。
 
-## 参数与修改
+## 借出
 
-### 参数模式
+### 借出方式
 
-| 参数写法 | 调用处 | 含义 |
-|---|---|---|
-| `x: T` | `f(a)` | 只读。被调函数看到一个值，不能修改它 |
-| `x: mut T` | `f(mut place)` | 就地修改调用方的这份数据 |
-| `x: move T` | `f(move name)` | 取走调用方的资源 |
-
-Receiver 同理：`self` 只读，`self: mut Self` 就地修改调用者，`self: move Self` 取走调用者。方法调用不需要调用处标记，但 `self: mut Self` 方法只能在可修改的位置上调用。
-
-`mut` 参数的语义等价于“传入、修改、调用结束时写回”，底层传地址、不复制。它不是可以保存的引用：把它赋给别的变量、存进字段、返回或被闭包捕获，得到的都是当时的值拷贝。不能把资源从 `mut` 参数中移走。
-
-`move` 只用于资源；参数类型不是资源时写 `move` 是编译错误。
-
-### 统一的 `mut` 规则
-
-`mut` 写在**位置**前面，表示对这个位置就地、独占的访问；在访问持续期间，原路径不能以任何方式使用：
-
-| 写法 | 访问持续到 |
+| 写法 | 含义 |
 |---|---|
-| `f(mut place)` | 调用结束 |
-| `for x in mut place { ... }` | 循环结束；`x` 是当前元素的就地别名 |
-| `let t = mut place` | `t` 最后一次使用 |
-| `match mut place { ... }`、`if let P = mut place { ... }` | 分支结束；模式绑定是被匹配部分的就地别名 |
+| `&place` | 只读借出：借出期间只能读，不能写，也不能移走 |
+| `&mut place` | 可变借出：借出期间独占，可以读写，但不能移走 |
 
-对就地别名的修改，包括整体赋值 `t = v`，都直接作用在原位置上。
+借出可以出现在以下位置，写法与 Rust 同形：
 
-`mut` 写在**变量名**前面（`let mut n`），表示这个变量本身可以修改。
+| 位置 | 拿走（默认） | 只读借出 | 可变借出 |
+|---|---|---|---|
+| 参数 | `x: T` | `x: &T` | `x: &mut T` |
+| 调用处 | `f(x)` | `f(&x)` | `f(&mut x)` |
+| receiver | `self` | `&self` | `&mut self` |
+| 返回 | `-> T` | `-> &T` | `-> &mut T` |
+| 绑定 | `let t = x` | `let t = &x` | `let t = &mut x` |
+| 循环 | `for e in xs` | `for e in &xs` | `for e in &mut xs` |
+| 匹配 | `match x` | `match &x` | `match &mut x` |
 
-一个位置可以修改，当且仅当它的根是以下之一：`let mut` 变量、`mut` 参数、`self: mut Self` 的 `self`、就地别名。修改包括整体赋值、字段赋值、下标赋值 `xs[i] = v`、复合赋值、调用 `self: mut Self` 方法，以及以 `mut` 传入。
+对值来说，“拿走”就是拷贝。
 
-`for x in mut place` 在 0.1 中只对 `List`（逐个元素）与 `Map`（逐个值）成立。
+- **借出不是类型。** `&T` 与 `&mut T` 只能写在参数、返回与 `let` 标注处，不能出现在字段、enum payload、tuple 元素、容器元素或泛型实参中。闭包也不能捕获借出绑定。要跨调用指称实体，用 `Handle<T>`。
+- **自动解引用。** 借出绑定 `t` 在表达式中就代表它借到的位置：字段、方法、运算符与赋值都直接作用在原位置上，包括整体赋值 `t = v`。没有 `*` 运算符。
+- **再借出。** 把借出绑定传给借出参数，同样要写 `&t` 或 `&mut t`。不写就是从借出处移走，这是错误。借出绑定不能写成 `let mut`：它不能改为借出别处。
+- **方法调用。** receiver 按方法声明自动借出，调用处不写 `&`。`&mut self` 方法只能在可修改的位置上调用。
+- **临时值。** `&` 与 `&mut` 也可以作用于不是位置的表达式，例如 `f(&make())`；临时值活到所在语句结束。
 
-### 独占规则
+可变借出与赋值要求位置可修改：位置的根是 `let mut` 变量、带 `mut` 的按值参数（`mut x: T`）、`&mut` 借出、`&mut self` 的 `self`，或经句柄访问、且当前函数可写地持有其 Region 的实体。
 
-编译器只检查以下两条，两条都只看一次调用或一个代码范围：
+### 借出持续多久
 
-1. 同一次调用中，一份数据以 `mut` 传入后，不能再以任何方式传入这次调用。
-2. 就地访问持续期间，不能再访问被占用的路径及其任何部分。下标不区分：`xs[i]` 与 `xs[j]` 都算作路径 `xs`。
+| 借出 | 持续到 |
+|---|---|
+| 调用实参 | 调用结束 |
+| `let t = &…`、`let t = &mut …` | `t` 最后一次使用 |
+| `for e in &…`、`for e in &mut …` | 循环结束 |
+| `match &…`、`match &mut …`、`if let` | 分支结束 |
+| 函数返回的借出 | 调用方最后一次使用返回结果 |
+
+### 返回借出
+
+`-> &T` 与 `-> &mut T` 返回的位置必须来自以借出方式传入的参数：`-> &T` 可以来自 `&` 或 `&mut` 参数，`-> &mut T` 只能来自 `&mut` 参数。局部变量与按值参数在返回时已经结束，不能借出返回。
+
+返回借出的调用本身就是一个位置：可以直接使用，也可以用 `let` 绑定，绑定得到同样方式的借出。调用方使用这个结果期间，这次调用中所有以借出方式传入的实参都视为仍被借出，方式与传入时相同。这条规则比按参数精确追踪粗，但不需要任何标注；多数情况下只有 `self` 一个借出实参。
 
 ```vorton
-f(mut world, world.log)                  // 错误：违反第 1 条
-let t = mut world.player
-world.player.hp = 0                      // 错误：t 之后还会使用
-t.hp -= 1
+impl Inventory {
+    fn items(&self) -> &List<Item> { &self.items }
+    fn items_mut(&mut self) -> &mut List<Item> { &mut self.items }
+    fn into_items(self) -> List<Item> { self.items }
+}
+
+let n = inv.items().len()
+inv.items_mut().push(sword)
+let xs = inv.items()          // 只读借出绑定；xs 最后一次使用之前，inv 不能修改
 ```
 
-### 快照与未读修改
+### 别名与修改互斥
 
-只读的 `let t = a.b` 得到一份快照：之后通过 `a` 的修改不会反映到 `t`。
+同一时刻，一个位置要么被任意多处只读借出，要么只被一处可变借出：
 
-对 `let mut` 变量的修改，如果之后从未被读取，是编译错误。这能捕获本应写成就地别名、却修改了副本的错误：
+1. 可变借出期间，被借出的位置及其任何部分不能被别处借出、写入或移走。别处仍可以读取其中值类型的部分：读取是当场拷贝，读到的是当前状态。
+2. 只读借出期间，被借出的位置及其任何部分不能被写入、可变借出或移走。
+3. 同一次调用的各个实参之间同样适用：一个位置以 `&mut` 传入后，不能再以任何方式传入这次调用。
+
+判断两个位置是否重叠时：
+
+- 字段按名字区分：`a.b` 与 `a.c` 不重叠。
+- 下标按值区分：`xs[i]` 与 `xs[j]` 只在 `i == j` 时重叠；`Map` 按键区分。
+- 经句柄的位置按句柄区分；不同类型的句柄必然不重叠。
+- 容器的结构（长度与键的集合）与元素是不同的部分。只读取结构的操作（`len`、`is_empty`、`contains_key` 等）不与元素的借出冲突；改变结构的操作（`push`、`insert`、`remove` 等）与任何元素的借出冲突。
+
+编译器能证明两个位置不重叠时，不做检查；证明不了时，在后一个借出开始处做运行时检查，重叠则 panic。两处写的是完全相同的位置表达式、且中间没有修改下标时，是编译错误。
 
 ```vorton
-let mut t = world.player    // 副本
-t.hp -= 1                   // 错误：修改结果从未被读取；就地修改写作 let t = mut world.player
+for i in 0..n {
+    for j in i + 1..n {
+        resolve(&mut bodies[i], &mut bodies[j])   // 能证明 i != j，不做检查
+    }
+}
+resolve(&mut bodies[a], &mut bodies[b])           // 运行时检查 a != b
+for e in &mut enemies {
+    e.aim(enemies[k].pos)                         // pos 是值，读取不冲突
+}
 ```
+
+语义只是“重叠则 panic”，与编译器能证明多少无关。每一处保留下来的运行时检查都作为代价导出；性能断言可以要求某处不留运行时检查。
+
+### 未读修改
+
+对值类型 `let mut` 变量的修改，如果之后从未被读取，是编译错误。这能捕获修改了拷贝、本应修改原位置的错误：
+
+```vorton
+let mut p = world.player.pos   // 拷贝
+p.x += 1.0                     // 错误：修改结果从未被读取；修改原位置写作 let p = &mut world.player.pos
+```
+
+## Region 与句柄
+
+### Region
+
+`Region` 是实体，用来存放寿命相同的一组实体，并发放指向它们的句柄。一个 Region 可以存放任意类型。
+
+- `Region::new()` 创建空 Region。Region 和其他实体一样由变量、字段或另一个 Region 拥有。
+- `r.insert(value)` 把 `value` 移入 `r`，返回 `Handle<T>`；`r.remove(h)` 把实体移出并返回它，之后指向它的句柄全部失效；`r.contains(h)` 判断句柄是否仍然有效。`insert` 与 `remove` 要求可变借出 `r`。
+- 没有隐式的 Region。局部变量拥有的实体不在任何 Region 中，用借出交给其他函数。
+
+### 句柄
+
+`Handle<T>` 是值：可以拷贝、用 `==` 判断是否指向同一实体、哈希。句柄不让实体存活，自身也不带访问权。
+
+经句柄访问实体的写法是 `h.field`、`h.method()`、`&h` 与 `&mut h`，它们都作用在句柄指向的实体上。整体替换实体用 `replace(&mut h, value)`；`h = other` 只改变句柄变量本身。
+
+每次经句柄访问，运行时检查三件事：
+
+1. 实体仍然存在。实体已被移出，或它所在的 Region 已释放时，访问 panic。
+2. 实体所在的 Region 被当前函数持有；写入与可变借出要求可写地持有。
+3. 与正在进行的借出不冲突，见[别名与修改互斥](#别名与修改互斥)。
+
+句柄失效后，访问只会失败，绝不会访问到别的实体。
+
+### 持有
+
+函数持有一个 Region，当且仅当这个 Region 是函数的某个参数或局部绑定本身，或者能从它们经字段路径到达。经句柄或容器元素才能到达的 Region 不算持有；需要时先把它借出到局部绑定，例如 `let level = &mut world.levels[i]`。
+
+经只读借出到达的 Region 只能读；经可变借出、`let mut` 变量或 `mut` 按值参数到达的 Region 可以写。因此函数签名显示了它可能读写哪些 Region。
+
+```vorton
+struct Enemy { target: Handle<Player>, hp: Int }
+
+fn chase(level: &mut Region, e: Handle<Enemy>) {
+    e.target.hp -= 10          // 检查 e 与 e.target 仍在、都在 level 中
+}
+```
+
+## 共同所有与内部可变
+
+### Shared 与 Weak
+
+- `Shared::new(value)` 创建共同所有的 `value`。`s.clone()` 增加一个所有者，不复制内容；最后一个所有者释放时，内容随之释放。
+- 经 `Shared` 只能读：`s.field`、`&s`。要修改共享的内容，在其中放 `Cell<T>`。
+- `Shared::downgrade(&s)` 返回 `Weak<T>`，它不让内容存活；`w.upgrade()` 返回 `Option<Shared<T>>`。
+
+### Cell
+
+`Cell<T>` 是内部可变性的唯一来源。`c.borrow()` 返回 `&T`，`c.borrow_mut()` 返回 `&mut T`；两者都只要求只读地访问 `c`，借出状态在运行时检查：可变借出期间再次借出，或只读借出期间可变借出，都会 panic。
+
+### 成环
+
+值、借出与句柄都不会造成泄漏：句柄成环不影响释放。只有 `Shared` 之间可能成环。一个类型经 `Shared` 的强引用能回到自身、且路径上有 `Cell` 时，编译器判定它可能成环，对它启用运行时环回收；其余 `Shared` 只做计数。
+
+可能成环的类型中不能含有实现 `Drop` 的类型：环回收的时机不确定，而实体的释放必须是确定的。
+
+`Shared` 的计数是否原子、`Cell` 用借用标记还是锁，由编译器按是否跨线程决定。0.1 没有并发。
 
 ## 函数值与闭包
 
 具名函数可以作为值使用。带位置字段的 enum constructor 不是函数值，需要时写成闭包：`fn(x) { Option::Some(x) }`。
 
-闭包在创建时按值捕获它用到的外部变量。闭包不能修改外部变量；捕获资源会把它移交给闭包，这个闭包因此成为资源。
+闭包在创建时按值捕获它用到的外部变量：值被拷贝，实体被移交给闭包，这个闭包因此成为实体。闭包不能修改外部变量，也不能修改自己捕获的变量，不能捕获借出绑定。需要共享并修改的状态，捕获 `Shared<Cell<T>>`。
 
 存在字段中的函数值通过 `(value.field)(args)` 调用。
 
 ## 容器
 
-`List<T>` 与 `Map<K, V>` 遵循值语义。`xs[i]` 读取得到一份值；在可修改的位置上，`xs[i] = v` 与 `m[k] = v` 修改元素。下标越界时 panic。元素含资源的容器是资源。容器 API 不在本页定义。
+`List<T>` 与 `Map<K, V>` 是实体。
+
+- `xs[i]` 与 `m[k]` 是位置。元素是值时，读取得到拷贝；元素是实体时，要借出（`&xs[i]`）、`clone()` 或用 `remove` 取出。
+- 在可修改的位置上，`xs[i] = v` 替换元素，`m[k] = v` 插入或替换。`xs[i]` 越界、读取 `m[k]` 时键不存在，都会 panic。
+- `xs.clone()` 复制整个容器，要求元素实现 `Clone`。
+- 借出遍历 `for e in &xs` 与 `for e in &mut xs` 在 0.1 中只对 `List`（逐个元素）与 `Map`（逐个值）成立。
+
+容器 API 不在本页定义。
 
 ## 代价模型
 
 以下保证不需要阅读编译器也能推断；其余优化一律尽力而为，不可依赖：
 
-1. 唯一持有的值被修改时，原地修改，不复制。
-2. 赋值、只读传参、返回、存进字段或容器：O(1)，不复制内容。
-3. `mut` 传参与就地别名：O(1)。
-4. 修改一份正被共享的值时，先复制一次。复制是浅的：嵌套容器只复制被修改路径上的那几层，其余部分继续共享。
-5. 字段只含标量的 struct 与 tuple，在 `List` 中连续存放，布局与 C 数组一致。
-6. 资源在所属作用域结束时释放。
+1. 实体的移交、借出与返回：O(1)，不复制内容。
+2. 值的拷贝与值的大小成正比；`Str` 与 `Handle` 的拷贝是 O(1)。
+3. `clone()` 复制全部内容；`Shared` 的 `clone()` 只增加计数。
+4. 字段只含标量的 struct 与 tuple，在 `List` 中连续存放，布局与 C 数组一致。
+5. 实体在所有者结束时释放，顺序见[实体](#实体)。
+6. 下标越界、句柄失效与持有、同一位置的重叠借出、`Cell` 的借用都在运行时检查；编译器能证明成立的检查省略，其余作为代价导出。
 7. 函数在尾位置直接调用自身时不增长栈。其他尾调用在 0.1 中不作保证，之后提供。
 
 ## 推断
 
 ### 签名与函数体
 
-- 具名函数、方法与 trait 方法的每个参数都必须写类型；省略返回类型表示 `Unit`。
+- 具名函数、方法与 trait 方法的每个参数都必须写类型与借出方式；省略返回类型表示 `Unit`。
 - 函数体内的局部变量、闭包参数与闭包返回类型由推断得到。期望类型从外向内传递：`let` 标注、参数类型、返回类型与字段类型都会约束其中的表达式。例如空列表 `[]` 需要期望类型。
 - 整数字面量是 `Int`，浮点字面量是 `Float`；数值之间没有隐式转换。
 - 局部 `let` 不泛化：同一个绑定只有一个类型。
 
 ### 泛型
 
-泛型函数显式声明类型参数，例如 `fn first<T>(xs: List<T>) -> Option<T>`。每次调用由实参与期望类型推断类型实参；调用处不能显式写类型实参。0.1 不支持多态递归：递归调用必须使用与自身相同的类型实参。
+泛型函数显式声明类型参数，例如 `fn first<T: Copy>(xs: &List<T>) -> Option<T>`。每次调用由实参与期望类型推断类型实参；调用处不能显式写类型实参。0.1 不支持多态递归：递归调用必须使用与自身相同的类型实参。
+
+类型参数在泛型代码中按实体对待：没有 `Copy` bound 时，移交之后不能再使用。
 
 ### 类型相等
 
@@ -184,14 +292,14 @@ t.hp -= 1                   // 错误：修改结果从未被读取；就地修�
 
 ## 表达式与语句
 
-- **运算符**：`+ - * / %` 与一元 `-` 要求两侧同为 `Int` 或同为 `Float`。`== !=` 要求类型实现 `PartialEq`；`< > <= >=` 要求实现 `PartialOrd`，见[比较 trait](traits.md#比较-trait)。`&& || !` 作用于 `Bool`。
-- **调用**：实参按参数模式检查。只读参数接受任意表达式；`mut` 参数要求 `mut place`；`move` 参数要求 `move name`。
+- **运算符**：`+ - * / %` 与一元 `-` 要求两侧同为 `Int` 或同为 `Float`。`== !=` 要求类型实现 `PartialEq`；`< > <= >=` 要求实现 `PartialOrd`，见[比较 trait](traits.md#比较-trait)。比较运算符自动只读借出两侧。`&& || !` 作用于 `Bool`。
+- **调用**：实参按参数的借出方式检查。`&T` 参数要求 `&e`，`&mut T` 参数要求 `&mut place`，按值参数接受任意表达式：实体从位置移走，值被拷贝。
 - **字段与构造**：struct 构造必须给出全部字段，且不能有多余字段；`..base` 用给定的值补齐其余字段。
 - **List 字面量**：所有元素同型。**Range**：`a..b` 与 `a..=b` 的两端都是 `Int`。
 - **代码块、`if`、`match`**：值的规则见[语法](syntax.md#代码块与语句)。控制无法越过的代码块类型为 `Never`：其中某一项是 `return`、`break`、`continue`，或类型为 `Never` 的表达式，或没有 `break` 的 `loop`。`if` 与 `match` 的各分支必须同型；没有 `else` 的 `if` 类型为 `Unit`。`match` 必须穷尽，见[模式匹配](patterns.md)。
-- **字符串插值**：`"${e}"` 中的 `e` 要求实现 `Display`，结果为 `Str`。
+- **字符串插值**：`"${e}"` 只读借出 `e`，要求它实现 `Display`，结果为 `Str`。
 - **`catch`、`handle`**：见 [Effect 系统](effects.md)。
-- **`for x in coll`**：`coll` 实现 `Iterable`；`Range<Int>` 直接编译为计数循环。
+- **`for x in e`**：`e` 是 `&place` 或 `&mut place` 时，按[容器](#容器)借出遍历；`e` 是 `Range<Int>` 时编译为计数循环；`e` 是按值的 `List` 或 `Map` 时拿走它并逐个产出元素；`e` 实现 `Iterator` 时拿走它并反复调用 `next`；`e` 实现 `Iterable` 时先调用 `iter`。
 
 同一表达式中，子表达式从左到右求值：被调函数或 receiver 先于参数，参数依次求值。复合赋值 `p op= e` 只求值 `e` 一次，然后读取 `p` 的当前值、运算并写回；`e` 失败时不写回。
 
@@ -240,11 +348,11 @@ let overflow = -min                   // 运行时 panic
 `receiver.method(args)` 总是方法调用，按以下顺序查找：
 
 1. receiver 类型的固有方法；
-2. `Str`、`Int`、`Float`、`List`、`Map` 的语言内建方法；
+2. `Str`、`Int`、`Float`、`List`、`Map`、`Region`、`Shared`、`Weak`、`Cell` 的语言内建方法；
 3. receiver 类型可用的 trait impl；
 4. receiver 是带 bound 的类型参数时，通过 bound 中的 trait 查找。
 
-找不到时报错。
+receiver 是 `Handle<T>` 时，先按 `Handle` 自身的方法查找，再按 `T` 查找。找不到时报错。
 
 ## 作用域
 
@@ -259,4 +367,7 @@ let overflow = -min                   // 运行时 panic
 
 - effect 在函数签名中的写法（Milestone 4 定稿）。
 - 派生（derive）的写法。
-- 资源作为泛型实参的规则。
+- 按类型遍历 Region 中全部实体的写法。
+- 可能为空的借出返回，例如容器按键查找（Rust 的 `Option<&T>`）。
+- 用户类型的借出遍历。
+- Region 的追踪回收策略。

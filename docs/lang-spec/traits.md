@@ -2,23 +2,23 @@
 
 Trait 提供有界多态。具体 receiver 在类型检查时解析到唯一 impl；受 trait bound 约束的类型变量通过隐式 dictionary evidence 调用。Evidence 的目标表示不属于语言规范。
 
-宿主指定的唯一官方 core root 以普通源码声明公开 `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Drop`、`Display`、`Debug`、`Hash`、`Iterator` 与 `Iterable`。这些 trait 及其成员都保留该 core 的 `LibraryId`、源码与 span，没有平行的语言内建声明。下文 `Show`、`Describable` 等是示例中显式声明的普通 trait。
+宿主指定的唯一官方 core root 以普通源码声明公开 `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Drop`、`Clone`、`Copy`、`Display`、`Debug`、`Hash`、`Iterator` 与 `Iterable`。这些 trait 及其成员都保留该 core 的 `LibraryId`、源码与 span，没有平行的语言内建声明。下文 `Show`、`Describable` 等是示例中显式声明的普通 trait。
 
-官方 core 的成员 identity 包括 `PartialEq::eq`、`PartialOrd::partial_cmp`、`Ord::cmp`、`Drop::drop`、`Display::to_str`、`Debug::debug`、`Hash::hash`、`Iterable::{Item, Iter, iter}` 与 `Iterator::{Item, next}`。`Eq` 没有新增成员。名称解析阶段核对这些 identity，但不按命名习惯发明额外成员、签名、impl 或运行时操作；trait 与 impl 的选择在类型检查阶段决定。
+官方 core 的成员 identity 包括 `PartialEq::eq`、`PartialOrd::partial_cmp`、`Ord::cmp`、`Drop::drop`、`Clone::clone`、`Display::to_str`、`Debug::debug`、`Hash::hash`、`Iterable::{Item, Iter, iter}` 与 `Iterator::{Item, next}`。`Eq` 与 `Copy` 没有新增成员。名称解析阶段核对这些 identity，但不按命名习惯发明额外成员、签名、impl 或运行时操作；trait 与 impl 的选择在类型检查阶段决定。
 
-值可以直接复制，没有 `Clone` 或 `Copy` trait；实现 `Drop` 的类型是资源，不能复制。见[类型系统](type-system.md)。
+`Copy` 标记值类型，只由编译器实现；`Clone` 提供显式复制。值与实体的区分见[类型系统](type-system.md#值与实体)。
 
 ## Trait 声明
 
 ```vorton
 trait Show {
-    fn to_str(self) -> Str
+    fn to_str(&self) -> Str
 }
 ```
 
 Trait 声明一组类型必须实现的方法。`Self` 是 owner 作用域内的特殊类型，指实现该 trait 的具体类型；它不是全局内建名。
 
-Trait 方法的 receiver 有三种写法：`self` 只读，`self: mut Self` 就地修改调用者，`self: move Self` 取走调用者（只用于资源）。完整产生式见[语法](syntax.md#program-与声明)。
+Trait 方法的 receiver 有三种写法：`&self` 只读借出调用者，`&mut self` 可变借出调用者，`self` 拿走调用者。完整产生式见[语法](syntax.md#program-与声明)。
 
 ### Visibility
 
@@ -48,35 +48,42 @@ Trait 成员只有方法签名，没有函数体。Trait 声明中出现方法�
 
 ## 官方 core 协议
 
-仓库中的 [`core/root.vorton`](../../core/root.vorton) 是下列声明的源码 authority。除下一节的四个比较 trait 外，形状固定如下；所有方法都没有默认 body，省略 `with` 的位置保留按 impl 关联的 effect scheme：
+仓库中的 [`core/root.vorton`](../../core/root.vorton) 是下列声明的源码 authority；它在实现切换到新的借出写法时同步为下列形状。除下一节的四个比较 trait 外，形状固定如下；所有方法都没有默认 body，省略 `with` 的位置保留按 impl 关联的 effect scheme：
 
 ```vorton
 pub trait Drop {
-    fn drop(self: mut Self)
+    fn drop(&mut self)
 }
 
+pub trait Clone {
+    fn clone(&self) -> Self
+}
+pub trait Copy: Clone {}
+
 pub trait Display {
-    fn to_str(self) -> Str
+    fn to_str(&self) -> Str
 }
 pub trait Debug {
-    fn debug(self) -> Str
+    fn debug(&self) -> Str
 }
 pub trait Hash {
-    fn hash(self) -> Int
+    fn hash(&self) -> Int
 }
 
 pub trait Iterator {
     type Item
-    fn next(self: mut Self) -> Option<Self::Item>
+    fn next(&mut self) -> Option<Self::Item>
 }
 pub trait Iterable {
     type Item
     type Iter: Iterator<Item = Self::Item>
-    fn iter(self) -> Self::Iter
+    fn iter(&self) -> Self::Iter
 }
 ```
 
-`Display` 与 `Debug` 是不同的方法 identity。`Iterator`／`Iterable` 的关联类型与方法引用必须保持上述 owner 关系。
+`Display` 与 `Debug` 是不同的方法 identity。`Iterator`／`Iterable` 的关联类型与方法引用必须保持上述 owner 关系。`Iterator` 产出拥有的元素：迭代器是普通实体，不能保存借出，所以 `iter` 返回的迭代器必须自己持有所需的状态，例如下标、句柄或拷贝。
+
+`Copy` 只由编译器为值类型实现，用户写 `impl Copy` 是错误。`Clone` 对值类型就是拷贝；对不实现 `Drop` 的实体，编译器在全部字段都实现 `Clone` 时提供结构实现；实现 `Drop` 的类型默认不能复制，需要时显式 `impl Clone`。
 
 ## 比较 trait
 
@@ -84,19 +91,19 @@ pub trait Iterable {
 
 ```text
 PartialEq:
-  eq(self, other: Self) -> Bool with {}
+  eq(&self, other: &Self) -> Bool with {}
 
 Eq: PartialEq
   无新增方法
 
 PartialOrd: PartialEq
-  partial_cmp(self, other: Self) -> Option<Ordering> with {}
+  partial_cmp(&self, other: &Self) -> Option<Ordering> with {}
 
 Ord: Eq + PartialOrd
-  cmp(self, other: Self) -> Ordering with {}
+  cmp(&self, other: &Self) -> Ordering with {}
 ```
 
-`self` 与 `other` 都是只读参数，比较方法本身是纯的；运算数在调用前的求值 effect 仍按从左到右规则传播。`Ordering` 的三个 variant 是 `Ordering::Less`、`Ordering::Equal`、`Ordering::Greater`，见[类型系统](type-system.md#option-与-ordering)。
+`self` 与 `other` 都是只读借出，比较运算符自动借出两侧运算数，比较方法本身是纯的；运算数在调用前的求值 effect 仍按从左到右规则传播。`Ordering` 的三个 variant 是 `Ordering::Less`、`Ordering::Equal`、`Ordering::Greater`，见[类型系统](type-system.md#option-与-ordering)。
 
 `==` 唯一 dispatch 到 `PartialEq::eq`，`!=` 对同一次调用结果取反；没有 `ne` 成员或第二条相等路径。四个排序运算符各只求值一次 `PartialOrd::partial_cmp`：
 
@@ -139,13 +146,13 @@ Trait 方法省略外层 `with` 时，该方法拥有按选定 impl 确定的完
 
 ```vorton
 trait Fetch {
-    fn fetch<effect E>(self, callback: fn(Str) with {E})
+    fn fetch<effect E>(&self, callback: fn(Str) with {E})
 }
 
 struct Memory {}
 
 impl Fetch for Memory {
-    fn fetch<effect E>(self, callback: fn(Str) with {E}) {
+    fn fetch<effect E>(&self, callback: fn(Str) with {E}) {
         callback("cached")
     }
 }
@@ -153,13 +160,13 @@ impl Fetch for Memory {
 struct Disk {}
 
 impl Fetch for Disk {
-    fn fetch<effect E>(self, callback: fn(Str) with {E}) {
+    fn fetch<effect E>(&self, callback: fn(Str) with {E}) {
         callback(read_file("data.txt"))
     }
 }
 ```
 
-于是 `Memory` 得到 `Fetch::fetch(E) = E`，`Disk` 得到 `Fetch::fetch(E) = {fs, E}`；完全不调用 callback 的实现可以不传播 `E`。
+于是 `Memory` 得到 `Fetch::fetch(E) = E`，`Disk` 得到 `Fetch::fetch(E) = {fail<FsError>, E}`；`Disk` 需要的 `fs` 是能力，不进入 scheme。完全不调用 callback 的实现可以不传播 `E`。
 
 受 `T: Trait` 约束的泛型调用方保留正式的方法 scheme；具体调用使用唯一选定 impl 的映射。类型实参、callback 的 effect 实参、trait evidence 与方法 scheme 必须来自同一次实例化。每个方法 scheme 独立；需要引用方法 scheme 时使用 [`TraitPath::method<...>`](effects.md#完整方法-scheme-引用)。
 
@@ -167,11 +174,11 @@ impl Fetch for Disk {
 
 ```vorton
 trait Describable {
-    fn describe(self) -> Str
+    fn describe(&self) -> Str
 }
 
 trait Printable: Describable {
-    fn label(self) -> Str
+    fn label(&self) -> Str
 }
 ```
 
@@ -189,12 +196,12 @@ Supertrait 必须解析到真实的具名 trait 声明；原始类型、struct�
 ```vorton
 trait Container {
     type Item
-    fn get(self) -> Item
+    fn get(&self) -> Item
 }
 
 impl Container for IntBox {
     type Item = Int
-    fn get(self) -> Int { self.value }
+    fn get(&self) -> Int { self.value }
 }
 ```
 
@@ -211,7 +218,7 @@ fn sum_source<T: Source<Item = Int>>(s: T) -> Int {
 
 trait Keyed {
     type Key: Eq
-    fn key(self) -> Key
+    fn key(&self) -> Key
 }
 ```
 
@@ -220,16 +227,16 @@ trait Keyed {
 ```vorton
 trait Processor {
     type Output = Int
-    fn process(self) -> Output
+    fn process(&self) -> Output
 }
 
 impl Processor for Doubler {
-    fn process(self) -> Int { self.value * 2 }
+    fn process(&self) -> Int { self.value * 2 }
 }
 
 impl Processor for Greeter {
     type Output = Str
-    fn process(self) -> Str { "Hello, ${self.name}!" }
+    fn process(&self) -> Str { "Hello, ${self.name}!" }
 }
 ```
 
@@ -241,21 +248,21 @@ impl Processor for Greeter {
 
 ```vorton
 impl Point {
-    pub fn distance(self) -> Float { ... }
-    pub fn translate(self: mut Self, dx: Float, dy: Float) {
+    pub fn distance(&self) -> Float { ... }
+    pub fn translate(&mut self, dx: Float, dy: Float) {
         self.x += dx
         self.y += dy
     }
 }
 ```
 
-固有方法不依赖任何 trait，通过 `point.distance()` 调用。调用 `self: mut Self` 方法时，receiver 必须是可修改的：`let mut` 变量、`mut` 参数、`mut` 别名，或以它们为根的路径。Receiver 不需要调用处标记。
+固有方法不依赖任何 trait，通过 `point.distance()` 调用。调用 `&mut self` 方法时，receiver 必须是可修改的位置，见[借出](type-system.md#借出)。Receiver 按方法声明自动借出，不需要调用处标记。
 
 ### Trait 实现
 
 ```vorton
 impl Show for Point {
-    fn to_str(self) -> Str {
+    fn to_str(&self) -> Str {
         "${self.x}, ${self.y}"
     }
 }
@@ -267,7 +274,7 @@ Trait 方法没有默认 body，impl 必须提供全部方法。
 
 ```vorton
 impl<T: Show> Show for List<T> {
-    fn to_str(self) -> Str { ... }
+    fn to_str(&self) -> Str { ... }
 }
 ```
 
@@ -276,11 +283,11 @@ Impl 块可以有自己的类型参数和约束。Impl 的类型参数在 bound�
 ## Trait bound
 
 ```vorton
-fn stringify<T: Show>(x: T) -> Str {
+fn stringify<T: Show>(x: &T) -> Str {
     x.to_str()
 }
 
-fn process<T: Show + Eq>(x: T, y: T) -> Bool { ... }
+fn process<T: Show + Eq>(x: &T, y: &T) -> Bool { ... }
 ```
 
 `T: Show` 要求 `T` 实现 `Show`，函数体内可以调用 `Show` 的方法；`+` 组合多个 bound。泛型函数的 bound 写在签名中，是其类型 scheme 的一部分；每次调用时核对实参类型满足 bound。
@@ -297,12 +304,12 @@ fn process<T: Show + Eq>(x: T, y: T) -> Bool { ... }
 找不到方法时报未定义方法的类型错误。
 
 ```vorton
-fn stringify<T: Show>(value: T) -> Str {
+fn stringify<T: Show>(value: &T) -> Str {
     value.to_str()
 }
 
-fn show_twice<T: Show>(value: T) -> Str {
-    "${stringify(value)} ${stringify(value)}"
+fn show_twice<T: Show>(value: &T) -> Str {
+    "${stringify(&value)} ${stringify(&value)}"
 }
 ```
 
@@ -320,6 +327,8 @@ fn show_twice<T: Show>(value: T) -> Str {
 - **Ord**：所有字段都实现 `Ord` 时提供，并与结构化相等和部分序一致。
 - **Hash**：只有当该类型走结构化 `Eq`、且所有字段都有 `Hash` 时提供。Struct 按字段顺序组合 hash；enum 先组合稳定的 variant 编号，再组合字段。手写了 `Eq` 的类型不会隐式获得结构化 `Hash`。
 - **Debug**：所有字段都实现 `Debug` 时提供。
+- **Clone**：类型不实现 `Drop`、且所有字段都实现 `Clone` 时提供，逐字段复制。
+- **Copy**：所有字段都实现 `Copy` 时提供；这样的类型就是值类型。
 
 ```vorton
 struct Reading { major: Int, sample: Float }

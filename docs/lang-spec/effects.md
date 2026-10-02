@@ -1,27 +1,32 @@
-# Effect 系统
+# Effect 与能力
 
-Vorton 用 effect row 描述计算可能发生的副作用，也就是函数的能力。有 body 的函数通常省略 effect 标注，由编译器推断；显式 `with { ... }` 是公开允许的上界，不能覆盖或隐藏 body 的实际 effect。
+函数可能做的事分成两类，规则完全不同：
 
-修改调用方的数据只经由签名中的 `mut` 参数发生，不作为 effect 追踪；见[类型系统](type-system.md#参数与修改)。
+| | 实例 | 是否属于函数类型 | 由谁处理 |
+|---|---|---|---|
+| **effect**（注入） | 用户 `effect` 声明、`fail<E>` | 是：调用方需要知道自己要处理什么 | 调用方用 `handle...with` 或 `catch` 提供实现 |
+| **能力** | `console`、`fs`、`process`、`unsafe`，以及可能写入哪些实体 | 否：由编译器在全仓库范围推断 | 由宿主执行；模块用 `requires` 设上限 |
+
+有 body 的函数通常省略 effect 标注，由编译器推断；显式 `with { ... }` 是公开允许的上界，不能覆盖或隐藏 body 的实际 effect。`with` 中只写 effect，不写能力。
+
+修改调用方的数据只经由签名中的 `&mut` 参数或 `Cell` 发生，不作为 effect 追踪；见[类型系统](type-system.md#借出)。
 
 Effect 声明、标注、`handle` 与 `catch` 的唯一产生式见[语法](syntax.md)；本页只定义类型与运行语义。
 
 ## Effect 分类与消除权
 
-Effect row 中的 atom 共享组合与推断机制，但执行与消除规则不同：
+Effect row 中的 atom 共享组合与推断机制，但消除规则不同：
 
-| 分类 | 实例 | 唯一消除或执行规则 |
+| 分类 | 实例 | 唯一消除规则 |
 |---|---|---|
-| System effect | `console`、`fs`、`process` | 不可 `handle`，不进入 evidence；由目标宿主执行 |
 | Handled effect | 用户 `effect` 声明 | 进入 typed evidence，由显式 `handle...with` 消除 |
 | Failure | `fail<E>` | 由 `catch` 或显式 failure handler 消除 |
-| Unsafe obligation | `unsafe` | 只由词法 `unsafe { ... }` discharge |
 
-Effect 的分类是固定的。System effect 绝不能获得 handler evidence；handled effect 绝不能直接变成宿主操作。`main` 可以保留 system effect，由目标环境执行；未消除的用户 handled effect 不得逃出 `main`。
+Effect 的分类是固定的。未消除的 handled effect 与 failure 不得逃出 `main`。
 
-`console`、`fs`、`process`、`fail<T>` 与 `unsafe` 由语言提供，不由隐藏源码或自动 prelude 声明。它们在 Effect namespace 中不能被源码 effect/alias、import 或 re-export 重定义；相同拼写在其他 namespace 仍按各自规则处理。`unsafe` 保持特殊写法，其他语言 effect 使用普通路径。
+`fail<T>` 由语言提供，不由隐藏源码或自动 prelude 声明。它与能力名 `console`、`fs`、`process`、`unsafe` 都不能被源码 effect/alias、import 或 re-export 重定义；相同拼写在其他 namespace 仍按各自规则处理。
 
-Effect 与 effect alias 只在 Effect 上下文中作为 exact identity；它们不能作为 Type/Value 的 `::` 选择基础。Failure 的 `fail.raise` 是下文定义的语言操作；system effect 在本规范中不声明静态成员。
+Effect 与 effect alias 只在 Effect 上下文中作为 exact identity；它们不能作为 Type/Value 的 `::` 选择基础。Failure 的 `fail.raise` 是下文定义的语言操作。
 
 ## Effect Row
 
@@ -44,7 +49,7 @@ fn apply<T, effect E>(value: T, callback: fn(T) with {E}) with {E} {
 }
 ```
 
-在源码 row 中，已绑定的 `E` 表示整条 row，不是一个 atom；`with {E, fs}` 表示把 `E` 的内容与 `fs` 合并。多个 formal 可以同时出现，例如 `{E1, E2}`。没有差集、补集、条件 effect 或任意 effect 层函数。
+在源码 row 中，已绑定的 `E` 表示整条 row，不是一个 atom；`with {E, Logger}` 表示把 `E` 的内容与 `Logger` 合并。多个 formal 可以同时出现，例如 `{E1, E2}`。没有差集、补集、条件 effect 或任意 effect 层函数。
 
 函数类型写作 `fn(T₁, ..., Tₙ) -> R with { ... }`，是普通类型。函数类型中省略 `with` 时的 effect 多态规则待 Milestone 4 定稿。
 
@@ -54,11 +59,9 @@ fn apply<T, effect E>(value: T, callback: fn(T) with {E}) with {E} {
 
 合并两个 row 时：
 
-1. system effect 按 exact identity 去重；`fs`、`console`、`process` 互不相等；
-2. `unsafe` 与 `unsafe` 是同一实例；
-3. `fail<T>` 与 `fail<U>` 匹配时统一 payload 类型；
-4. 同一 exact handled effect 只对应一份 evidence，其类型参数必须统一；
-5. 未匹配的 effect 只能进入开放尾，封闭侧不接受额外 effect。
+1. `fail<T>` 与 `fail<U>` 匹配时统一 payload 类型；
+2. 同一 exact handled effect 只对应一份 evidence，其类型参数必须统一；
+3. 未匹配的 effect 只能进入开放尾，封闭侧不接受额外 effect。
 
 不同开放尾都带未匹配项时，row unification 创建共享的新尾，并分别保留对侧未匹配项。Effect 分类不因 row 合并、alias 展开或 import 而改变。
 
@@ -75,14 +78,14 @@ fn apply<T, effect E>(value: T, callback: fn(T) with {E}) with {E} {
 - trait 方法省略外层 `with` 的含义由[按 impl 关联的 effect scheme](traits.md#按-impl-关联的-effect-scheme)规定；effect operation 调用只产生其所属的 handled effect，operation 本身不写外层 `with`。
 
 ```vorton
-fn read_config(path: Str) -> Config with {fs, fail<FsError>} {
+fn read_config(path: Str) -> Config with {Logger, fail<ConfigError>} {
     read_and_parse(path)
 }
 ```
 
-即使当前 `read_and_parse` 只产生 `fs`，`read_config` 的公开 row 仍是 `{fs, fail<FsError>}`。若 body 后来产生上界之外的 effect，编译器报错。
+即使当前 `read_and_parse` 只产生 `fail<ConfigError>`，`read_config` 的公开 row 仍是 `{Logger, fail<ConfigError>}`。若 body 后来产生上界之外的 effect，编译器报错。
 
-函数值只允许把自身 row 从较小的 row 适配到期望上界。参数数量、参数类型与参数模式、返回类型必须结构匹配；不引入参数或返回 variance、递归函数子类型或隐式 wrapper。
+函数值只允许把自身 row 从较小的 row 适配到期望上界。参数数量、参数类型与借出方式、返回类型必须结构匹配；不引入参数或返回 variance、递归函数子类型或隐式 wrapper。
 
 调用处对 effect formal 求唯一合法的最小解。纯 callback 使 `E = {}`；多个 callback 约束同一 `E` 时，取它们公开 row 的最小合法合并，并继续满足其他显式关系和上界。不存在唯一最小解时报错，不能任意扩大：
 
@@ -97,7 +100,7 @@ fn sequence<effect E>(first: fn() with {E}, second: fn() with {E}) with {E} {
 
 Panic 是不可恢复的程序终止，不是 effect atom，也不等于 `fail<E>`。`catch` 和 `handle...with` 都不能捕获 panic；`Int` 算术可能 panic，但不会因此向 row 加入 effect。
 
-Panic 发生后不再求值后续表达式，并终止整个程序。语言不保证对尚存的值执行 `Drop`，也不做 stack unwinding。此前已经发生的修改、IO、资源移交或其他 effect 保持发生，不回滚。正常返回、failure、`break`、`continue` 与 handler 退出仍执行结构化 cleanup。
+Panic 发生后不再求值后续表达式，并终止整个程序。语言不保证对尚存的实体执行 `Drop`，也不做 stack unwinding。此前已经发生的修改、IO、实体移交或其他 effect 保持发生，不回滚。正常返回、failure、`break`、`continue` 与 handler 退出仍执行结构化 cleanup。
 
 `with {}` 只表示没有 row effect，不保证函数不会 panic、一定终止或没有浮点舍入误差。本规范不规定 panic 的输出文字、退出码或栈追踪。
 
@@ -132,19 +135,26 @@ fn repeat<effect E>(done: Bool, callback: fn() with {E}) with {E} {
 }
 ```
 
-这里递归 body 只消费已声明的 `E`，不以自己的最终公开结果定义自己。相反，`trait Loop { fn step(self) with {Loop::step<Self>} }` 的显式 contract 直接自引用，必须拒绝；间接 contract 循环同样拒绝。正常的 body 递归不能因此被误判为 contract 循环。
+这里递归 body 只消费已声明的 `E`，不以自己的最终公开结果定义自己。相反，`trait Loop { fn step(&self) with {Loop::step<Self>} }` 的显式 contract 直接自引用，必须拒绝；间接 contract 循环同样拒绝。正常的 body 递归不能因此被误判为 contract 循环。
 
-## System effects
+## 能力
 
-| Effect | 语义范围 |
+| 能力 | 语义范围 |
 |---|---|
 | `console` | 标准输出与标准错误输出 |
 | `fs` | 文件系统访问，以及依赖工作目录或文件系统的路径解析 |
 | `process` | 参数、工作目录、同步子进程与进程退出 |
+| `unsafe` | 编译器无法验证其内存安全前提的操作，见下文 |
+| 写入的实体 | 函数经 `&mut`、句柄或 `Cell` 可能写入的实体类型与 Region |
 
-纯路径字符串运算不产生 `fs`。System effect 是静态能力事实，不是语言内的动态 provider。宿主声明必须带上 exact system effect 与正交的 `fail<E>` contract；不能因为是 extern、runtime bridge 或 intrinsic 而省略能力。
+纯路径字符串运算不需要 `fs`。能力是静态事实，不是语言内的动态 provider，也不是 sandbox。
 
-需要可替换或可 mock 的依赖时，声明用户 handled effect，再用普通 handler 翻译到 system 操作：
+- **推断**：编译器沿调用图在全仓库范围推断每个函数的能力。经函数值的调用，按可能流到这里的全部函数合并。
+- **不进类型**：能力不写进函数签名或函数类型，也不能被 `handle` 或 `catch` 消除。
+- **上限**：模块用 `requires` 设置能力上限，编译器强制执行，见[模块系统](modules.md#inline-mod-与-capability)。检查上限时，存进数据的回调，其能力算在定义它的模块，而不是调用它的模块。
+- **宿主声明**：宿主提供的函数没有 body 可供推断，必须声明自己的能力与 `fail<E>` contract；不能因为是 extern、runtime bridge 或 intrinsic 而省略。声明写法与 effect 的签名写法一起在 Milestone 4 定稿。
+
+需要可替换或可 mock 的依赖时，声明用户 handled effect，再用普通 handler 翻译到宿主操作：
 
 ```vorton
 effect FileAccess {
@@ -155,14 +165,14 @@ fn load(path: Str) -> Config with {FileAccess} {
     parse(FileAccess.read(path))
 }
 
-fn load_from_host(path: Str) -> Config with {fs, fail<FsError>} {
+fn load_from_host(path: Str) -> Config with {fail<FsError>} {
     handle { load(path) } with {
-        FileAccess.read(p) => read_file(p)
+        FileAccess.read(p) => read_file(p)      // read_file 需要 fs 能力
     }
 }
 ```
 
-System 操作本身不可被 `handle`，因此抽象依赖和真实宿主访问保持分离。
+宿主操作本身不可被 `handle`，因此抽象依赖和真实宿主访问保持分离。
 
 ## 用户自定义 Effect
 
@@ -176,7 +186,7 @@ fn write_log(message: Str) with {Logger} {
 }
 ```
 
-Operation 签名规定参数、返回类型和调用时产生的 handled effect。Operation 通过 `EffectName.operation(...)` 调用；receiver 必须解析到 exact handled-effect 声明（或语言的 failure effect），operation 必须解析到该 effect 的 exact 声明。缺失的 operation、effect alias receiver 或 system effect receiver 在名称解析阶段拒绝。`EffectName::operation(...)` 不是 operation 调用的另一种写法。
+Operation 签名规定参数、返回类型和调用时产生的 handled effect。Operation 通过 `EffectName.operation(...)` 调用；receiver 必须解析到 exact handled-effect 声明（或语言的 failure effect），operation 必须解析到该 effect 的 exact 声明。缺失的 operation、effect alias receiver 或能力名 receiver 在名称解析阶段拒绝。`EffectName::operation(...)` 不是 operation 调用的另一种写法。
 
 Effect operation 只有签名，没有 body。Custom effect 必须由显式 `handle...with` 提供解释；没有默认实现。
 
@@ -185,15 +195,15 @@ Effect operation 只有签名，没有 body。Custom effect 必须由显式 `han
 `effect alias` 给一组 effect 命名：
 
 ```vorton
-effect alias HostIO = {console, fs, process}
+effect alias Services = {Logger, Clock}
 effect alias Fallible<E> = {fail<E>}
 ```
 
 Alias 可以泛型化、可以 `pub` 导出，并在类型检查前递归展开；循环 alias 被拒绝。循环检查的节点是 exact effect alias 声明，边来自右侧显式出现的 alias，包括方法 scheme 引用中嵌套的 effect-row 实参。普通 effect、effect formal 与方法 scheme 引用本身不形成边。泛型实参不创建新节点；没被使用的 alias 同样参与循环检查。展开后的 exact atom 才参与 identity 与能力检查，alias 本身不产生 evidence 或新的运行时 effect。
 
-## `unsafe` Effect
+## `unsafe` 能力
 
-`unsafe` 标记编译器无法验证其内存安全前提的操作。它进入函数签名并向调用方传播，不能由 `handle` 或 `catch` 消除；唯一的 discharge 形式是词法 `unsafe { ... }` 块。
+`unsafe` 标记编译器无法验证其内存安全前提的操作。这样的操作只能写在词法 `unsafe { ... }` 块中，所在模块必须以 `requires {unsafe}` 获得许可。`unsafe` 不进入函数类型，调用含有 `unsafe` 块的函数不需要任何标记；它作为能力出现在推断结果与仓库地图上。
 
 ```vorton
 mod raw_buffer requires {unsafe} {
@@ -203,7 +213,7 @@ mod raw_buffer requires {unsafe} {
 }
 ```
 
-`unsafe { ... }` 只移除块内显式产生的 `unsafe`；其中的 system、failure 或 handled effect 仍然传播。模块必须以 `requires {unsafe}` 授权 discharge，该许可本身不证明块内的不变量。
+`unsafe { ... }` 块内的 failure 与 handled effect 照常传播。`requires {unsafe}` 只是许可，本身不证明块内的不变量。
 
 ## Effect 传播
 
@@ -254,7 +264,7 @@ let result = handle {
 }
 ```
 
-Handler 在 body 的动态调用范围内提供 handled-effect 的操作。被完整处理的 exact handled effect 从 body row 中消除；开放尾中的未知 effect 与分支新产生的 effect 继续传播。若 row 是 `{Logger, R}`，处理 `Logger` 后保留 `R`；若 callback row 只有未知 formal `E`，handler 不能假定其中含有 `Logger`，保守地原样传播 `E`。System effect 与 `unsafe` 不能由 `handle` 删除。
+Handler 在 body 的动态调用范围内提供 handled-effect 的操作。被完整处理的 exact handled effect 从 body row 中消除；开放尾中的未知 effect 与分支新产生的 effect 继续传播。若 row 是 `{Logger, R}`，处理 `Logger` 后保留 `R`；若 callback row 只有未知 formal `E`，handler 不能假定其中含有 `Logger`，保守地原样传播 `E`。能力不是 effect，不能由 `handle` 删除。
 
 一个 `handle...with` 只要为某个 effect 写了一个操作分支，就必须覆盖该 effect 声明的全部操作，各恰好一次。分支顺序任意；缺失、重复、未知或跨 effect 的分支都是编译错误。只需拦截部分操作时，拆分 effect 或为其余操作写显式转发分支。
 
@@ -274,19 +284,19 @@ fn transform<T, U, effect E>(value: T, callback: fn(T) -> U with {E}) -> U with 
 }
 ```
 
-Callback 的 system、handled、failure 或 unsafe effect 都通过 `E` 传播。高阶函数不能假装 callback 是纯的，也不能把 system effect 转成 handler evidence。
+Callback 的 handled 与 failure effect 都通过 `E` 传播，高阶函数不能假装 callback 是纯的。Callback 的能力由编译器另行推断，不经过 `E`。
 
-`extern fn` 没有 body 可供反推，必须写出完整的 effect 关系。Type/effect alias 透明展开，不成为隐式 formal 的 owner；effect operation 不获得量化能力。
+`extern fn` 没有 body 可供反推，必须写出完整的 effect 关系与能力。Type/effect alias 透明展开，不成为隐式 formal 的 owner；effect operation 不获得量化能力。
 
 ## Drop 边界
 
-用户 `Drop::drop` 的最终推断 row 必须为空；`fail`、system effect 与 handled effect 均禁止。编译器生成的字段递归释放、RC 释放与内建 cleanup 不属于用户 effect body。
+用户 `Drop::drop` 的最终推断 row 必须为空，`fail` 与 handled effect 均禁止；0.1 中它也不能使用 `console`、`fs`、`process` 能力。编译器生成的字段递归释放、计数释放与内建 cleanup 不属于用户 effect body。
 
 ## 0.1 边界
 
 - Handler 只支持 tail-resumptive 操作与 abortive failure；
 - 不支持 resume 之后的代码或多次 resume；
-- System effect 不是语言内 sandbox，只是可推断、可审计的宿主能力摘要；
-- 分配本身没有独立 effect；原始分配操作仍产生 `unsafe`。
+- 能力不是语言内 sandbox，只是可推断、可审计的宿主能力摘要；
+- 分配本身不是能力；原始分配操作需要 `unsafe`。
 
-工具默认展示推断结果，诊断优先指出缺少的 effect 与实际来源。物化推断结果时，不能把 trait 方法的省略项替换为当前某个 impl 的具体 row。
+工具默认展示推断结果，诊断优先指出缺少的 effect 或超出上限的能力，以及它们的实际来源。物化推断结果时，不能把 trait 方法的省略项替换为当前某个 impl 的具体 row。

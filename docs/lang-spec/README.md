@@ -8,8 +8,8 @@
 |------|------|
 | [词法结构](lexical.md) | Token、关键字、字面量、注释、换行标记 |
 | [语法](syntax.md) | 所有语言构造的 EBNF，换行与语句结束规则 |
-| [类型系统](type-system.md) | 值与资源、类型推断、参数与修改、代价模型 |
-| [Effect 系统](effects.md) | Effect 声明、传播、handling 与能力 |
+| [类型系统](type-system.md) | 值与实体、借出、Region 与句柄、共同所有、类型推断、代价模型 |
+| [Effect 与能力](effects.md) | 注入的 effect（声明、传播、handling）与编译器推断的能力 |
 | [Trait 系统](traits.md) | Trait 声明、impl 块、约束、关联类型与 dispatch 语义 |
 | [模式匹配](patterns.md) | 模式形式、绑定规则、穷尽性检查 |
 | [模块系统](modules.md) | 库图、逻辑模块树、导入、可见性与能力上限 |

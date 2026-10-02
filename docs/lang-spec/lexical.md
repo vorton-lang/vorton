@@ -4,7 +4,7 @@
 
 ## 扫描规则
 
-Lexer 从左到右扫描，并在当前位置选择可成立的最长 token。多字符运算符优先于其前缀；关键字只在完整标识符拼写相等时成立，例如 `move_value` 是一个 `Ident`，不是 `'move'` 后跟另一个 token。空白与注释被丢弃，其他字符必须形成下列 token，否则产生词法错误。
+Lexer 从左到右扫描，并在当前位置选择可成立的最长 token。多字符运算符优先于其前缀；关键字只在完整标识符拼写相等时成立，例如 `mut_value` 是一个 `Ident`，不是 `'mut'` 后跟另一个 token。空白与注释被丢弃，其他字符必须形成下列 token，否则产生词法错误。
 
 除字符串、原始字符串和行注释内容外，源码只接受下文定义的 ASCII 标识符字符、数字、运算符和定界符。`@` 与独立 `#` 没有 token；`@derive(Json)`、`#[test]` 等形式因此在词法阶段非法，不能产生 attribute/derive AST 占位。
 
@@ -35,7 +35,7 @@ Lexer 只产生一种 `Ident`。首字母大小写不产生 type、value、varia
 以下拼写是保留关键字 token：
 
 ```text
-fn       let      mut      move     const    struct   enum     match
+fn       let      mut      const    struct   enum     match
 impl     effect   handle   with     if       else     catch
 return   for      in       pub      where    true     false    trait
 while    break    continue loop     use      as       extern
@@ -53,13 +53,14 @@ mod      super    requires unsafe
 | 算术 | `+` `-` `*` `/` `%` |
 | 比较 | `==` `!=` `<` `>` `<=` `>=` |
 | 逻辑与模式 | `&&` `\|\|` `!` `\|` |
+| 借出 | `&` |
 | 赋值 | `=` `+=` `-=` `*=` `/=` `%=` |
 | 范围 | `..` `..=` |
 | 访问 | `.` `::` |
 | 箭头 | `->` `=>` |
 | 定界符 | `(` `)` `{` `}` `[` `]` `,` `:` `;` |
 
-单独的 `&` 与 `?` 不是 token。
+`&&` 总是一个 token，表示逻辑与；借出一个借出没有意义，所以不需要把它拆成两个 `&`。单独的 `?` 不是 token。
 
 ## 数值字面量
 

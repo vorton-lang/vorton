@@ -64,11 +64,11 @@ FnHeader         ::= 'fn' Ident CallableParams? '(' FnParams? ')'
                      ReturnType? EffectAnnotation?
 FnParams         ::= Receiver (',' Param)* ','?
                    | Param (',' Param)* ','?
-Receiver         ::= 'self' (':' ParamMode 'Self')?
-Param            ::= Ident ':' ParamType
-ParamType        ::= ParamMode? TypeExpr
-ParamMode        ::= 'mut' | 'move'
-ReturnType       ::= '->' TypeExpr
+Receiver         ::= Borrow 'self' | 'mut'? 'self'
+Param            ::= 'mut'? Ident ':' ParamType   (* 'mut' 只用于按值参数 *)
+ParamType        ::= Borrow? TypeExpr
+Borrow           ::= '&' 'mut'?
+ReturnType       ::= '->' Borrow? TypeExpr
 
 StructDecl       ::= 'struct' Ident TypeParams? '{' StructFields? '}'
 StructFields     ::= StructField (',' StructField)* ','?
@@ -113,9 +113,9 @@ UseItem          ::= Ident ('as' Ident)?
 
 文件 `requires` 若存在必须是第一项；所有 `use` 必须先于其他声明，inline `mod` 内同样如此。路径与模块的名称解析见[模块系统](modules.md)。
 
-具名函数、方法和 trait 方法的每个参数都必须写类型；省略返回类型表示 `Unit`。方法的第一个参数可以是 receiver：`self` 只读，`self: mut Self` 就地修改调用者，`self: move Self` 取走调用者（只用于资源）。Trait 成员只有签名，没有函数体。`impl` 本身没有 visibility；inherent impl 的成员可以加 `pub`，trait impl 的成员不能加。Effect operation 必须写返回类型。`extern fn` 必须写 `with`，pure 声明写作 `with {}`。
+具名函数、方法和 trait 方法的每个参数都必须写类型；省略返回类型表示 `Unit`。方法的第一个参数可以是 receiver：`&self` 只读借出调用者，`&mut self` 可变借出调用者，`self` 拿走调用者。Trait 成员只有签名，没有函数体。`impl` 本身没有 visibility；inherent impl 的成员可以加 `pub`，trait impl 的成员不能加。Effect operation 必须写返回类型。`extern fn` 必须写 `with`，pure 声明写作 `with {}`。
 
-参数模式的含义见[类型系统](type-system.md#参数与修改)：不写模式表示只读；`mut` 表示就地修改调用方的数据；`move` 表示取走一个资源。
+借出方式的含义见[类型系统](type-system.md#借出)：不写表示拿走（值则拷贝）；`&` 表示只读借出；`&mut` 表示可变借出。参数名前的 `mut`（`mut x: T`、`mut self`）只表示这个按值参数在函数内可以修改，与 `let mut` 相同。
 
 ## Path、类型与 effect
 
@@ -146,7 +146,7 @@ EffectApplyArgs  ::= '<' TypeExpr (',' TypeExpr)*
                      (',' 'effect' EffectSet)* ','? '>'
 ```
 
-函数类型是普通类型，可以出现在字段、容器元素、类型参数和返回类型中，例如 `List<fn(Int) -> Int>`。省略返回类型表示 `Unit`；参数可以带 `mut`／`move`，例如 `fn(mut List<Int>)`。`with` 归属最近的函数类型或函数头：`fn make() -> fn() -> Int with {fs}` 中的 `{fs}` 属于返回的函数类型；要标注 `make` 本身，把返回类型加括号：`fn make() -> (fn() -> Int) with {fs}`。
+函数类型是普通类型，可以出现在字段、容器元素、类型参数和返回类型中，例如 `List<fn(Int) -> Int>`。省略返回类型表示 `Unit`；参数与返回值可以带借出方式，例如 `fn(&mut Game, Handle<Button>)`。`Borrow` 不属于 `TypeExpr`，因此 `&T` 在语法上就不能出现在字段、tuple 元素或类型实参中。`with` 归属最近的函数类型或函数头：`fn make() -> fn() -> Int with {Logger}` 中的 `{Logger}` 属于返回的函数类型；要标注 `make` 本身，把返回类型加括号：`fn make() -> (fn() -> Int) with {Logger}`。`with` 中只写 effect；`requires` 中只写能力，见 [Effect 与能力](effects.md)。
 
 `(T)` 与 `T` 是同一类型。Tuple 至少两个元素；单位类型写作 `Unit`。可选值写作 `Option<T>`，没有 `T?` 缩写。所有命名类型、值路径、构造与模式都使用统一的 `Path`，大小写不参与分类。
 
@@ -158,7 +158,6 @@ Effect 参数（`effect E`）与 `EffectApplyArgs` 中的 `effect { ... }` 实�
 Block            ::= '{' Stmt* '}'
 
 Stmt             ::= LetStmt
-                   | AliasStmt
                    | LetDestructStmt
                    | AssignStmt
                    | ReturnStmt
@@ -170,34 +169,32 @@ Stmt             ::= LetStmt
                    | LoopStmt
                    | Expr
 
-LetStmt          ::= 'let' 'mut'? Ident (':' TypeExpr)? '=' Expr
-AliasStmt        ::= 'let' Ident (':' TypeExpr)? '=' 'mut' Place
+LetStmt          ::= 'let' 'mut'? Ident (':' Borrow? TypeExpr)? '=' Expr
 LetDestructStmt  ::= 'let' TuplePattern '=' Expr
 AssignStmt       ::= Place AssignOp Expr
 AssignOp         ::= '=' | '+=' | '-=' | '*=' | '/=' | '%='
 ReturnStmt       ::= 'return' Expr?
 
-IfLetStmt        ::= 'if' 'let' Pattern '=' Operand Block ('else' Block)?
+IfLetStmt        ::= 'if' 'let' Pattern '=' ControlHead Block ('else' Block)?
 WhileStmt        ::= 'while' ControlHead Block
-ForInStmt        ::= 'for' ForBinding 'in' Operand Block
+ForInStmt        ::= 'for' ForBinding 'in' ControlHead Block
 LoopStmt         ::= 'loop' Block
 ForBinding       ::= Ident | '(' Ident ',' Ident (',' Ident)* ','? ')'
 
-Operand          ::= 'mut' Place | ControlHead
 Place            ::= Ident PlaceSuffix*
 PlaceSuffix      ::= '.' Ident | '.' IntLit | '[' Expr ']'
 ```
 
 代码块的值是最后一项；最后一项不是表达式时，值为 `Unit`。期望类型是 `Unit` 时，最后一项的值被丢弃。非最后一项的表达式，其值总是被丢弃。
 
-`mut` 写在位置（`Place`）前面，表示就地、独占地访问这个位置，出现在四处：调用参数 `f(mut x)`、别名 `let t = mut a.b`、循环 `for e in mut xs`、以及 `match mut x`／`if let P = mut x`。`mut` 写在变量名前面（`let mut n`）表示这个变量本身可以修改。两者的语义见[类型系统](type-system.md#参数与修改)。
+借出写作前缀 `&` 或 `&mut`，是一元表达式。语法允许它出现在任何表达式位置；类型检查只接受以下几处：借出参数的实参、`let` 的右侧、`for`／`match`／`if let` 的头部，以及返回借出的函数的结果。`mut` 写在变量名前面（`let mut n`）表示这个变量本身可以修改。语义见[类型系统](type-system.md#借出)。
 
 ```vorton
-let t = mut world.scenes[s].nodes[n].transform
+let t = &mut world.scenes[s].nodes[n].transform
 t.position.x += dx
 t.dirty = true
 
-match mut world.state {
+match &mut world.state {
     State::Running { timer } => { timer -= dt }
     State::Paused => ()
 }
@@ -214,7 +211,7 @@ CompareExpr      ::= RangeExpr (('<' | '>' | '<=' | '>=') RangeExpr)?
 RangeExpr        ::= AddExpr (('..' | '..=') AddExpr)?
 AddExpr          ::= MulExpr (('+' | '-') MulExpr)*
 MulExpr          ::= UnaryExpr (('*' | '/' | '%') UnaryExpr)*
-UnaryExpr        ::= ('-' | '!') UnaryExpr | PostfixExpr
+UnaryExpr        ::= ('-' | '!' | Borrow) UnaryExpr | PostfixExpr
 PostfixExpr      ::= PrimaryExpr Postfix*
 Postfix          ::= ArgList
                    | '[' Expr ']'
@@ -244,12 +241,11 @@ FieldInit        ::= Ident (':' Expr)?
 ListLiteral      ::= '[' (Expr (',' Expr)* ','?)? ']'
 TupleExpr        ::= '(' Expr ',' Expr (',' Expr)* ','? ')'
 
-ArgList          ::= '(' (Arg (',' Arg)* ','?)? ')'
-Arg              ::= Expr | 'mut' Place | 'move' Ident
+ArgList          ::= '(' (Expr (',' Expr)* ','?)? ')'
 
 ControlHead      ::= Expr  (* 禁止 delimiter depth 0 的 NamedConstruct *)
 IfExpr           ::= 'if' ControlHead Block ('else' (IfExpr | Block))?
-MatchExpr        ::= 'match' Operand MatchBody
+MatchExpr        ::= 'match' ControlHead MatchBody
 MatchBody        ::= '{' MatchArm* '}'
 MatchArm         ::= OrPattern ('if' Expr)? '=>' Expr
 HandleExpr       ::= 'handle' Block 'with' '{' Handler* '}'
@@ -257,13 +253,13 @@ Handler          ::= Path '.' Ident '(' (HandlerParam (',' HandlerParam)* ','?)?
 HandlerParam     ::= Ident (':' TypeExpr)?
 ClosureExpr      ::= 'fn' '(' (ClosureParam (',' ClosureParam)* ','?)? ')'
                      ReturnType? EffectAnnotation? Block
-ClosureParam     ::= Ident (':' ParamType)?
+ClosureParam     ::= 'mut'? Ident (':' ParamType)?
 UnsafeExpr       ::= 'unsafe' Block
 ```
 
 `match` 分支与 handler 各占一项，以换行分隔；写在同一行时用 `,` 分隔，规则与 `;` 相同，行尾的 `,` 是语法错误。分支体是表达式；赋值等语句或多行分支体写成代码块，例如 `=> { timer -= dt }`。
 
-优先级从低到高为 `catch`、`||`、`&&`、相等、比较、range、加减、乘除余、一元、后缀。`catch`、逻辑、加减、乘除余和后缀左结合；一元右结合；相等、比较与 range 不可链式结合，所以 `a < b < c` 是语法错误。
+优先级从低到高为 `catch`、`||`、`&&`、相等、比较、range、加减、乘除余、一元（含借出）、后缀。因此 `&a.b[i]` 借出的是 `a.b[i]`。`catch`、逻辑、加减、乘除余和后缀左结合；一元右结合；相等、比较与 range 不可链式结合，所以 `a < b < c` 是语法错误。
 
 同一表达式内的子表达式按源码从左到右求值：被调函数或 receiver 先于参数；二元运算数、参数、List／tuple／构造字段与字符串插值依次求值；下标先 receiver 后下标。
 
@@ -271,9 +267,9 @@ UnsafeExpr       ::= 'unsafe' Block
 
 `value.member(args)` 总是方法调用。调用存放在字段里的函数值，必须写成 `(value.member)(args)`。
 
-### 调用处的 `mut` 与 `move`
+### 调用处的借出
 
-对 `mut` 参数，调用处写 `f(mut place)`；对 `move` 参数，调用处写 `f(move name)`。`mut` 后必须是位置，`move` 后必须是局部变量名；`f(mut make())` 在语法阶段拒绝。方法的 receiver 不需要调用处标记。
+对 `&T` 参数，调用处写 `f(&e)`；对 `&mut T` 参数，调用处写 `f(&mut place)`；按值参数直接写 `f(e)`。方法的 receiver 与 `print` 的实参自动借出，不写 `&`。
 
 ### Control head
 
@@ -281,7 +277,7 @@ UnsafeExpr       ::= 'unsafe' Block
 
 ### 闭包
 
-闭包写作 `fn(params) { body }`，参数类型可以省略，由上下文推断。闭包按值捕获它用到的外部变量，不能修改外部变量；捕获资源会取走它。没有 capture list。
+闭包写作 `fn(params) { body }`，参数类型可以省略，由上下文推断。闭包按值捕获它用到的外部变量，不能修改外部变量；捕获实体会取走它；不能捕获借出绑定。没有 capture list。
 
 ## 模式
 
@@ -312,12 +308,13 @@ let x = compute();                  // 行尾分号
 fn f()                              // { 不在同一行
 {
 }
-fn f(x: &Int) {}                    // 没有 &
-fn f(mut x: Int) {}                 // 参数不能写成本地可变；需要时 let mut y = x
-fn f(self: &mut Self) {}            // receiver 写作 self: mut Self
-let mut t = mut world.player        // 别名本身已可修改
-for mut e in enemies {}             // 就地修改写作 for e in mut enemies
-f(mut make())                       // mut 后必须是位置
+fn f(self: &mut Self) {}            // receiver 写作 &mut self
+struct S { r: &Node }               // 借出不能存进字段；跨调用指称用 Handle<Node>
+let xs: List<&Node> = []            // 借出不是类型
+fn f(x: &mut &Node) {}              // 不能借出借出
+*t = v                              // 没有 *；借出与句柄自动解引用
+f(mut x)                            // 调用处写 f(&mut x)
+f(move x)                           // 没有 move；按值传参就是移交
 let v: Int? = Option::None          // 没有 T? 缩写
 let v = item?                       // 没有后缀 ?
 fn apply<F: Fn>(f: call F) {}       // 没有 Fn trait、call、scoped；函数类型写作 fn(A) -> B

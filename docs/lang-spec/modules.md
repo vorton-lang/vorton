@@ -192,7 +192,7 @@ mod math requires {} {
 }
 ```
 
-File body 的第一项 `requires {effects}` 与 inline `mod name requires {effects}` 都给 module 设置能力上限：module 内函数实际使用的 effect 必须在上限之内。省略上限时 system、handled 与 `fail` effect 不受额外限制，但 `unsafe` 许可从不隐式获得。`requires {}` 只允许不使用任何 effect 的计算。通过 `mut` 参数修改调用方数据不是 effect，不受上限限制。Extern declaration 与 unsafe primitive 还必须满足 [Effect 规范](effects.md)中的专用规则。
+File body 的第一项 `requires {…}` 与 inline `mod name requires {…}` 都给 module 设置能力上限：编译器为 module 内代码推断出的能力（`console`、`fs`、`process`、`unsafe`）必须在上限之内。存进数据的回调，其能力算在定义它的 module。省略上限时 `console`、`fs`、`process` 不受额外限制，但 `unsafe` 许可从不隐式获得。`requires {}` 只允许不使用任何能力的计算。注入的 effect（用户 effect 与 `fail`）属于函数类型，由调用方处理，不受上限限制；经 `&mut` 参数修改调用方数据同样不受上限限制。Extern declaration 与 unsafe primitive 还必须满足 [Effect 与能力](effects.md)中的专用规则。
 
 ## Module graph 与 ResolvedAST
 

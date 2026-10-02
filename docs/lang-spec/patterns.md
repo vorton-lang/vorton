@@ -27,11 +27,15 @@
 
 ## 绑定语义
 
-`match`、`catch` 与 `if let` 的绑定方式取决于 scrutinee 是否写了 `mut`。
+`match`、`if let` 与 `let` 解构的绑定方式由头部决定：按值、`&` 或 `&mut`，与[借出](type-system.md#借出)的规则一致。
 
-### 普通 scrutinee：绑定是值
+### 按值匹配
 
-`match x { ... }` 与 `if let P = x { ... }` 中，每个绑定都是被匹配部分的只读值，与 `let y = x.part` 相同：之后通过其他路径修改原数据，绑定看到的仍是匹配时的值。绑定本身不可修改；需要本地修改时先 `let mut y = x`。
+`match x { ... }` 与 `if let P = x { ... }` 中，每个绑定得到被匹配部分本身：值被拷贝，实体被移走。
+
+- 只要有模式按值绑定了实体部分，被匹配的东西在 `match` 之后就视为已经移交。被匹配的是局部变量或按值参数时，此后不能再使用；是临时值（例如函数调用结果）时没有限制。
+- 被匹配的是字段、下标或借出时，不能移走其中的实体，按值绑定实体部分是编译错误；改写为 `match &x` 或 `match &mut x`。
+- 只匹配 tag、只用 `_` 忽略实体部分、或只绑定值部分的模式，不移走任何东西。
 
 ```vorton
 match shape {
@@ -40,28 +44,26 @@ match shape {
 }
 ```
 
-### `mut` scrutinee：绑定是就地别名
+### 只读借出匹配
 
-`match mut place { ... }` 与 `if let P = mut place { ... }` 中，每个绑定都是 `place` 对应部分的就地可写别名，与 `let t = mut place.part` 相同。修改绑定就是修改原数据。独占从分支开始持续到分支结束：分支体内不能再通过 `place` 或与它重叠的路径访问这份数据。
+`match &x { ... }` 与 `if let P = &x { ... }` 中，每个绑定都是被匹配部分的只读借出，持续到分支结束。匹配期间 `x` 不能被写入、可变借出或移走。
+
+### 可变借出匹配
+
+`match &mut x { ... }` 与 `if let P = &mut x { ... }` 中，每个绑定都是被匹配部分的可变借出，修改绑定就是修改原数据，因此 `x` 必须可修改。借出从分支开始持续到分支结束，期间的冲突规则见[别名与修改互斥](type-system.md#别名与修改互斥)。
 
 ```vorton
-match mut world.state {
+match &mut world.state {
     State::Running { timer } => { timer -= dt }
     State::Paused => ()
 }
 ```
 
-有 guard 时，guard 求值期间绑定只读；guard 成功后绑定才成为可写别名。
+有 guard 时，guard 求值期间绑定只读；guard 成功后绑定才成为可变借出。
 
-### 资源
+### `catch`
 
-资源（实现 `Drop` 的类型）不能复制，因此按值绑定资源部分就是取走它：
-
-- scrutinee 是局部变量名或临时值（例如函数调用结果）时，只要某个被选中分支绑定了资源类型的部分，整个 scrutinee 就被取走；此后该局部变量不能再使用。只匹配 tag、只用 `_` 忽略资源部分的分支不取走它。
-- scrutinee 是其他位置（字段路径、下标、只读参数）时，模式不能按值绑定资源类型的部分；可以用 `_` 忽略它，或改用 `match mut place` 得到就地别名。
-- `mut` scrutinee 的资源部分绑定为就地别名，不取走。
-
-`catch` 分支绑定的 failure payload 由分支取得。
+`catch` 分支绑定的 failure payload 由分支拿走。
 
 ## 绑定规则
 
@@ -72,7 +74,7 @@ bind_pattern(pattern, τ_expected) → Γ'
 bind_pattern(_, τ) = Γ     （无新绑定）
 
 ── 绑定 ──
-bind_pattern(x, τ) = Γ[x ↦ τ]     （值或就地别名，取决于 scrutinee）
+bind_pattern(x, τ) = Γ[x ↦ τ]     （按值、只读借出或可变借出，取决于头部）
 
 ── 字面量 ──
 bind_pattern(42, Int) = Γ     （无新绑定，验证类型匹配）
