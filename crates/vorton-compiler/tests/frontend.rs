@@ -49,7 +49,7 @@ use super::support
 use api::Thing as LocalThing
 
 pub fn transform<T: Show + Eq + Source<Item = Int>, F: Display>(
-    value: move T,
+    value: &T,
     callback: F,
     pair: (Int, Str),
 ) -> Option<T> with {console} {
@@ -126,12 +126,12 @@ pub mod inner requires {} {
     ));
     assert!(matches!(
         function.item.signature.parameters[0]
-            .mode
+            .borrow
             .as_ref()
-            .map(|mode| mode.kind),
-        Some(ParameterMode::Move)
+            .map(|borrow| borrow.kind),
+        Some(BorrowKind::Shared)
     ));
-    assert!(function.item.signature.parameters[1].mode.is_none());
+    assert!(function.item.signature.parameters[1].borrow.is_none());
     assert!(matches!(
         parameter_type(&function.item.signature.parameters[2]).kind,
         TypeKind::Tuple(ref values) if values.len() == 2
@@ -319,11 +319,11 @@ impl Build for Target { fn build(self) {} }
 fn preserves_parameter_types_modes_where_and_effect_ownership() {
     let source = r#"
 fn modes<G: Debug, F: Display>(
-    readonly: Int,
-    mutable: mut State,
-    owned: move Token,
+    readonly: &Int,
+    mutable: &mut State,
+    mut owned: Token,
     callback: F,
-    direct: fn(Int, mut State, move Token, G) -> Unit with {},
+    direct: fn(Int, &mut State, &Token, G) -> &Unit with {},
     named_scoped: scoped,
     named_call: call,
     qualified: call::Type,
@@ -332,12 +332,12 @@ fn modes<G: Debug, F: Display>(
     fn(callback: F, direct: fn(G) -> Unit, inferred) -> (fn(Int) -> Unit) {}
 }
 trait Use {
-    fn invoke<F: Display>(self, callback: F, state: mut State, token: move Token) -> Unit
+    fn invoke<F: Display>(&self, callback: F, state: &mut State, token: Token) -> Unit
 }
-extern fn external<F: Display>(callback: F, state: mut State, token: move Token) -> Unit with {}
-effect Operations<F> { fn run(callback: F, state: mut State, token: move Token) -> Unit }
+extern fn external<F: Display>(callback: F, state: &mut State, token: Token) -> Unit with {}
+effect Operations<F> { fn run(callback: F, state: &mut State, token: Token) -> Unit }
 impl<T> Use for Target where (T, T): Pair + Debug, T::Item: Eq, {
-    fn invoke<F: Display>(self, callback: F, state: mut State, token: move Token) -> Unit {}
+    fn invoke<F: Display>(&mut self, callback: F, state: &mut State, token: Token) -> Unit {}
 }
 "#;
     let program = parse(source).expect("parameter and predicate carriers should parse");
@@ -345,32 +345,38 @@ impl<T> Use for Target where (T, T): Pair + Debug, T::Item: Eq, {
         panic!("modes function expected")
     };
     let parameters = &modes.item.signature.parameters;
-    assert!(parameters[0].mode.is_none());
-    for (index, expected) in [(1, ParameterMode::Mut), (2, ParameterMode::Move)] {
+    for (index, expected) in [(0, BorrowKind::Shared), (1, BorrowKind::Mutable)] {
         assert_eq!(
-            parameters[index].mode.as_ref().map(|mode| mode.kind),
+            parameters[index].borrow.as_ref().map(|borrow| borrow.kind),
             Some(expected)
         );
     }
-    let mode = parameters[1].mode.as_ref().expect("mut mode");
-    assert_eq!(&source[mode.span.start..mode.span.end], "mut");
+    let borrow = parameters[1].borrow.as_ref().expect("mutable borrow");
+    assert_eq!(&source[borrow.span.start..borrow.span.end], "&mut");
+    assert!(parameters[2].borrow.is_none());
+    let mutable = parameters[2].mutable.expect("mutable by-value parameter");
+    assert_eq!(&source[mutable.start..mutable.end], "mut");
     let TypeKind::Function(direct) = &parameter_type(&parameters[4]).kind else {
         panic!("direct function parameter type expected")
     };
     assert_eq!(direct.parameters.len(), 4);
-    assert!(direct.parameters[0].mode.is_none());
+    assert!(direct.parameters[0].borrow.is_none());
     assert_eq!(
-        direct.parameters[1].mode.as_ref().unwrap().kind,
-        ParameterMode::Mut
+        direct.parameters[1].borrow.as_ref().unwrap().kind,
+        BorrowKind::Mutable
     );
     assert_eq!(
-        direct.parameters[2].mode.as_ref().unwrap().kind,
-        ParameterMode::Move
+        direct.parameters[2].borrow.as_ref().unwrap().kind,
+        BorrowKind::Shared
     );
-    assert!(direct.parameters[3].mode.is_none());
+    assert!(direct.parameters[3].borrow.is_none());
+    assert_eq!(
+        direct.return_borrow.as_ref().map(|borrow| borrow.kind),
+        Some(BorrowKind::Shared)
+    );
     assert!(matches!(direct.effects, Some(EffectSet { ref effects, .. }) if effects.is_empty()));
     for parameter in &parameters[5..] {
-        assert!(parameter.mode.is_none());
+        assert!(parameter.borrow.is_none());
         assert!(matches!(parameter_type(parameter).kind, TypeKind::Named(_)));
     }
     let TypeKind::Grouped(inner) = &return_type(&modes.item).kind else {
@@ -389,7 +395,7 @@ impl<T> Use for Target where (T, T): Pair + Debug, T::Item: Eq, {
     else {
         panic!("closure expected")
     };
-    assert!(closure.parameters[0].mode.is_none());
+    assert!(closure.parameters[0].borrow.is_none());
     assert!(matches!(
         parameter_type(&closure.parameters[1]).kind,
         TypeKind::Function(_)
@@ -406,14 +412,21 @@ impl<T> Use for Target where (T, T): Pair + Debug, T::Item: Eq, {
         panic!("trait method expected")
     };
     assert!(signature.parameters[0].ty.is_none());
-    assert!(signature.parameters[1].mode.is_none());
+    assert_eq!(
+        signature.parameters[0]
+            .borrow
+            .as_ref()
+            .map(|borrow| borrow.kind),
+        Some(BorrowKind::Shared)
+    );
+    assert!(signature.parameters[1].borrow.is_none());
     let DeclarationKind::Extern(external) = &declaration(&program, 2).kind else {
         panic!("extern expected")
     };
     let ExternDeclaration::Function(external) = &external.item else {
         panic!("extern function expected")
     };
-    assert!(external.parameters[0].mode.is_none());
+    assert!(external.parameters[0].borrow.is_none());
     let DeclarationKind::TraitImpl(implementation) = &declaration(&program, 4).kind else {
         panic!("trait impl expected")
     };
@@ -699,10 +712,7 @@ fn nested_expressions_fit_the_default_windows_stack() {
                             assert!(matches!(callee.kind, ExprKind::Path(_)));
                             assert_eq!(&source[callee.span.start..callee.span.end], "f");
                             assert_eq!(arguments.len(), 1);
-                            let CallArgument::Expression(argument) = &arguments[0] else {
-                                panic!("expression argument expected")
-                            };
-                            argument
+                            &arguments[0]
                         }
                         ("\"前${", ExprKind::InterpolatedString(parts)) => {
                             let [
@@ -758,7 +768,7 @@ fn nested_expressions_fit_the_default_windows_stack() {
 
 #[test]
 fn distinguishes_method_calls_field_calls_and_postfix_shapes() {
-    let expression = tail_expression("value.member(mut state, move file).field[0].1");
+    let expression = tail_expression("value.member(&mut state, file).field[0].1");
     let ExprKind::TupleField { receiver, index } = expression.kind else {
         panic!("tuple field expected")
     };
@@ -1020,7 +1030,7 @@ fn unresolved(value: Int) {
     lower_case { ..base, field }
     UPPER(1)
     namespace::constructor { value: 1 }
-    transfer(mut state.field, move resource)
+    transfer(&mut state.field, resource)
     unresolved_name
 }
 "#,
@@ -1164,6 +1174,22 @@ fn preserves_every_operator_and_call_argument_kind() {
         assert_eq!(operator.kind, expected);
     }
 
+    for (source, expected, spelling) in [
+        ("&value.items[0]", BorrowKind::Shared, "&"),
+        ("&mut value.items[0]", BorrowKind::Mutable, "&mut"),
+    ] {
+        let expression = tail_expression(source);
+        let ExprKind::Borrow { kind, operand } = expression.kind else {
+            panic!("borrow expected for {source}")
+        };
+        assert_eq!(kind.kind, expected);
+        assert_eq!(kind.span.end - kind.span.start, spelling.len());
+        assert!(
+            matches!(operand.kind, ExprKind::Index { .. }),
+            "{source} borrows the whole place"
+        );
+    }
+
     let body = first_function_body(
         r#"
 fn assignments() {
@@ -1191,13 +1217,20 @@ fn assignments() {
         assert_eq!(operator.kind, expected);
     }
 
-    let call = tail_expression("callable(value, mut state.field, move resource)");
+    let call = tail_expression("callable(value, &mut state.field, &make())");
     let ExprKind::Call { arguments, .. } = call.kind else {
         panic!("call expected")
     };
-    assert!(matches!(arguments[0], CallArgument::Expression(_)));
-    assert!(matches!(arguments[1], CallArgument::Mut { .. }));
-    assert!(matches!(arguments[2], CallArgument::Move { .. }));
+    assert!(matches!(arguments[0].kind, ExprKind::Path(_)));
+    assert!(matches!(
+        arguments[1].kind,
+        ExprKind::Borrow { ref kind, .. } if kind.kind == BorrowKind::Mutable
+    ));
+    assert!(matches!(
+        arguments[2].kind,
+        ExprKind::Borrow { ref kind, ref operand }
+            if kind.kind == BorrowKind::Shared && matches!(operand.kind, ExprKind::Call { .. })
+    ));
 }
 
 #[test]
@@ -1288,7 +1321,7 @@ extern fn invoke<F: Display, effect E>(callback: F) -> Unit with {E}
     );
     assert!(method.parameters[0].ty.is_none());
     assert_eq!(method.type_parameters[1].bounds.len(), 1);
-    assert!(method.parameters[1].mode.is_none());
+    assert!(method.parameters[1].borrow.is_none());
     assert!(matches!(
         parameter_type(&method.parameters[1]).kind,
         TypeKind::Named(_)
@@ -1327,7 +1360,7 @@ extern fn invoke<F: Display, effect E>(callback: F) -> Unit with {E}
             .len(),
         1
     );
-    assert!(function.item.signature.parameters[3].mode.is_none());
+    assert!(function.item.signature.parameters[3].borrow.is_none());
 
     let outer_effects = function
         .item
@@ -1360,7 +1393,7 @@ extern fn invoke<F: Display, effect E>(callback: F) -> Unit with {E}
     };
     assert_eq!(external.effect_parameters.len(), 1);
     assert!(external.effects.is_some());
-    assert!(external.parameters[0].mode.is_none());
+    assert!(external.parameters[0].borrow.is_none());
 
     let impl_program = parse(
         "struct Worker {}; impl Worker { fn invoke<F: Display, effect E>(callback: F) -> Unit with {E} { callback() } }",
@@ -1567,7 +1600,12 @@ fn rejects_new_surface_outside_its_exact_positions() {
 fn rejects_excluded_or_ambiguous_surfaces() {
     let invalid = [
         "fn invalid(mut value) {}",
-        "fn invalid(mut self) {}",
+        "fn invalid(self: &mut Self) {}",
+        "fn invalid(&value: Int) {}",
+        "fn invalid(value: &&Int) {}",
+        "fn invalid() { transfer(&&value) }",
+        "struct Invalid { field: &Node }",
+        "fn invalid(value: List<&Node>) {}",
         "pub impl Value {}",
         "effect Bad { fn op() -> Unit, }",
         "trait Bad { fn method() {} }",
@@ -1591,7 +1629,6 @@ fn rejects_excluded_or_ambiguous_surfaces() {
         "fn invalid() { ordinary() next() }",
         "fn invalid() { while ready {};\n() }",
         "fn invalid() { transfer(mut make_state()) }",
-        "fn invalid() { transfer(move (resource)) }",
         "fn invalid() { Thing { field, ..base } }",
         "fn invalid() { (single,) }",
         "fn invalid() { match value { Variant() => 0 } }",

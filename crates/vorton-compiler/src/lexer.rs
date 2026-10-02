@@ -24,7 +24,6 @@ pub(crate) enum TokenKind {
     Fn,
     Let,
     Mut,
-    Move,
     Const,
     Struct,
     Enum,
@@ -70,6 +69,7 @@ pub(crate) enum TokenKind {
     OrOr,
     Bang,
     Pipe,
+    Amp,
     Equal,
     PlusEqual,
     MinusEqual,
@@ -107,7 +107,6 @@ pub(crate) enum Tag {
     Fn,
     Let,
     Mut,
-    Move,
     Const,
     Struct,
     Enum,
@@ -153,6 +152,7 @@ pub(crate) enum Tag {
     OrOr,
     Bang,
     Pipe,
+    Amp,
     Equal,
     PlusEqual,
     MinusEqual,
@@ -191,7 +191,6 @@ impl TokenKind {
             Self::Fn => Tag::Fn,
             Self::Let => Tag::Let,
             Self::Mut => Tag::Mut,
-            Self::Move => Tag::Move,
             Self::Const => Tag::Const,
             Self::Struct => Tag::Struct,
             Self::Enum => Tag::Enum,
@@ -237,6 +236,7 @@ impl TokenKind {
             Self::OrOr => Tag::OrOr,
             Self::Bang => Tag::Bang,
             Self::Pipe => Tag::Pipe,
+            Self::Amp => Tag::Amp,
             Self::Equal => Tag::Equal,
             Self::PlusEqual => Tag::PlusEqual,
             Self::MinusEqual => Tag::MinusEqual,
@@ -284,7 +284,6 @@ impl Tag {
             Self::Fn => "fn",
             Self::Let => "let",
             Self::Mut => "mut",
-            Self::Move => "move",
             Self::Const => "const",
             Self::Struct => "struct",
             Self::Enum => "enum",
@@ -330,6 +329,7 @@ impl Tag {
             Self::OrOr => "||",
             Self::Bang => "!",
             Self::Pipe => "|",
+            Self::Amp => "&",
             Self::Equal => "=",
             Self::PlusEqual => "+=",
             Self::MinusEqual => "-=",
@@ -494,6 +494,7 @@ impl Lexer<'_> {
             b'>' => TokenKind::Greater,
             b'!' => TokenKind::Bang,
             b'|' => TokenKind::Pipe,
+            b'&' => TokenKind::Amp,
             b'=' => TokenKind::Equal,
             b'.' => TokenKind::Dot,
             b'(' => TokenKind::LParen,
@@ -758,7 +759,6 @@ fn keyword(spelling: &str) -> Option<TokenKind> {
         "fn" => TokenKind::Fn,
         "let" => TokenKind::Let,
         "mut" => TokenKind::Mut,
-        "move" => TokenKind::Move,
         "const" => TokenKind::Const,
         "struct" => TokenKind::Struct,
         "enum" => TokenKind::Enum,
@@ -812,10 +812,10 @@ mod tests {
 
     #[test]
     fn scans_every_fixed_token() {
-        let source = "fn let mut move const struct enum match impl effect handle with if else \
+        let source = "fn let mut const struct enum match impl effect handle with if else \
             catch return for in pub where true false trait while break continue loop \
             use as extern mod super requires unsafe \
-            + - * / % == != < > <= >= && || ! | = += -= *= /= %= .. ..= . :: -> => \
+            + - * / % == != < > <= >= && || ! | & = += -= *= /= %= .. ..= . :: -> => \
             ( ) { } [ ] , : ;";
         assert_eq!(
             tags(source),
@@ -823,7 +823,6 @@ mod tests {
                 Tag::Fn,
                 Tag::Let,
                 Tag::Mut,
-                Tag::Move,
                 Tag::Const,
                 Tag::Struct,
                 Tag::Enum,
@@ -869,6 +868,7 @@ mod tests {
                 Tag::OrOr,
                 Tag::Bang,
                 Tag::Pipe,
+                Tag::Amp,
                 Tag::Equal,
                 Tag::PlusEqual,
                 Tag::MinusEqual,
@@ -897,8 +897,8 @@ mod tests {
 
     #[test]
     fn applies_boundaries_longest_match_and_decimal_rules() {
-        let tokens = lex("move_value 1..2 12.340 type self alias rvalue test").unwrap();
-        assert!(matches!(&tokens[0].kind, TokenKind::Ident(value) if value == "move_value"));
+        let tokens = lex("mut_value 1..2 12.340 type self alias move test").unwrap();
+        assert!(matches!(&tokens[0].kind, TokenKind::Ident(value) if value == "mut_value"));
         assert!(matches!(&tokens[1].kind, TokenKind::Integer(value) if value == "1"));
         assert_eq!(tokens[2].kind.tag(), Tag::DotDot);
         assert!(matches!(&tokens[3].kind, TokenKind::Integer(value) if value == "2"));

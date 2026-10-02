@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::ast::{
-    AssignmentOperator, BinaryOperator, ParameterMode, RawStringDelimiter, Span, UnaryOperator,
+    AssignmentOperator, BinaryOperator, BorrowKind, RawStringDelimiter, Span, UnaryOperator,
 };
 use crate::diagnostic::FrontendDiagnosticKind;
 
@@ -313,10 +313,10 @@ pub enum CoreRoleIssue {
         actual: usize,
     },
     Receiver,
-    ParameterMode {
+    ParameterBorrow {
         index: usize,
-        expected: Option<ParameterMode>,
-        actual: Option<ParameterMode>,
+        expected: Option<BorrowKind>,
+        actual: Option<BorrowKind>,
     },
     ParameterType {
         index: usize,
@@ -679,6 +679,7 @@ pub(crate) struct ResolvedFunction {
     pub(crate) type_parameters: Vec<ResolvedTypeParameter>,
     pub(crate) effect_parameters: Vec<ResolvedEffectParameter>,
     pub(crate) parameters: Vec<ResolvedParameter>,
+    pub(crate) return_borrow: Option<(Span, BorrowKind)>,
     pub(crate) return_type: Option<ResolvedType>,
     pub(crate) effects: Option<ResolvedEffectSet>,
     pub(crate) body: ResolvedBlock,
@@ -690,6 +691,7 @@ pub(crate) struct ResolvedFunctionSignature {
     pub(crate) type_parameters: Vec<ResolvedTypeParameter>,
     pub(crate) effect_parameters: Vec<ResolvedEffectParameter>,
     pub(crate) parameters: Vec<ResolvedParameter>,
+    pub(crate) return_borrow: Option<(Span, BorrowKind)>,
     pub(crate) return_type: Option<ResolvedType>,
     pub(crate) effects: Option<ResolvedEffectSet>,
 }
@@ -698,7 +700,8 @@ pub(crate) struct ResolvedFunctionSignature {
 pub(crate) struct ResolvedParameter {
     pub(crate) span: Span,
     pub(crate) binding: ResolvedBinding,
-    pub(crate) mode: Option<(Span, ParameterMode)>,
+    pub(crate) mutable: Option<Span>,
+    pub(crate) borrow: Option<(Span, BorrowKind)>,
     pub(crate) annotation: Option<ResolvedType>,
 }
 
@@ -862,6 +865,7 @@ pub(crate) enum ResolvedTypeKind {
     Tuple(Vec<ResolvedType>),
     Function {
         parameters: Vec<ResolvedFunctionTypeParameter>,
+        return_borrow: Option<(Span, BorrowKind)>,
         return_type: Option<Box<ResolvedType>>,
         effects: Option<ResolvedEffectSet>,
     },
@@ -870,7 +874,7 @@ pub(crate) enum ResolvedTypeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedFunctionTypeParameter {
     pub(crate) span: Span,
-    pub(crate) mode: Option<(Span, ParameterMode)>,
+    pub(crate) borrow: Option<(Span, BorrowKind)>,
     pub(crate) ty: ResolvedType,
 }
 
@@ -912,13 +916,9 @@ pub(crate) enum ResolvedStatementKind {
     Let {
         bindings: Vec<ResolvedBinding>,
         mutable: Option<Span>,
+        annotation_borrow: Option<(Span, BorrowKind)>,
         annotation: Option<ResolvedType>,
         value: ResolvedExpr,
-    },
-    Alias {
-        binding: ResolvedBinding,
-        annotation: Option<ResolvedType>,
-        place: ResolvedPlace,
     },
     Return(Option<ResolvedExpr>),
     Break,
@@ -931,7 +931,7 @@ pub(crate) enum ResolvedStatementKind {
     Expression(ResolvedExpr),
     IfLet {
         pattern: ResolvedPattern,
-        value: ResolvedOperand,
+        value: ResolvedExpr,
         then_branch: ResolvedBlock,
         else_branch: Option<ResolvedBlock>,
     },
@@ -941,19 +941,10 @@ pub(crate) enum ResolvedStatementKind {
     },
     For {
         bindings: Vec<ResolvedBinding>,
-        iterable: ResolvedOperand,
+        iterable: ResolvedExpr,
         body: ResolvedBlock,
     },
     Loop(ResolvedBlock),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResolvedOperand {
-    Value(Box<ResolvedExpr>),
-    MutPlace {
-        span: Span,
-        place: Box<ResolvedPlace>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1003,7 +994,7 @@ pub(crate) enum ResolvedExprKind {
         else_branch: Option<Box<ResolvedExpr>>,
     },
     Match {
-        scrutinee: ResolvedOperand,
+        scrutinee: Box<ResolvedExpr>,
         arms: Vec<ResolvedMatchArm>,
     },
     Handle {
@@ -1020,6 +1011,10 @@ pub(crate) enum ResolvedExprKind {
         operator: (Span, UnaryOperator),
         operand: Box<ResolvedExpr>,
     },
+    Borrow {
+        kind: (Span, BorrowKind),
+        operand: Box<ResolvedExpr>,
+    },
     Binary {
         left: Box<ResolvedExpr>,
         operator: (Span, BinaryOperator),
@@ -1027,7 +1022,7 @@ pub(crate) enum ResolvedExprKind {
     },
     Call {
         callee: Box<ResolvedExpr>,
-        arguments: Vec<ResolvedCallArgument>,
+        arguments: Vec<ResolvedExpr>,
     },
     Index {
         receiver: Box<ResolvedExpr>,
@@ -1045,7 +1040,7 @@ pub(crate) enum ResolvedExprKind {
     MethodCall {
         receiver: Box<ResolvedExpr>,
         method: ResolvedSelection,
-        arguments: Vec<ResolvedCallArgument>,
+        arguments: Vec<ResolvedExpr>,
     },
 }
 
@@ -1062,19 +1057,6 @@ pub(crate) enum ResolvedConstructEntry {
         member: ResolvedSelection,
         value: Option<Box<ResolvedExpr>>,
         shorthand: Option<Box<ResolvedReference>>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResolvedCallArgument {
-    Expression(ResolvedExpr),
-    Mut {
-        span: Span,
-        place: ResolvedPlace,
-    },
-    Move {
-        span: Span,
-        reference: ResolvedReference,
     },
 }
 
@@ -1135,6 +1117,7 @@ pub(crate) struct ResolvedHandler {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedClosure {
     pub(crate) parameters: Vec<ResolvedParameter>,
+    pub(crate) return_borrow: Option<(Span, BorrowKind)>,
     pub(crate) return_type: Option<ResolvedType>,
     pub(crate) effects: Option<ResolvedEffectSet>,
     pub(crate) body: ResolvedBlock,

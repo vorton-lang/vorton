@@ -2380,7 +2380,7 @@ fn validate_core_profile(
         "eq",
         &roles.partial_eq.method,
         partial_eq_members,
-        &[None, None],
+        &[Some(BorrowKind::Shared), Some(BorrowKind::Shared)],
         CoreMethodEffect::ClosedEmpty,
     )?;
     require_core_self_parameter(core, "PartialEq", "eq", &roles.partial_eq, 0, parameters[0])?;
@@ -2400,7 +2400,7 @@ fn validate_core_profile(
         "partial_cmp",
         &roles.partial_ord.method,
         partial_ord_members,
-        &[None, None],
+        &[Some(BorrowKind::Shared), Some(BorrowKind::Shared)],
         CoreMethodEffect::ClosedEmpty,
     )?;
     require_core_self_parameter(
@@ -2438,7 +2438,7 @@ fn validate_core_profile(
         "cmp",
         &roles.ord.method,
         ord_members,
-        &[None, None],
+        &[Some(BorrowKind::Shared), Some(BorrowKind::Shared)],
         CoreMethodEffect::ClosedEmpty,
     )?;
     require_core_self_parameter(core, "Ord", "cmp", &roles.ord, 0, parameters[0])?;
@@ -2453,7 +2453,7 @@ fn validate_core_profile(
         "drop",
         &roles.drop,
         drop_members,
-        Some(ParameterMode::Mut),
+        Some(BorrowKind::Mutable),
         &unit_type,
     )?;
     validate_simple_core_method(
@@ -2462,7 +2462,7 @@ fn validate_core_profile(
         "to_str",
         &roles.display,
         display_members,
-        None,
+        Some(BorrowKind::Shared),
         &str_type,
     )?;
     validate_simple_core_method(
@@ -2471,7 +2471,7 @@ fn validate_core_profile(
         "debug",
         &roles.debug,
         debug_members,
-        None,
+        Some(BorrowKind::Shared),
         &str_type,
     )?;
     validate_simple_core_method(
@@ -2480,7 +2480,7 @@ fn validate_core_profile(
         "hash",
         &roles.hash,
         hash_members,
-        None,
+        Some(BorrowKind::Shared),
         &int_type,
     )?;
 
@@ -2510,7 +2510,7 @@ fn validate_core_profile(
         "next",
         &roles.iterator.next,
         iterator_members,
-        &[Some(ParameterMode::Mut)],
+        &[Some(BorrowKind::Mutable)],
         CoreMethodEffect::Inferred,
     )?;
     require_core_self_parameter(
@@ -2593,7 +2593,7 @@ fn validate_core_profile(
         "iter",
         &roles.iterable.iter,
         iterable_members,
-        &[None],
+        &[Some(BorrowKind::Shared)],
         CoreMethodEffect::Inferred,
     )?;
     let iterable_method = CoreMethodRole {
@@ -2681,7 +2681,7 @@ fn validate_core_method_header<'a>(
     member_name: &str,
     identity: &EntityId,
     members: &'a [ResolvedTraitMember],
-    expected_modes: &[Option<ParameterMode>],
+    expected_modes: &[Option<BorrowKind>],
     expected_effect: CoreMethodEffect,
 ) -> Result<(Vec<Option<&'a ResolvedType>>, &'a ResolvedType), ProjectDiagnostic> {
     let member = members
@@ -2740,13 +2740,13 @@ fn validate_core_method_header<'a>(
     for (index, (parameter, expected_mode)) in
         signature.parameters.iter().zip(expected_modes).enumerate()
     {
-        let actual_mode = parameter.mode.map(|(_, mode)| mode);
+        let actual_mode = parameter.borrow.map(|(_, kind)| kind);
         if actual_mode != *expected_mode {
             return Err(core_role_diagnostic(
                 core,
                 role,
                 Some(member_name),
-                CoreRoleIssue::ParameterMode {
+                CoreRoleIssue::ParameterBorrow {
                     index,
                     expected: *expected_mode,
                     actual: actual_mode,
@@ -2766,7 +2766,11 @@ fn validate_core_method_header<'a>(
         }
         parameter_types.push(parameter.annotation.as_ref());
     }
-    let Some(result) = signature.return_type.as_ref() else {
+    let Some(result) = signature
+        .return_type
+        .as_ref()
+        .filter(|_| signature.return_borrow.is_none())
+    else {
         return Err(core_role_diagnostic(
             core,
             role,
@@ -2842,7 +2846,7 @@ fn validate_simple_core_method(
     member: &str,
     method: &CoreMethodRole,
     members: &[ResolvedTraitMember],
-    mode: Option<ParameterMode>,
+    mode: Option<BorrowKind>,
     result_type: &EntityId,
 ) -> Result<(), ProjectDiagnostic> {
     let (parameters, result) = validate_core_method_header(
@@ -3541,6 +3545,7 @@ impl<'state> BodyResolver<'state> {
             type_parameters,
             effect_parameters,
             parameters,
+            return_borrow: borrow_of(signature.return_borrow.as_ref()),
             return_type,
             effects,
             body,
@@ -3578,6 +3583,7 @@ impl<'state> BodyResolver<'state> {
             type_parameters,
             effect_parameters,
             parameters,
+            return_borrow: borrow_of(function.return_borrow.as_ref()),
             return_type,
             effects,
         })
@@ -3820,7 +3826,8 @@ impl<'state> BodyResolver<'state> {
             resolved.push(ResolvedParameter {
                 span: parameter.span,
                 binding: ResolvedBinding { origin, identity },
-                mode: parameter.mode.as_ref().map(|mode| (mode.span, mode.kind)),
+                mutable: parameter.mutable,
+                borrow: borrow_of(parameter.borrow.as_ref()),
                 annotation,
             });
         }
@@ -4088,11 +4095,12 @@ impl BodyResolver<'_> {
                     .map(|parameter| {
                         Ok(ResolvedFunctionTypeParameter {
                             span: parameter.span,
-                            mode: parameter.mode.as_ref().map(|mode| (mode.span, mode.kind)),
+                            borrow: borrow_of(parameter.borrow.as_ref()),
                             ty: self.resolve_type(&parameter.ty)?,
                         })
                     })
                     .collect::<Result<Vec<_>, ProjectDiagnostic>>()?,
+                return_borrow: borrow_of(function.return_borrow.as_ref()),
                 return_type: function
                     .return_type
                     .as_ref()
@@ -4885,6 +4893,7 @@ impl BodyResolver<'_> {
                 LetBinding::Name {
                     name,
                     mutable,
+                    annotation_borrow,
                     annotation,
                 } => {
                     let annotation = annotation
@@ -4905,6 +4914,7 @@ impl BodyResolver<'_> {
                     ResolvedStatementKind::Let {
                         bindings: vec![binding],
                         mutable: *mutable,
+                        annotation_borrow: borrow_of(annotation_borrow.as_ref()),
                         annotation,
                         value,
                     }
@@ -4927,33 +4937,12 @@ impl BodyResolver<'_> {
                     ResolvedStatementKind::Let {
                         bindings: resolved_bindings,
                         mutable: None,
+                        annotation_borrow: None,
                         annotation: None,
                         value,
                     }
                 }
             },
-            StatementKind::Alias {
-                name,
-                annotation,
-                place,
-            } => {
-                let annotation = annotation
-                    .as_ref()
-                    .map(|annotation| self.resolve_type(annotation))
-                    .transpose()?;
-                let place = self.resolve_place(place)?;
-                let binding =
-                    self.make_value_binding(name, name.span, EntityKind::Local, self.owner.clone());
-                self.value_scopes
-                    .last_mut()
-                    .expect("let appears in a block scope")
-                    .insert(name.text.clone(), binding.identity.clone());
-                ResolvedStatementKind::Alias {
-                    binding,
-                    annotation,
-                    place,
-                }
-            }
             StatementKind::Return(value) => ResolvedStatementKind::Return(
                 value
                     .as_ref()
@@ -4981,7 +4970,7 @@ impl BodyResolver<'_> {
                 else_branch,
             } => {
                 let (pattern, bindings) = self.resolve_single_pattern(pattern)?;
-                let value = self.resolve_operand(value)?;
+                let value = self.resolve_expr(value)?;
                 let then_branch = self.resolve_block_with_bindings(then_branch, bindings)?;
                 let else_branch = else_branch
                     .as_ref()
@@ -5029,7 +5018,7 @@ impl BodyResolver<'_> {
                     }
                     resolved_bindings.push(resolved);
                 }
-                let iterable = self.resolve_operand(iterable)?;
+                let iterable = self.resolve_expr(iterable)?;
                 let body = self.resolve_block_with_bindings(body, bindings)?;
                 ResolvedStatementKind::For {
                     bindings: resolved_bindings,
@@ -5043,18 +5032,6 @@ impl BodyResolver<'_> {
             span: statement.span,
             kind,
         })
-    }
-
-    fn resolve_operand(&mut self, operand: &Operand) -> Result<ResolvedOperand, ProjectDiagnostic> {
-        match operand {
-            Operand::Value(value) => {
-                Ok(ResolvedOperand::Value(Box::new(self.resolve_expr(value)?)))
-            }
-            Operand::MutPlace { span, place } => Ok(ResolvedOperand::MutPlace {
-                span: *span,
-                place: Box::new(self.resolve_place(place)?),
-            }),
-        }
     }
 
     fn resolve_place(&mut self, place: &PlaceExpr) -> Result<ResolvedPlace, ProjectDiagnostic> {
@@ -5140,9 +5117,9 @@ impl BodyResolver<'_> {
                 else_branch,
             } => self.resolve_if_expression(condition, then_branch, else_branch.as_deref()),
             ExprKind::Match { scrutinee, arms } => {
-                self.resolve_operand(scrutinee).and_then(|scrutinee| {
+                self.resolve_expr(scrutinee).and_then(|scrutinee| {
                     Ok(ResolvedExprKind::Match {
-                        scrutinee,
+                        scrutinee: Box::new(scrutinee),
                         arms: arms
                             .iter()
                             .map(|arm| self.resolve_match_arm(arm))
@@ -5178,6 +5155,13 @@ impl BodyResolver<'_> {
                 self.resolve_expr(operand)
                     .map(|operand| ResolvedExprKind::Unary {
                         operator: (operator.span, operator.kind),
+                        operand: Box::new(operand),
+                    })
+            }
+            ExprKind::Borrow { kind, operand } => {
+                self.resolve_expr(operand)
+                    .map(|operand| ResolvedExprKind::Borrow {
+                        kind: (kind.span, kind.kind),
                         operand: Box::new(operand),
                     })
             }
@@ -5257,13 +5241,13 @@ impl BodyResolver<'_> {
     fn resolve_call_expression(
         &mut self,
         callee: &Expr,
-        arguments: &[CallArgument],
+        arguments: &[Expr],
     ) -> Result<ResolvedExprKind, ProjectDiagnostic> {
         Ok(ResolvedExprKind::Call {
             callee: Box::new(self.resolve_expr(callee)?),
             arguments: arguments
                 .iter()
-                .map(|argument| self.resolve_call_argument(argument))
+                .map(|argument| self.resolve_expr(argument))
                 .collect::<Result<Vec<_>, _>>()?,
         })
     }
@@ -5312,7 +5296,7 @@ impl BodyResolver<'_> {
         &mut self,
         receiver: &Expr,
         method: &Identifier,
-        arguments: &[CallArgument],
+        arguments: &[Expr],
     ) -> Result<ResolvedExprKind, ProjectDiagnostic> {
         let receiver = if let ExprKind::Path(path) = &receiver.kind {
             ResolvedExpr {
@@ -5340,27 +5324,8 @@ impl BodyResolver<'_> {
             method,
             arguments: arguments
                 .iter()
-                .map(|argument| self.resolve_call_argument(argument))
+                .map(|argument| self.resolve_expr(argument))
                 .collect::<Result<Vec<_>, _>>()?,
-        })
-    }
-
-    fn resolve_call_argument(
-        &mut self,
-        argument: &CallArgument,
-    ) -> Result<ResolvedCallArgument, ProjectDiagnostic> {
-        Ok(match argument {
-            CallArgument::Expression(expression) => {
-                ResolvedCallArgument::Expression(self.resolve_expr(expression)?)
-            }
-            CallArgument::Mut { span, place } => ResolvedCallArgument::Mut {
-                span: *span,
-                place: self.resolve_place(place)?,
-            },
-            CallArgument::Move { span, name } => ResolvedCallArgument::Move {
-                span: *span,
-                reference: self.resolve_path(&single_identifier_path(name), ExpectedName::Value)?,
-            },
         })
     }
 
@@ -5437,6 +5402,7 @@ impl BodyResolver<'_> {
         self.owner = previous_owner;
         Ok(ResolvedClosure {
             parameters,
+            return_borrow: borrow_of(closure.return_borrow.as_ref()),
             return_type,
             effects,
             body,
@@ -5697,6 +5663,10 @@ impl BodyResolver<'_> {
             identity,
         }
     }
+}
+
+fn borrow_of(borrow: Option<&Spanned<BorrowKind>>) -> Option<(Span, BorrowKind)> {
+    borrow.map(|borrow| (borrow.span, borrow.kind))
 }
 
 fn single_identifier_path(identifier: &Identifier) -> Path {
@@ -6879,8 +6849,10 @@ mod tests {
 
     #[test]
     fn missing_core_role_has_no_fabricated_source_span() {
-        let source =
-            replaced_core_source("pub trait Display {\n    fn to_str(self) -> Str\n}\n\n", "");
+        let source = replaced_core_source(
+            "pub trait Display {\n    fn to_str(&self) -> Str\n}\n\n",
+            "",
+        );
         let diagnostic = resolve_project(&project_with_core_source(source))
             .expect_err("a required role cannot be synthesized");
         assert_eq!(
@@ -6898,7 +6870,7 @@ mod tests {
     fn rejects_wrong_core_declaration_category() {
         assert_invalid_core(
             replaced_core_source(
-                "pub trait Display {\n    fn to_str(self) -> Str\n}",
+                "pub trait Display {\n    fn to_str(&self) -> Str\n}",
                 "pub type Display = Str",
             ),
             "Display",
@@ -6923,13 +6895,13 @@ mod tests {
     #[test]
     fn rejects_missing_or_wrong_core_members() {
         assert_invalid_core(
-            replaced_core_source("    fn debug(self) -> Str\n", ""),
+            replaced_core_source("    fn debug(&self) -> Str\n", ""),
             "Debug",
             None,
             CoreRoleIssue::MemberSet,
         );
         assert_invalid_core(
-            replaced_core_source("    fn hash(self) -> Int", "    type hash"),
+            replaced_core_source("    fn hash(&self) -> Int", "    type hash"),
             "Hash",
             Some("hash"),
             CoreRoleIssue::MemberKind,
@@ -6939,23 +6911,23 @@ mod tests {
     #[test]
     fn rejects_wrong_core_receiver_and_result_profiles() {
         assert_invalid_core(
-            replaced_core_source("fn to_str(self) -> Str", "fn to_str(value: Self) -> Str"),
+            replaced_core_source("fn to_str(&self) -> Str", "fn to_str(value: Self) -> Str"),
             "Display",
             Some("to_str"),
             CoreRoleIssue::Receiver,
         );
         assert_invalid_core(
-            replaced_core_source("fn drop(self: mut Self) -> Unit", "fn drop(self) -> Unit"),
+            replaced_core_source("fn drop(&mut self) -> Unit", "fn drop(&self) -> Unit"),
             "Drop",
             Some("drop"),
-            CoreRoleIssue::ParameterMode {
+            CoreRoleIssue::ParameterBorrow {
                 index: 0,
-                expected: Some(ParameterMode::Mut),
-                actual: None,
+                expected: Some(BorrowKind::Mutable),
+                actual: Some(BorrowKind::Shared),
             },
         );
         assert_invalid_core(
-            replaced_core_source("fn to_str(self) -> Str", "fn to_str(self) -> Bool"),
+            replaced_core_source("fn to_str(&self) -> Str", "fn to_str(&self) -> Bool"),
             "Display",
             Some("to_str"),
             CoreRoleIssue::ReturnType,
@@ -6966,15 +6938,15 @@ mod tests {
     fn rejects_wrong_core_effect_profile() {
         assert_invalid_core(
             replaced_core_source(
-                "fn eq(self, other: Self) -> Bool with {}",
-                "fn eq(self, other: Self) -> Bool",
+                "fn eq(&self, other: &Self) -> Bool with {}",
+                "fn eq(&self, other: &Self) -> Bool",
             ),
             "PartialEq",
             Some("eq"),
             CoreRoleIssue::EffectProfile,
         );
         assert_invalid_core(
-            replaced_core_source("fn to_str(self) -> Str", "fn to_str(self) -> Str with {}"),
+            replaced_core_source("fn to_str(&self) -> Str", "fn to_str(&self) -> Str with {}"),
             "Display",
             Some("to_str"),
             CoreRoleIssue::EffectProfile,
@@ -8214,9 +8186,7 @@ fn choose<T: Eq>(value: T) -> Option<T> {
             exact(path_expression(callee)).module.source_library(),
             Some(TEST_CORE)
         );
-        let ResolvedCallArgument::Expression(argument) = &arguments[0] else {
-            panic!("ordinary argument");
-        };
+        let argument = &arguments[0];
         assert_eq!(
             exact(path_expression(argument)),
             &second_bindings[0].identity
@@ -9436,7 +9406,7 @@ pub trait Fetch {
             .annotation
             .as_ref()
             .expect("callback type");
-        assert!(method.parameters[1].mode.is_none());
+        assert!(method.parameters[1].borrow.is_none());
         let start = defs.find("fn(U)").expect("function type source");
         assert_eq!(
             callback.span,
@@ -9493,16 +9463,16 @@ pub trait Fetch {
     }
 
     #[test]
-    fn transports_function_types_modes_where_and_bindings() {
+    fn transports_function_types_borrows_where_and_bindings() {
         let source = r#"
 trait Contract {}
 struct Target<T> { value: T }
 impl<T, G: Debug, F: Display> Contract for Target<T> where (T, T): Eq + Debug, T::Item: Eq, {
     fn run(
         callback: F,
-        state: mut T,
-        owned: move T,
-        direct: fn(T, mut T, move G) -> T with {fs},
+        state: &mut T,
+        mut owned: T,
+        direct: fn(T, &mut T, &G) -> &T with {fs},
     ) -> (fn(G) -> T with {fs}) with {fs} {
         match state { value | value => value }
     }
@@ -9533,19 +9503,19 @@ impl<T, G: Debug, F: Display> Contract for Target<T> where (T, T): Eq + Debug, T
         let ResolvedImplMemberKind::Function(method) = &implementation.members[0].kind else {
             panic!("impl method expected")
         };
-        assert!(method.parameters[0].mode.is_none());
-        assert_eq!(
-            method.parameters[1].mode.as_ref().unwrap().1,
-            ParameterMode::Mut
-        );
-        assert_eq!(
-            method.parameters[2].mode.as_ref().unwrap().1,
-            ParameterMode::Move
-        );
-        let mode_span = method.parameters[1].mode.as_ref().unwrap().0;
-        assert_eq!(&source[mode_span.start..mode_span.end], "mut");
+        assert!(method.parameters[0].borrow.is_none());
+        assert!(method.parameters[0].mutable.is_none());
+        let (borrow_span, borrow) = method.parameters[1].borrow.unwrap();
+        assert_eq!(borrow, BorrowKind::Mutable);
+        assert_eq!(&source[borrow_span.start..borrow_span.end], "&mut");
+        assert!(method.parameters[2].borrow.is_none());
+        let mutable = method.parameters[2]
+            .mutable
+            .expect("mutable by-value parameter");
+        assert_eq!(&source[mutable.start..mutable.end], "mut");
         let ResolvedTypeKind::Function {
             parameters,
+            return_borrow,
             effects: Some(effects),
             ..
         } = &method.parameters[3]
@@ -9556,9 +9526,10 @@ impl<T, G: Debug, F: Display> Contract for Target<T> where (T, T): Eq + Debug, T
         else {
             panic!("function type carrier expected")
         };
-        assert!(parameters[0].mode.is_none());
-        assert_eq!(parameters[1].mode.as_ref().unwrap().1, ParameterMode::Mut);
-        assert_eq!(parameters[2].mode.as_ref().unwrap().1, ParameterMode::Move);
+        assert!(parameters[0].borrow.is_none());
+        assert_eq!(parameters[1].borrow.unwrap().1, BorrowKind::Mutable);
+        assert_eq!(parameters[2].borrow.unwrap().1, BorrowKind::Shared);
+        assert_eq!(return_borrow.unwrap().1, BorrowKind::Shared);
         assert!(effects.effects[0].arguments.is_empty());
         assert_eq!(exact(&effects.effects[0].reference).name, "fs");
         let factory = method.return_type.as_ref().expect("factory return type");

@@ -119,28 +119,33 @@ pub struct FunctionSignature {
     pub type_parameters: Vec<TypeParameter>,
     pub effect_parameters: Vec<EffectParameter>,
     pub parameters: Vec<Parameter>,
+    pub return_borrow: Option<Spanned<BorrowKind>>,
     pub return_type: Option<TypeExpr>,
     pub effects: Option<EffectSet>,
 }
 
 /// One named parameter.
 ///
-/// Named functions and trait methods always carry `ty`, except for a bare
+/// Named functions and trait methods always carry `ty`, except for a
 /// `self` receiver. Closure and handler parameters may omit it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
     pub span: Span,
+    /// `mut x: T` or `mut self`: the by-value binding may be modified.
+    pub mutable: Option<Span>,
     pub name: Identifier,
-    pub mode: Option<Spanned<ParameterMode>>,
+    pub borrow: Option<Spanned<BorrowKind>>,
     pub ty: Option<TypeExpr>,
 }
 
+/// How a parameter, return value or expression is borrowed. Absent means
+/// by value: entities move, values copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParameterMode {
-    /// `x: mut T`: in-place access to the caller's place.
-    Mut,
-    /// `x: move T`: takes the caller's resource.
-    Move,
+pub enum BorrowKind {
+    /// `&`: read-only borrow.
+    Shared,
+    /// `&mut`: exclusive borrow.
+    Mutable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,7 +287,7 @@ pub struct EffectAliasDeclaration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternDeclaration {
-    Function(FunctionSignature),
+    Function(Box<FunctionSignature>),
     Type {
         name: Identifier,
         type_parameters: Vec<TypeParameter>,
@@ -356,6 +361,7 @@ pub enum TypeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionType {
     pub parameters: Vec<FunctionTypeParameter>,
+    pub return_borrow: Option<Spanned<BorrowKind>>,
     pub return_type: Option<Box<TypeExpr>>,
     pub effects: Option<EffectSet>,
 }
@@ -363,7 +369,7 @@ pub struct FunctionType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionTypeParameter {
     pub span: Span,
-    pub mode: Option<Spanned<ParameterMode>>,
+    pub borrow: Option<Spanned<BorrowKind>>,
     pub ty: TypeExpr,
 }
 
@@ -408,12 +414,6 @@ pub enum StatementKind {
         binding: LetBinding,
         value: Expr,
     },
-    /// `let t = mut place`: an in-place alias.
-    Alias {
-        name: Identifier,
-        annotation: Option<TypeExpr>,
-        place: PlaceExpr,
-    },
     Return(Option<Expr>),
     Break,
     Continue,
@@ -425,7 +425,7 @@ pub enum StatementKind {
     Expression(Expr),
     IfLet {
         pattern: Pattern,
-        value: Operand,
+        value: Expr,
         then_branch: Block,
         else_branch: Option<Block>,
     },
@@ -435,7 +435,7 @@ pub enum StatementKind {
     },
     For {
         binding: ForBinding,
-        iterable: Operand,
+        iterable: Expr,
         body: Block,
     },
     Loop(Block),
@@ -446,6 +446,7 @@ pub enum LetBinding {
     Name {
         name: Identifier,
         mutable: Option<Span>,
+        annotation_borrow: Option<Spanned<BorrowKind>>,
         annotation: Option<TypeExpr>,
     },
     Tuple(Pattern),
@@ -455,17 +456,6 @@ pub enum LetBinding {
 pub enum ForBinding {
     Name(Identifier),
     Tuple { span: Span, names: Vec<Identifier> },
-}
-
-/// The subject of `for ... in`, `match` and `if let`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Operand {
-    Value(Box<Expr>),
-    /// `mut place`: in-place, exclusive access for the construct's duration.
-    MutPlace {
-        span: Span,
-        place: PlaceExpr,
-    },
 }
 
 /// A syntactic place: a local name followed by field, tuple-field and index
@@ -523,7 +513,7 @@ pub enum ExprKind {
         else_branch: Option<Box<Expr>>,
     },
     Match {
-        scrutinee: Operand,
+        scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
     Handle {
@@ -540,6 +530,11 @@ pub enum ExprKind {
         operator: Spanned<UnaryOperator>,
         operand: Box<Expr>,
     },
+    /// `&e` or `&mut e`.
+    Borrow {
+        kind: Spanned<BorrowKind>,
+        operand: Box<Expr>,
+    },
     Binary {
         left: Box<Expr>,
         operator: Spanned<BinaryOperator>,
@@ -547,7 +542,7 @@ pub enum ExprKind {
     },
     Call {
         callee: Box<Expr>,
-        arguments: Vec<CallArgument>,
+        arguments: Vec<Expr>,
     },
     Index {
         receiver: Box<Expr>,
@@ -564,7 +559,7 @@ pub enum ExprKind {
     MethodCall {
         receiver: Box<Expr>,
         method: Identifier,
-        arguments: Vec<CallArgument>,
+        arguments: Vec<Expr>,
     },
 }
 
@@ -598,21 +593,6 @@ pub enum ConstructEntryKind {
     Field {
         name: Identifier,
         value: Option<Expr>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CallArgument {
-    Expression(Expr),
-    /// `mut place` for a `mut` parameter.
-    Mut {
-        span: Span,
-        place: PlaceExpr,
-    },
-    /// `move name` for a `move` parameter.
-    Move {
-        span: Span,
-        name: Identifier,
     },
 }
 
@@ -699,6 +679,7 @@ pub struct Handler {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosureExpression {
     pub parameters: Vec<Parameter>,
+    pub return_borrow: Option<Spanned<BorrowKind>>,
     pub return_type: Option<Box<TypeExpr>>,
     pub effects: Option<EffectSet>,
     pub body: Block,

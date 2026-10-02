@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 
 use crate::ast::{AssignmentOperator, BinaryOperator, Span, UnaryOperator};
 use crate::project::{
-    EntityId, EntityKind, LibraryId, ModuleRef, OriginRef, ResolvedBlock, ResolvedCallArgument,
-    ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedFunction,
-    ResolvedInterpolationPart, ResolvedProject, ResolvedReference, ResolvedStatement,
-    ResolvedStatementKind, ResolvedType, ResolvedTypeKind, SourceRef,
+    EntityId, EntityKind, LibraryId, ModuleRef, OriginRef, ResolvedBlock, ResolvedDeclarationKind,
+    ResolvedExpr, ResolvedExprKind, ResolvedFunction, ResolvedInterpolationPart, ResolvedProject,
+    ResolvedReference, ResolvedStatement, ResolvedStatementKind, ResolvedType, ResolvedTypeKind,
+    SourceRef,
 };
 
 /// A Milestone 1 value type.
@@ -219,7 +219,11 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         };
         let mut parameters = Vec::new();
         for (parameter, ty) in function.parameters.iter().zip(&signature.parameters) {
-            parameters.push(checker.declare(&parameter.binding.identity, *ty, false));
+            parameters.push(checker.declare(
+                &parameter.binding.identity,
+                *ty,
+                parameter.mutable.is_some(),
+            ));
         }
         let body = checker.check_block(&function.body, Some(signature.result))?;
         functions.push(Function {
@@ -266,13 +270,16 @@ fn check_signature(
     let mut parameters = Vec::new();
     for parameter in &function.parameters {
         let at = Some(parameter.binding.origin.clone());
-        if parameter.mode.is_some() {
-            return Err(unsupported(at, "`mut` and `move` parameters"));
+        if parameter.borrow.is_some() {
+            return Err(unsupported(at, "borrowed parameters"));
         }
         let Some(annotation) = &parameter.annotation else {
             return Err(unsupported(at, "receivers outside methods"));
         };
         parameters.push(value_type(annotation, origin)?);
+    }
+    if function.return_borrow.is_some() {
+        return Err(unsupported(Some(origin.clone()), "borrowed return values"));
     }
     let result = match &function.return_type {
         Some(ty) => value_type(ty, origin)?,
@@ -442,12 +449,16 @@ impl BodyChecker<'_> {
             ResolvedStatementKind::Let {
                 bindings,
                 mutable,
+                annotation_borrow,
                 annotation,
                 value,
             } => {
                 let [binding] = bindings.as_slice() else {
                     return Err(self.unsupported(span, "tuple destructuring"));
                 };
+                if annotation_borrow.is_some() {
+                    return Err(self.unsupported(span, "borrowed bindings"));
+                }
                 let expected = annotation
                     .as_ref()
                     .map(|annotation| {
@@ -563,7 +574,6 @@ impl BodyChecker<'_> {
                 let frame = self.loops.pop().expect("the loop frame was pushed");
                 Ok((Statement::Loop(body?), !frame.breaks))
             }
-            ResolvedStatementKind::Alias { .. } => Err(self.unsupported(span, "in-place aliases")),
             ResolvedStatementKind::IfLet { .. } => Err(self.unsupported(span, "`if let`")),
             ResolvedStatementKind::For { .. } => Err(self.unsupported(span, "`for` loops")),
         }
@@ -810,21 +820,12 @@ impl BodyChecker<'_> {
         &mut self,
         span: Span,
         callee: &ResolvedExpr,
-        arguments: &[ResolvedCallArgument],
+        arguments: &[ResolvedExpr],
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) = &callee.kind else {
             return Err(self.unsupported(callee.span, "calls of computed functions"));
         };
-        let mut values = Vec::new();
-        for argument in arguments {
-            match argument {
-                ResolvedCallArgument::Expression(expression) => values.push(expression),
-                ResolvedCallArgument::Mut { span, .. }
-                | ResolvedCallArgument::Move { span, .. } => {
-                    return Err(self.unsupported(*span, "`mut` and `move` arguments"));
-                }
-            }
-        }
+        let values = arguments.iter().collect::<Vec<_>>();
         if target.kind == EntityKind::LanguageFunction {
             return self.check_intrinsic(span, &target.name, &values);
         }

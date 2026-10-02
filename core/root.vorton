@@ -10,42 +10,42 @@ pub enum Ordering {
 }
 
 pub trait PartialEq {
-    fn eq(self, other: Self) -> Bool with {}
+    fn eq(&self, other: &Self) -> Bool with {}
 }
 
 pub trait Eq: PartialEq {}
 
 pub trait PartialOrd: PartialEq {
-    fn partial_cmp(self, other: Self) -> Option<Ordering> with {}
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> with {}
 }
 
 pub trait Ord: Eq + PartialOrd {
-    fn cmp(self, other: Self) -> Ordering with {}
+    fn cmp(&self, other: &Self) -> Ordering with {}
 }
 
 pub trait Drop {
-    fn drop(self: mut Self) -> Unit
+    fn drop(&mut self) -> Unit
 }
 
 pub trait Display {
-    fn to_str(self) -> Str
+    fn to_str(&self) -> Str
 }
 
 pub trait Debug {
-    fn debug(self) -> Str
+    fn debug(&self) -> Str
 }
 
 pub trait Hash {
-    fn hash(self) -> Int
+    fn hash(&self) -> Int
 }
 
 pub trait Iterator {
     type Item
-    fn next(self: mut Self) -> Option<Self::Item>
+    fn next(&mut self) -> Option<Self::Item>
 }
 
 pub trait Iterable {
     type Item
     type Iter: Iterator<Item = Self::Item>
-    fn iter(self) -> Self::Iter
+    fn iter(&self) -> Self::Iter
 }

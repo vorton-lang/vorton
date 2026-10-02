@@ -24,29 +24,29 @@ effect Log {
 }
 
 trait Area {
-    fn area(self) -> Float
-    fn grow(self: mut Self, by: Float)
+    fn area(&self) -> Float
+    fn grow(&mut self, by: Float)
 }
 
 impl Area for Vec2 {
-    fn area(self) -> Float { self.x * self.y }
-    fn grow(self: mut Self, by: Float) {
+    fn area(&self) -> Float { self.x * self.y }
+    fn grow(&mut self, by: Float) {
         self.x += by; self.y += by
     }
 }
 
-fn damage_all(world: mut World, amount: Int) {
-    for e in mut world.enemies {
+fn damage_all(world: &mut World, amount: Int) {
+    for e in &mut world.enemies {
         e.hp -= amount
     }
     world.log.push("hit ${amount}")
 }
 
-fn tick(world: mut World, state: mut State, dt: Float) -> Int {
-    let t = mut world.enemies[0].pos
+fn tick(world: &mut World, state: &mut State, dt: Float) -> Int {
+    let t = &mut world.enemies[0].pos
     t.x += dt
     t.y += dt
-    match mut state {
+    match &mut state {
         State::Running { timer } => { timer -= dt }
         State::Paused => ()
     }
@@ -56,14 +56,14 @@ fn tick(world: mut World, state: mut State, dt: Float) -> Int {
     let total = alive * 2 +
         1
     if total > 3 {
-        damage_all(mut world, 1)
+        damage_all(&mut world, 1)
     } else {
         world.log.push("calm")
     }
     let apply = fn(x: Int) -> Int { x + 1 }
     world.hooks.push(apply)
     let first = (world.hooks[0])(total)
-    if let Some(value) = world.enemies.first() {
+    if let Some(value) = &world.enemies.first() {
         return value.hp
     }
     first

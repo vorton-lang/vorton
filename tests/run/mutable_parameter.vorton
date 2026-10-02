@@ -1,0 +1,16 @@
+// A by-value parameter marked `mut` is a mutable local copy; the caller's
+// variable is unchanged.
+fn countdown(mut n: Int) -> Int {
+    let mut steps = 0
+    while n > 0 {
+        n -= 1
+        steps += 1
+    }
+    steps
+}
+
+fn main() {
+    let start = 3
+    print(countdown(start))
+    print(start)
+}
