@@ -2,6 +2,7 @@
 
 mod checker;
 mod codegen;
+mod exhaustive;
 mod lexer;
 mod parser;
 mod prepare;

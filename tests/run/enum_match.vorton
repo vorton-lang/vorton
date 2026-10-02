@@ -1,0 +1,83 @@
+// Enums, match with literals, tuples, guards and or-patterns, if let,
+// destructuring, structural `==`, and the generic core `Option`.
+enum Shape {
+    Circle(Float),
+    Rect { w: Float, h: Float },
+    Point,
+}
+
+enum Token {
+    Num(Int),
+    Word(Str),
+    End,
+}
+
+fn area(s: Shape) -> Float {
+    match s {
+        Shape::Circle(r) => 3.0 * r * r
+        Shape::Rect { w, h } => w * h
+        Shape::Point => 0.0
+    }
+}
+
+fn describe(t: Token) -> Str {
+    match t {
+        Token::Num(0) => "zero"
+        Token::Num(n) if n < 0 => "negative"
+        Token::Num(_) => "positive"
+        Token::Word("hi") | Token::Word("hello") => "greeting"
+        Token::Word(w) => "word ${w}"
+        Token::End => "end"
+    }
+}
+
+fn first_even(a: Int, b: Int) -> Option<Int> {
+    if a % 2 == 0 {
+        Option::Some(a)
+    } else if b % 2 == 0 {
+        Option::Some(b)
+    } else {
+        Option::None
+    }
+}
+
+fn classify(pair: (Int, Bool)) -> Str {
+    match pair {
+        (0, _) => "origin"
+        (n, true) => "flagged ${n}"
+        (n, false) => "plain ${n}"
+    }
+}
+
+fn main() {
+    print(area(Shape::Circle(1.0)))
+    print(area(Shape::Rect { w: 2.0, h: 3.5 }))
+    print(area(Shape::Point))
+    print(describe(Token::Num(0)))
+    print(describe(Token::Num(-4)))
+    print(describe(Token::Num(9)))
+    print(describe(Token::Word("hello")))
+    print(describe(Token::Word("vorton${1}")))
+    print(describe(Token::End))
+    if let Option::Some(n) = first_even(3, 8) {
+        print("even ${n}")
+    }
+    if let Option::Some(n) = first_even(3, 5) {
+        print("unexpected ${n}")
+    } else {
+        print("no even")
+    }
+    let missing: Option<Str> = Option::None
+    print(missing == Option::None)
+    print(Option::Some("a${1}") == Option::Some("a1"))
+    print(classify((0, true)))
+    print(classify((2, true)))
+    print(classify((3, false)))
+    let (left, right) = ("l${1}", 2)
+    print(left)
+    print(right)
+    let counted = Token::Word("kept${0}")
+    let copy = counted
+    print(describe(copy))
+    print(describe(counted))
+}

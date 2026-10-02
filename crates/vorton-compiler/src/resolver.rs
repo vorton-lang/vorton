@@ -4913,6 +4913,7 @@ impl BodyResolver<'_> {
                         .insert(name.text.clone(), binding.identity.clone());
                     ResolvedStatementKind::Let {
                         bindings: vec![binding],
+                        pattern: None,
                         mutable: *mutable,
                         annotation_borrow: borrow_of(annotation_borrow.as_ref()),
                         annotation,
@@ -4936,6 +4937,7 @@ impl BodyResolver<'_> {
                         .extend(bindings);
                     ResolvedStatementKind::Let {
                         bindings: resolved_bindings,
+                        pattern: Some(pattern),
                         mutable: None,
                         annotation_borrow: None,
                         annotation: None,

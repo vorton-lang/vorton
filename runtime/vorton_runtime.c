@@ -39,6 +39,11 @@ static _Noreturn void vt_panic_str(const vt_str *message) {
     exit(101);
 }
 
+/* Reached only if the compiler wrongly judged a `match` exhaustive. */
+static _Noreturn void vt_unreachable(void) {
+    vt_panic("internal error: no `match` arm applies");
+}
+
 static _Noreturn void vt_panic_assert(const vt_str *message) {
     fflush(stdout);
     fputs("panic: assertion failed: ", stderr);

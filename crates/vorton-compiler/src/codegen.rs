@@ -1,8 +1,8 @@
 //! C11 code generation for checked programs.
 //!
 //! Expressions are flattened into temporaries so evaluation order is explicit.
-//! `Str` values are reference counted, and so are tuples and structs that
-//! contain them ("counted" types): locals and temporaries own one count,
+//! `Str` values are reference counted, and so are tuples, structs and enums
+//! that contain them ("counted" types): locals and temporaries own one count,
 //! parameters and borrowed operands own none, and every owned value is released
 //! when its scope ends or right after its last borrowing use.
 
@@ -10,7 +10,8 @@ use std::fmt::Write as _;
 
 use crate::ast::{AssignmentOperator, BinaryOperator, UnaryOperator};
 use crate::checker::{
-    Block, Expr, ExprKind, Function, Intrinsic, Place, Program, Statement, Type, TypeKind, Types,
+    Arm, Block, Expr, ExprKind, Function, Intrinsic, Pattern, Place, Program, Statement, Type,
+    TypeKind, Types,
 };
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
@@ -46,22 +47,53 @@ pub(crate) fn emit(program: &Program) -> String {
     output
 }
 
-/// C definitions for every tuple and struct type, components first, with the
-/// retain and release helpers of counted ones.
+/// C definitions for every tuple, struct and enum type, components first,
+/// with retain and release helpers for counted types and an equality function
+/// for types that support `==`.
 fn type_definitions(types: &Types) -> String {
-    fn visit(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
-        if done[ty.index()] || !is_aggregate(types, ty) {
-            return;
+    let mut output = String::new();
+    let mut done = vec![false; types.len()];
+    for ty in types.all() {
+        define(types, ty, &mut done, &mut output);
+    }
+    output
+}
+
+fn define(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
+    if done[ty.index()] || !is_aggregate(types, ty) {
+        return;
+    }
+    done[ty.index()] = true;
+    for component in types.components(ty) {
+        define(types, component, done, output);
+    }
+    let name = c_type(types, ty);
+    writeln!(output, "typedef struct {name} {{").unwrap();
+    if types.is_enum(ty) {
+        output.push_str("    int32_t tag;\n");
+        let mut union = String::new();
+        for (variant, fields) in variant_fields(types, ty).iter().enumerate() {
+            let members = fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| types.has_storage(**field))
+                .map(|(index, field)| format!("{} f{index};", c_type(types, *field)))
+                .collect::<Vec<_>>();
+            if !members.is_empty() {
+                writeln!(
+                    union,
+                    "        struct {{ {} }} v{variant};",
+                    members.join(" ")
+                )
+                .unwrap();
+            }
         }
-        done[ty.index()] = true;
-        let components = types.components(ty);
-        for component in &components {
-            visit(types, *component, done, output);
+        if !union.is_empty() {
+            writeln!(output, "    union {{\n{union}    }} u;").unwrap();
         }
-        let name = c_type(types, ty);
-        writeln!(output, "typedef struct {name} {{").unwrap();
+    } else {
         let mut stored = 0;
-        for (index, component) in components.iter().enumerate() {
+        for (index, component) in types.components(ty).iter().enumerate() {
             if types.has_storage(*component) {
                 writeln!(output, "    {} f{index};", c_type(types, *component)).unwrap();
                 stored += 1;
@@ -70,39 +102,138 @@ fn type_definitions(types: &Types) -> String {
         if stored == 0 {
             output.push_str("    char vt_empty;\n");
         }
-        writeln!(output, "}} {name};").unwrap();
-        if types.is_counted(ty) {
-            for action in ["retain", "release"] {
-                writeln!(
-                    output,
-                    "static void vt_{action}_T{}({name} v) {{",
-                    ty.index()
-                )
-                .unwrap();
-                for (index, component) in components.iter().enumerate() {
-                    if types.is_counted(*component) {
-                        writeln!(
-                            output,
-                            "    {}",
-                            count_line(*component, action, &format!("v.f{index}"))
-                        )
-                        .unwrap();
+    }
+    writeln!(output, "}} {name};").unwrap();
+
+    let parts = variant_fields(types, ty);
+    if types.is_counted(ty) {
+        for action in ["retain", "release"] {
+            writeln!(
+                output,
+                "static void vt_{action}_T{}({name} v) {{",
+                ty.index()
+            )
+            .unwrap();
+            for (variant, fields) in parts.iter().enumerate() {
+                let lines = fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| types.is_counted(**field))
+                    .map(|(index, field)| {
+                        count_line(*field, action, &field_code(types, ty, variant, index, "v"))
+                    })
+                    .collect::<Vec<_>>();
+                if lines.is_empty() {
+                    continue;
+                }
+                if types.is_enum(ty) {
+                    writeln!(
+                        output,
+                        "    if (v.tag == {variant}) {{ {} }}",
+                        lines.join(" ")
+                    )
+                    .unwrap();
+                } else {
+                    for line in lines {
+                        writeln!(output, "    {line}").unwrap();
                     }
                 }
-                output.push_str("}\n");
             }
+            output.push_str("}\n");
         }
     }
-    let mut output = String::new();
-    let mut done = vec![false; types.len()];
-    for ty in types.all() {
-        visit(types, ty, &mut done, &mut output);
+    if has_equality(types, ty) {
+        writeln!(
+            output,
+            "static bool vt_eq_T{}({name} a, {name} b) {{",
+            ty.index()
+        )
+        .unwrap();
+        if types.is_enum(ty) {
+            output.push_str("    if (a.tag != b.tag) return false;\n");
+        }
+        for (variant, fields) in parts.iter().enumerate() {
+            let tests = fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| types.has_storage(**field))
+                .map(|(index, field)| {
+                    equal_code(
+                        types,
+                        *field,
+                        &field_code(types, ty, variant, index, "a"),
+                        &field_code(types, ty, variant, index, "b"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if tests.is_empty() {
+                continue;
+            }
+            if types.is_enum(ty) {
+                writeln!(
+                    output,
+                    "    if (a.tag == {variant}) return {};",
+                    tests.join(" && ")
+                )
+                .unwrap();
+            } else {
+                writeln!(output, "    return {};", tests.join(" && ")).unwrap();
+            }
+        }
+        output.push_str("    return true;\n}\n");
     }
-    output
+}
+
+/// The field types of each variant; a tuple or struct has one variant.
+fn variant_fields(types: &Types, ty: Type) -> Vec<Vec<Type>> {
+    match types.kind(ty) {
+        TypeKind::Tuple(elements) => vec![elements.clone()],
+        TypeKind::Nominal { .. } => types
+            .variants(ty)
+            .iter()
+            .map(|variant| variant.fields.iter().map(|field| field.ty).collect())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The C lvalue of field `index` of `variant` inside `base` of type `ty`.
+fn field_code(types: &Types, ty: Type, variant: usize, index: usize, base: &str) -> String {
+    if types.is_enum(ty) {
+        format!("{base}.u.v{variant}.f{index}")
+    } else {
+        format!("{base}.f{index}")
+    }
 }
 
 fn is_aggregate(types: &Types, ty: Type) -> bool {
-    matches!(types.kind(ty), TypeKind::Tuple(_) | TypeKind::Struct(_))
+    matches!(
+        types.kind(ty),
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. }
+    )
+}
+
+fn has_equality(types: &Types, ty: Type) -> bool {
+    match types.kind(ty) {
+        TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => true,
+        TypeKind::Never => false,
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => types
+            .components(ty)
+            .into_iter()
+            .all(|component| has_equality(types, component)),
+    }
+}
+
+/// A C expression that compares two values of type `ty`.
+fn equal_code(types: &Types, ty: Type, a: &str, b: &str) -> String {
+    match types.kind(ty) {
+        TypeKind::Unit | TypeKind::Never => "true".to_owned(),
+        TypeKind::Str => format!("vt_str_eq({a}, {b})"),
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
+            format!("vt_eq_T{}({a}, {b})", ty.index())
+        }
+        TypeKind::Int | TypeKind::Float | TypeKind::Bool => format!("({a} == {b})"),
+    }
 }
 
 /// The statement that retains or releases the counts inside `code`.
@@ -151,7 +282,7 @@ fn c_type(types: &Types, ty: Type) -> String {
         TypeKind::Bool => "bool".to_owned(),
         TypeKind::Str => "vt_str *".to_owned(),
         TypeKind::Unit | TypeKind::Never => "void".to_owned(),
-        TypeKind::Tuple(_) | TypeKind::Struct(_) => format!("vt_T{}", ty.index()),
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => format!("vt_T{}", ty.index()),
     }
 }
 
@@ -161,7 +292,7 @@ fn zero(types: &Types, ty: Type) -> &'static str {
         TypeKind::Float => "0.0",
         TypeKind::Bool => "false",
         TypeKind::Str => "NULL",
-        TypeKind::Tuple(_) | TypeKind::Struct(_) => "{0}",
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => "{0}",
         TypeKind::Unit | TypeKind::Never => unreachable!("unit values have no storage"),
     }
 }
@@ -232,8 +363,10 @@ struct FunctionEmitter<'a> {
     body: String,
     indent: usize,
     temporaries: usize,
-    /// Counted locals that currently own their value, per open scope.
-    scopes: Vec<Vec<usize>>,
+    labels: usize,
+    /// Counted values that the current code owns, per open scope, as C
+    /// lvalues with their types.
+    scopes: Vec<Vec<(String, Type)>>,
     /// The scope depth at the start of each enclosing loop body.
     loops: Vec<usize>,
 }
@@ -255,6 +388,7 @@ impl FunctionEmitter<'_> {
             body: String::new(),
             indent: 1,
             temporaries: 0,
+            labels: 0,
             scopes: Vec::new(),
             loops: Vec::new(),
         };
@@ -312,6 +446,20 @@ impl FunctionEmitter<'_> {
         self.types.is_counted(ty)
     }
 
+    fn local_code(&self, local: usize) -> String {
+        local_name(local, &self.function.locals[local].name)
+    }
+
+    /// Records that the innermost scope owns `code` of type `ty`.
+    fn own(&mut self, code: String, ty: Type) {
+        if self.counted(ty) {
+            self.scopes
+                .last_mut()
+                .expect("a scope is open")
+                .push((code, ty));
+        }
+    }
+
     /// Makes `value` an owned operand, retaining a borrowed counted value.
     fn owned(&mut self, value: Value, ty: Type) -> Value {
         match value {
@@ -331,22 +479,19 @@ impl FunctionEmitter<'_> {
     /// Releases `value` after a borrowing use if it owns a count.
     fn release(&mut self, value: &Value, ty: Type) {
         if let Value::Code { code, owned: true } = value {
-            let line = count_line(ty, "release", code);
-            self.line(&line);
+            self.line(&count_line(ty, "release", code));
         }
     }
 
     fn release_scopes_from(&mut self, depth: usize) {
-        let locals = self.scopes[depth..]
+        let owned = self.scopes[depth..]
             .iter()
             .flatten()
             .rev()
-            .copied()
+            .cloned()
             .collect::<Vec<_>>();
-        for local in locals {
-            let info = &self.function.locals[local];
-            let line = count_line(info.ty, "release", &local_name(local, &info.name));
-            self.line(&line);
+        for (code, ty) in owned {
+            self.line(&count_line(ty, "release", &code));
         }
     }
 
@@ -382,8 +527,7 @@ impl FunctionEmitter<'_> {
     }
 
     fn place_code(&self, place: &Place) -> String {
-        let info = &self.function.locals[place.local];
-        let mut code = local_name(place.local, &info.name);
+        let mut code = self.local_code(place.local);
         for index in &place.path {
             write!(code, ".f{index}").unwrap();
         }
@@ -403,14 +547,21 @@ impl FunctionEmitter<'_> {
                     return false;
                 }
                 let value = self.owned(value, ty);
-                let name = local_name(*local, &self.function.locals[*local].name);
+                let name = self.local_code(*local);
                 self.line(&format!("{name} = {};", value.code()));
-                if self.counted(ty) {
-                    self.scopes
-                        .last_mut()
-                        .expect("a scope is open")
-                        .push(*local);
+                self.own(name, ty);
+                false
+            }
+            Statement::LetPattern { pattern, value } => {
+                let ty = value.ty;
+                let subject = self.expr(value);
+                if matches!(subject, Value::Never) {
+                    return true;
                 }
+                let code = self.subject(subject, ty);
+                self.bind(pattern, &code, ty);
+                self.close_subject();
+                self.register_bindings(pattern);
                 false
             }
             Statement::Assign {
@@ -431,8 +582,7 @@ impl FunctionEmitter<'_> {
                 match (operator, ty) {
                     (AssignmentOperator::Assign, ty) if self.counted(ty) => {
                         let value = self.owned(value, ty);
-                        let release = count_line(ty, "release", &name);
-                        self.line(&release);
+                        self.line(&count_line(ty, "release", &name));
                         self.line(&format!("{name} = {};", value.code()));
                     }
                     (AssignmentOperator::Assign, _) => self.line(&format!("{name} = {code};")),
@@ -516,7 +666,7 @@ impl FunctionEmitter<'_> {
                 self.loop_body(body);
                 self.indent -= 1;
                 self.line("}");
-                body.ty == Type::NEVER && !self.loop_breaks(body)
+                body.ty == Type::NEVER && !loop_breaks(body)
             }
         }
     }
@@ -525,36 +675,6 @@ impl FunctionEmitter<'_> {
         self.loops.push(self.scopes.len());
         self.block(body);
         self.loops.pop();
-    }
-
-    fn loop_breaks(&self, body: &Block) -> bool {
-        fn block_breaks(block: &Block) -> bool {
-            block.statements.iter().any(statement_breaks)
-                || block.tail.as_deref().is_some_and(expr_breaks)
-        }
-        fn statement_breaks(statement: &Statement) -> bool {
-            match statement {
-                Statement::Break => true,
-                Statement::Let { value, .. } | Statement::Assign { value, .. } => {
-                    expr_breaks(value)
-                }
-                Statement::Expr(value) => expr_breaks(value),
-                Statement::Return(value) => value.as_ref().is_some_and(expr_breaks),
-                Statement::Continue | Statement::While { .. } | Statement::Loop(_) => false,
-            }
-        }
-        fn expr_breaks(expression: &Expr) -> bool {
-            match &expression.kind {
-                ExprKind::Block(block) => block_breaks(block),
-                ExprKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => block_breaks(then_branch) || else_branch.as_deref().is_some_and(expr_breaks),
-                _ => false,
-            }
-        }
-        block_breaks(body)
     }
 
     fn expr(&mut self, expression: &Expr) -> Value {
@@ -577,10 +697,9 @@ impl FunctionEmitter<'_> {
             },
             ExprKind::Unit => Value::Unit,
             ExprKind::Local(local) => {
-                let info = &self.function.locals[*local];
-                if self.types.has_storage(info.ty) {
+                if self.types.has_storage(self.function.locals[*local].ty) {
                     Value::Code {
-                        code: local_name(*local, &info.name),
+                        code: self.local_code(*local),
                         owned: false,
                     }
                 } else {
@@ -626,22 +745,33 @@ impl FunctionEmitter<'_> {
             ExprKind::Interpolate(parts) => self.interpolate(parts),
             ExprKind::Tuple(elements) => {
                 let fields = elements.iter().enumerate().collect::<Vec<_>>();
-                self.aggregate(expression.ty, None, &fields)
+                self.aggregate(expression.ty, 0, None, &fields)
             }
-            ExprKind::Construct { base, fields } => {
+            ExprKind::Construct {
+                variant,
+                base,
+                fields,
+            } => {
                 let fields = fields
                     .iter()
                     .map(|(index, value)| (*index, value))
                     .collect::<Vec<_>>();
-                self.aggregate(expression.ty, base.as_deref(), &fields)
+                self.aggregate(expression.ty, *variant, base.as_deref(), &fields)
             }
             ExprKind::Field { base, index } => self.field(base, *index, expression.ty),
+            ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, expression.ty),
         }
     }
 
-    /// Builds a tuple or struct from `base` and the given fields, evaluated in
-    /// that order.
-    fn aggregate(&mut self, ty: Type, base: Option<&Expr>, fields: &[(usize, &Expr)]) -> Value {
+    /// Builds a tuple, struct or enum value from `base` and the given fields,
+    /// evaluated in that order.
+    fn aggregate(
+        &mut self,
+        ty: Type,
+        variant: usize,
+        base: Option<&Expr>,
+        fields: &[(usize, &Expr)],
+    ) -> Value {
         let base = match base {
             Some(base) => {
                 let value = self.expr(base);
@@ -664,15 +794,17 @@ impl FunctionEmitter<'_> {
         if let Some(base) = &base {
             self.line(&format!("{result} = {};", base.code()));
         }
+        if self.types.is_enum(ty) {
+            self.line(&format!("{result}.tag = {variant};"));
+        }
         for (index, field_ty, value) in values {
             if matches!(value, Value::Unit) {
                 continue;
             }
             let value = self.owned(value, field_ty);
-            let target = format!("{result}.f{index}");
+            let target = field_code(self.types, ty, variant, index, &result);
             if base.is_some() && self.counted(field_ty) {
-                let release = count_line(field_ty, "release", &target);
-                self.line(&release);
+                self.line(&count_line(field_ty, "release", &target));
             }
             self.line(&format!("{target} = {};", value.code()));
         }
@@ -691,27 +823,217 @@ impl FunctionEmitter<'_> {
             self.release(&Value::Code { code, owned }, base.ty);
             return Value::Unit;
         }
-        let field = format!("{code}.f{index}");
+        let field = field_code(self.types, base.ty, 0, index, &code);
         if !owned {
             return Value::Code {
                 code: field,
                 owned: false,
             };
         }
-        let result = self.owned(
-            Value::Code {
-                code: field,
-                owned: false,
-            },
-            ty,
-        );
-        let result = match result {
-            Value::Code { owned: true, .. } => result,
-            Value::Code { code, .. } => self.store(ty, code, false),
-            other => other,
+        let result = if self.counted(ty) {
+            self.owned(
+                Value::Code {
+                    code: field,
+                    owned: false,
+                },
+                ty,
+            )
+        } else {
+            self.store(ty, field, false)
         };
         self.release(&Value::Code { code, owned }, base.ty);
         result
+    }
+
+    /// Keeps a match subject in a temporary that the tests and bindings read.
+    /// An owned counted subject is owned by a new scope that
+    /// [`Self::close_subject`] closes.
+    fn subject(&mut self, value: Value, ty: Type) -> Option<String> {
+        self.scopes.push(Vec::new());
+        match value {
+            Value::Code { code, owned } => {
+                let temporary = self.store(ty, code, owned);
+                if owned {
+                    self.own(temporary.code().to_owned(), ty);
+                }
+                Some(temporary.code().to_owned())
+            }
+            Value::Unit | Value::Never => None,
+        }
+    }
+
+    fn close_subject(&mut self) {
+        let depth = self.scopes.len() - 1;
+        self.release_scopes_from(depth);
+        self.scopes.pop();
+    }
+
+    fn match_expr(&mut self, scrutinee: &Expr, arms: &[Arm], ty: Type) -> Value {
+        let subject_ty = scrutinee.ty;
+        let value = self.expr(scrutinee);
+        if matches!(value, Value::Never) {
+            return Value::Never;
+        }
+        let code = self.subject(value, subject_ty);
+        let result = self.types.has_storage(ty).then(|| self.temporary(ty));
+        let end = format!("vt_m{}", self.labels);
+        self.labels += 1;
+        for arm in arms {
+            let test = code.as_deref().map_or_else(
+                || "true".to_owned(),
+                |code| self.test(&arm.pattern, code, subject_ty),
+            );
+            self.line(&format!("if ({test}) {{"));
+            self.indent += 1;
+            self.scopes.push(Vec::new());
+            self.bind(&arm.pattern, &code, subject_ty);
+            self.register_bindings(&arm.pattern);
+            let guard = match &arm.guard {
+                Some(guard) => {
+                    let value = self.expr(guard);
+                    if matches!(value, Value::Never) {
+                        None
+                    } else {
+                        self.line(&format!("if ({}) {{", value.code()));
+                        self.indent += 1;
+                        Some(())
+                    }
+                }
+                None => None,
+            };
+            let value = self.expr(&arm.body);
+            if !matches!(value, Value::Never) {
+                self.assign_branch(result.as_deref(), value, arm.body.ty);
+                let depth = self.scopes.len() - 1;
+                self.release_scopes_from(depth);
+                self.line(&format!("goto {end};"));
+            }
+            if guard.is_some() {
+                self.indent -= 1;
+                self.line("}");
+                let depth = self.scopes.len() - 1;
+                self.release_scopes_from(depth);
+            }
+            self.scopes.pop();
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.line("vt_unreachable();");
+        self.line(&format!("{end}:;"));
+        self.close_subject();
+        match result {
+            Some(code) => Value::Code {
+                code,
+                owned: self.counted(ty),
+            },
+            None if ty == Type::NEVER => Value::Never,
+            None => Value::Unit,
+        }
+    }
+
+    /// A side-effect-free C condition that holds when `pattern` matches `code`.
+    fn test(&mut self, pattern: &Pattern, code: &str, ty: Type) -> String {
+        match pattern {
+            Pattern::Wildcard | Pattern::Binding(_) => "true".to_owned(),
+            Pattern::Int(value) => format!("({code} == {})", int_literal(*value)),
+            Pattern::Float(value) => format!("({code} == {value:e})"),
+            Pattern::Bool(value) => format!("({code} == {value})"),
+            Pattern::Str(value) => format!("vt_str_eq({code}, {})", self.literals.add(value)),
+            Pattern::Tuple(elements) => {
+                let element_types = self.types.components(ty);
+                let tests = elements
+                    .iter()
+                    .zip(element_types)
+                    .enumerate()
+                    .map(|(index, (element, element_ty))| {
+                        let field = field_code(self.types, ty, 0, index, code);
+                        self.test(element, &field, element_ty)
+                    })
+                    .collect::<Vec<_>>();
+                conjunction(&tests)
+            }
+            Pattern::Variant { variant, fields } => {
+                let mut tests = vec![format!("({code}.tag == {variant})")];
+                for (index, field) in fields {
+                    let field_ty = self.types.variants(ty)[*variant].fields[*index].ty;
+                    let field_code = field_code(self.types, ty, *variant, *index, code);
+                    tests.push(self.test(field, &field_code, field_ty));
+                }
+                conjunction(&tests)
+            }
+            Pattern::Or(alternatives) => {
+                let tests = alternatives
+                    .iter()
+                    .map(|alternative| self.test(alternative, code, ty))
+                    .collect::<Vec<_>>();
+                format!("({})", tests.join(" || "))
+            }
+        }
+    }
+
+    /// Copies the matched parts of `code` into the pattern's binding locals,
+    /// retaining counted ones.
+    fn bind(&mut self, pattern: &Pattern, code: &Option<String>, ty: Type) {
+        let Some(code) = code else {
+            return;
+        };
+        match pattern {
+            Pattern::Binding(local) => {
+                if self.types.has_storage(ty) {
+                    let name = self.local_code(*local);
+                    self.line(&format!("{name} = {code};"));
+                    if self.counted(ty) {
+                        self.line(&count_line(ty, "retain", &name));
+                    }
+                }
+            }
+            Pattern::Tuple(elements) => {
+                let element_types = self.types.components(ty);
+                for (index, (element, element_ty)) in elements.iter().zip(element_types).enumerate()
+                {
+                    let field = field_code(self.types, ty, 0, index, code);
+                    self.bind(element, &Some(field), element_ty);
+                }
+            }
+            Pattern::Variant { variant, fields } => {
+                for (index, field) in fields {
+                    let field_ty = self.types.variants(ty)[*variant].fields[*index].ty;
+                    let field_code = field_code(self.types, ty, *variant, *index, code);
+                    self.bind(field, &Some(field_code), field_ty);
+                }
+            }
+            Pattern::Or(alternatives) => {
+                if !binds(pattern) {
+                    return;
+                }
+                let mut keyword = "if";
+                for alternative in alternatives {
+                    let test = self.test(alternative, code, ty);
+                    self.line(&format!("{keyword} ({test}) {{"));
+                    self.indent += 1;
+                    self.bind(alternative, &Some(code.clone()), ty);
+                    self.indent -= 1;
+                    self.line("}");
+                    keyword = "else if";
+                }
+            }
+            Pattern::Wildcard
+            | Pattern::Int(_)
+            | Pattern::Float(_)
+            | Pattern::Bool(_)
+            | Pattern::Str(_) => {}
+        }
+    }
+
+    /// Makes the innermost scope own the counted binding locals of `pattern`.
+    fn register_bindings(&mut self, pattern: &Pattern) {
+        let mut locals = Vec::new();
+        collect_bindings(pattern, &mut locals);
+        for local in locals {
+            let ty = self.function.locals[local].ty;
+            let code = self.local_code(local);
+            self.own(code, ty);
+        }
     }
 
     /// Stores `code` in a new temporary so later side effects cannot reorder it.
@@ -877,6 +1199,14 @@ impl FunctionEmitter<'_> {
             self.release(&left, operand_ty);
             return Value::Never;
         }
+        if !self.types.has_storage(operand_ty) {
+            let code = if operator == Op::Equal {
+                "true"
+            } else {
+                "false"
+            };
+            return self.store(ty, code.to_owned(), false);
+        }
         let (a, b) = (left.code(), right.code());
         let code = match (operator, operand_ty) {
             (Op::Add, Type::INT) => format!("vt_int_add({a}, {b})"),
@@ -889,14 +1219,12 @@ impl FunctionEmitter<'_> {
             (Op::Multiply, _) => format!("({a} * {b})"),
             (Op::Divide, _) => format!("({a} / {b})"),
             (Op::Remainder, _) => format!("fmod({a}, {b})"),
-            (Op::Equal, Type::STR) => format!("vt_str_eq({a}, {b})"),
-            (Op::NotEqual, Type::STR) => format!("(!vt_str_eq({a}, {b}))"),
+            (Op::Equal, _) => equal_code(self.types, operand_ty, a, b),
+            (Op::NotEqual, _) => format!("(!{})", equal_code(self.types, operand_ty, a, b)),
             (Op::Less, Type::STR) => format!("(vt_str_compare({a}, {b}) < 0)"),
             (Op::Greater, Type::STR) => format!("(vt_str_compare({a}, {b}) > 0)"),
             (Op::LessEqual, Type::STR) => format!("(vt_str_compare({a}, {b}) <= 0)"),
             (Op::GreaterEqual, Type::STR) => format!("(vt_str_compare({a}, {b}) >= 0)"),
-            (Op::Equal, _) => format!("({a} == {b})"),
-            (Op::NotEqual, _) => format!("({a} != {b})"),
             (Op::Less, _) => format!("({a} < {b})"),
             (Op::Greater, _) => format!("({a} > {b})"),
             (Op::LessEqual, _) => format!("({a} <= {b})"),
@@ -956,6 +1284,86 @@ impl FunctionEmitter<'_> {
             (_, Value::Unit | Value::Never) => {}
         }
     }
+}
+
+fn conjunction(tests: &[String]) -> String {
+    let tests = tests
+        .iter()
+        .filter(|test| test.as_str() != "true")
+        .cloned()
+        .collect::<Vec<_>>();
+    if tests.is_empty() {
+        "true".to_owned()
+    } else {
+        format!("({})", tests.join(" && "))
+    }
+}
+
+/// Whether `pattern` binds any local.
+fn binds(pattern: &Pattern) -> bool {
+    let mut locals = Vec::new();
+    collect_bindings(pattern, &mut locals);
+    !locals.is_empty()
+}
+
+/// The binding locals of `pattern`; the alternatives of an or-pattern bind
+/// the same locals, so only the first is read.
+fn collect_bindings(pattern: &Pattern, locals: &mut Vec<usize>) {
+    match pattern {
+        Pattern::Binding(local) => locals.push(*local),
+        Pattern::Tuple(elements) => {
+            for element in elements {
+                collect_bindings(element, locals);
+            }
+        }
+        Pattern::Variant { fields, .. } => {
+            for (_, field) in fields {
+                collect_bindings(field, locals);
+            }
+        }
+        Pattern::Or(alternatives) => {
+            if let Some(first) = alternatives.first() {
+                collect_bindings(first, locals);
+            }
+        }
+        Pattern::Wildcard
+        | Pattern::Int(_)
+        | Pattern::Float(_)
+        | Pattern::Bool(_)
+        | Pattern::Str(_) => {}
+    }
+}
+
+/// Whether some path through `body` reaches a `break` of this loop.
+fn loop_breaks(body: &Block) -> bool {
+    fn block_breaks(block: &Block) -> bool {
+        block.statements.iter().any(statement_breaks)
+            || block.tail.as_deref().is_some_and(expr_breaks)
+    }
+    fn statement_breaks(statement: &Statement) -> bool {
+        match statement {
+            Statement::Break => true,
+            Statement::Let { value, .. }
+            | Statement::LetPattern { value, .. }
+            | Statement::Assign { value, .. } => expr_breaks(value),
+            Statement::Expr(value) => expr_breaks(value),
+            Statement::Return(value) => value.as_ref().is_some_and(expr_breaks),
+            Statement::Continue | Statement::While { .. } | Statement::Loop(_) => false,
+        }
+    }
+    fn expr_breaks(expression: &Expr) -> bool {
+        match &expression.kind {
+            ExprKind::Block(block) => block_breaks(block),
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => block_breaks(then_branch) || else_branch.as_deref().is_some_and(expr_breaks),
+            ExprKind::Match { arms, .. } => arms.iter().any(|arm| expr_breaks(&arm.body)),
+            _ => false,
+        }
+    }
+    block_breaks(body)
 }
 
 fn int_literal(value: i64) -> String {

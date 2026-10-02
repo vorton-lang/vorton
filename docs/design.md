@@ -27,7 +27,7 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 | 语法 | `parser.rs` | 按换行规则切分语句，产生 AST；不做名称或类型判断 |
 | 名称解析 | `resolver.rs` | 解析纯内存的多库项目，给每个声明、绑定与引用一个包含库归属的精确 identity |
 | 声明检查 | `prepare.rs` | 检查 supertrait 目标与 trait、effect alias 的声明图无环 |
-| 类型检查 | `checker.rs`、`types.rs` | 局部双向推断：签名给出参数与返回类型，函数体内推断；每个类型在类型表中只登记一次，按编号比较；产出带类型的程序 |
+| 类型检查 | `checker.rs`、`types.rs`、`exhaustive.rs` | 局部双向推断：签名给出参数与返回类型，函数体内推断；每个类型在类型表中只登记一次，按编号比较；模式的穷尽性按 Maranget 算法检查；产出带类型的程序 |
 | 代码生成 | `codegen.rs` | 把带类型的程序展开成使用临时变量的 C11 代码，为 tuple 与 struct 生成 C 结构体，并插入计数操作 |
 | 构建 | `native.rs` | 调用系统 C 编译器生成可执行文件 |
 
@@ -37,7 +37,7 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 
 ### 当前支持范围
 
-类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、非泛型 struct（不能按值包含自身）、函数、`let`/`let mut`、`mut` 按值参数、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`。其他构造都报告 `Unsupported`。
+类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`match`、`if let` 与 tuple 解构（含穷尽性检查）、结构化 `==`、函数、`let`/`let mut`、`mut` 按值参数、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`。其他构造都报告 `Unsupported`。
 
 `Str` 是不可变的值，用引用计数实现 O(1) 拷贝；含有 `Str` 的 tuple 与 struct 是“计数类型”，生成代码为它们各生成一对 retain/release 函数。实体（`List`、`Map` 等）与借出进入实现后，会在类型检查与 C 生成之间加入一层中间表示，在那里检查移交与借出，插入释放与运行时检查。
 

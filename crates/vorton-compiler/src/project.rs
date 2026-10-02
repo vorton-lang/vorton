@@ -915,6 +915,8 @@ pub(crate) struct ResolvedStatement {
 pub(crate) enum ResolvedStatementKind {
     Let {
         bindings: Vec<ResolvedBinding>,
+        /// The destructuring pattern of `let (a, b) = value`.
+        pattern: Option<ResolvedPattern>,
         mutable: Option<Span>,
         annotation_borrow: Option<(Span, BorrowKind)>,
         annotation: Option<ResolvedType>,
