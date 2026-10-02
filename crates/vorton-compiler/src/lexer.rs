@@ -529,7 +529,13 @@ impl Lexer<'_> {
         while self.position < self.bytes.len() && self.bytes[self.position].is_ascii_digit() {
             self.position += 1;
         }
-        let is_float = self.position + 1 < self.bytes.len()
+        // After `.`, a number is a tuple index, so `pair.0.1` is two indices.
+        let after_dot = self
+            .tokens
+            .last()
+            .is_some_and(|token| token.kind.tag() == Tag::Dot && token.span.end == start);
+        let is_float = !after_dot
+            && self.position + 1 < self.bytes.len()
             && self.bytes[self.position] == b'.'
             && self.bytes[self.position + 1].is_ascii_digit();
         if is_float {
@@ -907,6 +913,24 @@ mod tests {
             tokens[5..10]
                 .iter()
                 .all(|token| token.kind.tag() == Tag::Ident)
+        );
+    }
+
+    #[test]
+    fn reads_numbers_right_after_a_dot_as_tuple_indices() {
+        assert_eq!(
+            tags("pair.0.1 pair. 0.5"),
+            vec![
+                Tag::Ident,
+                Tag::Dot,
+                Tag::Integer,
+                Tag::Dot,
+                Tag::Integer,
+                Tag::Ident,
+                Tag::Dot,
+                Tag::Float,
+                Tag::Eof,
+            ]
         );
     }
 

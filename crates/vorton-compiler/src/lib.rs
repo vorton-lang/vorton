@@ -7,6 +7,7 @@ mod parser;
 mod prepare;
 mod project;
 mod resolver;
+mod types;
 
 pub mod ast;
 pub mod diagnostic;

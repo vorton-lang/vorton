@@ -1,14 +1,17 @@
-//! C11 code generation for checked Milestone 1 programs.
+//! C11 code generation for checked programs.
 //!
 //! Expressions are flattened into temporaries so evaluation order is explicit.
-//! `Str` values are reference counted: locals and temporaries own one count,
+//! `Str` values are reference counted, and so are tuples and structs that
+//! contain them ("counted" types): locals and temporaries own one count,
 //! parameters and borrowed operands own none, and every owned value is released
 //! when its scope ends or right after its last borrowing use.
 
 use std::fmt::Write as _;
 
 use crate::ast::{AssignmentOperator, BinaryOperator, UnaryOperator};
-use crate::checker::{Block, Expr, ExprKind, Function, Intrinsic, Program, Statement, Type};
+use crate::checker::{
+    Block, Expr, ExprKind, Function, Intrinsic, Place, Program, Statement, Type, TypeKind, Types,
+};
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
 
@@ -27,9 +30,10 @@ pub(crate) fn emit(program: &Program) -> String {
 
     let mut output = String::from(RUNTIME);
     output.push('\n');
+    output.push_str(&type_definitions(&program.types));
     output.push_str(&literals.declarations);
     for (index, function) in program.functions.iter().enumerate() {
-        writeln!(output, "{};", prototype(index, function)).unwrap();
+        writeln!(output, "{};", prototype(&program.types, index, function)).unwrap();
     }
     output.push('\n');
     output.push_str(&bodies);
@@ -42,19 +46,88 @@ pub(crate) fn emit(program: &Program) -> String {
     output
 }
 
+/// C definitions for every tuple and struct type, components first, with the
+/// retain and release helpers of counted ones.
+fn type_definitions(types: &Types) -> String {
+    fn visit(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
+        if done[ty.index()] || !is_aggregate(types, ty) {
+            return;
+        }
+        done[ty.index()] = true;
+        let components = types.components(ty);
+        for component in &components {
+            visit(types, *component, done, output);
+        }
+        let name = c_type(types, ty);
+        writeln!(output, "typedef struct {name} {{").unwrap();
+        let mut stored = 0;
+        for (index, component) in components.iter().enumerate() {
+            if types.has_storage(*component) {
+                writeln!(output, "    {} f{index};", c_type(types, *component)).unwrap();
+                stored += 1;
+            }
+        }
+        if stored == 0 {
+            output.push_str("    char vt_empty;\n");
+        }
+        writeln!(output, "}} {name};").unwrap();
+        if types.is_counted(ty) {
+            for action in ["retain", "release"] {
+                writeln!(
+                    output,
+                    "static void vt_{action}_T{}({name} v) {{",
+                    ty.index()
+                )
+                .unwrap();
+                for (index, component) in components.iter().enumerate() {
+                    if types.is_counted(*component) {
+                        writeln!(
+                            output,
+                            "    {}",
+                            count_line(*component, action, &format!("v.f{index}"))
+                        )
+                        .unwrap();
+                    }
+                }
+                output.push_str("}\n");
+            }
+        }
+    }
+    let mut output = String::new();
+    let mut done = vec![false; types.len()];
+    for ty in types.all() {
+        visit(types, ty, &mut done, &mut output);
+    }
+    output
+}
+
+fn is_aggregate(types: &Types, ty: Type) -> bool {
+    matches!(types.kind(ty), TypeKind::Tuple(_) | TypeKind::Struct(_))
+}
+
+/// The statement that retains or releases the counts inside `code`.
+fn count_line(ty: Type, action: &str, code: &str) -> String {
+    if ty == Type::STR {
+        format!("vt_str_{action}({code});")
+    } else {
+        format!("vt_{action}_T{}({code});", ty.index())
+    }
+}
+
 fn function_name(index: usize, function: &Function) -> String {
     format!("vt_f{index}_{}", function.name)
 }
 
-fn prototype(index: usize, function: &Function) -> String {
+fn prototype(types: &Types, index: usize, function: &Function) -> String {
     let parameters = function
         .parameters
         .iter()
+        .filter(|&&local| types.has_storage(function.locals[local].ty))
         .map(|&local| {
             let local_info = &function.locals[local];
             format!(
                 "{} {}",
-                c_type(local_info.ty),
+                c_type(types, local_info.ty),
                 local_name(local, &local_info.name)
             )
         })
@@ -66,18 +139,30 @@ fn prototype(index: usize, function: &Function) -> String {
     };
     format!(
         "static {} {}({parameters})",
-        c_type(function.result),
+        c_type(types, function.result),
         function_name(index, function)
     )
 }
 
-fn c_type(ty: Type) -> &'static str {
-    match ty {
-        Type::Int => "int64_t",
-        Type::Float => "double",
-        Type::Bool => "bool",
-        Type::Str => "vt_str *",
-        Type::Unit | Type::Never => "void",
+fn c_type(types: &Types, ty: Type) -> String {
+    match types.kind(ty) {
+        TypeKind::Int => "int64_t".to_owned(),
+        TypeKind::Float => "double".to_owned(),
+        TypeKind::Bool => "bool".to_owned(),
+        TypeKind::Str => "vt_str *".to_owned(),
+        TypeKind::Unit | TypeKind::Never => "void".to_owned(),
+        TypeKind::Tuple(_) | TypeKind::Struct(_) => format!("vt_T{}", ty.index()),
+    }
+}
+
+fn zero(types: &Types, ty: Type) -> &'static str {
+    match types.kind(ty) {
+        TypeKind::Int => "0",
+        TypeKind::Float => "0.0",
+        TypeKind::Bool => "false",
+        TypeKind::Str => "NULL",
+        TypeKind::Tuple(_) | TypeKind::Struct(_) => "{0}",
+        TypeKind::Unit | TypeKind::Never => unreachable!("unit values have no storage"),
     }
 }
 
@@ -120,8 +205,8 @@ fn escape_c(value: &str) -> String {
     escaped
 }
 
-/// A lowered operand. `owned` operands hold one `Str` count that the consumer
-/// must either store or release.
+/// A lowered operand. `owned` operands of counted types hold one count that
+/// the consumer must either store or release.
 #[derive(Clone)]
 enum Value {
     Unit,
@@ -140,13 +225,14 @@ impl Value {
 
 struct FunctionEmitter<'a> {
     program: &'a Program,
+    types: &'a Types,
     function: &'a Function,
     literals: &'a mut Literals,
     declarations: String,
     body: String,
     indent: usize,
     temporaries: usize,
-    /// `Str` locals that currently own a count, per open scope.
+    /// Counted locals that currently own their value, per open scope.
     scopes: Vec<Vec<usize>>,
     /// The scope depth at the start of each enclosing loop body.
     loops: Vec<usize>,
@@ -159,8 +245,10 @@ impl FunctionEmitter<'_> {
         function: &Function,
         literals: &mut Literals,
     ) -> String {
+        let types = &program.types;
         let mut emitter = FunctionEmitter {
             program,
+            types,
             function,
             literals,
             declarations: String::new(),
@@ -171,14 +259,13 @@ impl FunctionEmitter<'_> {
             loops: Vec::new(),
         };
         for (local, info) in function.locals.iter().enumerate() {
-            if !function.parameters.contains(&local) && !matches!(info.ty, Type::Unit | Type::Never)
-            {
+            if !function.parameters.contains(&local) && types.has_storage(info.ty) {
                 writeln!(
                     emitter.declarations,
                     "    {} {} = {};",
-                    c_type(info.ty),
+                    c_type(types, info.ty),
                     local_name(local, &info.name),
-                    zero(info.ty)
+                    zero(types, info.ty)
                 )
                 .unwrap();
             }
@@ -194,7 +281,7 @@ impl FunctionEmitter<'_> {
         }
         format!(
             "{} {{\n{}{}}}\n\n",
-            prototype(index, function),
+            prototype(types, index, function),
             emitter.declarations,
             emitter.body
         )
@@ -214,20 +301,24 @@ impl FunctionEmitter<'_> {
         writeln!(
             self.declarations,
             "    {} {name} = {};",
-            c_type(ty),
-            zero(ty)
+            c_type(self.types, ty),
+            zero(self.types, ty)
         )
         .unwrap();
         name
     }
 
-    /// Makes `value` an owned operand, retaining a borrowed `Str`.
+    fn counted(&self, ty: Type) -> bool {
+        self.types.is_counted(ty)
+    }
+
+    /// Makes `value` an owned operand, retaining a borrowed counted value.
     fn owned(&mut self, value: Value, ty: Type) -> Value {
         match value {
-            Value::Code { code, owned: false } if ty == Type::Str => {
-                let temporary = self.temporary(Type::Str);
+            Value::Code { code, owned: false } if self.counted(ty) => {
+                let temporary = self.temporary(ty);
                 self.line(&format!("{temporary} = {code};"));
-                self.line(&format!("vt_str_retain({temporary});"));
+                self.line(&count_line(ty, "retain", &temporary));
                 Value::Code {
                     code: temporary,
                     owned: true,
@@ -238,9 +329,10 @@ impl FunctionEmitter<'_> {
     }
 
     /// Releases `value` after a borrowing use if it owns a count.
-    fn release(&mut self, value: &Value) {
+    fn release(&mut self, value: &Value, ty: Type) {
         if let Value::Code { code, owned: true } = value {
-            self.line(&format!("vt_str_release({code});"));
+            let line = count_line(ty, "release", code);
+            self.line(&line);
         }
     }
 
@@ -252,8 +344,9 @@ impl FunctionEmitter<'_> {
             .copied()
             .collect::<Vec<_>>();
         for local in locals {
-            let name = local_name(local, &self.function.locals[local].name);
-            self.line(&format!("vt_str_release({name});"));
+            let info = &self.function.locals[local];
+            let line = count_line(info.ty, "release", &local_name(local, &info.name));
+            self.line(&line);
         }
     }
 
@@ -268,16 +361,16 @@ impl FunctionEmitter<'_> {
         let value = match &block.tail {
             Some(tail) => {
                 let value = self.expr(tail);
-                if block.ty == Type::Unit {
-                    self.release(&value);
+                if block.ty == Type::UNIT {
+                    self.release(&value, tail.ty);
                     Value::Unit
-                } else if matches!(value, Value::Never) || block.ty == Type::Never {
+                } else if matches!(value, Value::Never) || block.ty == Type::NEVER {
                     Value::Never
                 } else {
                     self.owned(value, block.ty)
                 }
             }
-            None if block.ty == Type::Never => Value::Never,
+            None if block.ty == Type::NEVER => Value::Never,
             None => Value::Unit,
         };
         if !matches!(value, Value::Never) {
@@ -286,6 +379,15 @@ impl FunctionEmitter<'_> {
         }
         self.scopes.pop();
         value
+    }
+
+    fn place_code(&self, place: &Place) -> String {
+        let info = &self.function.locals[place.local];
+        let mut code = local_name(place.local, &info.name);
+        for index in &place.path {
+            write!(code, ".f{index}").unwrap();
+        }
+        code
     }
 
     /// Emits `statement` and returns whether control cannot continue after it.
@@ -303,7 +405,7 @@ impl FunctionEmitter<'_> {
                 let value = self.owned(value, ty);
                 let name = local_name(*local, &self.function.locals[*local].name);
                 self.line(&format!("{name} = {};", value.code()));
-                if ty == Type::Str {
+                if self.counted(ty) {
                     self.scopes
                         .last_mut()
                         .expect("a scope is open")
@@ -312,11 +414,11 @@ impl FunctionEmitter<'_> {
                 false
             }
             Statement::Assign {
-                local,
+                place,
                 operator,
                 value,
             } => {
-                let ty = self.function.locals[*local].ty;
+                let ty = value.ty;
                 let value = self.expr(value);
                 if matches!(value, Value::Never) {
                     return true;
@@ -324,16 +426,17 @@ impl FunctionEmitter<'_> {
                 if matches!(value, Value::Unit) {
                     return false;
                 }
-                let name = local_name(*local, &self.function.locals[*local].name);
+                let name = self.place_code(place);
                 let code = value.code().to_owned();
                 match (operator, ty) {
-                    (AssignmentOperator::Assign, Type::Str) => {
+                    (AssignmentOperator::Assign, ty) if self.counted(ty) => {
                         let value = self.owned(value, ty);
-                        self.line(&format!("vt_str_release({name});"));
+                        let release = count_line(ty, "release", &name);
+                        self.line(&release);
                         self.line(&format!("{name} = {};", value.code()));
                     }
                     (AssignmentOperator::Assign, _) => self.line(&format!("{name} = {code};")),
-                    (operator, Type::Int) => {
+                    (operator, Type::INT) => {
                         let function = match operator {
                             AssignmentOperator::AddAssign => "vt_int_add",
                             AssignmentOperator::SubtractAssign => "vt_int_sub",
@@ -360,7 +463,7 @@ impl FunctionEmitter<'_> {
             }
             Statement::Expr(expression) => {
                 let value = self.expr(expression);
-                self.release(&value);
+                self.release(&value, expression.ty);
                 matches!(value, Value::Never)
             }
             Statement::Return(value) => {
@@ -413,7 +516,7 @@ impl FunctionEmitter<'_> {
                 self.loop_body(body);
                 self.indent -= 1;
                 self.line("}");
-                body.ty == Type::Never && !self.loop_breaks(body)
+                body.ty == Type::NEVER && !self.loop_breaks(body)
             }
         }
     }
@@ -475,13 +578,13 @@ impl FunctionEmitter<'_> {
             ExprKind::Unit => Value::Unit,
             ExprKind::Local(local) => {
                 let info = &self.function.locals[*local];
-                if matches!(info.ty, Type::Unit | Type::Never) {
-                    Value::Unit
-                } else {
+                if self.types.has_storage(info.ty) {
                     Value::Code {
                         code: local_name(*local, &info.name),
                         owned: false,
                     }
+                } else {
+                    Value::Unit
                 }
             }
             ExprKind::Call {
@@ -498,7 +601,7 @@ impl FunctionEmitter<'_> {
                     return Value::Never;
                 }
                 let code = match (operator, expression.ty) {
-                    (UnaryOperator::Negate, Type::Int) => format!("vt_int_neg({})", operand.code()),
+                    (UnaryOperator::Negate, Type::INT) => format!("vt_int_neg({})", operand.code()),
                     (UnaryOperator::Negate, _) => format!("(-{})", operand.code()),
                     (UnaryOperator::Not, _) => format!("(!{})", operand.code()),
                 };
@@ -521,7 +624,94 @@ impl FunctionEmitter<'_> {
             ),
             ExprKind::Block(block) => self.block(block),
             ExprKind::Interpolate(parts) => self.interpolate(parts),
+            ExprKind::Tuple(elements) => {
+                let fields = elements.iter().enumerate().collect::<Vec<_>>();
+                self.aggregate(expression.ty, None, &fields)
+            }
+            ExprKind::Construct { base, fields } => {
+                let fields = fields
+                    .iter()
+                    .map(|(index, value)| (*index, value))
+                    .collect::<Vec<_>>();
+                self.aggregate(expression.ty, base.as_deref(), &fields)
+            }
+            ExprKind::Field { base, index } => self.field(base, *index, expression.ty),
         }
+    }
+
+    /// Builds a tuple or struct from `base` and the given fields, evaluated in
+    /// that order.
+    fn aggregate(&mut self, ty: Type, base: Option<&Expr>, fields: &[(usize, &Expr)]) -> Value {
+        let base = match base {
+            Some(base) => {
+                let value = self.expr(base);
+                if matches!(value, Value::Never) {
+                    return Value::Never;
+                }
+                Some(self.owned(value, ty))
+            }
+            None => None,
+        };
+        let mut values = Vec::new();
+        for (index, field) in fields {
+            let value = self.expr(field);
+            if matches!(value, Value::Never) {
+                return Value::Never;
+            }
+            values.push((*index, field.ty, value));
+        }
+        let result = self.temporary(ty);
+        if let Some(base) = &base {
+            self.line(&format!("{result} = {};", base.code()));
+        }
+        for (index, field_ty, value) in values {
+            if matches!(value, Value::Unit) {
+                continue;
+            }
+            let value = self.owned(value, field_ty);
+            let target = format!("{result}.f{index}");
+            if base.is_some() && self.counted(field_ty) {
+                let release = count_line(field_ty, "release", &target);
+                self.line(&release);
+            }
+            self.line(&format!("{target} = {};", value.code()));
+        }
+        Value::Code {
+            code: result,
+            owned: self.counted(ty),
+        }
+    }
+
+    fn field(&mut self, base: &Expr, index: usize, ty: Type) -> Value {
+        let value = self.expr(base);
+        let Value::Code { code, owned } = value else {
+            return value;
+        };
+        if !self.types.has_storage(ty) {
+            self.release(&Value::Code { code, owned }, base.ty);
+            return Value::Unit;
+        }
+        let field = format!("{code}.f{index}");
+        if !owned {
+            return Value::Code {
+                code: field,
+                owned: false,
+            };
+        }
+        let result = self.owned(
+            Value::Code {
+                code: field,
+                owned: false,
+            },
+            ty,
+        );
+        let result = match result {
+            Value::Code { owned: true, .. } => result,
+            Value::Code { code, .. } => self.store(ty, code, false),
+            other => other,
+        };
+        self.release(&Value::Code { code, owned }, base.ty);
+        result
     }
 
     /// Stores `code` in a new temporary so later side effects cannot reorder it.
@@ -541,31 +731,30 @@ impl FunctionEmitter<'_> {
             if matches!(value, Value::Never) {
                 return Value::Never;
             }
-            values.push(value);
+            values.push((value, argument.ty));
         }
         let name = function_name(function, &self.program.functions[function]);
         let code = format!(
             "{name}({})",
             values
                 .iter()
-                .filter(|value| !matches!(value, Value::Unit))
-                .map(Value::code)
+                .filter(|(value, _)| !matches!(value, Value::Unit))
+                .map(|(value, _)| value.code())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let result = match ty {
-            Type::Unit | Type::Never => {
-                self.line(&format!("{code};"));
-                if ty == Type::Never {
-                    Value::Never
-                } else {
-                    Value::Unit
-                }
+        let result = if self.types.has_storage(ty) {
+            self.store(ty, code, self.counted(ty))
+        } else {
+            self.line(&format!("{code};"));
+            if ty == Type::NEVER {
+                Value::Never
+            } else {
+                Value::Unit
             }
-            _ => self.store(ty, code, ty == Type::Str),
         };
-        for value in &values {
-            self.release(value);
+        for (value, ty) in &values {
+            self.release(value, *ty);
         }
         result
     }
@@ -583,8 +772,8 @@ impl FunctionEmitter<'_> {
             Intrinsic::Print => {
                 let text = self.stringify(&values[0], arguments[0].ty);
                 self.line(&format!("vt_print({});", text.code()));
-                self.release(&text);
-                self.release(&values[0]);
+                self.release(&text, Type::STR);
+                self.release(&values[0], arguments[0].ty);
                 Value::Unit
             }
             Intrinsic::Assert => {
@@ -593,7 +782,7 @@ impl FunctionEmitter<'_> {
                     values[0].code(),
                     values[1].code()
                 ));
-                self.release(&values[1]);
+                self.release(&values[1], Type::STR);
                 Value::Unit
             }
             Intrinsic::Panic => {
@@ -606,21 +795,21 @@ impl FunctionEmitter<'_> {
     /// Converts a printable value to a `Str` operand without consuming it.
     fn stringify(&mut self, value: &Value, ty: Type) -> Value {
         match ty {
-            Type::Str => Value::Code {
+            Type::STR => Value::Code {
                 code: value.code().to_owned(),
                 owned: false,
             },
-            Type::Int => self.store(Type::Str, format!("vt_int_to_str({})", value.code()), true),
-            Type::Float => self.store(
-                Type::Str,
+            Type::INT => self.store(Type::STR, format!("vt_int_to_str({})", value.code()), true),
+            Type::FLOAT => self.store(
+                Type::STR,
                 format!("vt_float_to_str({})", value.code()),
                 true,
             ),
-            Type::Bool => Value::Code {
+            Type::BOOL => Value::Code {
                 code: format!("vt_bool_to_str({})", value.code()),
                 owned: false,
             },
-            Type::Unit | Type::Never => unreachable!("the checker admits only printable values"),
+            _ => unreachable!("the checker admits only printable values"),
         }
     }
 
@@ -639,7 +828,7 @@ impl FunctionEmitter<'_> {
         }
         let list = texts.iter().map(Value::code).collect::<Vec<_>>().join(", ");
         let result = self.store(
-            Type::Str,
+            Type::STR,
             format!(
                 "vt_str_join({}, (vt_str *[]){{{list}}})",
                 texts.len().max(1)
@@ -647,10 +836,10 @@ impl FunctionEmitter<'_> {
             true,
         );
         for text in &texts {
-            self.release(text);
+            self.release(text, Type::STR);
         }
-        for (value, _) in &values {
-            self.release(value);
+        for (value, ty) in &values {
+            self.release(value, *ty);
         }
         result
     }
@@ -662,7 +851,7 @@ impl FunctionEmitter<'_> {
             if matches!(left, Value::Never) {
                 return Value::Never;
             }
-            let result = self.store(Type::Bool, left.code().to_owned(), false);
+            let result = self.store(Type::BOOL, left.code().to_owned(), false);
             let test = if operator == Op::LogicAnd {
                 result.code().to_owned()
             } else {
@@ -685,27 +874,27 @@ impl FunctionEmitter<'_> {
         }
         let right = self.expr(right);
         if matches!(right, Value::Never) {
-            self.release(&left);
+            self.release(&left, operand_ty);
             return Value::Never;
         }
         let (a, b) = (left.code(), right.code());
         let code = match (operator, operand_ty) {
-            (Op::Add, Type::Int) => format!("vt_int_add({a}, {b})"),
-            (Op::Subtract, Type::Int) => format!("vt_int_sub({a}, {b})"),
-            (Op::Multiply, Type::Int) => format!("vt_int_mul({a}, {b})"),
-            (Op::Divide, Type::Int) => format!("vt_int_div({a}, {b})"),
-            (Op::Remainder, Type::Int) => format!("vt_int_rem({a}, {b})"),
+            (Op::Add, Type::INT) => format!("vt_int_add({a}, {b})"),
+            (Op::Subtract, Type::INT) => format!("vt_int_sub({a}, {b})"),
+            (Op::Multiply, Type::INT) => format!("vt_int_mul({a}, {b})"),
+            (Op::Divide, Type::INT) => format!("vt_int_div({a}, {b})"),
+            (Op::Remainder, Type::INT) => format!("vt_int_rem({a}, {b})"),
             (Op::Add, _) => format!("({a} + {b})"),
             (Op::Subtract, _) => format!("({a} - {b})"),
             (Op::Multiply, _) => format!("({a} * {b})"),
             (Op::Divide, _) => format!("({a} / {b})"),
             (Op::Remainder, _) => format!("fmod({a}, {b})"),
-            (Op::Equal, Type::Str) => format!("vt_str_eq({a}, {b})"),
-            (Op::NotEqual, Type::Str) => format!("(!vt_str_eq({a}, {b}))"),
-            (Op::Less, Type::Str) => format!("(vt_str_compare({a}, {b}) < 0)"),
-            (Op::Greater, Type::Str) => format!("(vt_str_compare({a}, {b}) > 0)"),
-            (Op::LessEqual, Type::Str) => format!("(vt_str_compare({a}, {b}) <= 0)"),
-            (Op::GreaterEqual, Type::Str) => format!("(vt_str_compare({a}, {b}) >= 0)"),
+            (Op::Equal, Type::STR) => format!("vt_str_eq({a}, {b})"),
+            (Op::NotEqual, Type::STR) => format!("(!vt_str_eq({a}, {b}))"),
+            (Op::Less, Type::STR) => format!("(vt_str_compare({a}, {b}) < 0)"),
+            (Op::Greater, Type::STR) => format!("(vt_str_compare({a}, {b}) > 0)"),
+            (Op::LessEqual, Type::STR) => format!("(vt_str_compare({a}, {b}) <= 0)"),
+            (Op::GreaterEqual, Type::STR) => format!("(vt_str_compare({a}, {b}) >= 0)"),
             (Op::Equal, _) => format!("({a} == {b})"),
             (Op::NotEqual, _) => format!("({a} != {b})"),
             (Op::Less, _) => format!("({a} < {b})"),
@@ -717,8 +906,8 @@ impl FunctionEmitter<'_> {
             }
         };
         let result = self.store(ty, code, false);
-        self.release(&left);
-        self.release(&right);
+        self.release(&left, operand_ty);
+        self.release(&right, operand_ty);
         result
     }
 
@@ -733,26 +922,26 @@ impl FunctionEmitter<'_> {
         if matches!(condition, Value::Never) {
             return Value::Never;
         }
-        let result = (!matches!(ty, Type::Unit | Type::Never)).then(|| self.temporary(ty));
+        let result = self.types.has_storage(ty).then(|| self.temporary(ty));
         self.line(&format!("if ({}) {{", condition.code()));
         self.indent += 1;
         let value = self.block(then_branch);
-        self.assign_branch(result.as_deref(), value, ty);
+        self.assign_branch(result.as_deref(), value, then_branch.ty);
         self.indent -= 1;
         if let Some(else_branch) = else_branch {
             self.line("} else {");
             self.indent += 1;
             let value = self.expr(else_branch);
-            self.assign_branch(result.as_deref(), value, ty);
+            self.assign_branch(result.as_deref(), value, else_branch.ty);
             self.indent -= 1;
         }
         self.line("}");
         match result {
             Some(code) => Value::Code {
                 code,
-                owned: ty == Type::Str,
+                owned: self.counted(ty),
             },
-            None if ty == Type::Never => Value::Never,
+            None if ty == Type::NEVER => Value::Never,
             None => Value::Unit,
         }
     }
@@ -763,7 +952,7 @@ impl FunctionEmitter<'_> {
                 let value = self.owned(value, ty);
                 self.line(&format!("{result} = {};", value.code()));
             }
-            (None, value @ Value::Code { .. }) => self.release(&value),
+            (None, value @ Value::Code { .. }) => self.release(&value, ty),
             (_, Value::Unit | Value::Never) => {}
         }
     }
@@ -774,15 +963,5 @@ fn int_literal(value: i64) -> String {
         "INT64_MIN".to_owned()
     } else {
         format!("INT64_C({value})")
-    }
-}
-
-fn zero(ty: Type) -> &'static str {
-    match ty {
-        Type::Int => "0",
-        Type::Float => "0.0",
-        Type::Bool => "false",
-        Type::Str => "NULL",
-        Type::Unit | Type::Never => unreachable!("unit values have no storage"),
     }
 }

@@ -1,0 +1,49 @@
+// Structs and tuples of values: assignment copies, and fields of a `let mut`
+// variable can be updated in place without touching the copies.
+struct Point { x: Int, y: Int }
+struct Named { name: Str, at: Point }
+
+fn shift(p: Point, dx: Int) -> Point {
+    Point { ..p, x: p.x + dx }
+}
+
+fn describe(n: Named) -> Str {
+    "${n.name}@${n.at.x},${n.at.y}"
+}
+
+fn make() -> Named {
+    Named { name: "made", at: Point { x: 1, y: 1 } }
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    let mut q = p
+    q.x = 10
+    print(p.x)
+    print(q.x)
+    let moved = shift(q, 5)
+    print(moved.x)
+    print(moved.y)
+
+    let mut n = Named { name: "origin", at: Point { x: 0, y: 0 } }
+    let copy = n
+    n.name = "home${1}"
+    n.at.y += 3
+    print(describe(n))
+    print(describe(copy))
+
+    let pair = (n.name, 42)
+    print(pair.0)
+    print(pair.1)
+    let mut nested = ((1, "a${2}"), copy)
+    nested.0.1 = "b"
+    print(nested.0.1)
+    print(nested.1.name)
+
+    let x = 7
+    let y = 8
+    let shorthand = Point { x, y }
+    print(shorthand.x + shorthand.y)
+    print(make().name)
+    print(make().at.x)
+}
