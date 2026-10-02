@@ -1,0 +1,7 @@
+fn take(xs: &List<Int>) -> List<Int> {
+    xs
+}
+
+fn main() {
+    print(take(&[1]).len())
+}

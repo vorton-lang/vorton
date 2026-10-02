@@ -16,8 +16,8 @@ use std::fmt::Write as _;
 
 use crate::ast::{AssignmentOperator, BinaryOperator, UnaryOperator};
 use crate::checker::{
-    Arm, Block, Builtin, Expr, ExprKind, ForSource, Function, Intrinsic, Pattern, Place, Program,
-    Projection, Receiver, Statement, Type, TypeKind, Types,
+    Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, Intrinsic, Pattern,
+    Place, Program, Projection, Receiver, Statement, Type, TypeKind, Types,
 };
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
@@ -457,7 +457,7 @@ fn prototype(types: &Types, index: usize, function: &Function) -> String {
             let local_info = &function.locals[local];
             format!(
                 "{} {}",
-                c_type(types, local_info.ty),
+                storage_type(types, local_info),
                 local_name(local, &local_info.name)
             )
         })
@@ -472,6 +472,15 @@ fn prototype(types: &Types, index: usize, function: &Function) -> String {
         c_type(types, function.result),
         function_name(index, function)
     )
+}
+
+/// The C type that stores a local: a pointer for a borrowed local.
+fn storage_type(types: &Types, local: &crate::checker::Local) -> String {
+    if local.borrow.is_some() {
+        format!("{} *", c_type(types, local.ty))
+    } else {
+        c_type(types, local.ty)
+    }
 }
 
 fn c_type(types: &Types, ty: Type) -> String {
@@ -605,12 +614,16 @@ impl FunctionEmitter<'_> {
         };
         for (local, info) in function.locals.iter().enumerate() {
             if !function.parameters.contains(&local) && types.has_storage(info.ty) {
+                let initial = if info.borrow.is_some() {
+                    "NULL"
+                } else {
+                    zero(types, info.ty)
+                };
                 writeln!(
                     emitter.declarations,
-                    "    {} {} = {};",
-                    c_type(types, info.ty),
+                    "    {} {} = {initial};",
+                    storage_type(types, info),
                     local_name(local, &info.name),
-                    zero(types, info.ty)
                 )
                 .unwrap();
             }
@@ -618,7 +631,7 @@ impl FunctionEmitter<'_> {
         // The callee owns its entity parameters.
         for &local in &function.parameters {
             let ty = function.locals[local].ty;
-            if types.is_entity(ty) {
+            if types.is_entity(ty) && function.locals[local].borrow.is_none() {
                 emitter.own(emitter.local_code(local), ty);
             }
         }
@@ -675,8 +688,15 @@ impl FunctionEmitter<'_> {
         self.types.needs_release(ty)
     }
 
+    /// The C lvalue of a local; a borrowed local is dereferenced.
     fn local_code(&self, local: usize) -> String {
-        local_name(local, &self.function.locals[local].name)
+        let info = &self.function.locals[local];
+        let name = local_name(local, &info.name);
+        if info.borrow.is_some() {
+            format!("(*{name})")
+        } else {
+            name
+        }
     }
 
     /// Records that the innermost scope owns `code` of type `ty`.
@@ -780,11 +800,13 @@ impl FunctionEmitter<'_> {
         value
     }
 
-    /// Evaluates the indices of `place` and returns its C lvalue and type.
-    /// Returns `None` if an index diverges.
-    fn place(&mut self, place: &Place) -> Option<(String, Type)> {
+    /// Evaluates the indices of `place` and returns its C lvalue, its type,
+    /// and the temporaries that hold its list indices, in order. Returns
+    /// `None` if an index diverges.
+    fn place(&mut self, place: &Place) -> Option<(String, Type, Vec<String>)> {
         let mut code = self.local_code(place.local);
         let mut ty = self.function.locals[place.local].ty;
+        let mut indices = Vec::new();
         for projection in &place.projections {
             match projection {
                 Projection::Field(index) => {
@@ -799,6 +821,7 @@ impl FunctionEmitter<'_> {
                     let index = self.store(Type::INT, value.code().to_owned(), false);
                     self.line(&format!("vt_check_index({}, {code}.len);", index.code()));
                     code = format!("{code}.items[{}]", index.code());
+                    indices.push(index.code().to_owned());
                     let TypeKind::List(element) = *self.types.kind(ty) else {
                         unreachable!("the checker indexes only lists")
                     };
@@ -806,7 +829,7 @@ impl FunctionEmitter<'_> {
                 }
             }
         }
-        Some((code, ty))
+        Some((code, ty, indices))
     }
 
     /// Emits `statement` and returns whether control cannot continue after it.
@@ -913,7 +936,7 @@ impl FunctionEmitter<'_> {
     }
 
     fn assign(&mut self, place: &Place, operator: AssignmentOperator, value: &Expr) -> bool {
-        let Some((name, ty)) = self.place(place) else {
+        let Some((name, ty, _)) = self.place(place) else {
             return true;
         };
         let value = self.expr(value);
@@ -1035,7 +1058,7 @@ impl FunctionEmitter<'_> {
                 self.close_scope();
             }
             ForSource::Borrowed(place) => {
-                let Some((list, ty)) = self.place(place) else {
+                let Some((list, ty, _)) = self.place(place) else {
                     return;
                 };
                 let TypeKind::List(element) = *self.types.kind(ty) else {
@@ -1095,7 +1118,9 @@ impl FunctionEmitter<'_> {
             ExprKind::Call {
                 function,
                 arguments,
-            } => self.call(*function, arguments, expression.ty),
+                checks,
+            } => self.call(*function, arguments, checks, expression.ty),
+            ExprKind::Borrow(_) => unreachable!("borrows appear only as call arguments"),
             ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
@@ -1307,7 +1332,7 @@ impl FunctionEmitter<'_> {
     ) -> Value {
         let (code, receiver_ty, receiver_value) = match receiver {
             Receiver::Place(place) => {
-                let Some((code, receiver_ty)) = self.place(place) else {
+                let Some((code, receiver_ty, _)) = self.place(place) else {
                     return Value::Never;
                 };
                 (code, receiver_ty, None)
@@ -1548,7 +1573,13 @@ impl FunctionEmitter<'_> {
         };
         match pattern {
             Pattern::Binding(local) => {
-                if self.types.has_storage(ty) {
+                if self.function.locals[*local].borrow.is_some() {
+                    if !self.types.has_storage(ty) {
+                        return;
+                    }
+                    let name = local_name(*local, &self.function.locals[*local].name);
+                    self.line(&format!("{name} = &{code};"));
+                } else if self.types.has_storage(ty) {
                     let name = self.local_code(*local);
                     self.line(&format!("{name} = {code};"));
                     if self.types.is_entity(ty) {
@@ -1601,6 +1632,9 @@ impl FunctionEmitter<'_> {
         let mut locals = Vec::new();
         collect_bindings(pattern, &mut locals);
         for local in locals {
+            if self.function.locals[local].borrow.is_some() {
+                continue;
+            }
             let ty = self.function.locals[local].ty;
             let code = self.local_code(local);
             self.own(code, ty);
@@ -1617,25 +1651,75 @@ impl FunctionEmitter<'_> {
         }
     }
 
-    fn call(&mut self, function: usize, arguments: &[Expr], ty: Type) -> Value {
-        let mut values = Vec::new();
+    fn call(
+        &mut self,
+        function: usize,
+        arguments: &[Expr],
+        checks: &[crate::checker::DisjointCheck],
+        ty: Type,
+    ) -> Value {
+        // The C operands, the values to release after the call, and the
+        // index temporaries of each borrowed place.
+        let mut operands = Vec::new();
+        let mut releases = Vec::new();
+        let mut indices = Vec::new();
         for argument in arguments {
-            let value = self.expr(argument);
-            if matches!(value, Value::Never) {
-                return Value::Never;
-            }
-            values.push((value, argument.ty));
+            let ty = argument.ty;
+            let mut place_indices = Vec::new();
+            let operand = match &argument.kind {
+                ExprKind::Borrow(target) => match target.as_ref() {
+                    BorrowTarget::Place(place) => {
+                        let Some((code, _, evaluated)) = self.place(place) else {
+                            return Value::Never;
+                        };
+                        place_indices = evaluated;
+                        self.types.has_storage(ty).then(|| format!("&{code}"))
+                    }
+                    BorrowTarget::Value(value) => match self.expr(value) {
+                        Value::Never => return Value::Never,
+                        Value::Unit => None,
+                        // A part of a temporary that the scope keeps alive.
+                        Value::Code { code, owned: false } if self.types.is_entity(ty) => {
+                            Some(format!("&{code}"))
+                        }
+                        value => {
+                            let value = self.owned(value, ty);
+                            let temporary = self.store(ty, value.code().to_owned(), true);
+                            let operand = format!("&{}", temporary.code());
+                            releases.push((temporary, ty));
+                            Some(operand)
+                        }
+                    },
+                },
+                _ => match self.expr(argument) {
+                    Value::Never => return Value::Never,
+                    Value::Unit => None,
+                    value => {
+                        let operand = value.code().to_owned();
+                        // The callee owns entity arguments and borrows the others.
+                        if !self.types.is_entity(ty) {
+                            releases.push((value, ty));
+                        }
+                        Some(operand)
+                    }
+                },
+            };
+            operands.extend(operand);
+            indices.push(place_indices);
+        }
+        for check in checks {
+            let same = indices[check.first]
+                .iter()
+                .zip(&indices[check.second])
+                .map(|(first, second)| format!("{first} == {second}"))
+                .collect::<Vec<_>>();
+            self.line(&format!(
+                "if ({}) vt_panic(\"the same element is borrowed twice\");",
+                same.join(" && ")
+            ));
         }
         let name = function_name(function, &self.program.functions[function]);
-        let code = format!(
-            "{name}({})",
-            values
-                .iter()
-                .filter(|(value, _)| !matches!(value, Value::Unit))
-                .map(|(value, _)| value.code())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let code = format!("{name}({})", operands.join(", "));
         let result = if self.types.has_storage(ty) {
             self.store(ty, code, true)
         } else {
@@ -1646,11 +1730,8 @@ impl FunctionEmitter<'_> {
                 Value::Unit
             }
         };
-        for (value, value_ty) in &values {
-            // The callee owns entity arguments and borrows the others.
-            if !self.types.is_entity(*value_ty) {
-                self.release(value, *value_ty);
-            }
+        for (value, value_ty) in &releases {
+            self.release(value, *value_ty);
         }
         result
     }

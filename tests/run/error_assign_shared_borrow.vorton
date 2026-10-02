@@ -1,0 +1,8 @@
+fn set(x: &Int) {
+    x = 2
+}
+
+fn main() {
+    let x = 1
+    set(&x)
+}

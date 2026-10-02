@@ -1,0 +1,6 @@
+fn show(xs: &List<Int>) {}
+
+fn main() {
+    let xs = [1]
+    show(xs)
+}

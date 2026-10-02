@@ -1,0 +1,16 @@
+// Two `&mut` arguments that differ only in list indices are checked at run
+// time; naming the same element panics.
+fn trade(a: &mut Int, b: &mut Int) {
+    a += 1
+    b += 1
+}
+
+fn main() {
+    let mut xs = [1, 2, 3]
+    let i = 1
+    let j = 2 - 1
+    trade(&mut xs[0], &mut xs[i])
+    print(xs[0])
+    trade(&mut xs[i], &mut xs[j])
+    print("unreachable")
+}

@@ -87,6 +87,8 @@ pub(crate) struct Function {
 pub(crate) struct Local {
     pub(crate) name: String,
     pub(crate) ty: Type,
+    /// A borrowed local holds a pointer to a place of type `ty`.
+    pub(crate) borrow: Option<BorrowKind>,
 }
 
 pub(crate) struct Block {
@@ -135,7 +137,7 @@ pub(crate) enum ForSource {
     },
     /// Takes the list and yields its elements.
     List(Expr),
-    /// Reads the value elements of a list place without taking them.
+    /// Borrows the elements of a list place without taking them.
     Borrowed(Place),
 }
 
@@ -196,6 +198,8 @@ pub(crate) enum ExprKind {
     Call {
         function: usize,
         arguments: Vec<Expr>,
+        /// Pairs of borrowed arguments whose places must differ at run time.
+        checks: Vec<DisjointCheck>,
     },
     Intrinsic {
         intrinsic: Intrinsic,
@@ -249,6 +253,21 @@ pub(crate) enum ExprKind {
         receiver: Box<Receiver>,
         arguments: Vec<Expr>,
     },
+    /// `&x` or `&mut x` as a call argument: a pointer to a place, or to a
+    /// temporary that lives until the end of the enclosing statement.
+    Borrow(Box<BorrowTarget>),
+}
+
+pub(crate) enum BorrowTarget {
+    Place(Place),
+    Value(Expr),
+}
+
+/// Two borrowed arguments of one call whose places have the same shape and
+/// differ only in list indices; they must not name the same element.
+pub(crate) struct DisjointCheck {
+    pub(crate) first: usize,
+    pub(crate) second: usize,
 }
 
 pub(crate) struct Arm {
@@ -284,7 +303,7 @@ pub(crate) enum Intrinsic {
 
 struct Signature {
     index: usize,
-    parameters: Vec<Type>,
+    parameters: Vec<(Type, Option<BorrowKind>)>,
     result: Type,
 }
 
@@ -440,12 +459,15 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             frozen: Vec::new(),
         };
         let mut parameters = Vec::new();
-        for (parameter, ty) in function.parameters.iter().zip(&signature.parameters) {
-            parameters.push(checker.declare(
-                &parameter.binding.identity,
-                *ty,
-                parameter.mutable.is_some(),
-            ));
+        for (parameter, (ty, borrow)) in function.parameters.iter().zip(&signature.parameters) {
+            parameters.push(match borrow {
+                Some(kind) => checker.declare_borrow(&parameter.binding.identity, *ty, *kind),
+                None => checker.declare(
+                    &parameter.binding.identity,
+                    *ty,
+                    parameter.mutable.is_some(),
+                ),
+            });
         }
         let body = checker.check_block(&function.body, Some(signature.result))?;
         functions.push(Function {
@@ -593,20 +615,20 @@ fn check_signature(
     let mut parameters = Vec::new();
     for parameter in &function.parameters {
         let at = Some(parameter.binding.origin.clone());
-        if parameter.borrow.is_some() {
-            return Err(unsupported(at, "borrowed parameters"));
-        }
         let Some(annotation) = &parameter.annotation else {
             return Err(unsupported(at, "receivers outside methods"));
         };
-        parameters.push(resolve_type(
-            types,
-            nominals,
-            annotation,
-            &BTreeMap::new(),
-            origin,
-            0,
-        )?);
+        if parameter.borrow.is_some() && parameter.mutable.is_some() {
+            return Err(CheckDiagnostic {
+                kind: CheckDiagnosticKind::NotAssignable,
+                primary: at,
+                message:
+                    "a borrowed parameter cannot be `mut`; it already names the caller's place"
+                        .to_owned(),
+            });
+        }
+        let ty = resolve_type(types, nominals, annotation, &BTreeMap::new(), origin, 0)?;
+        parameters.push((ty, parameter.borrow.map(|(_, kind)| kind)));
     }
     if function.return_borrow.is_some() {
         return Err(unsupported(Some(origin.clone()), "borrowed return values"));
@@ -746,6 +768,16 @@ struct Frozen {
     local: usize,
     /// Field indices from the local; `None` stands for any list element.
     path: Vec<Option<usize>>,
+    /// Whether the borrow is `&mut`, which excludes even shared access.
+    exclusive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// A shared borrow, or a read that is not a value copy.
+    Share,
+    /// An assignment, a move, a `&mut` borrow or a changing method.
+    Change,
 }
 
 /// The values given to a variant or struct, in source order.
@@ -808,10 +840,67 @@ impl BodyChecker<'_> {
     }
 
     fn declare(&mut self, identity: &EntityId, ty: Type, mutable: bool) -> usize {
+        self.declare_local(identity, ty, mutable, None)
+    }
+
+    /// Declares a pattern binding: a copy or move without `mode`, otherwise a
+    /// pointer into the matched place.
+    fn declare_binding(
+        &mut self,
+        identity: &EntityId,
+        ty: Type,
+        mode: Option<BorrowKind>,
+    ) -> usize {
+        match mode {
+            Some(kind) => self.declare_borrow(identity, ty, kind),
+            None => self.declare(identity, ty, false),
+        }
+    }
+
+    /// Checks that `place` may be borrowed with `kind` now: `&mut` needs a
+    /// changeable place, and neither may conflict with a running borrow.
+    fn check_borrow(
+        &self,
+        place: &Place,
+        path: &[Option<usize>],
+        kind: BorrowKind,
+        span: Span,
+    ) -> Result<(), CheckDiagnostic> {
+        if kind == BorrowKind::Mutable && !self.mutable[place.local] {
+            return Err(self.error(
+                CheckDiagnosticKind::NotAssignable,
+                span,
+                format!(
+                    "`{}` is not declared `mut`, so it cannot be borrowed with `&mut`",
+                    self.locals[place.local].name
+                ),
+            ));
+        }
+        let access = match kind {
+            BorrowKind::Shared => Access::Share,
+            BorrowKind::Mutable => Access::Change,
+        };
+        self.check_access(place.local, path, access, span)
+    }
+
+    /// Declares a local that points at a borrowed place; through `&mut` the
+    /// place can be changed.
+    fn declare_borrow(&mut self, identity: &EntityId, ty: Type, kind: BorrowKind) -> usize {
+        self.declare_local(identity, ty, kind == BorrowKind::Mutable, Some(kind))
+    }
+
+    fn declare_local(
+        &mut self,
+        identity: &EntityId,
+        ty: Type,
+        mutable: bool,
+        borrow: Option<BorrowKind>,
+    ) -> usize {
         let index = self.locals.len();
         self.locals.push(Local {
             name: identity.name.clone(),
             ty,
+            borrow,
         });
         self.mutable.push(mutable);
         self.local_ids.insert(identity.clone(), index);
@@ -858,6 +947,15 @@ impl BodyChecker<'_> {
             return Ok(expression);
         }
         match expression.kind {
+            ExprKind::Local(local) if self.locals[local].borrow.is_some() => Err(self.error(
+                CheckDiagnosticKind::CannotMove,
+                span,
+                format!(
+                    "`{}` is borrowed, so its `{}` cannot be moved; use `clone()`",
+                    self.locals[local].name,
+                    self.types.name(expression.ty)
+                ),
+            )),
             ExprKind::Local(local) => {
                 self.check_not_frozen(local, &[], span)?;
                 self.moved.insert(local);
@@ -887,28 +985,48 @@ impl BodyChecker<'_> {
         self.consume(checked, expression.span)
     }
 
-    /// Rejects changing `local` along `path` while a loop reads an
-    /// overlapping place.
-    fn check_not_frozen(
+    /// Rejects an access to `local` along `path` that conflicts with a
+    /// running borrow of an overlapping place: any change conflicts with a
+    /// borrow, and a shared access conflicts with an exclusive one. Reading a
+    /// value never conflicts.
+    fn check_access(
         &self,
         local: usize,
         path: &[Option<usize>],
+        access: Access,
         span: Span,
     ) -> Result<(), CheckDiagnostic> {
-        let overlaps = |frozen: &Frozen| {
+        self.check_access_in(&self.frozen, local, path, access, span)
+    }
+
+    fn check_access_in(
+        &self,
+        frozen: &[Frozen],
+        local: usize,
+        path: &[Option<usize>],
+        access: Access,
+        span: Span,
+    ) -> Result<(), CheckDiagnostic> {
+        let conflicts = |frozen: &Frozen| {
             frozen.local == local
+                && (access == Access::Change || frozen.exclusive)
                 && frozen
                     .path
                     .iter()
                     .zip(path)
                     .all(|(left, right)| left.is_none() || right.is_none() || left == right)
         };
-        if self.frozen.iter().any(overlaps) {
+        if frozen.iter().any(conflicts) {
+            let what = if access == Access::Change {
+                "change"
+            } else {
+                "be borrowed"
+            };
             return Err(self.error(
                 CheckDiagnosticKind::BorrowConflict,
                 span,
                 format!(
-                    "`{}` cannot change while a loop over it is running",
+                    "`{}` cannot {what} while it is borrowed",
                     self.locals[local].name
                 ),
             ));
@@ -916,6 +1034,14 @@ impl BodyChecker<'_> {
         Ok(())
     }
 
+    fn check_not_frozen(
+        &self,
+        local: usize,
+        path: &[Option<usize>],
+        span: Span,
+    ) -> Result<(), CheckDiagnostic> {
+        self.check_access(local, path, Access::Change, span)
+    }
     /// Ends one path through a loop body: an outer local that the next
     /// iteration would see moved is an error.
     fn check_loop_back(&self, span: Span) -> Result<(), CheckDiagnostic> {
@@ -1167,7 +1293,7 @@ impl BodyChecker<'_> {
         iterable: &ResolvedExpr,
         body: &ResolvedBlock,
     ) -> Result<(Statement, bool), CheckDiagnostic> {
-        let (source, element, frozen) = match &iterable.kind {
+        let (source, element, frozen, mode) = match &iterable.kind {
             ResolvedExprKind::Binary {
                 left,
                 operator:
@@ -1187,12 +1313,13 @@ impl BodyChecker<'_> {
                     end,
                     inclusive: *operator == BinaryOperator::RangeInclusive,
                 };
-                (source, Type::INT, None)
+                (source, Type::INT, None, None)
             }
             ResolvedExprKind::Borrow {
-                kind: (_, BorrowKind::Shared),
+                kind: (_, kind),
                 operand,
             } => {
+                let kind = *kind;
                 let Some((place, ty, path)) = self.expr_place(operand)? else {
                     return Err(self.unsupported(operand.span, "borrowing loops over temporaries"));
                 };
@@ -1203,19 +1330,17 @@ impl BodyChecker<'_> {
                         format!("`for` cannot iterate over `{}`", self.types.name(ty)),
                     ));
                 };
-                if self.types.is_entity(element) {
-                    return Err(
-                        self.unsupported(operand.span, "borrowing loops over lists of entities")
-                    );
-                }
+                self.check_borrow(&place, &path, kind, operand.span)?;
                 let frozen = Frozen {
                     local: place.local,
                     path,
+                    exclusive: kind == BorrowKind::Mutable,
                 };
-                (ForSource::Borrowed(place), element, Some(frozen))
-            }
-            ResolvedExprKind::Borrow { .. } => {
-                return Err(self.unsupported(iterable.span, "`for` over `&mut`"));
+                // Value elements read through `&` are copied; anything else
+                // binds a pointer to the element.
+                let mode =
+                    (kind == BorrowKind::Mutable || self.types.is_entity(element)).then_some(kind);
+                (ForSource::Borrowed(place), element, Some(frozen), mode)
             }
             _ => {
                 let value = self.check_expr(iterable, None)?;
@@ -1227,23 +1352,23 @@ impl BodyChecker<'_> {
                     ));
                 };
                 let value = self.consume(value, iterable.span)?;
-                (ForSource::List(value), element, None)
+                (ForSource::List(value), element, None, None)
             }
         };
         let scope = self.local_ids.clone();
         self.enter_loop();
         let binding = match bindings {
-            [single] => Ok(Pattern::Binding(self.declare(
+            [single] => Ok(Pattern::Binding(self.declare_binding(
                 &single.identity,
                 element,
-                false,
+                mode,
             ))),
             many => match self.types.kind(element).clone() {
                 TypeKind::Tuple(elements) if elements.len() == many.len() => Ok(Pattern::Tuple(
                     many.iter()
                         .zip(elements)
                         .map(|(binding, ty)| {
-                            Pattern::Binding(self.declare(&binding.identity, ty, false))
+                            Pattern::Binding(self.declare_binding(&binding.identity, ty, mode))
                         })
                         .collect(),
                 )),
@@ -2752,19 +2877,143 @@ impl BodyChecker<'_> {
             signature.parameters.clone(),
             signature.result,
         );
-        let mut checked = Vec::new();
-        for (value, ty) in values.into_iter().zip(parameters) {
-            let argument = self.check_consumed(value, Some(ty))?;
-            self.require(value.span, ty, argument.ty)?;
-            checked.push(argument);
-        }
+        let frozen_before = self.frozen.len();
+        let checked = self.check_arguments(values, parameters);
+        self.frozen.truncate(frozen_before);
+        let (arguments, checks) = checked?;
         Ok((
             result,
             ExprKind::Call {
                 function: index,
-                arguments: checked,
+                arguments,
+                checks,
             },
         ))
+    }
+
+    /// Checks call arguments in order. A borrowed argument stays borrowed
+    /// while the later ones are checked; two borrows of one place that
+    /// differ only in list indices are checked at run time.
+    fn check_arguments(
+        &mut self,
+        values: Vec<&ResolvedExpr>,
+        parameters: Vec<(Type, Option<BorrowKind>)>,
+    ) -> Result<(Vec<Expr>, Vec<DisjointCheck>), CheckDiagnostic> {
+        let frozen_before = self.frozen.len();
+        let mut checked = Vec::new();
+        let mut borrows: Vec<ArgumentBorrow> = Vec::new();
+        let mut checks = Vec::new();
+        for (position, (value, (ty, borrow))) in values.into_iter().zip(parameters).enumerate() {
+            let Some(kind) = borrow else {
+                let argument = self.check_consumed(value, Some(ty))?;
+                self.require(value.span, ty, argument.ty)?;
+                checked.push(argument);
+                continue;
+            };
+            let spelled = match kind {
+                BorrowKind::Shared => "&",
+                BorrowKind::Mutable => "&mut",
+            };
+            let ResolvedExprKind::Borrow {
+                kind: (_, written),
+                operand,
+            } = &value.kind
+            else {
+                return Err(self.error(
+                    CheckDiagnosticKind::TypeMismatch,
+                    value.span,
+                    format!("this parameter borrows its argument; write `{spelled}` before it"),
+                ));
+            };
+            if *written != kind {
+                return Err(self.error(
+                    CheckDiagnosticKind::TypeMismatch,
+                    value.span,
+                    format!("this parameter borrows with `{spelled}`"),
+                ));
+            }
+            let target = match self.expr_place(operand)? {
+                Some((place, place_ty, path)) => {
+                    self.require(operand.span, ty, place_ty)?;
+                    if kind == BorrowKind::Mutable && !self.mutable[place.local] {
+                        return Err(self.error(
+                            CheckDiagnosticKind::NotAssignable,
+                            operand.span,
+                            format!(
+                                "`{}` is not declared `mut`, so it cannot be borrowed with `&mut`",
+                                self.locals[place.local].name
+                            ),
+                        ));
+                    }
+                    let access = match kind {
+                        BorrowKind::Shared => Access::Share,
+                        BorrowKind::Mutable => Access::Change,
+                    };
+                    self.check_access_in(
+                        &self.frozen[..frozen_before],
+                        place.local,
+                        &path,
+                        access,
+                        operand.span,
+                    )?;
+                    let keys = index_keys(operand);
+                    for earlier in &borrows {
+                        if earlier.local != place.local
+                            || (kind == BorrowKind::Shared && earlier.kind == BorrowKind::Shared)
+                        {
+                            continue;
+                        }
+                        match overlap(&earlier.path, &path) {
+                            Overlap::Disjoint => {}
+                            Overlap::IfIndicesEqual(positions)
+                                if !positions.iter().all(|&at| {
+                                    earlier.keys.get(at).cloned().flatten().is_some()
+                                        && earlier.keys.get(at) == keys.get(at)
+                                }) =>
+                            {
+                                checks.push(DisjointCheck {
+                                    first: earlier.position,
+                                    second: position,
+                                });
+                            }
+                            Overlap::IfIndicesEqual(_) | Overlap::Certain => {
+                                return Err(self.error(
+                                    CheckDiagnosticKind::BorrowConflict,
+                                    operand.span,
+                                    format!(
+                                        "`{}` is borrowed twice in one call, at least once with `&mut`",
+                                        self.locals[place.local].name
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    self.frozen.push(Frozen {
+                        local: place.local,
+                        path: path.clone(),
+                        exclusive: kind == BorrowKind::Mutable,
+                    });
+                    borrows.push(ArgumentBorrow {
+                        position,
+                        local: place.local,
+                        path,
+                        kind,
+                        keys,
+                    });
+                    BorrowTarget::Place(place)
+                }
+                None => {
+                    let value = self.check_expr(operand, Some(ty))?;
+                    self.require(operand.span, ty, value.ty)?;
+                    BorrowTarget::Value(value)
+                }
+            };
+            checked.push(Expr {
+                ty,
+                kind: ExprKind::Borrow(Box::new(target)),
+            });
+        }
+        Ok((checked, checks))
     }
 
     fn check_intrinsic(
@@ -2820,6 +3069,16 @@ impl BodyChecker<'_> {
     }
 }
 
+/// A borrowed call argument: its position, the place it borrows, and the
+/// `index_keys` of the place.
+struct ArgumentBorrow {
+    position: usize,
+    local: usize,
+    path: Vec<Option<usize>>,
+    kind: BorrowKind,
+    keys: Vec<Option<String>>,
+}
+
 /// Whether every type parameter that `ty` mentions is bound in `substitution`.
 fn mentions_only(
     ty: &ResolvedType,
@@ -2862,5 +3121,57 @@ fn integer_literal(expression: &ResolvedExpr) -> Option<&str> {
         ResolvedExprKind::Integer(text) => Some(text),
         ResolvedExprKind::Parenthesized(inner) => integer_literal(inner),
         _ => None,
+    }
+}
+
+enum Overlap {
+    Disjoint,
+    Certain,
+    /// The places overlap exactly when the list indices at these path
+    /// positions are equal.
+    IfIndicesEqual(Vec<usize>),
+}
+
+/// Compares two paths from the same local.
+fn overlap(left: &[Option<usize>], right: &[Option<usize>]) -> Overlap {
+    let mut positions = Vec::new();
+    for (position, (left, right)) in left.iter().zip(right).enumerate() {
+        match (left, right) {
+            (Some(left), Some(right)) if left != right => return Overlap::Disjoint,
+            (None, None) => positions.push(position),
+            _ => {}
+        }
+    }
+    if positions.is_empty() {
+        Overlap::Certain
+    } else {
+        Overlap::IfIndicesEqual(positions)
+    }
+}
+
+/// For each projection of a place expression, from its root: a key that
+/// names the index when it is a literal or a plain variable, so two equal
+/// keys denote the same element.
+fn index_keys(expression: &ResolvedExpr) -> Vec<Option<String>> {
+    match &expression.kind {
+        ResolvedExprKind::Parenthesized(inner) => index_keys(inner),
+        ResolvedExprKind::Field { receiver, .. }
+        | ResolvedExprKind::TupleField { receiver, .. } => {
+            let mut keys = index_keys(receiver);
+            keys.push(None);
+            keys
+        }
+        ResolvedExprKind::Index { receiver, index } => {
+            let mut keys = index_keys(receiver);
+            keys.push(match &index.kind {
+                ResolvedExprKind::Integer(text) => Some(format!("integer {text}")),
+                ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => {
+                    Some(format!("{target:?}"))
+                }
+                _ => None,
+            });
+            keys
+        }
+        _ => Vec::new(),
     }
 }

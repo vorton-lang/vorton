@@ -1,0 +1,7 @@
+fn trade(a: &mut Int, b: &mut Int) {}
+
+fn main() {
+    let mut xs = [1, 2]
+    let i = 0
+    trade(&mut xs[i], &mut xs[i])
+}

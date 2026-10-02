@@ -1,0 +1,10 @@
+fn bump(x: &mut Int) {
+    x += 1
+}
+
+fn main() {
+    let mut xs = [1, 2]
+    for x in &xs {
+        bump(&mut xs[0])
+    }
+}

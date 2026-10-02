@@ -1,0 +1,79 @@
+// `&` and `&mut` parameters point at the caller's place: nothing is copied or
+// moved, and changes through `&mut` are seen by the caller.
+struct Body { name: Str, hp: Int, log: List<Str> }
+
+fn describe(b: &Body) -> Str {
+    "${b.name}:${b.hp}:${b.log.len()}"
+}
+
+fn hit(b: &mut Body, damage: Int) {
+    b.hp -= damage
+    b.log.push("hit ${damage}")
+}
+
+fn trade(a: &mut Body, b: &mut Body) {
+    let given = a.hp / 2
+    a.hp -= given
+    b.hp += given
+}
+
+fn total(xs: &List<Int>) -> Int {
+    let mut sum = 0
+    for x in &xs {
+        sum += x
+    }
+    sum
+}
+
+fn shout(s: &mut Str) {
+    s = "${s}!"
+}
+
+fn reset(xs: &mut List<Int>) {
+    xs.clear()
+    xs.push(7)
+}
+
+fn main() {
+    let mut bodies = [
+        Body { name: "a", hp: 10, log: [] },
+        Body { name: "b", hp: 20, log: [] },
+        Body { name: "c", hp: 30, log: [] },
+    ]
+    hit(&mut bodies[1], 5)
+    print(describe(&bodies[1]))
+    for i in 0..2 {
+        trade(&mut bodies[i], &mut bodies[i + 1])
+    }
+    for b in &bodies {
+        print(describe(&b))
+    }
+    for b in &mut bodies {
+        hit(&mut b, 1)
+        b.name = "${b.name}${b.name}"
+    }
+    for b in &bodies {
+        print(describe(&b))
+    }
+
+    let mut xs = [1, 2, 3]
+    print(total(&xs))
+    for x in &mut xs {
+        x *= 10
+    }
+    print(total(&xs))
+    reset(&mut xs)
+    print(xs.len())
+    print(total(&[4, 5]))
+    print(describe(&Body { name: "temp", hp: 1, log: ["x"] }))
+
+    let mut word = "hey"
+    shout(&mut word)
+    shout(&mut word)
+    print(word)
+
+    let mut pair = (Body { name: "p", hp: 4, log: [] }, Body { name: "q", hp: 8, log: [] })
+    trade(&mut pair.1, &mut pair.0)
+    print(describe(&pair.0))
+    print(describe(&pair.1))
+}

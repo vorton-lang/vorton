@@ -1,0 +1,6 @@
+fn f(xs: &mut List<Int>, x: &Int) {}
+
+fn main() {
+    let mut xs = [1, 2]
+    f(&mut xs, &xs[0])
+}
