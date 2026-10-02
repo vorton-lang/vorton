@@ -1,17 +1,23 @@
 //! C11 code generation for checked programs.
 //!
 //! Expressions are flattened into temporaries so evaluation order is explicit.
-//! `Str` values are reference counted, and so are tuples, structs and enums
-//! that contain them ("counted" types): locals and temporaries own one count,
-//! parameters and borrowed operands own none, and every owned value is released
-//! when its scope ends or right after its last borrowing use.
+//! An owned value that must be released, a counted `Str`, a list, or an
+//! aggregate holding either, belongs to exactly one place:
+//!
+//! - locals and temporaries own their value; a scope releases what it owns
+//!   when it ends, and `break`, `continue` and `return` release the scopes
+//!   they leave;
+//! - copying a counted value retains it; an entity is never copied: moving
+//!   it leaves the source zeroed, and releasing a zeroed value does nothing;
+//! - a parameter of a counted value type is borrowed from the caller, while
+//!   a parameter of an entity type is owned by the callee.
 
 use std::fmt::Write as _;
 
 use crate::ast::{AssignmentOperator, BinaryOperator, UnaryOperator};
 use crate::checker::{
-    Arm, Block, Expr, ExprKind, Function, Intrinsic, Pattern, Place, Program, Statement, Type,
-    TypeKind, Types,
+    Arm, Block, Builtin, Expr, ExprKind, ForSource, Function, Intrinsic, Pattern, Place, Program,
+    Projection, Receiver, Statement, Type, TypeKind, Types,
 };
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
@@ -47,16 +53,23 @@ pub(crate) fn emit(program: &Program) -> String {
     output
 }
 
-/// C definitions for every tuple, struct and enum type, components first,
-/// with retain and release helpers for counted types and an equality function
-/// for types that support `==`.
+/// C definitions for every tuple, struct, enum and list type, then the
+/// prototypes and bodies of their helpers: release, retain, equality,
+/// clone, and the list operations.
 fn type_definitions(types: &Types) -> String {
-    let mut output = String::new();
+    let mut definitions = String::new();
     let mut done = vec![false; types.len()];
     for ty in types.all() {
-        define(types, ty, &mut done, &mut output);
+        define(types, ty, &mut done, &mut definitions);
     }
-    output
+    let mut prototypes = String::new();
+    let mut bodies = String::new();
+    for ty in types.all() {
+        if is_aggregate(types, ty) {
+            helpers(types, ty, &mut prototypes, &mut bodies);
+        }
+    }
+    definitions + &prototypes + &bodies
 }
 
 fn define(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
@@ -69,88 +82,148 @@ fn define(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
     }
     let name = c_type(types, ty);
     writeln!(output, "typedef struct {name} {{").unwrap();
-    if types.is_enum(ty) {
-        output.push_str("    int32_t tag;\n");
-        let mut union = String::new();
-        for (variant, fields) in variant_fields(types, ty).iter().enumerate() {
-            let members = fields
-                .iter()
-                .enumerate()
-                .filter(|(_, field)| types.has_storage(**field))
-                .map(|(index, field)| format!("{} f{index};", c_type(types, *field)))
-                .collect::<Vec<_>>();
-            if !members.is_empty() {
-                writeln!(
-                    union,
-                    "        struct {{ {} }} v{variant};",
-                    members.join(" ")
-                )
-                .unwrap();
+    match types.kind(ty) {
+        TypeKind::List(element) => {
+            writeln!(
+                output,
+                "    int64_t len;\n    int64_t cap;\n    {} *items;",
+                item_type(types, *element)
+            )
+            .unwrap();
+        }
+        _ if types.is_enum(ty) => {
+            output.push_str("    int32_t tag;\n");
+            let mut union = String::new();
+            for (variant, fields) in variant_fields(types, ty).iter().enumerate() {
+                let members = fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| types.has_storage(**field))
+                    .map(|(index, field)| format!("{} f{index};", c_type(types, *field)))
+                    .collect::<Vec<_>>();
+                if !members.is_empty() {
+                    writeln!(
+                        union,
+                        "        struct {{ {} }} v{variant};",
+                        members.join(" ")
+                    )
+                    .unwrap();
+                }
+            }
+            if !union.is_empty() {
+                writeln!(output, "    union {{\n{union}    }} u;").unwrap();
             }
         }
-        if !union.is_empty() {
-            writeln!(output, "    union {{\n{union}    }} u;").unwrap();
-        }
-    } else {
-        let mut stored = 0;
-        for (index, component) in types.components(ty).iter().enumerate() {
-            if types.has_storage(*component) {
-                writeln!(output, "    {} f{index};", c_type(types, *component)).unwrap();
-                stored += 1;
+        _ => {
+            let mut stored = 0;
+            for (index, component) in types.components(ty).iter().enumerate() {
+                if types.has_storage(*component) {
+                    writeln!(output, "    {} f{index};", c_type(types, *component)).unwrap();
+                    stored += 1;
+                }
             }
-        }
-        if stored == 0 {
-            output.push_str("    char vt_empty;\n");
+            if stored == 0 {
+                output.push_str("    char vt_empty;\n");
+            }
         }
     }
     writeln!(output, "}} {name};").unwrap();
+}
 
+/// The C type of list items: a struct tag, so lists can hold types that are
+/// defined after them.
+fn item_type(types: &Types, element: Type) -> String {
+    if !types.has_storage(element) {
+        "char".to_owned()
+    } else if is_aggregate(types, element) {
+        format!("struct {}", c_type(types, element))
+    } else {
+        c_type(types, element)
+    }
+}
+
+fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String) {
+    let name = c_type(types, ty);
+    let n = ty.index();
+    let mut function = |signature: String, body: String| {
+        writeln!(prototypes, "static {signature};").unwrap();
+        writeln!(bodies, "static {signature} {{\n{body}}}").unwrap();
+    };
+    if let TypeKind::List(element) = *types.kind(ty) {
+        list_helpers(types, ty, element, &mut function);
+        return;
+    }
     let parts = variant_fields(types, ty);
-    if types.is_counted(ty) {
-        for action in ["retain", "release"] {
-            writeln!(
-                output,
-                "static void vt_{action}_T{}({name} v) {{",
-                ty.index()
-            )
-            .unwrap();
-            for (variant, fields) in parts.iter().enumerate() {
-                let lines = fields
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, field)| types.is_counted(**field))
-                    .map(|(index, field)| {
-                        count_line(*field, action, &field_code(types, ty, variant, index, "v"))
-                    })
-                    .collect::<Vec<_>>();
-                if lines.is_empty() {
-                    continue;
-                }
-                if types.is_enum(ty) {
-                    writeln!(
-                        output,
-                        "    if (v.tag == {variant}) {{ {} }}",
-                        lines.join(" ")
-                    )
-                    .unwrap();
-                } else {
-                    for line in lines {
-                        writeln!(output, "    {line}").unwrap();
-                    }
+    let per_field = |action: &dyn Fn(Type, &str) -> Option<String>, source: &str| {
+        let mut body = String::new();
+        for (variant, fields) in parts.iter().enumerate() {
+            let lines = fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, field)| {
+                    action(*field, &field_code(types, ty, variant, index, source))
+                })
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                continue;
+            }
+            if types.is_enum(ty) {
+                writeln!(
+                    body,
+                    "    if ({source}.tag == {variant}) {{ {} }}",
+                    lines.join(" ")
+                )
+                .unwrap();
+            } else {
+                for line in lines {
+                    writeln!(body, "    {line}").unwrap();
                 }
             }
-            output.push_str("}\n");
+        }
+        body
+    };
+    if types.needs_release(ty) {
+        let body = per_field(
+            &|field, code| {
+                types
+                    .needs_release(field)
+                    .then(|| count_line(field, "release", code))
+            },
+            "v",
+        );
+        function(format!("void vt_release_T{n}({name} v)"), body);
+        if !types.is_entity(ty) {
+            let body = per_field(
+                &|field, code| {
+                    types
+                        .needs_release(field)
+                        .then(|| count_line(field, "retain", code))
+                },
+                "v",
+            );
+            function(format!("void vt_retain_T{n}({name} v)"), body);
         }
     }
+    let clone_body = if types.is_entity(ty) {
+        let body = per_field(
+            &|field, code| {
+                types
+                    .needs_release(field)
+                    .then(|| format!("{code} = {};", clone_code(types, field, code)))
+            },
+            "r",
+        );
+        format!("    {name} r = v;\n{body}    return r;\n")
+    } else if types.needs_release(ty) {
+        format!("    vt_retain_T{n}(v);\n    return v;\n")
+    } else {
+        "    return v;\n".to_owned()
+    };
+    function(format!("{name} vt_clone_T{n}({name} v)"), clone_body);
     if has_equality(types, ty) {
-        writeln!(
-            output,
-            "static bool vt_eq_T{}({name} a, {name} b) {{",
-            ty.index()
-        )
-        .unwrap();
+        let mut body = String::new();
         if types.is_enum(ty) {
-            output.push_str("    if (a.tag != b.tag) return false;\n");
+            body.push_str("    if (a.tag != b.tag) return false;\n");
         }
         for (variant, fields) in parts.iter().enumerate() {
             let tests = fields
@@ -171,16 +244,141 @@ fn define(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
             }
             if types.is_enum(ty) {
                 writeln!(
-                    output,
+                    body,
                     "    if (a.tag == {variant}) return {};",
                     tests.join(" && ")
                 )
                 .unwrap();
             } else {
-                writeln!(output, "    return {};", tests.join(" && ")).unwrap();
+                writeln!(body, "    return {};", tests.join(" && ")).unwrap();
             }
         }
-        output.push_str("    return true;\n}\n");
+        body.push_str("    return true;\n");
+        function(format!("bool vt_eq_T{n}({name} a, {name} b)"), body);
+    }
+}
+
+fn list_helpers(types: &Types, ty: Type, element: Type, function: &mut impl FnMut(String, String)) {
+    let name = c_type(types, ty);
+    let n = ty.index();
+    let stored = types.has_storage(element);
+    let item = c_type(types, element);
+    let size = if stored {
+        format!("sizeof({item})")
+    } else {
+        "1".to_owned()
+    };
+    let release_each = if types.needs_release(element) {
+        format!(
+            "    for (int64_t i = 0; i < v.len; i += 1) {{ {} }}\n",
+            count_line(element, "release", "v.items[i]")
+        )
+    } else {
+        String::new()
+    };
+    function(
+        format!("void vt_release_T{n}({name} v)"),
+        format!("{release_each}    vt_items_free(v.items);\n"),
+    );
+    let grow = format!(
+        "    if (list->len == list->cap) {{\n        list->cap = list->cap == 0 ? 4 : list->cap * 2;\n        list->items = vt_items_resize(list->items, list->cap, {size});\n    }}\n"
+    );
+    let value_parameter = if stored {
+        format!(", {item} value")
+    } else {
+        String::new()
+    };
+    let store = if stored {
+        "    list->items[list->len] = value;\n"
+    } else {
+        ""
+    };
+    function(
+        format!("void vt_push_T{n}({name} *list{value_parameter})"),
+        format!("{grow}{store}    list->len += 1;\n"),
+    );
+    let shift_up = if stored {
+        format!(
+            "    memmove(list->items + index + 1, list->items + index, (size_t)(list->len - index) * {size});\n    list->items[index] = value;\n"
+        )
+    } else {
+        String::new()
+    };
+    function(
+        format!("void vt_insert_T{n}({name} *list, int64_t index{value_parameter})"),
+        format!(
+            "    if (index < 0 || index > list->len) {{\n        vt_panic(\"index out of bounds\");\n    }}\n{grow}{shift_up}    list->len += 1;\n"
+        ),
+    );
+    if stored {
+        function(
+            format!("{item} vt_remove_T{n}({name} *list, int64_t index)"),
+            format!(
+                "    vt_check_index(index, list->len);\n    {item} result = list->items[index];\n    memmove(list->items + index, list->items + index + 1, (size_t)(list->len - index - 1) * {size});\n    list->len -= 1;\n    return result;\n"
+            ),
+        );
+    }
+    let release_all = if types.needs_release(element) {
+        format!(
+            "    for (int64_t i = 0; i < list->len; i += 1) {{ {} }}\n",
+            count_line(element, "release", "list->items[i]")
+        )
+    } else {
+        String::new()
+    };
+    function(
+        format!("void vt_clear_T{n}({name} *list)"),
+        format!("{release_all}    list->len = 0;\n"),
+    );
+    let copy_items = if stored {
+        format!(
+            "    for (int64_t i = 0; i < v.len; i += 1) {{ r.items[i] = {}; }}\n",
+            clone_code(types, element, "v.items[i]")
+        )
+    } else {
+        String::new()
+    };
+    function(
+        format!("{name} vt_clone_T{n}({name} v)"),
+        format!(
+            "    {name} r = {{0}};\n    if (v.len > 0) {{\n        r.cap = v.len;\n        r.items = vt_items_resize(NULL, r.cap, {size});\n    }}\n{copy_items}    r.len = v.len;\n    return r;\n"
+        ),
+    );
+    if has_equality(types, ty) {
+        let test = if stored {
+            format!(
+                "        if (!{}) return false;\n",
+                equal_code(types, element, "a.items[i]", "b.items[i]")
+            )
+        } else {
+            String::new()
+        };
+        function(
+            format!("bool vt_eq_T{n}({name} a, {name} b)"),
+            format!(
+                "    if (a.len != b.len) return false;\n    for (int64_t i = 0; i < a.len; i += 1) {{\n{test}    }}\n    return true;\n"
+            ),
+        );
+        if stored && !types.is_entity(element) {
+            function(
+                format!("bool vt_contains_T{n}({name} v, {item} value)"),
+                format!(
+                    "    for (int64_t i = 0; i < v.len; i += 1) {{\n        if ({}) return true;\n    }}\n    return false;\n",
+                    equal_code(types, element, "v.items[i]", "value")
+                ),
+            );
+        }
+    }
+}
+
+/// A C expression that returns an owned copy of `code`.
+fn clone_code(types: &Types, ty: Type, code: &str) -> String {
+    match types.kind(ty) {
+        TypeKind::Str => format!("(vt_str_retain({code}), {code})"),
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => {
+            format!("vt_clone_T{}({code})", ty.index())
+        }
+        _ => code.to_owned(),
     }
 }
 
@@ -209,7 +407,7 @@ fn field_code(types: &Types, ty: Type, variant: usize, index: usize, base: &str)
 fn is_aggregate(types: &Types, ty: Type) -> bool {
     matches!(
         types.kind(ty),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. }
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_)
     )
 }
 
@@ -217,6 +415,7 @@ fn has_equality(types: &Types, ty: Type) -> bool {
     match types.kind(ty) {
         TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => true,
         TypeKind::Never => false,
+        TypeKind::List(element) => has_equality(types, *element),
         TypeKind::Tuple(_) | TypeKind::Nominal { .. } => types
             .components(ty)
             .into_iter()
@@ -229,14 +428,14 @@ fn equal_code(types: &Types, ty: Type, a: &str, b: &str) -> String {
     match types.kind(ty) {
         TypeKind::Unit | TypeKind::Never => "true".to_owned(),
         TypeKind::Str => format!("vt_str_eq({a}, {b})"),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => {
             format!("vt_eq_T{}({a}, {b})", ty.index())
         }
         TypeKind::Int | TypeKind::Float | TypeKind::Bool => format!("({a} == {b})"),
     }
 }
 
-/// The statement that retains or releases the counts inside `code`.
+/// The statement that retains or releases the value `code`.
 fn count_line(ty: Type, action: &str, code: &str) -> String {
     if ty == Type::STR {
         format!("vt_str_{action}({code});")
@@ -282,18 +481,30 @@ fn c_type(types: &Types, ty: Type) -> String {
         TypeKind::Bool => "bool".to_owned(),
         TypeKind::Str => "vt_str *".to_owned(),
         TypeKind::Unit | TypeKind::Never => "void".to_owned(),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => format!("vt_T{}", ty.index()),
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => {
+            format!("vt_T{}", ty.index())
+        }
     }
 }
 
+/// An initializer for a variable of type `ty`.
 fn zero(types: &Types, ty: Type) -> &'static str {
     match types.kind(ty) {
         TypeKind::Int => "0",
         TypeKind::Float => "0.0",
         TypeKind::Bool => "false",
         TypeKind::Str => "NULL",
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => "{0}",
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => "{0}",
         TypeKind::Unit | TypeKind::Never => unreachable!("unit values have no storage"),
+    }
+}
+
+/// An expression for the zero value of `ty`, assignable to an existing place.
+fn zero_value(types: &Types, ty: Type) -> String {
+    if is_aggregate(types, ty) {
+        format!("({}){{0}}", c_type(types, ty))
+    } else {
+        zero(types, ty).to_owned()
     }
 }
 
@@ -336,8 +547,8 @@ fn escape_c(value: &str) -> String {
     escaped
 }
 
-/// A lowered operand. `owned` operands of counted types hold one count that
-/// the consumer must either store or release.
+/// A lowered operand. `owned` operands that need releasing belong to the
+/// consumer, which must store or release them.
 #[derive(Clone)]
 enum Value {
     Unit,
@@ -364,8 +575,8 @@ struct FunctionEmitter<'a> {
     indent: usize,
     temporaries: usize,
     labels: usize,
-    /// Counted values that the current code owns, per open scope, as C
-    /// lvalues with their types.
+    /// Values that the current code owns and must release, per open scope,
+    /// as C lvalues with their types.
     scopes: Vec<Vec<(String, Type)>>,
     /// The scope depth at the start of each enclosing loop body.
     loops: Vec<usize>,
@@ -389,7 +600,7 @@ impl FunctionEmitter<'_> {
             indent: 1,
             temporaries: 0,
             labels: 0,
-            scopes: Vec::new(),
+            scopes: vec![Vec::new()],
             loops: Vec::new(),
         };
         for (local, info) in function.locals.iter().enumerate() {
@@ -404,12 +615,23 @@ impl FunctionEmitter<'_> {
                 .unwrap();
             }
         }
+        // The callee owns its entity parameters.
+        for &local in &function.parameters {
+            let ty = function.locals[local].ty;
+            if types.is_entity(ty) {
+                emitter.own(emitter.local_code(local), ty);
+            }
+        }
         let value = emitter.block(&function.body);
         match value {
             Value::Never => {}
-            Value::Unit => emitter.line("return;"),
+            Value::Unit => {
+                emitter.release_scopes_from(0);
+                emitter.line("return;");
+            }
             Value::Code { .. } => {
                 let value = emitter.owned(value, function.result);
+                emitter.release_scopes_from(0);
                 emitter.line(&format!("return {};", value.code()));
             }
         }
@@ -442,8 +664,15 @@ impl FunctionEmitter<'_> {
         name
     }
 
-    fn counted(&self, ty: Type) -> bool {
-        self.types.is_counted(ty)
+    fn counter(&mut self) -> String {
+        let name = format!("t{}", self.temporaries);
+        self.temporaries += 1;
+        writeln!(self.declarations, "    int64_t {name} = 0;").unwrap();
+        name
+    }
+
+    fn releases(&self, ty: Type) -> bool {
+        self.types.needs_release(ty)
     }
 
     fn local_code(&self, local: usize) -> String {
@@ -452,7 +681,7 @@ impl FunctionEmitter<'_> {
 
     /// Records that the innermost scope owns `code` of type `ty`.
     fn own(&mut self, code: String, ty: Type) {
-        if self.counted(ty) {
+        if self.releases(ty) {
             self.scopes
                 .last_mut()
                 .expect("a scope is open")
@@ -463,7 +692,11 @@ impl FunctionEmitter<'_> {
     /// Makes `value` an owned operand, retaining a borrowed counted value.
     fn owned(&mut self, value: Value, ty: Type) -> Value {
         match value {
-            Value::Code { code, owned: false } if self.counted(ty) => {
+            Value::Code { code, owned: false } if self.releases(ty) => {
+                debug_assert!(
+                    !self.types.is_entity(ty),
+                    "the checker moves entities into owning positions"
+                );
                 let temporary = self.temporary(ty);
                 self.line(&format!("{temporary} = {code};"));
                 self.line(&count_line(ty, "retain", &temporary));
@@ -476,10 +709,25 @@ impl FunctionEmitter<'_> {
         }
     }
 
-    /// Releases `value` after a borrowing use if it owns a count.
+    /// Releases `value` after a borrowing use if it owns what it holds.
     fn release(&mut self, value: &Value, ty: Type) {
-        if let Value::Code { code, owned: true } = value {
+        if let Value::Code { code, owned: true } = value
+            && self.releases(ty)
+        {
             self.line(&count_line(ty, "release", code));
+        }
+    }
+
+    /// Keeps an owned value alive until the innermost scope ends, so a part
+    /// of it can be read without copying, and returns it as a borrowed value.
+    fn defer(&mut self, value: Value, ty: Type) -> Value {
+        match value {
+            Value::Code { code, owned: true } if self.releases(ty) => {
+                let temporary = self.store(ty, code, false);
+                self.own(temporary.code().to_owned(), ty);
+                temporary
+            }
+            value => value,
         }
     }
 
@@ -493,6 +741,12 @@ impl FunctionEmitter<'_> {
         for (code, ty) in owned {
             self.line(&count_line(ty, "release", &code));
         }
+    }
+
+    fn close_scope(&mut self) {
+        let depth = self.scopes.len() - 1;
+        self.release_scopes_from(depth);
+        self.scopes.pop();
     }
 
     fn block(&mut self, block: &Block) -> Value {
@@ -518,20 +772,41 @@ impl FunctionEmitter<'_> {
             None if block.ty == Type::NEVER => Value::Never,
             None => Value::Unit,
         };
-        if !matches!(value, Value::Never) {
-            let depth = self.scopes.len() - 1;
-            self.release_scopes_from(depth);
+        if matches!(value, Value::Never) {
+            self.scopes.pop();
+        } else {
+            self.close_scope();
         }
-        self.scopes.pop();
         value
     }
 
-    fn place_code(&self, place: &Place) -> String {
+    /// Evaluates the indices of `place` and returns its C lvalue and type.
+    /// Returns `None` if an index diverges.
+    fn place(&mut self, place: &Place) -> Option<(String, Type)> {
         let mut code = self.local_code(place.local);
-        for index in &place.path {
-            write!(code, ".f{index}").unwrap();
+        let mut ty = self.function.locals[place.local].ty;
+        for projection in &place.projections {
+            match projection {
+                Projection::Field(index) => {
+                    code = field_code(self.types, ty, 0, *index, &code);
+                    ty = self.types.components(ty)[*index];
+                }
+                Projection::Index(index) => {
+                    let value = self.expr(index);
+                    if matches!(value, Value::Never) {
+                        return None;
+                    }
+                    let index = self.store(Type::INT, value.code().to_owned(), false);
+                    self.line(&format!("vt_check_index({}, {code}.len);", index.code()));
+                    code = format!("{code}.items[{}]", index.code());
+                    let TypeKind::List(element) = *self.types.kind(ty) else {
+                        unreachable!("the checker indexes only lists")
+                    };
+                    ty = element;
+                }
+            }
         }
-        code
+        Some((code, ty))
     }
 
     /// Emits `statement` and returns whether control cannot continue after it.
@@ -560,7 +835,7 @@ impl FunctionEmitter<'_> {
                 }
                 let code = self.subject(subject, ty);
                 self.bind(pattern, &code, ty);
-                self.close_subject();
+                self.close_scope();
                 self.register_bindings(pattern);
                 false
             }
@@ -568,49 +843,7 @@ impl FunctionEmitter<'_> {
                 place,
                 operator,
                 value,
-            } => {
-                let ty = value.ty;
-                let value = self.expr(value);
-                if matches!(value, Value::Never) {
-                    return true;
-                }
-                if matches!(value, Value::Unit) {
-                    return false;
-                }
-                let name = self.place_code(place);
-                let code = value.code().to_owned();
-                match (operator, ty) {
-                    (AssignmentOperator::Assign, ty) if self.counted(ty) => {
-                        let value = self.owned(value, ty);
-                        self.line(&count_line(ty, "release", &name));
-                        self.line(&format!("{name} = {};", value.code()));
-                    }
-                    (AssignmentOperator::Assign, _) => self.line(&format!("{name} = {code};")),
-                    (operator, Type::INT) => {
-                        let function = match operator {
-                            AssignmentOperator::AddAssign => "vt_int_add",
-                            AssignmentOperator::SubtractAssign => "vt_int_sub",
-                            AssignmentOperator::MultiplyAssign => "vt_int_mul",
-                            AssignmentOperator::DivideAssign => "vt_int_div",
-                            AssignmentOperator::RemainderAssign => "vt_int_rem",
-                            AssignmentOperator::Assign => unreachable!(),
-                        };
-                        self.line(&format!("{name} = {function}({name}, {code});"));
-                    }
-                    (operator, _) => {
-                        let expression = match operator {
-                            AssignmentOperator::AddAssign => format!("{name} + {code}"),
-                            AssignmentOperator::SubtractAssign => format!("{name} - {code}"),
-                            AssignmentOperator::MultiplyAssign => format!("{name} * {code}"),
-                            AssignmentOperator::DivideAssign => format!("{name} / {code}"),
-                            AssignmentOperator::RemainderAssign => format!("fmod({name}, {code})"),
-                            AssignmentOperator::Assign => unreachable!(),
-                        };
-                        self.line(&format!("{name} = {expression};"));
-                    }
-                }
-                false
-            }
+            } => self.assign(place, *operator, value),
             Statement::Expr(expression) => {
                 let value = self.expr(expression);
                 self.release(&value, expression.ty);
@@ -654,7 +887,7 @@ impl FunctionEmitter<'_> {
                 let condition = self.expr(condition);
                 if !matches!(condition, Value::Never) {
                     self.line(&format!("if (!{}) break;", condition.code()));
-                    self.loop_body(body);
+                    self.loop_body(body, None);
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -663,18 +896,164 @@ impl FunctionEmitter<'_> {
             Statement::Loop(body) => {
                 self.line("for (;;) {");
                 self.indent += 1;
-                self.loop_body(body);
+                self.loop_body(body, None);
                 self.indent -= 1;
                 self.line("}");
                 body.ty == Type::NEVER && !loop_breaks(body)
             }
+            Statement::For {
+                binding,
+                source,
+                body,
+            } => {
+                self.for_loop(binding, source, body);
+                false
+            }
         }
     }
 
-    fn loop_body(&mut self, body: &Block) {
+    fn assign(&mut self, place: &Place, operator: AssignmentOperator, value: &Expr) -> bool {
+        let Some((name, ty)) = self.place(place) else {
+            return true;
+        };
+        let value = self.expr(value);
+        if matches!(value, Value::Never) {
+            return true;
+        }
+        if matches!(value, Value::Unit) {
+            return false;
+        }
+        let code = value.code().to_owned();
+        match (operator, ty) {
+            (AssignmentOperator::Assign, ty) if self.releases(ty) => {
+                let value = self.owned(value, ty);
+                self.line(&count_line(ty, "release", &name));
+                self.line(&format!("{name} = {};", value.code()));
+            }
+            (AssignmentOperator::Assign, _) => self.line(&format!("{name} = {code};")),
+            (operator, Type::INT) => {
+                let function = match operator {
+                    AssignmentOperator::AddAssign => "vt_int_add",
+                    AssignmentOperator::SubtractAssign => "vt_int_sub",
+                    AssignmentOperator::MultiplyAssign => "vt_int_mul",
+                    AssignmentOperator::DivideAssign => "vt_int_div",
+                    AssignmentOperator::RemainderAssign => "vt_int_rem",
+                    AssignmentOperator::Assign => unreachable!(),
+                };
+                self.line(&format!("{name} = {function}({name}, {code});"));
+            }
+            (operator, _) => {
+                let expression = match operator {
+                    AssignmentOperator::AddAssign => format!("{name} + {code}"),
+                    AssignmentOperator::SubtractAssign => format!("{name} - {code}"),
+                    AssignmentOperator::MultiplyAssign => format!("{name} * {code}"),
+                    AssignmentOperator::DivideAssign => format!("{name} / {code}"),
+                    AssignmentOperator::RemainderAssign => format!("fmod({name}, {code})"),
+                    AssignmentOperator::Assign => unreachable!(),
+                };
+                self.line(&format!("{name} = {expression};"));
+            }
+        }
+        false
+    }
+
+    /// Emits a loop body. `binding` assigns the loop variable at the start of
+    /// each iteration; the variable is owned by the iteration.
+    fn loop_body(&mut self, body: &Block, binding: Option<(&Pattern, String, Type)>) {
         self.loops.push(self.scopes.len());
-        self.block(body);
+        self.scopes.push(Vec::new());
+        if let Some((pattern, code, ty)) = binding {
+            self.bind(pattern, &Some(code), ty);
+            self.register_bindings(pattern);
+        }
+        if !matches!(self.block(body), Value::Never) {
+            self.close_scope();
+        } else {
+            self.scopes.pop();
+        }
         self.loops.pop();
+    }
+
+    fn for_loop(&mut self, binding: &Pattern, source: &ForSource, body: &Block) {
+        match source {
+            ForSource::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let start = self.expr(start);
+                if matches!(start, Value::Never) {
+                    return;
+                }
+                let current = self.store(Type::INT, start.code().to_owned(), false);
+                let end = self.expr(end);
+                if matches!(end, Value::Never) {
+                    return;
+                }
+                let end = self.store(Type::INT, end.code().to_owned(), false);
+                let (current, end) = (current.code().to_owned(), end.code().to_owned());
+                if *inclusive {
+                    let going = self.counter();
+                    self.line(&format!(
+                        "for ({going} = {current} <= {end}; {going}; {going} = {current} != {end} && ({current} += 1, 1)) {{"
+                    ));
+                } else {
+                    self.line(&format!("for (; {current} < {end}; {current} += 1) {{"));
+                }
+                self.indent += 1;
+                self.loop_body(body, Some((binding, current, Type::INT)));
+                self.indent -= 1;
+                self.line("}");
+            }
+            ForSource::List(list) => {
+                let ty = list.ty;
+                let TypeKind::List(element) = *self.types.kind(ty) else {
+                    unreachable!("the checker iterates lists")
+                };
+                let value = self.expr(list);
+                if matches!(value, Value::Never) {
+                    return;
+                }
+                // The loop owns the list. Binding an entity element takes it
+                // and zeroes its slot, so the list later releases only what
+                // the iterations did not take.
+                self.scopes.push(Vec::new());
+                let list = self.store(ty, value.code().to_owned(), true);
+                let list = list.code().to_owned();
+                self.own(list.clone(), ty);
+                let index = self.counter();
+                self.line(&format!(
+                    "for ({index} = 0; {index} < {list}.len; {index} += 1) {{"
+                ));
+                self.indent += 1;
+                self.loop_body(
+                    body,
+                    Some((binding, format!("{list}.items[{index}]"), element)),
+                );
+                self.indent -= 1;
+                self.line("}");
+                self.close_scope();
+            }
+            ForSource::Borrowed(place) => {
+                let Some((list, ty)) = self.place(place) else {
+                    return;
+                };
+                let TypeKind::List(element) = *self.types.kind(ty) else {
+                    unreachable!("the checker iterates lists")
+                };
+                let index = self.counter();
+                self.line(&format!(
+                    "for ({index} = 0; {index} < {list}.len; {index} += 1) {{"
+                ));
+                self.indent += 1;
+                self.loop_body(
+                    body,
+                    Some((binding, format!("{list}.items[{index}]"), element)),
+                );
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
     }
 
     fn expr(&mut self, expression: &Expr) -> Value {
@@ -705,6 +1084,13 @@ impl FunctionEmitter<'_> {
                 } else {
                     Value::Unit
                 }
+            }
+            ExprKind::Move(local) => {
+                let ty = self.function.locals[*local].ty;
+                let name = self.local_code(*local);
+                let value = self.store(ty, name.clone(), true);
+                self.line(&format!("{name} = {};", zero_value(self.types, ty)));
+                value
             }
             ExprKind::Call {
                 function,
@@ -760,6 +1146,13 @@ impl FunctionEmitter<'_> {
             }
             ExprKind::Field { base, index } => self.field(base, *index, expression.ty),
             ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, expression.ty),
+            ExprKind::List(elements) => self.list(expression.ty, elements),
+            ExprKind::Index { base, index } => self.index(base, index, expression.ty),
+            ExprKind::Builtin {
+                builtin,
+                receiver,
+                arguments,
+            } => self.builtin(*builtin, receiver, arguments, expression.ty),
         }
     }
 
@@ -803,15 +1196,54 @@ impl FunctionEmitter<'_> {
             }
             let value = self.owned(value, field_ty);
             let target = field_code(self.types, ty, variant, index, &result);
-            if base.is_some() && self.counted(field_ty) {
+            if base.is_some() && self.releases(field_ty) {
                 self.line(&count_line(field_ty, "release", &target));
             }
             self.line(&format!("{target} = {};", value.code()));
         }
         Value::Code {
             code: result,
-            owned: self.counted(ty),
+            owned: true,
         }
+    }
+
+    /// Reads a part of `base`: borrowed from a place, or copied out of an
+    /// owned value that is then released. An entity part of an owned value
+    /// is borrowed and the value lives until the scope ends.
+    fn part(&mut self, base: Value, base_ty: Type, part: String, ty: Type) -> Value {
+        let Value::Code { code, owned } = base else {
+            return base;
+        };
+        if !self.types.has_storage(ty) {
+            self.release(&Value::Code { code, owned }, base_ty);
+            return Value::Unit;
+        }
+        if !owned || !self.releases(base_ty) {
+            return Value::Code {
+                code: part,
+                owned: false,
+            };
+        }
+        if self.types.is_entity(ty) {
+            self.defer(Value::Code { code, owned }, base_ty);
+            return Value::Code {
+                code: part,
+                owned: false,
+            };
+        }
+        let result = if self.releases(ty) {
+            self.owned(
+                Value::Code {
+                    code: part,
+                    owned: false,
+                },
+                ty,
+            )
+        } else {
+            self.store(ty, part, false)
+        };
+        self.release(&Value::Code { code, owned }, base_ty);
+        result
     }
 
     fn field(&mut self, base: &Expr, index: usize, ty: Type) -> Value {
@@ -819,35 +1251,180 @@ impl FunctionEmitter<'_> {
         let Value::Code { code, owned } = value else {
             return value;
         };
-        if !self.types.has_storage(ty) {
-            self.release(&Value::Code { code, owned }, base.ty);
-            return Value::Unit;
+        let part = field_code(self.types, base.ty, 0, index, &code);
+        self.part(Value::Code { code, owned }, base.ty, part, ty)
+    }
+
+    fn index(&mut self, base: &Expr, index: &Expr, ty: Type) -> Value {
+        let value = self.expr(base);
+        if matches!(value, Value::Never) {
+            return Value::Never;
         }
-        let field = field_code(self.types, base.ty, 0, index, &code);
-        if !owned {
-            return Value::Code {
-                code: field,
-                owned: false,
+        let position = self.expr(index);
+        if matches!(position, Value::Never) {
+            self.release(&value, base.ty);
+            return Value::Never;
+        }
+        let list = value.code().to_owned();
+        let position = self.store(Type::INT, position.code().to_owned(), false);
+        self.line(&format!("vt_check_index({}, {list}.len);", position.code()));
+        let part = format!("{list}.items[{}]", position.code());
+        self.part(value, base.ty, part, ty)
+    }
+
+    fn list(&mut self, ty: Type, elements: &[Expr]) -> Value {
+        let mut values = Vec::new();
+        for element in elements {
+            let value = self.expr(element);
+            if matches!(value, Value::Never) {
+                return Value::Never;
+            }
+            values.push((value, element.ty));
+        }
+        let result = self.temporary(ty);
+        for (value, element_ty) in values {
+            let argument = match value {
+                Value::Unit => String::new(),
+                value => {
+                    let value = self.owned(value, element_ty);
+                    format!(", {}", value.code())
+                }
             };
+            self.line(&format!("vt_push_T{}(&{result}{argument});", ty.index()));
         }
-        let result = if self.counted(ty) {
-            self.owned(
-                Value::Code {
-                    code: field,
-                    owned: false,
-                },
-                ty,
-            )
-        } else {
-            self.store(ty, field, false)
+        Value::Code {
+            code: result,
+            owned: true,
+        }
+    }
+
+    fn builtin(
+        &mut self,
+        builtin: Builtin,
+        receiver: &Receiver,
+        arguments: &[Expr],
+        ty: Type,
+    ) -> Value {
+        let (code, receiver_ty, receiver_value) = match receiver {
+            Receiver::Place(place) => {
+                let Some((code, receiver_ty)) = self.place(place) else {
+                    return Value::Never;
+                };
+                (code, receiver_ty, None)
+            }
+            Receiver::Value(value) => {
+                let receiver_ty = value.ty;
+                let evaluated = self.expr(value);
+                if matches!(evaluated, Value::Never) {
+                    return Value::Never;
+                }
+                (evaluated.code().to_owned(), receiver_ty, Some(evaluated))
+            }
         };
-        self.release(&Value::Code { code, owned }, base.ty);
+        let mut values = Vec::new();
+        for argument in arguments {
+            let value = self.expr(argument);
+            if matches!(value, Value::Never) {
+                return Value::Never;
+            }
+            values.push((value, argument.ty));
+        }
+        let n = receiver_ty.index();
+        let element = match self.types.kind(receiver_ty) {
+            TypeKind::List(element) => Some(*element),
+            _ => None,
+        };
+        let owned_argument = |emitter: &mut Self, position: usize| -> String {
+            let (value, value_ty) = values[position].clone();
+            match value {
+                Value::Unit => String::new(),
+                value => format!(", {}", emitter.owned(value, value_ty).code()),
+            }
+        };
+        let result = match builtin {
+            Builtin::Push => {
+                let argument = owned_argument(self, 0);
+                self.line(&format!("vt_push_T{n}(&{code}{argument});"));
+                Value::Unit
+            }
+            Builtin::Insert => {
+                let argument = owned_argument(self, 1);
+                self.line(&format!(
+                    "vt_insert_T{n}(&{code}, {}{argument});",
+                    values[0].0.code()
+                ));
+                Value::Unit
+            }
+            Builtin::Clear => {
+                self.line(&format!("vt_clear_T{n}(&{code});"));
+                Value::Unit
+            }
+            Builtin::Len => self.store(Type::INT, format!("{code}.len"), false),
+            Builtin::IsEmpty => self.store(Type::BOOL, format!("({code}.len == 0)"), false),
+            Builtin::Remove => {
+                let element = element.expect("remove is a list method");
+                if self.types.has_storage(element) {
+                    self.store(
+                        ty,
+                        format!("vt_remove_T{n}(&{code}, {})", values[0].0.code()),
+                        true,
+                    )
+                } else {
+                    self.line(&format!(
+                        "vt_check_index({0}, {code}.len); {code}.len -= 1;",
+                        values[0].0.code()
+                    ));
+                    Value::Unit
+                }
+            }
+            Builtin::Pop => {
+                let element = element.expect("pop is a list method");
+                let (some, none) = option_variants(self.types, ty);
+                let result = self.temporary(ty);
+                self.line(&format!("if ({code}.len == 0) {{"));
+                self.line(&format!("    {result}.tag = {none};"));
+                self.line("} else {");
+                self.line(&format!("    {code}.len -= 1;"));
+                self.line(&format!("    {result}.tag = {some};"));
+                if self.types.has_storage(element) {
+                    self.line(&format!(
+                        "    {} = {code}.items[{code}.len];",
+                        field_code(self.types, ty, some, 0, &result)
+                    ));
+                }
+                self.line("}");
+                Value::Code {
+                    code: result,
+                    owned: true,
+                }
+            }
+            Builtin::Contains => self.store(
+                Type::BOOL,
+                format!("vt_contains_T{n}({code}, {})", values[0].0.code()),
+                false,
+            ),
+            Builtin::Clone => {
+                if self.types.has_storage(receiver_ty) {
+                    self.store(ty, clone_code(self.types, receiver_ty, &code), true)
+                } else {
+                    Value::Unit
+                }
+            }
+        };
+        for (value, value_ty) in &values {
+            if !matches!(builtin, Builtin::Push | Builtin::Insert) {
+                self.release(value, *value_ty);
+            }
+        }
+        if let Some(receiver_value) = receiver_value {
+            self.release(&receiver_value, receiver_ty);
+        }
         result
     }
 
     /// Keeps a match subject in a temporary that the tests and bindings read.
-    /// An owned counted subject is owned by a new scope that
-    /// [`Self::close_subject`] closes.
+    /// An owned subject is owned by a new scope that [`Self::close_scope`]
+    /// closes.
     fn subject(&mut self, value: Value, ty: Type) -> Option<String> {
         self.scopes.push(Vec::new());
         match value {
@@ -860,12 +1437,6 @@ impl FunctionEmitter<'_> {
             }
             Value::Unit | Value::Never => None,
         }
-    }
-
-    fn close_subject(&mut self) {
-        let depth = self.scopes.len() - 1;
-        self.release_scopes_from(depth);
-        self.scopes.pop();
     }
 
     fn match_expr(&mut self, scrutinee: &Expr, arms: &[Arm], ty: Type) -> Value {
@@ -920,12 +1491,9 @@ impl FunctionEmitter<'_> {
         }
         self.line("vt_unreachable();");
         self.line(&format!("{end}:;"));
-        self.close_subject();
+        self.close_scope();
         match result {
-            Some(code) => Value::Code {
-                code,
-                owned: self.counted(ty),
-            },
+            Some(code) => Value::Code { code, owned: true },
             None if ty == Type::NEVER => Value::Never,
             None => Value::Unit,
         }
@@ -971,8 +1539,9 @@ impl FunctionEmitter<'_> {
         }
     }
 
-    /// Copies the matched parts of `code` into the pattern's binding locals,
-    /// retaining counted ones.
+    /// Gives the pattern's binding locals the matched parts of `code`: an
+    /// entity part is taken and zeroed in the subject, a counted value is
+    /// retained, anything else is copied.
     fn bind(&mut self, pattern: &Pattern, code: &Option<String>, ty: Type) {
         let Some(code) = code else {
             return;
@@ -982,7 +1551,9 @@ impl FunctionEmitter<'_> {
                 if self.types.has_storage(ty) {
                     let name = self.local_code(*local);
                     self.line(&format!("{name} = {code};"));
-                    if self.counted(ty) {
+                    if self.types.is_entity(ty) {
+                        self.line(&format!("{code} = {};", zero_value(self.types, ty)));
+                    } else if self.releases(ty) {
                         self.line(&count_line(ty, "retain", &name));
                     }
                 }
@@ -1025,7 +1596,7 @@ impl FunctionEmitter<'_> {
         }
     }
 
-    /// Makes the innermost scope own the counted binding locals of `pattern`.
+    /// Makes the innermost scope own the binding locals of `pattern`.
     fn register_bindings(&mut self, pattern: &Pattern) {
         let mut locals = Vec::new();
         collect_bindings(pattern, &mut locals);
@@ -1066,7 +1637,7 @@ impl FunctionEmitter<'_> {
                 .join(", ")
         );
         let result = if self.types.has_storage(ty) {
-            self.store(ty, code, self.counted(ty))
+            self.store(ty, code, true)
         } else {
             self.line(&format!("{code};"));
             if ty == Type::NEVER {
@@ -1075,8 +1646,11 @@ impl FunctionEmitter<'_> {
                 Value::Unit
             }
         };
-        for (value, ty) in &values {
-            self.release(value, *ty);
+        for (value, value_ty) in &values {
+            // The callee owns entity arguments and borrows the others.
+            if !self.types.is_entity(*value_ty) {
+                self.release(value, *value_ty);
+            }
         }
         result
     }
@@ -1265,10 +1839,7 @@ impl FunctionEmitter<'_> {
         }
         self.line("}");
         match result {
-            Some(code) => Value::Code {
-                code,
-                owned: self.counted(ty),
-            },
+            Some(code) => Value::Code { code, owned: true },
             None if ty == Type::NEVER => Value::Never,
             None => Value::Unit,
         }
@@ -1284,6 +1855,21 @@ impl FunctionEmitter<'_> {
             (_, Value::Unit | Value::Never) => {}
         }
     }
+}
+
+/// The `Some` and `None` variant indices of an `Option` type: `Some` is the
+/// variant with one field.
+fn option_variants(types: &Types, ty: Type) -> (usize, usize) {
+    let variants = types.variants(ty);
+    let some = variants
+        .iter()
+        .position(|variant| variant.fields.len() == 1)
+        .expect("`Option` has `Some`");
+    let none = variants
+        .iter()
+        .position(|variant| variant.fields.is_empty())
+        .expect("`Option` has `None`");
+    (some, none)
 }
 
 fn conjunction(tests: &[String]) -> String {
@@ -1348,7 +1934,10 @@ fn loop_breaks(body: &Block) -> bool {
             | Statement::Assign { value, .. } => expr_breaks(value),
             Statement::Expr(value) => expr_breaks(value),
             Statement::Return(value) => value.as_ref().is_some_and(expr_breaks),
-            Statement::Continue | Statement::While { .. } | Statement::Loop(_) => false,
+            Statement::Continue
+            | Statement::While { .. }
+            | Statement::Loop(_)
+            | Statement::For { .. } => false,
         }
     }
     fn expr_breaks(expression: &Expr) -> bool {

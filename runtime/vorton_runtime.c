@@ -9,10 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* With VT_CHECK_LEAKS defined, the runtime counts live heap strings and a\n * program that ends normally reports any string it did not release exactly\n * once. Tests build with it. */
+/* With VT_CHECK_LEAKS defined, the runtime counts live heap blocks (strings
+ * and list buffers), and a program that ends normally reports any block it
+ * did not free exactly once. Tests build with it. */
 #ifdef VT_CHECK_LEAKS
-static int64_t vt_live_strings = 0;
-#define VT_COUNT(delta) (vt_live_strings += (delta))
+static int64_t vt_live_blocks = 0;
+#define VT_COUNT(delta) (vt_live_blocks += (delta))
 #else
 #define VT_COUNT(delta) ((void)0)
 #endif
@@ -66,14 +68,16 @@ static vt_str *vt_str_alloc(int64_t len) {
     return result;
 }
 
+/* A moved-from or never-assigned string is NULL; retaining or releasing it
+ * does nothing. */
 static void vt_str_retain(vt_str *value) {
-    if (value->rc >= 0) {
+    if (value != NULL && value->rc >= 0) {
         value->rc += 1;
     }
 }
 
 static void vt_str_release(vt_str *value) {
-    if (value->rc > 0 && --value->rc == 0) {
+    if (value != NULL && value->rc > 0 && --value->rc == 0) {
         VT_COUNT(-1);
         free(value);
     }
@@ -241,6 +245,31 @@ static vt_str *vt_float_to_str(double value) {
     return vt_str_from_bytes(out, len);
 }
 
+/* Resizes a list buffer to cap elements of size bytes. */
+static void *vt_items_resize(void *items, int64_t cap, size_t size) {
+    void *result = realloc(items, (size_t)cap * size);
+    if (result == NULL) {
+        vt_panic("out of memory");
+    }
+    if (items == NULL) {
+        VT_COUNT(1);
+    }
+    return result;
+}
+
+static void vt_items_free(void *items) {
+    if (items != NULL) {
+        VT_COUNT(-1);
+        free(items);
+    }
+}
+
+static void vt_check_index(int64_t index, int64_t len) {
+    if (index < 0 || index >= len) {
+        vt_panic("index out of bounds");
+    }
+}
+
 static vt_str vt_str_true = {-1, 4, "true"};
 static vt_str vt_str_false = {-1, 5, "false"};
 
@@ -256,9 +285,9 @@ static void vt_print(const vt_str *value) {
 /* Runs after the program's main returns normally. */
 static void vt_finish(void) {
 #ifdef VT_CHECK_LEAKS
-    if (vt_live_strings != 0) {
+    if (vt_live_blocks != 0) {
         fflush(stdout);
-        fprintf(stderr, "leak check: %lld strings still live\n", (long long)vt_live_strings);
+        fprintf(stderr, "leak check: %lld heap blocks still live\n", (long long)vt_live_blocks);
         exit(102);
     }
 #endif

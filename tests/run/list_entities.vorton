@@ -1,0 +1,81 @@
+// Lists are entities: assignment and passing move them, `clone()` copies
+// them, and every list is freed when its owner ends.
+struct Bag { name: Str, items: List<Int> }
+
+fn total(xs: List<Int>) -> Int {
+    let mut sum = 0
+    for x in xs {
+        sum += x
+    }
+    sum
+}
+
+fn squares(n: Int) -> List<Int> {
+    let mut result: List<Int> = []
+    for i in 1..=n {
+        result.push(i * i)
+    }
+    result
+}
+
+fn main() {
+    let mut xs = [3, 1, 4]
+    xs.push(1)
+    xs.push(5)
+    print(xs.len())
+    print(xs[2])
+    xs[0] = 30
+    print(xs[0])
+    let ys = xs.clone()
+    xs.push(9)
+    print(ys.len())
+    print(xs.len())
+    print(total(ys))
+    print(total(squares(4)))
+
+    let mut words: List<Str> = []
+    words.push("a${1}")
+    words.push("b")
+    words.insert(0, "first")
+    for w in &words {
+        print(w)
+    }
+    print(words.contains("b"))
+    print(words.remove(1))
+    match words.pop() {
+        Option::Some(last) => print("popped ${last}")
+        Option::None => print("empty")
+    }
+    print(words.len())
+    words.clear()
+    print(words.is_empty())
+
+    let mut bag = Bag { name: "bag", items: [1, 2] }
+    bag.items.push(3)
+    print(bag.items.len())
+    let moved = bag
+    print(moved.items[2])
+    print(moved.name)
+
+    let mut grid: List<List<Int>> = [[1, 2], [3]]
+    grid[1].push(4)
+    grid.push([5])
+    let mut count = 0
+    for row in grid {
+        for cell in row {
+            count += cell
+        }
+    }
+    print(count)
+    print([1, 2] == [1, 2])
+    print([[1], [2]] == [[1], [3]])
+    for j in 0..0 {
+        print(j)
+    }
+    let mut names = ["x${1}", "y"]
+    names[0] = "z"
+    let first = names.remove(0)
+    print(first)
+    let rest = names
+    print(rest.len())
+}

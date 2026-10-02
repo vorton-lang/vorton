@@ -32,6 +32,8 @@ pub(crate) enum TypeKind {
     Unit,
     Never,
     Tuple(Vec<Type>),
+    /// A growable list that owns its elements; an entity.
+    List(Type),
     /// A struct or enum declaration, by its index in [`Types::nominals`],
     /// applied to type arguments.
     Nominal {
@@ -149,6 +151,7 @@ impl Types {
             TypeKind::Unit => "Unit".to_owned(),
             TypeKind::Never => "Never".to_owned(),
             TypeKind::Tuple(elements) => format!("({})", self.names(elements)),
+            TypeKind::List(element) => format!("List<{}>", self.name(*element)),
             TypeKind::Nominal {
                 declaration,
                 arguments,
@@ -176,21 +179,40 @@ impl Types {
         !matches!(self.kind(ty), TypeKind::Unit | TypeKind::Never)
     }
 
-    /// Whether copying `ty` must retain reference counts inside it.
-    pub(crate) fn is_counted(&self, ty: Type) -> bool {
+    /// Whether an owned value of `ty` must be released: it holds a counted
+    /// `Str` or owns heap storage.
+    pub(crate) fn needs_release(&self, ty: Type) -> bool {
         match self.kind(ty) {
-            TypeKind::Str => true,
+            TypeKind::Str | TypeKind::List(_) => true,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .components(ty)
                 .into_iter()
-                .any(|component| self.is_counted(component)),
+                .any(|component| self.needs_release(component)),
             TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Unit | TypeKind::Never => {
                 false
             }
         }
     }
 
-    /// The types stored inside `ty`: tuple elements, or the fields of every variant.
+    /// Whether `ty` is an entity: it has identity and is moved, never copied.
+    pub(crate) fn is_entity(&self, ty: Type) -> bool {
+        match self.kind(ty) {
+            TypeKind::List(_) => true,
+            TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
+                .components(ty)
+                .into_iter()
+                .any(|component| self.is_entity(component)),
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::Str
+            | TypeKind::Unit
+            | TypeKind::Never => false,
+        }
+    }
+
+    /// The types stored inside `ty` by value: tuple elements, or the fields
+    /// of every variant. List elements live on the heap and are not included.
     pub(crate) fn components(&self, ty: Type) -> Vec<Type> {
         match self.kind(ty) {
             TypeKind::Tuple(elements) => elements.clone(),

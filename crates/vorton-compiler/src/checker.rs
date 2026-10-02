@@ -2,16 +2,22 @@
 //!
 //! The checker covers `Int`, `Float`, `Bool`, `Str` and `Unit` values,
 //! tuples, structs and enums (generic ones are instantiated at concrete type
-//! arguments), `match`, `if let` and tuple destructuring with exhaustiveness,
-//! named functions with written signatures, local bindings, assignment to
-//! `let mut` locals and their fields, `if`, `while`, `loop`, `break`,
-//! `continue`, `return`, string interpolation, and the `print`, `assert` and
-//! `panic` intrinsics. Every other construct reports
+//! arguments), `List` with its built-in methods, `match`, `if let` and tuple
+//! destructuring with exhaustiveness, named functions with written
+//! signatures, local bindings, assignment to `let mut` locals and their parts,
+//! `if`, `while`, `loop`, `for` over ranges and lists, `break`, `continue`,
+//! `return`, string interpolation, and the `print`, `assert` and `panic`
+//! intrinsics. Every other construct reports
 //! [`CheckDiagnosticKind::Unsupported`] instead of being treated as checked.
+//!
+//! Entities (lists and the aggregates that contain them) are moved, never
+//! copied. The checker tracks which locals may have been moved along every
+//! path and rejects a later use, a move out of a field or element, and a move
+//! of an outer local that a later loop iteration would see.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ast::{AssignmentOperator, BinaryOperator, Span, UnaryOperator};
+use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::exhaustive;
 use crate::project::{
     EntityId, EntityKind, LibraryId, ModuleRef, OriginRef, ResolvedBlock, ResolvedConstructEntry,
@@ -53,6 +59,14 @@ pub enum CheckDiagnosticKind {
     CannotInfer,
     /// A `match`, `if let` alternative or destructuring misses possible values.
     NonExhaustive,
+    /// A local is used after its entity value may have been moved away.
+    UseAfterMove,
+    /// An entity is moved out of a field, an element or a borrow.
+    CannotMove,
+    /// A method that the receiver's type does not have.
+    UnknownMethod,
+    /// A place is changed while a loop or borrow still reads it.
+    BorrowConflict,
 }
 
 /// A checked program ready for code generation.
@@ -105,12 +119,66 @@ pub(crate) enum Statement {
         body: Block,
     },
     Loop(Block),
+    For {
+        binding: Pattern,
+        source: ForSource,
+        body: Block,
+    },
 }
 
-/// A local and a path of struct-field or tuple-element indices inside it.
+pub(crate) enum ForSource {
+    /// `start..end` or `start..=end` over `Int`.
+    Range {
+        start: Expr,
+        end: Expr,
+        inclusive: bool,
+    },
+    /// Takes the list and yields its elements.
+    List(Expr),
+    /// Reads the value elements of a list place without taking them.
+    Borrowed(Place),
+}
+
+/// A local and a path of parts inside it.
 pub(crate) struct Place {
     pub(crate) local: usize,
-    pub(crate) path: Vec<usize>,
+    pub(crate) projections: Vec<Projection>,
+}
+
+pub(crate) enum Projection {
+    /// A struct field or tuple element, by index.
+    Field(usize),
+    /// A list element at a checked index.
+    Index(Box<Expr>),
+}
+
+/// The receiver of a built-in method: a place it reads or changes, or a
+/// value it reads and then releases.
+pub(crate) enum Receiver {
+    Place(Place),
+    Value(Box<Expr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Builtin {
+    /// `List::push(&mut self, value)`.
+    Push,
+    /// `List::pop(&mut self) -> Option<T>`.
+    Pop,
+    /// `List::len(&self) -> Int`.
+    Len,
+    /// `List::is_empty(&self) -> Bool`.
+    IsEmpty,
+    /// `List::insert(&mut self, index, value)`.
+    Insert,
+    /// `List::remove(&mut self, index) -> T`.
+    Remove,
+    /// `List::clear(&mut self)`.
+    Clear,
+    /// `List::contains(&self, value) -> Bool`.
+    Contains,
+    /// `clone(&self)` of any type.
+    Clone,
 }
 
 pub(crate) struct Expr {
@@ -168,6 +236,19 @@ pub(crate) enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<Arm>,
     },
+    /// Takes the entity value of a local, which is left empty.
+    Move(usize),
+    List(Vec<Expr>),
+    /// Reads a value element of a list.
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Builtin {
+        builtin: Builtin,
+        receiver: Box<Receiver>,
+        arguments: Vec<Expr>,
+    },
 }
 
 pub(crate) struct Arm {
@@ -224,6 +305,8 @@ struct Nominals<'a> {
     declarations: Vec<NominalDeclaration<'a>>,
     by_identity: BTreeMap<EntityId, usize>,
     constructors: BTreeMap<EntityId, (usize, usize)>,
+    /// The core `Option` declaration and its `Some` and `None` variants.
+    option: Option<(usize, usize, usize)>,
 }
 
 /// How deep generic instantiation may nest before it is reported.
@@ -235,6 +318,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         declarations: Vec::new(),
         by_identity: BTreeMap::new(),
         constructors: BTreeMap::new(),
+        option: None,
     };
     for (module, resolved) in &project.modules {
         let Some(body) = &resolved.body else {
@@ -308,6 +392,15 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         }
     }
 
+    let option = &project.core_roles.option;
+    if let (Some(&declaration), Some(&(_, some)), Some(&(_, none))) = (
+        nominals.by_identity.get(&option.declaration),
+        nominals.constructors.get(&option.some),
+        nominals.constructors.get(&option.none),
+    ) {
+        nominals.option = Some((declaration, some, none));
+    }
+
     let mut types = Types::new();
     for declaration in &nominals.declarations {
         types.nominals.push(NominalInfo {
@@ -343,6 +436,8 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             mutable: Vec::new(),
             loops: Vec::new(),
             result: signature.result,
+            moved: BTreeSet::new(),
+            frozen: Vec::new(),
         };
         let mut parameters = Vec::new();
         for (parameter, ty) in function.parameters.iter().zip(&signature.parameters) {
@@ -571,6 +666,12 @@ fn resolve_type(
             {
                 return Ok(ty);
             }
+            if target.kind == EntityKind::LanguageType
+                && target.name == "List"
+                && let [element] = arguments.as_slice()
+            {
+                return Ok(types.intern(TypeKind::List(*element)));
+            }
             if target.kind == EntityKind::LanguageType && arguments.is_empty() {
                 let language = match target.name.as_str() {
                     "Int" => Some(Type::INT),
@@ -626,6 +727,25 @@ fn unsupported(primary: Option<OriginRef>, what: &str) -> CheckDiagnostic {
 
 struct LoopFrame {
     breaks: bool,
+    /// The locals that may be moved when the loop starts.
+    entry_moved: BTreeSet<usize>,
+    /// Locals with a smaller index are declared outside the loop.
+    outer_locals: usize,
+    /// The moved locals at each `break`.
+    break_states: Vec<BTreeSet<usize>>,
+}
+
+/// A place, its type, and the path that loops freeze while reading it.
+type PlaceAccess = (Place, Type, Vec<Option<usize>>);
+
+/// A checked arm pattern and the locals visible in its arm.
+type ArmPattern = (Pattern, BTreeMap<EntityId, usize>);
+
+/// A place that a running loop reads, so the loop body may not change it.
+struct Frozen {
+    local: usize,
+    /// Field indices from the local; `None` stands for any list element.
+    path: Vec<Option<usize>>,
 }
 
 /// The values given to a variant or struct, in source order.
@@ -645,6 +765,9 @@ struct BodyChecker<'a> {
     mutable: Vec<bool>,
     loops: Vec<LoopFrame>,
     result: Type,
+    /// Locals whose entity value may have been moved on some path to here.
+    moved: BTreeSet<usize>,
+    frozen: Vec<Frozen>,
 }
 
 impl BodyChecker<'_> {
@@ -713,6 +836,128 @@ impl BodyChecker<'_> {
         }
     }
 
+    /// Rejects a use of `local` after its value may have been moved.
+    fn use_local(&self, local: usize, span: Span) -> Result<(), CheckDiagnostic> {
+        if self.moved.contains(&local) {
+            return Err(self.error(
+                CheckDiagnosticKind::UseAfterMove,
+                span,
+                format!(
+                    "`{}` is used after its value may have been moved",
+                    self.locals[local].name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Turns `expression` into a value that its consumer owns: an entity
+    /// local is moved, and an entity inside a field or element is rejected.
+    fn consume(&mut self, expression: Expr, span: Span) -> Result<Expr, CheckDiagnostic> {
+        if !self.types.is_entity(expression.ty) {
+            return Ok(expression);
+        }
+        match expression.kind {
+            ExprKind::Local(local) => {
+                self.check_not_frozen(local, &[], span)?;
+                self.moved.insert(local);
+                Ok(Expr {
+                    ty: expression.ty,
+                    kind: ExprKind::Move(local),
+                })
+            }
+            ExprKind::Field { .. } | ExprKind::Index { .. } => Err(self.error(
+                CheckDiagnosticKind::CannotMove,
+                span,
+                format!(
+                    "a `{}` cannot be moved out of a field or element; use `clone()`, or take it with `remove` or `replace`",
+                    self.types.name(expression.ty)
+                ),
+            )),
+            _ => Ok(expression),
+        }
+    }
+
+    fn check_consumed(
+        &mut self,
+        expression: &ResolvedExpr,
+        expected: Option<Type>,
+    ) -> Result<Expr, CheckDiagnostic> {
+        let checked = self.check_expr(expression, expected)?;
+        self.consume(checked, expression.span)
+    }
+
+    /// Rejects changing `local` along `path` while a loop reads an
+    /// overlapping place.
+    fn check_not_frozen(
+        &self,
+        local: usize,
+        path: &[Option<usize>],
+        span: Span,
+    ) -> Result<(), CheckDiagnostic> {
+        let overlaps = |frozen: &Frozen| {
+            frozen.local == local
+                && frozen
+                    .path
+                    .iter()
+                    .zip(path)
+                    .all(|(left, right)| left.is_none() || right.is_none() || left == right)
+        };
+        if self.frozen.iter().any(overlaps) {
+            return Err(self.error(
+                CheckDiagnosticKind::BorrowConflict,
+                span,
+                format!(
+                    "`{}` cannot change while a loop over it is running",
+                    self.locals[local].name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Ends one path through a loop body: an outer local that the next
+    /// iteration would see moved is an error.
+    fn check_loop_back(&self, span: Span) -> Result<(), CheckDiagnostic> {
+        let frame = self.loops.last().expect("inside a loop");
+        if let Some(&local) = self
+            .moved
+            .iter()
+            .find(|local| **local < frame.outer_locals && !frame.entry_moved.contains(local))
+        {
+            return Err(self.error(
+                CheckDiagnosticKind::UseAfterMove,
+                span,
+                format!(
+                    "`{}` is moved in one loop iteration and would be used in the next",
+                    self.locals[local].name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn enter_loop(&mut self) {
+        self.loops.push(LoopFrame {
+            breaks: false,
+            entry_moved: self.moved.clone(),
+            outer_locals: self.locals.len(),
+            break_states: Vec::new(),
+        });
+    }
+
+    /// Leaves a loop. After it, a local is moved if it was when the loop
+    /// started or at some `break`.
+    fn exit_loop(&mut self) -> LoopFrame {
+        let frame = self.loops.pop().expect("the loop frame was pushed");
+        let mut moved = frame.entry_moved.clone();
+        for state in &frame.break_states {
+            moved.extend(state.iter().copied());
+        }
+        self.moved = moved;
+        frame
+    }
+
     fn check_block(
         &mut self,
         block: &ResolvedBlock,
@@ -729,7 +974,7 @@ impl BodyChecker<'_> {
         let (tail, ty) = match &block.tail {
             Some(tail) => {
                 let discard = expected == Some(Type::UNIT);
-                let tail = self.check_expr(tail, expected)?;
+                let tail = self.check_consumed(tail, expected)?;
                 let ty = if tail.ty == Type::NEVER || diverges {
                     Type::NEVER
                 } else if discard {
@@ -773,6 +1018,7 @@ impl BodyChecker<'_> {
                     return Err(self.unsupported(span, "borrowed bindings"));
                 }
                 if let Some(pattern) = pattern {
+                    let value_span = value.span;
                     let value = self.check_expr(value, None)?;
                     if value.ty == Type::NEVER {
                         return Ok((Statement::Expr(value), true));
@@ -785,6 +1031,11 @@ impl BodyChecker<'_> {
                             format!("this destructuring does not cover `{missing}`"),
                         ));
                     }
+                    let value = if self.binds_entity(&pattern) {
+                        self.consume(value, value_span)?
+                    } else {
+                        value
+                    };
                     return Ok((Statement::LetPattern { pattern, value }, false));
                 }
                 let [binding] = bindings.as_slice() else {
@@ -794,7 +1045,7 @@ impl BodyChecker<'_> {
                     Some(annotation) => Some(self.resolve_type(annotation, &BTreeMap::new())?),
                     None => None,
                 };
-                let value = self.check_expr(value, expected)?;
+                let value = self.check_consumed(value, expected)?;
                 if let Some(expected) = expected {
                     self.require(span, expected, value.ty)?;
                 }
@@ -808,12 +1059,15 @@ impl BodyChecker<'_> {
                 operator: (operator_span, operator),
                 value,
             } => {
-                let (place, ty) = self.check_place(target)?;
-                let value = self.check_expr(value, Some(ty))?;
+                let (place, ty) = self.check_place(target, true)?;
+                let value = self.check_consumed(value, Some(ty))?;
                 self.require(span, ty, value.ty)?;
                 if *operator != AssignmentOperator::Assign && !matches!(ty, Type::INT | Type::FLOAT)
                 {
                     return Err(self.mismatch(*operator_span, Type::INT, ty));
+                }
+                if place.projections.is_empty() {
+                    self.moved.remove(&place.local);
                 }
                 let diverges = value.ty == Type::NEVER;
                 Ok((
@@ -834,7 +1088,7 @@ impl BodyChecker<'_> {
             ResolvedStatementKind::Return(value) => {
                 let value = match value {
                     Some(value) => {
-                        let checked = self.check_expr(value, Some(self.result))?;
+                        let checked = self.check_consumed(value, Some(self.result))?;
                         self.require(value.span, self.result, checked.ty)?;
                         Some(checked)
                     }
@@ -856,28 +1110,36 @@ impl BodyChecker<'_> {
                 };
                 if is_break {
                     frame.breaks = true;
+                    frame.break_states.push(self.moved.clone());
                     Ok((Statement::Break, true))
                 } else {
+                    self.check_loop_back(span)?;
                     Ok((Statement::Continue, true))
                 }
             }
             ResolvedStatementKind::While { condition, body } => {
-                let condition = self.check_condition(condition)?;
-                self.loops.push(LoopFrame { breaks: false });
-                let body = self.check_block(body, Some(Type::UNIT));
-                self.loops.pop();
-                Ok((
-                    Statement::While {
-                        condition,
-                        body: body?,
-                    },
-                    false,
-                ))
+                self.enter_loop();
+                let condition = self.check_condition(condition);
+                let body = condition.and_then(|condition| {
+                    let body = self.check_block(body, Some(Type::UNIT))?;
+                    if body.ty != Type::NEVER {
+                        self.check_loop_back(span)?;
+                    }
+                    Ok((condition, body))
+                });
+                self.exit_loop();
+                let (condition, body) = body?;
+                Ok((Statement::While { condition, body }, false))
             }
             ResolvedStatementKind::Loop(body) => {
-                self.loops.push(LoopFrame { breaks: false });
-                let body = self.check_block(body, Some(Type::UNIT));
-                let frame = self.loops.pop().expect("the loop frame was pushed");
+                self.enter_loop();
+                let body = self.check_block(body, Some(Type::UNIT)).and_then(|body| {
+                    if body.ty != Type::NEVER {
+                        self.check_loop_back(span)?;
+                    }
+                    Ok(body)
+                });
+                let frame = self.exit_loop();
                 Ok((Statement::Loop(body?), !frame.breaks))
             }
             ResolvedStatementKind::IfLet {
@@ -890,12 +1152,222 @@ impl BodyChecker<'_> {
                 let diverges = expression.ty == Type::NEVER;
                 Ok((Statement::Expr(expression), diverges))
             }
-            ResolvedStatementKind::For { .. } => Err(self.unsupported(span, "`for` loops")),
+            ResolvedStatementKind::For {
+                bindings,
+                iterable,
+                body,
+            } => self.check_for(span, bindings, iterable, body),
         }
     }
 
-    /// Checks an assignment target and returns it with its type.
-    fn check_place(&mut self, target: &ResolvedPlace) -> Result<(Place, Type), CheckDiagnostic> {
+    fn check_for(
+        &mut self,
+        span: Span,
+        bindings: &[crate::project::ResolvedBinding],
+        iterable: &ResolvedExpr,
+        body: &ResolvedBlock,
+    ) -> Result<(Statement, bool), CheckDiagnostic> {
+        let (source, element, frozen) = match &iterable.kind {
+            ResolvedExprKind::Binary {
+                left,
+                operator:
+                    (
+                        _,
+                        operator
+                        @ (BinaryOperator::RangeExclusive | BinaryOperator::RangeInclusive),
+                    ),
+                right,
+            } => {
+                let start = self.check_expr(left, Some(Type::INT))?;
+                self.require(left.span, Type::INT, start.ty)?;
+                let end = self.check_expr(right, Some(Type::INT))?;
+                self.require(right.span, Type::INT, end.ty)?;
+                let source = ForSource::Range {
+                    start,
+                    end,
+                    inclusive: *operator == BinaryOperator::RangeInclusive,
+                };
+                (source, Type::INT, None)
+            }
+            ResolvedExprKind::Borrow {
+                kind: (_, BorrowKind::Shared),
+                operand,
+            } => {
+                let Some((place, ty, path)) = self.expr_place(operand)? else {
+                    return Err(self.unsupported(operand.span, "borrowing loops over temporaries"));
+                };
+                let TypeKind::List(element) = *self.types.kind(ty) else {
+                    return Err(self.error(
+                        CheckDiagnosticKind::TypeMismatch,
+                        operand.span,
+                        format!("`for` cannot iterate over `{}`", self.types.name(ty)),
+                    ));
+                };
+                if self.types.is_entity(element) {
+                    return Err(
+                        self.unsupported(operand.span, "borrowing loops over lists of entities")
+                    );
+                }
+                let frozen = Frozen {
+                    local: place.local,
+                    path,
+                };
+                (ForSource::Borrowed(place), element, Some(frozen))
+            }
+            ResolvedExprKind::Borrow { .. } => {
+                return Err(self.unsupported(iterable.span, "`for` over `&mut`"));
+            }
+            _ => {
+                let value = self.check_expr(iterable, None)?;
+                let TypeKind::List(element) = *self.types.kind(value.ty) else {
+                    return Err(self.error(
+                        CheckDiagnosticKind::TypeMismatch,
+                        iterable.span,
+                        format!("`for` cannot iterate over `{}`", self.types.name(value.ty)),
+                    ));
+                };
+                let value = self.consume(value, iterable.span)?;
+                (ForSource::List(value), element, None)
+            }
+        };
+        let scope = self.local_ids.clone();
+        self.enter_loop();
+        let binding = match bindings {
+            [single] => Ok(Pattern::Binding(self.declare(
+                &single.identity,
+                element,
+                false,
+            ))),
+            many => match self.types.kind(element).clone() {
+                TypeKind::Tuple(elements) if elements.len() == many.len() => Ok(Pattern::Tuple(
+                    many.iter()
+                        .zip(elements)
+                        .map(|(binding, ty)| {
+                            Pattern::Binding(self.declare(&binding.identity, ty, false))
+                        })
+                        .collect(),
+                )),
+                _ => Err(self.error(
+                    CheckDiagnosticKind::TypeMismatch,
+                    span,
+                    format!(
+                        "the elements are `{}`, not a tuple of {}",
+                        self.types.name(element),
+                        many.len()
+                    ),
+                )),
+            },
+        };
+        let has_frozen = frozen.is_some();
+        if let Some(frozen) = frozen {
+            self.frozen.push(frozen);
+        }
+        let body = binding.and_then(|binding| {
+            let body = self.check_block(body, Some(Type::UNIT))?;
+            if body.ty != Type::NEVER {
+                self.check_loop_back(span)?;
+            }
+            Ok((binding, body))
+        });
+        if has_frozen {
+            self.frozen.pop();
+        }
+        self.exit_loop();
+        self.local_ids = scope;
+        let (binding, body) = body?;
+        Ok((
+            Statement::For {
+                binding,
+                source,
+                body,
+            },
+            false,
+        ))
+    }
+
+    /// Converts a local followed by field, tuple-element and index accesses
+    /// into a place, with its type and the path that loops freeze. Returns
+    /// `None` for any other expression.
+    fn expr_place(
+        &mut self,
+        expression: &ResolvedExpr,
+    ) -> Result<Option<PlaceAccess>, CheckDiagnostic> {
+        match &expression.kind {
+            ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => {
+                let Some(&local) = self.local_ids.get(target) else {
+                    return Ok(None);
+                };
+                self.use_local(local, expression.span)?;
+                Ok(Some((
+                    Place {
+                        local,
+                        projections: Vec::new(),
+                    },
+                    self.locals[local].ty,
+                    Vec::new(),
+                )))
+            }
+            ResolvedExprKind::Parenthesized(inner) => self.expr_place(inner),
+            ResolvedExprKind::Field { receiver, field } => {
+                let Some((mut place, ty, mut path)) = self.expr_place(receiver)? else {
+                    return Ok(None);
+                };
+                let (index, ty) = self.named_field(ty, &field.name, field.origin.span)?;
+                place.projections.push(Projection::Field(index));
+                path.push(Some(index));
+                Ok(Some((place, ty, path)))
+            }
+            ResolvedExprKind::TupleField {
+                receiver,
+                index,
+                origin,
+            } => {
+                let Some((mut place, ty, mut path)) = self.expr_place(receiver)? else {
+                    return Ok(None);
+                };
+                let (index, ty) = self.tuple_element(ty, index, origin.span)?;
+                place.projections.push(Projection::Field(index));
+                path.push(Some(index));
+                Ok(Some((place, ty, path)))
+            }
+            ResolvedExprKind::Index { receiver, index } => {
+                let Some((mut place, ty, mut path)) = self.expr_place(receiver)? else {
+                    return Ok(None);
+                };
+                let element = self.list_element(ty, receiver.span)?;
+                let index = self.check_index(index)?;
+                place.projections.push(Projection::Index(Box::new(index)));
+                path.push(None);
+                Ok(Some((place, element, path)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn list_element(&self, ty: Type, span: Span) -> Result<Type, CheckDiagnostic> {
+        match self.types.kind(ty) {
+            TypeKind::List(element) => Ok(*element),
+            _ => Err(self.error(
+                CheckDiagnosticKind::TypeMismatch,
+                span,
+                format!("`{}` cannot be indexed", self.types.name(ty)),
+            )),
+        }
+    }
+
+    fn check_index(&mut self, index: &ResolvedExpr) -> Result<Expr, CheckDiagnostic> {
+        let checked = self.check_expr(index, Some(Type::INT))?;
+        self.require(index.span, Type::INT, checked.ty)?;
+        Ok(checked)
+    }
+
+    /// Checks an assignment target and returns it with its type. Assigning
+    /// a whole local is allowed after its value was moved.
+    fn check_place(
+        &mut self,
+        target: &ResolvedPlace,
+        reinitializes: bool,
+    ) -> Result<(Place, Type), CheckDiagnostic> {
         let local = match &target.root {
             ResolvedReference::Exact { target: entity, .. } => self.local_ids.get(entity).copied(),
             ResolvedReference::Selection { .. } => None,
@@ -908,24 +1380,57 @@ impl BodyChecker<'_> {
                     .to_owned(),
             ));
         };
+        if !(reinitializes && target.projections.is_empty()) {
+            self.use_local(local, target.span)?;
+        }
         let mut ty = self.locals[local].ty;
+        let mut projections = Vec::new();
         let mut path = Vec::new();
         for projection in &target.projections {
-            let (index, field_ty) = match projection {
+            match projection {
                 ResolvedPlaceProjection::Field(selection) => {
-                    self.named_field(ty, &selection.name, selection.origin.span)?
+                    let (index, field_ty) =
+                        self.named_field(ty, &selection.name, selection.origin.span)?;
+                    projections.push(Projection::Field(index));
+                    path.push(Some(index));
+                    ty = field_ty;
                 }
                 ResolvedPlaceProjection::TupleField { index, origin } => {
-                    self.tuple_element(ty, index, origin.span)?
+                    let (index, field_ty) = self.tuple_element(ty, index, origin.span)?;
+                    projections.push(Projection::Field(index));
+                    path.push(Some(index));
+                    ty = field_ty;
                 }
                 ResolvedPlaceProjection::Index(index) => {
-                    return Err(self.unsupported(index.span, "assignment to elements"));
+                    let element = self.list_element(ty, target.span)?;
+                    let index = self.check_index(index)?;
+                    projections.push(Projection::Index(Box::new(index)));
+                    path.push(None);
+                    ty = element;
                 }
-            };
-            path.push(index);
-            ty = field_ty;
+            }
         }
-        Ok((Place { local, path }, ty))
+        self.check_not_frozen(local, &path, target.span)?;
+        Ok((Place { local, projections }, ty))
+    }
+
+    /// Whether some binding of `pattern` holds an entity.
+    fn binds_entity(&self, pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Binding(local) => self.types.is_entity(self.locals[*local].ty),
+            Pattern::Tuple(elements) => elements.iter().any(|element| self.binds_entity(element)),
+            Pattern::Variant { fields, .. } => {
+                fields.iter().any(|(_, field)| self.binds_entity(field))
+            }
+            Pattern::Or(alternatives) => alternatives
+                .iter()
+                .any(|alternative| self.binds_entity(alternative)),
+            Pattern::Wildcard
+            | Pattern::Int(_)
+            | Pattern::Float(_)
+            | Pattern::Str(_)
+            | Pattern::Bool(_) => false,
+        }
     }
 
     fn named_field(
@@ -1029,6 +1534,7 @@ impl BodyChecker<'_> {
                     return Err(self.unsupported(span, "values other than local variables"));
                 };
                 if let Some(&local) = self.local_ids.get(target) {
+                    self.use_local(local, span)?;
                     (self.locals[local].ty, ExprKind::Local(local))
                 } else if let Some(&(declaration, variant)) = self.nominals.constructors.get(target)
                 {
@@ -1125,9 +1631,180 @@ impl BodyChecker<'_> {
                     },
                 )
             }
+            ResolvedExprKind::List(elements) => self.check_list(span, elements, expected)?,
+            ResolvedExprKind::Index { receiver, index } => {
+                let base = self.check_expr(receiver, None)?;
+                let element = self.list_element(base.ty, receiver.span)?;
+                let index = self.check_index(index)?;
+                (
+                    element,
+                    ExprKind::Index {
+                        base: Box::new(base),
+                        index: Box::new(index),
+                    },
+                )
+            }
+            ResolvedExprKind::MethodCall {
+                receiver,
+                method,
+                arguments,
+            } => self.check_method(span, receiver, &method.name, arguments)?,
+            ResolvedExprKind::Borrow { .. } => {
+                return Err(self.unsupported(span, "borrows outside `for` loops"));
+            }
             _ => return Err(self.unsupported(span, "these expressions")),
         };
         Ok(Expr { ty, kind })
+    }
+
+    fn check_list(
+        &mut self,
+        span: Span,
+        elements: &[ResolvedExpr],
+        expected: Option<Type>,
+    ) -> Result<(Type, ExprKind), CheckDiagnostic> {
+        let mut element = match expected.map(|ty| self.types.kind(ty)) {
+            Some(TypeKind::List(element)) => Some(*element),
+            _ => None,
+        };
+        let mut checked = Vec::new();
+        for value in elements {
+            let value_checked = self.check_consumed(value, element)?;
+            if value_checked.ty == Type::NEVER {
+                return Err(self.unsupported(value.span, "diverging list elements"));
+            }
+            match element {
+                Some(element) => self.require(value.span, element, value_checked.ty)?,
+                None => element = Some(value_checked.ty),
+            }
+            checked.push(value_checked);
+        }
+        let Some(element) = element else {
+            return Err(self.error(
+                CheckDiagnosticKind::CannotInfer,
+                span,
+                "the element type of an empty list cannot be inferred here; write the expected type"
+                    .to_owned(),
+            ));
+        };
+        Ok((
+            self.types.intern(TypeKind::List(element)),
+            ExprKind::List(checked),
+        ))
+    }
+
+    fn option_type(&mut self, span: Span, element: Type) -> Result<Type, CheckDiagnostic> {
+        let Some((declaration, _, _)) = self.nominals.option else {
+            return Err(self.unsupported(span, "`Option` without the core declaration"));
+        };
+        instantiate(self.types, self.nominals, declaration, vec![element], 0)
+    }
+
+    /// Checks a call of a built-in method.
+    fn check_method(
+        &mut self,
+        span: Span,
+        receiver: &ResolvedExpr,
+        name: &str,
+        arguments: &[ResolvedExpr],
+    ) -> Result<(Type, ExprKind), CheckDiagnostic> {
+        let (receiver_value, ty, path) = match self.expr_place(receiver)? {
+            Some((place, ty, path)) => (Receiver::Place(place), ty, Some(path)),
+            None => {
+                let value = self.check_expr(receiver, None)?;
+                let ty = value.ty;
+                (Receiver::Value(Box::new(value)), ty, None)
+            }
+        };
+        let unknown = |checker: &Self| {
+            checker.error(
+                CheckDiagnosticKind::UnknownMethod,
+                span,
+                format!("`{}` has no method `{name}`", checker.types.name(ty)),
+            )
+        };
+        let (builtin, parameters, result, mutates): (Builtin, Vec<(Type, bool)>, Type, bool) =
+            if name == "clone" {
+                (Builtin::Clone, Vec::new(), ty, false)
+            } else if let TypeKind::List(element) = *self.types.kind(ty) {
+                match name {
+                    "push" => (Builtin::Push, vec![(element, true)], Type::UNIT, true),
+                    "pop" => (
+                        Builtin::Pop,
+                        Vec::new(),
+                        self.option_type(span, element)?,
+                        true,
+                    ),
+                    "len" => (Builtin::Len, Vec::new(), Type::INT, false),
+                    "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
+                    "insert" => (
+                        Builtin::Insert,
+                        vec![(Type::INT, false), (element, true)],
+                        Type::UNIT,
+                        true,
+                    ),
+                    "remove" => (Builtin::Remove, vec![(Type::INT, false)], element, true),
+                    "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
+                    "contains" if !self.types.is_entity(element) && self.has_equality(element) => {
+                        (Builtin::Contains, vec![(element, false)], Type::BOOL, false)
+                    }
+                    _ => return Err(unknown(self)),
+                }
+            } else {
+                return Err(unknown(self));
+            };
+        if mutates {
+            let Receiver::Place(place) = &receiver_value else {
+                return Err(self.error(
+                    CheckDiagnosticKind::NotAssignable,
+                    receiver.span,
+                    format!(
+                        "`{name}` changes its receiver, which must be a variable or a part of one"
+                    ),
+                ));
+            };
+            if !self.mutable[place.local] {
+                return Err(self.error(
+                    CheckDiagnosticKind::NotAssignable,
+                    receiver.span,
+                    format!(
+                        "`{name}` changes `{}`, which is not declared `mut`",
+                        self.locals[place.local].name
+                    ),
+                ));
+            }
+            let local = place.local;
+            self.check_not_frozen(local, path.as_deref().unwrap_or(&[]), receiver.span)?;
+        }
+        if arguments.len() != parameters.len() {
+            return Err(self.error(
+                CheckDiagnosticKind::ArgumentCount,
+                span,
+                format!(
+                    "`{name}` takes {} arguments, found {}",
+                    parameters.len(),
+                    arguments.len()
+                ),
+            ));
+        }
+        let mut checked = Vec::new();
+        for (argument, (parameter, consumed)) in arguments.iter().zip(parameters) {
+            let value = if consumed {
+                self.check_consumed(argument, Some(parameter))?
+            } else {
+                self.check_expr(argument, Some(parameter))?
+            };
+            self.require(argument.span, parameter, value.ty)?;
+            checked.push(value);
+        }
+        Ok((
+            result,
+            ExprKind::Builtin {
+                builtin,
+                receiver: Box::new(receiver_value),
+                arguments: checked,
+            },
+        ))
     }
 
     fn check_tuple(
@@ -1142,7 +1819,7 @@ impl BodyChecker<'_> {
         let mut checked = Vec::new();
         for (position, element) in elements.iter().enumerate() {
             let expected = expected_elements.as_ref().map(|types| types[position]);
-            let value = self.check_expr(element, expected)?;
+            let value = self.check_consumed(element, expected)?;
             if value.ty == Type::NEVER {
                 return Err(self.unsupported(element.span, "diverging tuple elements"));
             }
@@ -1316,7 +1993,7 @@ impl BodyChecker<'_> {
 
         let base = match base_expression {
             Some(expression) => {
-                let base = self.check_expr(expression, expected)?;
+                let base = self.check_consumed(expression, expected)?;
                 if base.ty == Type::NEVER {
                     return Err(self.unsupported(expression.span, "diverging bases"));
                 }
@@ -1356,7 +2033,7 @@ impl BodyChecker<'_> {
             } else {
                 None
             };
-            let checked = self.check_expr(value, field_expected)?;
+            let checked = self.check_consumed(value, field_expected)?;
             if checked.ty == Type::NEVER {
                 return Err(self.unsupported(value_span, "diverging fields"));
             }
@@ -1519,8 +2196,14 @@ impl BodyChecker<'_> {
         expected: Option<Type>,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let condition = self.check_condition(condition)?;
+        let before = self.moved.clone();
         let Some(else_branch) = else_branch else {
             let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
+            if then_branch.ty == Type::NEVER {
+                self.moved = before;
+            } else {
+                self.moved.extend(before);
+            }
             return Ok((
                 Type::UNIT,
                 ExprKind::If {
@@ -1531,9 +2214,14 @@ impl BodyChecker<'_> {
             ));
         };
         let then_branch = self.check_block(then_branch, expected)?;
+        let after_then = std::mem::replace(&mut self.moved, before);
         let expected = expected.or(Some(then_branch.ty).filter(|ty| *ty != Type::NEVER));
         let else_span = else_branch.span;
-        let else_branch = self.check_expr(else_branch, expected)?;
+        let else_branch = self.check_consumed(else_branch, expected)?;
+        self.merge_moved([
+            (then_branch.ty, after_then),
+            (else_branch.ty, self.moved.clone()),
+        ]);
         let ty = match (then_branch.ty, else_branch.ty) {
             (Type::NEVER, other) | (other, Type::NEVER) => other,
             _ if expected == Some(Type::UNIT) => Type::UNIT,
@@ -1552,6 +2240,39 @@ impl BodyChecker<'_> {
         ))
     }
 
+    /// Joins the moved locals of branches; a branch of type `Never` does not
+    /// reach the join.
+    fn merge_moved(&mut self, branches: impl IntoIterator<Item = (Type, BTreeSet<usize>)>) {
+        let mut reaching = None::<BTreeSet<usize>>;
+        let mut all = BTreeSet::new();
+        for (ty, moved) in branches {
+            all.extend(moved.iter().copied());
+            if ty != Type::NEVER {
+                reaching.get_or_insert_with(BTreeSet::new).extend(moved);
+            }
+        }
+        self.moved = reaching.unwrap_or(all);
+    }
+
+    /// Checks the patterns of `arms` against `ty`; returns each pattern with
+    /// the locals visible in its arm.
+    fn check_arm_patterns<'p>(
+        &mut self,
+        patterns: impl IntoIterator<Item = &'p ResolvedPattern>,
+        ty: Type,
+    ) -> Result<Vec<ArmPattern>, CheckDiagnostic> {
+        let scope = self.local_ids.clone();
+        let mut checked = Vec::new();
+        for pattern in patterns {
+            let pattern = self.check_pattern(pattern, ty, &mut BTreeMap::new())?;
+            checked.push((
+                pattern,
+                std::mem::replace(&mut self.local_ids, scope.clone()),
+            ));
+        }
+        Ok(checked)
+    }
+
     fn check_match(
         &mut self,
         span: Span,
@@ -1562,23 +2283,37 @@ impl BodyChecker<'_> {
         if matches!(scrutinee.kind, ResolvedExprKind::Borrow { .. }) {
             return Err(self.unsupported(scrutinee.span, "borrowed `match` subjects"));
         }
+        let scrutinee_span = scrutinee.span;
         let scrutinee = self.check_expr(scrutinee, None)?;
         if scrutinee.ty == Type::NEVER {
             return Ok((Type::NEVER, scrutinee.kind));
         }
+        let patterns =
+            self.check_arm_patterns(arms.iter().map(|arm| &arm.pattern), scrutinee.ty)?;
+        let scrutinee = if patterns
+            .iter()
+            .any(|(pattern, _)| self.binds_entity(pattern))
+        {
+            self.consume(scrutinee, scrutinee_span)?
+        } else {
+            scrutinee
+        };
+        let scope = self.local_ids.clone();
+        let before = self.moved.clone();
+        let mut ends = Vec::new();
         let mut expected = expected;
         let mut ty = None;
         let mut checked = Vec::new();
-        for arm in arms {
-            let scope = self.local_ids.clone();
-            let pattern = self.check_pattern(&arm.pattern, scrutinee.ty, &mut BTreeMap::new())?;
+        for (arm, (pattern, visible)) in arms.iter().zip(patterns) {
+            self.local_ids = visible;
+            self.moved = before.clone();
             let guard = arm
                 .guard
                 .as_ref()
                 .map(|guard| self.check_condition(guard))
                 .transpose()?;
-            let body = self.check_expr(&arm.body, expected)?;
-            self.local_ids = scope;
+            let body = self.check_consumed(&arm.body, expected)?;
+            ends.push((body.ty, self.moved.clone()));
             if body.ty != Type::NEVER {
                 match ty {
                     None => {
@@ -1594,6 +2329,12 @@ impl BodyChecker<'_> {
                 guard,
                 body,
             });
+        }
+        self.local_ids = scope;
+        if ends.is_empty() {
+            self.moved = before;
+        } else {
+            self.merge_moved(ends);
         }
         let unguarded = checked
             .iter()
@@ -1636,10 +2377,18 @@ impl BodyChecker<'_> {
         if scrutinee.ty == Type::NEVER {
             return Ok(scrutinee);
         }
-        let scope = self.local_ids.clone();
-        let pattern = self.check_pattern(pattern, scrutinee.ty, &mut BTreeMap::new())?;
+        let mut patterns = self.check_arm_patterns([pattern], scrutinee.ty)?;
+        let (pattern, visible) = patterns.pop().expect("one pattern was checked");
+        let scrutinee = if self.binds_entity(&pattern) {
+            self.consume(scrutinee, value.span)?
+        } else {
+            scrutinee
+        };
+        let scope = std::mem::replace(&mut self.local_ids, visible);
+        let before = self.moved.clone();
         let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
         self.local_ids = scope;
+        let after_then = std::mem::replace(&mut self.moved, before);
         let else_body = match else_branch {
             Some(block) => self.check_block(block, Some(Type::UNIT))?,
             None => Block {
@@ -1648,6 +2397,10 @@ impl BodyChecker<'_> {
                 ty: Type::UNIT,
             },
         };
+        self.merge_moved([
+            (then_branch.ty, after_then),
+            (else_body.ty, self.moved.clone()),
+        ]);
         let ty = if then_branch.ty == Type::NEVER && else_body.ty == Type::NEVER {
             Type::NEVER
         } else {
@@ -1669,7 +2422,6 @@ impl BodyChecker<'_> {
             },
         })
     }
-
     /// Checks `pattern` against a value of type `ty`, declaring its bindings.
     /// `shared` maps binding names to the locals of earlier alternatives.
     fn check_pattern(
@@ -1949,6 +2701,7 @@ impl BodyChecker<'_> {
                 true
             }
             TypeKind::Never => false,
+            TypeKind::List(element) => self.has_equality(*element),
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .types
                 .components(ty)
@@ -2001,7 +2754,7 @@ impl BodyChecker<'_> {
         );
         let mut checked = Vec::new();
         for (value, ty) in values.into_iter().zip(parameters) {
-            let argument = self.check_expr(value, Some(ty))?;
+            let argument = self.check_consumed(value, Some(ty))?;
             self.require(value.span, ty, argument.ty)?;
             checked.push(argument);
         }

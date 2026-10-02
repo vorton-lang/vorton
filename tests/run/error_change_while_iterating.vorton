@@ -1,0 +1,6 @@
+fn main() {
+    let mut xs = [1, 2]
+    for x in &xs {
+        xs.push(x)
+    }
+}

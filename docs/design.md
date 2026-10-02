@@ -37,9 +37,16 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 
 ### 当前支持范围
 
-类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`match`、`if let` 与 tuple 解构（含穷尽性检查）、结构化 `==`、函数、`let`/`let mut`、`mut` 按值参数、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`。其他构造都报告 `Unsupported`。
+类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`List` 及其 `push`、`pop`、`len`、`is_empty`、`insert`、`remove`、`clear`、`contains` 与任意类型的 `clone`、下标读写、`for` 遍历 range 与列表（拿走或只读借出）、`match`、`if let` 与 tuple 解构（含穷尽性检查）、结构化 `==`、函数、`let`/`let mut`、`mut` 按值参数、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`。其他构造都报告 `Unsupported`。
 
-`Str` 是不可变的值，用引用计数实现 O(1) 拷贝；含有 `Str` 的 tuple 与 struct 是“计数类型”，生成代码为它们各生成一对 retain/release 函数。实体（`List`、`Map` 等）与借出进入实现后，会在类型检查与 C 生成之间加入一层中间表示，在那里检查移交与借出，插入释放与运行时检查。
+`Str` 是不可变的值，用引用计数实现 O(1) 拷贝。`List` 与含有它的聚合值是实体：
+
+- **移交检查在类型检查中完成。** 检查器沿每条路径记录哪些局部变量可能已被移走，分支汇合时取并集；之后再使用、从字段或元素中移出、或在循环里移走外层变量让下一轮看到，都是编译错误。
+- **生成代码不需要释放标记。** 移交时把源清零，作用域结束时一律释放，释放清零的值什么也不做。
+- **参数约定。** 实体参数归被调函数所有，由它释放；计数值参数由调用方借出。
+- **只读借出的 `for`。** 循环期间冻结被遍历的位置，循环体改变与它重叠的位置是编译错误。
+
+一般的 `&`／`&mut` 借出与运行时冲突检查尚未实现，遇到时报告 `Unsupported`。
 
 ## Runtime
 
