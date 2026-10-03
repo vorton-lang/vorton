@@ -1,0 +1,28 @@
+// A type may contain itself through a list, which holds its elements on the
+// heap: `==`, `clone()` and release all follow the nesting.
+enum Shape {
+    Circle(Int),
+    Group { items: List<Shape> },
+}
+
+fn count(s: &Shape) -> Int {
+    match &s {
+        Shape::Circle(_) => 1
+        Shape::Group { items } => {
+            let mut n = 0
+            for it in &items {
+                n += count(&it)
+            }
+            n
+        }
+    }
+}
+
+fn main() {
+    let g = Shape::Group { items: [Shape::Circle(1), Shape::Group { items: [Shape::Circle(2)] }] }
+    print(count(&g))
+    let copy = g.clone()
+    print(copy == g)
+    let other = Shape::Group { items: [Shape::Circle(1)] }
+    print(other == g)
+}

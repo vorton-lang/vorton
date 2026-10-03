@@ -225,7 +225,7 @@ fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String
         "    return v;\n".to_owned()
     };
     function(format!("{name} vt_clone_T{n}({name} v)"), clone_body);
-    if has_equality(types, ty) {
+    if types.has_equality(ty) {
         let mut body = String::new();
         if types.is_enum(ty) {
             body.push_str("    if (a.tag != b.tag) return false;\n");
@@ -474,7 +474,7 @@ fn list_helpers(types: &Types, ty: Type, element: Type, function: &mut impl FnMu
             "    {name} r = {{0}};\n    if (v.len > 0) {{\n        r.cap = v.len;\n        r.items = vt_items_resize(NULL, r.cap, {size});\n    }}\n{copy_items}    r.len = v.len;\n    return r;\n"
         ),
     );
-    if has_equality(types, ty) {
+    if types.has_equality(ty) {
         let test = if stored {
             format!(
                 "        if (!{}) return false;\n",
@@ -539,18 +539,6 @@ fn is_aggregate(types: &Types, ty: Type) -> bool {
         types.kind(ty),
         TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..)
     )
-}
-
-fn has_equality(types: &Types, ty: Type) -> bool {
-    match types.kind(ty) {
-        TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => true,
-        TypeKind::Never | TypeKind::Map(..) => false,
-        TypeKind::List(element) => has_equality(types, *element),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => types
-            .components(ty)
-            .into_iter()
-            .all(|component| has_equality(types, component)),
-    }
 }
 
 /// A C expression that compares two values of type `ty`.

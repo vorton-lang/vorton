@@ -214,6 +214,37 @@ impl Types {
         }
     }
 
+    /// Whether `==` applies to `ty`: built-in values, and lists and
+    /// aggregates of them.
+    pub(crate) fn has_equality(&self, ty: Type) -> bool {
+        self.has_equality_in(ty, &mut Vec::new())
+    }
+
+    /// `pending` holds the types whose answer is being worked out further up;
+    /// meeting one again, through a list, assumes the answer is yes, which is
+    /// the greatest fixed point the spec asks for recursive types.
+    fn has_equality_in(&self, ty: Type, pending: &mut Vec<Type>) -> bool {
+        match self.kind(ty) {
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
+                true
+            }
+            TypeKind::Never | TypeKind::Map(..) => false,
+            TypeKind::List(element) => self.has_equality_in(*element, pending),
+            TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
+                if pending.contains(&ty) {
+                    return true;
+                }
+                pending.push(ty);
+                let result = self
+                    .components(ty)
+                    .into_iter()
+                    .all(|component| self.has_equality_in(component, pending));
+                pending.pop();
+                result
+            }
+        }
+    }
+
     /// Whether `ty` can be a map key: a value compared with `==` that has
     /// no `Float` in it.
     pub(crate) fn is_key(&self, ty: Type) -> bool {

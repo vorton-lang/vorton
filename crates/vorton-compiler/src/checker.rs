@@ -3850,20 +3850,8 @@ impl BodyChecker<'_> {
         ))
     }
 
-    /// Whether `==` applies: built-in values and aggregates of them.
     fn has_equality(&self, ty: Type) -> bool {
-        match self.types.kind(ty) {
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
-                true
-            }
-            TypeKind::Never | TypeKind::Map(..) => false,
-            TypeKind::List(element) => self.has_equality(*element),
-            TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
-                .types
-                .components(ty)
-                .into_iter()
-                .all(|component| self.has_equality(component)),
-        }
+        self.types.has_equality(ty)
     }
 
     fn check_call(
