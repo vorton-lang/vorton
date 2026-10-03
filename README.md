@@ -6,20 +6,32 @@ Vorton 是一门给 LLM 写、给人定边界的 native 语言：代码主要由
 
 ## 现在能运行的程序
 
+数据分两种。值（`Int`、`Str`、只含值的 struct 等）赋值就是拷贝；实体（`List`、`Map`、`Set` 与含有它们的类型）赋值是移交，要副本就显式 `clone()`。要修改调用方的数据，签名和调用处都写 `&mut`，写法与 Rust 相同；编译器保证一个位置被修改时没有别处在读它。
+
 ```vorton
-fn label(n: Int) -> Str {
-    if n % 3 == 0 {
-        return "fizz"
+struct Enemy { name: Str, hp: Int }
+
+impl Enemy {
+    fn hit(&mut self, amount: Int) {
+        self.hp -= amount
     }
-    "n=${n}"
+}
+
+fn damage_all(enemies: &mut List<Enemy>, amount: Int) {
+    for e in &mut enemies {
+        e.hit(amount)
+    }
 }
 
 fn main() {
-    let mut i = 1
-    while i <= 5 {
-        print(label(i))
-        i += 1
+    let mut enemies = [Enemy { name: "slime", hp: 10 }, Enemy { name: "bat", hp: 4 }]
+    let before = enemies.clone()
+    damage_all(&mut enemies, 3)
+    let mut hp: Map<Str, Int> = Map::new()
+    for e in &enemies {
+        hp[e.name] = e.hp
     }
+    print("${before[0].hp} -> ${hp["slime"]}")   // 10 -> 7
 }
 ```
 
@@ -27,30 +39,7 @@ fn main() {
 cargo run --bin vorton -- run program.vorton
 ```
 
-需要 clang 或 gcc；也可以用 `VORTON_CC` 指定 C 编译器。当前支持的范围见[编译器设计](docs/design.md#当前支持范围)。
-
-## 目标语言一瞥
-
-普通数据是值：赋值和传参是逻辑拷贝，底层引用计数，只在修改共享数据时才复制。要修改调用方的数据，签名和调用处都写 `mut`：
-
-```vorton
-struct Enemy { name: Str, hp: Int }
-
-fn damage_all(enemies: mut List<Enemy>, amount: Int) {
-    for e in mut enemies {
-        e.hp -= amount
-    }
-}
-
-fn main() {
-    let mut enemies = [Enemy { name: "slime", hp: 10 }]
-    let before = enemies
-    damage_all(mut enemies, 3)
-    print("${before[0].hp} -> ${enemies[0].hp}")   // 10 -> 7
-}
-```
-
-完整规则见[语言规范](docs/lang-spec/README.md)。
+需要 clang 或 gcc；也可以用 `VORTON_CC` 指定 C 编译器。当前支持的范围见[编译器设计](docs/design.md#当前支持范围)，完整规则见[语言规范](docs/lang-spec/README.md)。
 
 ## 检查
 
