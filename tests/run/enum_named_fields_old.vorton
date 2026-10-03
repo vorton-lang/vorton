@@ -1,0 +1,66 @@
+// B-100 P1.1 parity: enum named fields — declaration, construction, pattern
+// matching with punning, explicit binding, partial match (..), and mixed
+// positional + named field variants.
+
+enum Shape {
+    Circle { radius: Int },
+    Rect { width: Int, height: Int },
+    Point,
+}
+
+fn area(s: Shape) -> Int {
+    match s {
+        Shape::Circle { radius } => radius * radius * 3
+        Shape::Rect { width, height } => width * height
+        Shape::Point => 0
+    }
+}
+
+// Mixed positional and named fields
+enum Expr {
+    Lit(Int),
+    Add { left: Int, right: Int },
+    Neg(Int),
+}
+
+fn eval(e: Expr) -> Int {
+    match e {
+        Expr::Lit(n) => n
+        Expr::Add { left, right } => left + right
+        Expr::Neg(n) => 0 - n
+    }
+}
+
+fn main() {
+    // Named field construction and matching
+    let c = Shape::Circle { radius: 5 }
+    let r = Shape::Rect { width: 3, height: 4 }
+    let p = Shape::Point
+    print("circle=${area(c)}")
+    print("rect=${area(r)}")
+    print("point=${area(p)}")
+
+    // Explicit binding in pattern (not punning)
+    let r2 = Shape::Rect { width: 7, height: 8 }
+    match r2 {
+        Shape::Rect { width: w, height: h } => print("explicit=${w * h}")
+        _ => print("unreachable")
+    }
+
+    // Partial match with ..
+    match c {
+        Shape::Circle { .. } => print("partial=ok")
+        _ => print("partial=fail")
+    }
+
+    // Construction with punning (variable name matches field name)
+    let width = 10
+    let height = 20
+    let r3 = Shape::Rect { width, height }
+    print("punned=${area(r3)}")
+
+    // Mixed positional + named
+    print("lit=${eval(Expr::Lit(10))}")
+    print("add=${eval(Expr::Add { left: 3, right: 7 })}")
+    print("neg=${eval(Expr::Neg(5))}")
+}

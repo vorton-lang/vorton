@@ -1,0 +1,8 @@
+clone_eq=true
+p1_x=1
+p2_x=1
+color_eq=true
+circle_r=10
+rect=3,4
+a_x=10 b_x=10
+ab_eq=true

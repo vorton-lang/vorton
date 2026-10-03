@@ -1,0 +1,8 @@
+opt_some=42
+opt_none=was_none
+custom_some=99
+custom_none=was_none
+circle_r=5
+rect_as_circle=no_match
+unit_match=yes
+no_else=7
