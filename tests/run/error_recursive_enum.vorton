@@ -1,0 +1,8 @@
+enum Expr {
+    Num(Int),
+    Add(Expr, Expr),
+}
+
+fn main() {
+    let e = Expr::Num(1)
+}

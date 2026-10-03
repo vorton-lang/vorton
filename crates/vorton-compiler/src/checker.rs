@@ -643,8 +643,6 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             body,
         });
     }
-    reject_recursive_types(&types, &nominals)?;
-
     let main = functions_found
         .iter()
         .position(|found| {
@@ -737,23 +735,12 @@ fn instantiate(
             .collect::<Result<_, CheckDiagnostic>>()?,
     };
     types.set_variants(ty, variants);
-    Ok(ty)
-}
-
-/// Rejects nominal types that contain themselves by value, which would have
-/// no finite size.
-fn reject_recursive_types(types: &Types, nominals: &Nominals) -> Result<(), CheckDiagnostic> {
-    for ty in types.all() {
-        if let TypeKind::Nominal { declaration, .. } = types.kind(ty)
-            && contains_by_value(types, ty, ty, &mut BTreeSet::new())
-        {
-            return Err(unsupported(
-                Some(nominals.declarations[*declaration].origin.clone()),
-                "recursive types",
-            ));
-        }
+    // A type that contains itself by value has no finite size. It is
+    // rejected as soon as its fields are known, before anything walks them.
+    if contains_by_value(types, ty, ty, &mut BTreeSet::new()) {
+        return Err(unsupported(Some(info.origin.clone()), "recursive types"));
     }
-    Ok(())
+    Ok(ty)
 }
 
 fn contains_by_value(types: &Types, ty: Type, target: Type, seen: &mut BTreeSet<Type>) -> bool {
