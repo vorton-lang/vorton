@@ -1,0 +1,10 @@
+fn main() {
+  let values = [Option::Some(1), Option::None, Option::Some(3)]
+  let mut sum = 0
+  for opt in values {
+    if let Option::Some(v) = opt {
+      sum = sum + v
+    }
+  }
+  print(sum)
+}

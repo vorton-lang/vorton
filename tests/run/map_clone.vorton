@@ -1,0 +1,26 @@
+// Test: map_clone function
+
+fn main() {
+    let original = {
+        let mut entries: Map<Int, Str> = Map::new()
+        entries.insert(1, "one")
+        entries.insert(2, "two")
+        entries.insert(3, "three")
+        entries
+    }
+    let mut cloned = original.clone()
+
+    // Clone has same content
+    assert(cloned.len() == 3, "clone len")
+    match cloned.get(2) {
+        Option::Some(v) => assert(v == "two", "clone get")
+        Option::None => assert(false, "clone should have key 2")
+    }
+
+    // Mutating clone doesn't affect original
+    cloned.insert(4, "four")
+    assert(cloned.len() == 4, "clone mutated")
+    assert(original.len() == 3, "original unchanged")
+
+    print("map_clone: all tests passed")
+}

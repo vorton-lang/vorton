@@ -1,0 +1,18 @@
+fn main() {
+  let mut m = {
+        let mut entries: Map<Int, Str> = Map::new()
+        entries.insert(1, "one")
+        entries.insert(2, "two")
+        entries.insert(3, "three")
+        entries
+    }
+  print(m.len())
+  print(m.contains_key(2))
+  print(m.is_empty())
+
+  m.insert(4, "four")
+  print(m.len())
+
+  m.remove(1)
+  print(m.len())
+}

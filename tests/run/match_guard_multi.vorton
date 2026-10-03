@@ -1,0 +1,18 @@
+// Regression C3: same variant with multiple arms + guards
+enum Shape { circle(Int), rect(Int, Int) }
+
+fn classify(s: Shape) -> Str {
+    match s {
+        Shape::circle(r) if r > 5 => "big circle"
+        Shape::circle(r) => "small circle"
+        Shape::rect(w, h) if w == h => "square"
+        Shape::rect(w, h) => "rectangle"
+    }
+}
+
+fn main() {
+    print(classify(Shape::circle(10)))
+    print(classify(Shape::circle(3)))
+    print(classify(Shape::rect(5, 5)))
+    print(classify(Shape::rect(3, 7)))
+}

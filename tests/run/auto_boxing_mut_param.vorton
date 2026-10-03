@@ -1,0 +1,13 @@
+fn increment(n: &mut Int) {
+    n = n + 1
+}
+
+fn main() {
+    let mut x = 0
+    increment(&mut x)
+    assert(x == 1, "mut param boxing")
+    increment(&mut x)
+    assert(x == 2, "mut param boxing twice")
+
+    print("auto_boxing_mut_param: all tests passed")
+}

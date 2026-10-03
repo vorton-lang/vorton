@@ -1,0 +1,18 @@
+fn main() {
+  let m = {
+        let mut entries: Map<Int, Str> = Map::new()
+        entries.insert(1, "one")
+        entries.insert(2, "two")
+        entries
+    }
+
+  if let Option::Some(v) = m.get(1) {
+    print(v)
+  }
+
+  if let Option::Some(v) = m.get(99) {
+    print("should not print")
+  } else {
+    print("not found")
+  }
+}

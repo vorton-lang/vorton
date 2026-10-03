@@ -1,0 +1,16 @@
+fn main() {
+  let x: Option<Int> = Option::Some(42)
+
+  if let Option::Some(v) = x {
+    print(v)
+  } else {
+    print("none")
+  }
+
+  let y: Option<Int> = Option::None
+  if let Option::Some(v) = y {
+    print("should not print")
+  } else {
+    print("was none")
+  }
+}
