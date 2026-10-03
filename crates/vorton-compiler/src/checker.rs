@@ -14,6 +14,14 @@
 //! copied. The checker tracks which locals may have been moved along every
 //! path and rejects a later use, a move out of a field or element, and a move
 //! of an outer local that a later loop iteration would see.
+//!
+//! Borrows appear as parameters, call arguments, `for` and `match` subjects,
+//! `let` values and function results. While a borrow lasts, the place it
+//! names cannot be changed, moved or, after `&mut`, borrowed again: a call
+//! argument lasts until the call ends, a loop or `match` subject until it
+//! ends, the arguments of a call that returns a borrow until the statement
+//! ends, and a `let` borrow until the last statement of its block that
+//! mentions it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -67,6 +75,8 @@ pub enum CheckDiagnosticKind {
     UnknownMethod,
     /// A place is changed while a loop or borrow still reads it.
     BorrowConflict,
+    /// A returned borrow names a place that ends when the function returns.
+    BorrowOutlives,
 }
 
 /// A checked program ready for code generation.
@@ -81,6 +91,8 @@ pub(crate) struct Function {
     pub(crate) parameters: Vec<usize>,
     pub(crate) locals: Vec<Local>,
     pub(crate) result: Type,
+    /// A borrowed result is a pointer to a place of type `result`.
+    pub(crate) result_borrow: Option<BorrowKind>,
     pub(crate) body: Block,
 }
 
@@ -144,6 +156,9 @@ pub(crate) enum ForSource {
 /// A local and a path of parts inside it.
 pub(crate) struct Place {
     pub(crate) local: usize,
+    /// A call that returns a borrow, made first; the borrowed `local` then
+    /// points at what it returns.
+    pub(crate) call: Option<Box<Expr>>,
     pub(crate) projections: Vec<Projection>,
 }
 
@@ -200,6 +215,8 @@ pub(crate) enum ExprKind {
         arguments: Vec<Expr>,
         /// Pairs of borrowed arguments whose places must differ at run time.
         checks: Vec<DisjointCheck>,
+        /// A call that returns a borrow names the place it points at.
+        borrow: Option<BorrowKind>,
     },
     Intrinsic {
         intrinsic: Intrinsic,
@@ -253,9 +270,9 @@ pub(crate) enum ExprKind {
         receiver: Box<Receiver>,
         arguments: Vec<Expr>,
     },
-    /// `&x` or `&mut x` as a call argument, `match` subject or `let` value: a
-    /// pointer to a place, or to a temporary that lives until the end of the
-    /// enclosing statement.
+    /// `&x` or `&mut x` as a call argument, `match` subject, `let` value or
+    /// returned result: a pointer to a place, or to a temporary that lives
+    /// until the end of the enclosing statement.
     Borrow(Box<BorrowTarget>),
 }
 
@@ -341,6 +358,7 @@ struct Signature {
     index: usize,
     parameters: Vec<(Type, Option<BorrowKind>)>,
     result: Type,
+    result_borrow: Option<BorrowKind>,
 }
 
 enum Shape<'a> {
@@ -491,15 +509,21 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             mutable: Vec::new(),
             loops: Vec::new(),
             result: signature.result,
+            result_borrow: signature.result_borrow,
             moved: BTreeSet::new(),
             frozen: Vec::new(),
             held: Vec::new(),
             depth: 0,
+            from_parameters: Vec::new(),
         };
         let mut parameters = Vec::new();
         for (parameter, (ty, borrow)) in function.parameters.iter().zip(&signature.parameters) {
             parameters.push(match borrow {
-                Some(kind) => checker.declare_borrow(&parameter.binding.identity, *ty, *kind),
+                Some(kind) => {
+                    let local = checker.declare_borrow(&parameter.binding.identity, *ty, *kind);
+                    checker.from_parameters[local] = true;
+                    local
+                }
                 None => checker.declare(
                     &parameter.binding.identity,
                     *ty,
@@ -513,6 +537,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             parameters,
             locals: checker.locals,
             result: signature.result,
+            result_borrow: signature.result_borrow,
             body,
         });
     }
@@ -668,17 +693,22 @@ fn check_signature(
         let ty = resolve_type(types, nominals, annotation, &BTreeMap::new(), origin, 0)?;
         parameters.push((ty, parameter.borrow.map(|(_, kind)| kind)));
     }
-    if function.return_borrow.is_some() {
-        return Err(unsupported(Some(origin.clone()), "borrowed return values"));
-    }
     let result = match &function.return_type {
         Some(ty) => resolve_type(types, nominals, ty, &BTreeMap::new(), origin, 0)?,
         None => Type::UNIT,
     };
+    let result_borrow = function.return_borrow.map(|(_, kind)| kind);
+    if result_borrow.is_some() && !types.has_storage(result) {
+        return Err(unsupported(
+            Some(origin.clone()),
+            "borrowed `Unit` and `Never` results",
+        ));
+    }
     Ok(Signature {
         index,
         parameters,
         result,
+        result_borrow,
     })
 }
 
@@ -847,12 +877,16 @@ struct BodyChecker<'a> {
     mutable: Vec<bool>,
     loops: Vec<LoopFrame>,
     result: Type,
+    result_borrow: Option<BorrowKind>,
     /// Locals whose entity value may have been moved on some path to here.
     moved: BTreeSet<usize>,
     frozen: Vec<Frozen>,
     held: Vec<HeldBorrow>,
     /// How many blocks enclose the statement being checked.
     depth: usize,
+    /// For each local, whether it is a borrow that reaches only places of
+    /// the parameters passed by borrow, so the function may return it.
+    from_parameters: Vec<bool>,
 }
 
 impl BodyChecker<'_> {
@@ -922,21 +956,33 @@ impl BodyChecker<'_> {
         kind: BorrowKind,
         span: Span,
     ) -> Result<(), CheckDiagnostic> {
+        self.check_borrow_except(&[], place, path, kind, span)
+    }
+
+    /// Like [`Self::check_borrow`], ignoring the running borrows at the
+    /// positions `skip` of the borrow stack.
+    fn check_borrow_except(
+        &self,
+        skip: &[usize],
+        place: &Place,
+        path: &[Option<usize>],
+        kind: BorrowKind,
+        span: Span,
+    ) -> Result<(), CheckDiagnostic> {
         if kind == BorrowKind::Mutable && !self.mutable[place.local] {
-            return Err(self.error(
-                CheckDiagnosticKind::NotAssignable,
-                span,
-                format!(
-                    "`{}` is not declared `mut`, so it cannot be borrowed with `&mut`",
-                    self.locals[place.local].name
-                ),
-            ));
+            let name = &self.locals[place.local].name;
+            let message = if place.call.is_some() {
+                format!("`{name}` returns `&`, so its result cannot be borrowed with `&mut`")
+            } else {
+                format!("`{name}` is not declared `mut`, so it cannot be borrowed with `&mut`")
+            };
+            return Err(self.error(CheckDiagnosticKind::NotAssignable, span, message));
         }
         let access = match kind {
             BorrowKind::Shared => Access::Share,
             BorrowKind::Mutable => Access::Change,
         };
-        self.check_access(place.local, path, access, span)
+        self.check_access_except(skip, place.local, path, access, span)
     }
 
     /// Declares a local that points at a borrowed place; through `&mut` the
@@ -952,15 +998,34 @@ impl BodyChecker<'_> {
         mutable: bool,
         borrow: Option<BorrowKind>,
     ) -> usize {
-        let index = self.locals.len();
-        self.locals.push(Local {
-            name: identity.name.clone(),
-            ty,
-            borrow,
-        });
-        self.mutable.push(mutable);
+        let index = self.push_local(identity.name.clone(), ty, mutable, borrow);
         self.local_ids.insert(identity.clone(), index);
         index
+    }
+
+    /// Adds a local that no name in the source refers to.
+    fn push_local(
+        &mut self,
+        name: String,
+        ty: Type,
+        mutable: bool,
+        borrow: Option<BorrowKind>,
+    ) -> usize {
+        let index = self.locals.len();
+        self.locals.push(Local { name, ty, borrow });
+        self.mutable.push(mutable);
+        self.from_parameters.push(false);
+        index
+    }
+
+    /// Records that the borrowed ones of `locals` reach what `root` reaches.
+    fn borrow_from(&mut self, locals: &[usize], root: Option<usize>) {
+        let reaches = root.is_some_and(|root| self.from_parameters[root]);
+        for &local in locals {
+            if self.locals[local].borrow.is_some() {
+                self.from_parameters[local] = reaches;
+            }
+        }
     }
 
     fn resolve_type(
@@ -1020,6 +1085,16 @@ impl BodyChecker<'_> {
                     kind: ExprKind::Move(local),
                 })
             }
+            ExprKind::Call {
+                borrow: Some(_), ..
+            } => Err(self.error(
+                CheckDiagnosticKind::CannotMove,
+                span,
+                format!(
+                    "this call returns a borrow, so its `{}` cannot be moved; use `clone()`",
+                    self.types.name(expression.ty)
+                ),
+            )),
             ExprKind::Field { .. } | ExprKind::Index { .. } => Err(self.error(
                 CheckDiagnosticKind::CannotMove,
                 span,
@@ -1052,12 +1127,14 @@ impl BodyChecker<'_> {
         access: Access,
         span: Span,
     ) -> Result<(), CheckDiagnostic> {
-        self.check_access_in(&self.frozen, local, path, access, span)
+        self.check_access_except(&[], local, path, access, span)
     }
 
-    fn check_access_in(
+    /// Like [`Self::check_access`], ignoring the running borrows at the
+    /// positions `skip` of the borrow stack.
+    fn check_access_except(
         &self,
-        frozen: &[Frozen],
+        skip: &[usize],
         local: usize,
         path: &[Option<usize>],
         access: Access,
@@ -1072,8 +1149,14 @@ impl BodyChecker<'_> {
                     .zip(path)
                     .all(|(left, right)| left.is_none() || right.is_none() || left == right)
         };
+        let running = self
+            .frozen
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !skip.contains(position))
+            .map(|(_, frozen)| frozen);
         let held = self.held.iter().flat_map(|held| &held.frozen);
-        if frozen.iter().chain(held).any(conflicts) {
+        if running.chain(held).any(conflicts) {
             let what = if access == Access::Change {
                 "change"
             } else {
@@ -1151,9 +1234,11 @@ impl BodyChecker<'_> {
         let mut diverges = false;
         self.depth += 1;
         for index in 0..block.statements.len() {
+            let frozen_before = self.frozen.len();
             let (statement, statement_diverges) = self.check_statement(block, index)?;
             diverges |= statement_diverges;
             statements.push(statement);
+            self.frozen.truncate(frozen_before);
             let depth = self.depth;
             self.held
                 .retain(|held| held.depth != depth || held.until > index);
@@ -1161,7 +1246,11 @@ impl BodyChecker<'_> {
         let (tail, ty) = match &block.tail {
             Some(tail) => {
                 let discard = expected == Some(Type::UNIT);
-                let tail = self.check_consumed(tail, expected)?;
+                // The tail of the function body is its result.
+                let tail = match self.result_borrow {
+                    Some(kind) if self.depth == 1 => self.check_returned_borrow(tail, kind)?,
+                    _ => self.check_consumed(tail, expected)?,
+                };
                 let ty = if tail.ty == Type::NEVER || diverges {
                     Type::NEVER
                 } else if discard {
@@ -1232,13 +1321,14 @@ impl BodyChecker<'_> {
                 Ok((Statement::Expr(expression), diverges))
             }
             ResolvedStatementKind::Return(value) => {
-                let value = match value {
-                    Some(value) => {
+                let value = match (value, self.result_borrow) {
+                    (Some(value), Some(kind)) => Some(self.check_returned_borrow(value, kind)?),
+                    (Some(value), None) => {
                         let checked = self.check_consumed(value, Some(self.result))?;
                         self.require(value.span, self.result, checked.ty)?;
                         Some(checked)
                     }
-                    None => {
+                    (None, _) => {
                         self.require(span, self.result, Type::UNIT)?;
                         None
                     }
@@ -1332,12 +1422,15 @@ impl BodyChecker<'_> {
             Some(annotation) => Some(self.resolve_type(annotation, &BTreeMap::new())?),
             None => None,
         };
-        if let ResolvedExprKind::Borrow {
-            kind: (_, kind),
-            operand,
-        } = &value.kind
-        {
-            let kind = *kind;
+        // `&place`, `&mut place`, or a call that returns a borrow.
+        let borrowed = match &value.kind {
+            ResolvedExprKind::Borrow {
+                kind: (_, kind),
+                operand,
+            } => Some((*kind, operand.as_ref())),
+            _ => self.returned_borrow(value).map(|kind| (kind, value)),
+        };
+        if let Some((kind, operand)) = borrowed {
             if let Some(mutable) = mutable {
                 return Err(self.error(
                     CheckDiagnosticKind::NotAssignable,
@@ -1355,6 +1448,7 @@ impl BodyChecker<'_> {
                     "the annotation and the value borrow in different ways".to_owned(),
                 ));
             }
+            let frozen_before = self.frozen.len();
             let Some((place, ty, path)) = self.expr_place(operand)? else {
                 return Err(self.unsupported(operand.span, "borrowed bindings of temporaries"));
             };
@@ -1362,7 +1456,9 @@ impl BodyChecker<'_> {
                 self.require(operand.span, expected, ty)?;
             }
             self.check_borrow(&place, &path, kind, operand.span)?;
-            let frozen = self.held_frozen(place.local, path, kind);
+            let root = place.local;
+            let mut frozen = self.held_frozen(root, path, kind);
+            frozen.extend(self.take_frozen(frozen_before));
             let target = Expr {
                 ty,
                 kind: ExprKind::Borrow(Box::new(BorrowTarget::Place(place))),
@@ -1396,6 +1492,7 @@ impl BodyChecker<'_> {
                 }
             };
             locals.retain(|&local| self.locals[local].borrow.is_some());
+            self.borrow_from(&locals, Some(root));
             if !locals.is_empty() {
                 let names = bindings
                     .iter()
@@ -1445,6 +1542,70 @@ impl BodyChecker<'_> {
         Ok((Statement::Let { local, value }, diverges))
     }
 
+    /// Checks a value returned by a function whose result is borrowed with
+    /// `kind`: `&place`, `&mut place`, or a call that returns a borrow, all
+    /// reaching only places of the parameters passed by borrow.
+    fn check_returned_borrow(
+        &mut self,
+        value: &ResolvedExpr,
+        kind: BorrowKind,
+    ) -> Result<Expr, CheckDiagnostic> {
+        let operand = match &value.kind {
+            ResolvedExprKind::Parenthesized(inner) => {
+                return self.check_returned_borrow(inner, kind);
+            }
+            ResolvedExprKind::Borrow {
+                kind: (_, written),
+                operand,
+            } => {
+                if *written != kind {
+                    return Err(self.error(
+                        CheckDiagnosticKind::TypeMismatch,
+                        value.span,
+                        "the value borrows differently from the declared result".to_owned(),
+                    ));
+                }
+                operand.as_ref()
+            }
+            _ if self.returned_borrow(value).is_some() => value,
+            _ => {
+                let checked = self.check_expr(value, None)?;
+                if checked.ty == Type::NEVER {
+                    return Ok(checked);
+                }
+                return Err(self.error(
+                    CheckDiagnosticKind::TypeMismatch,
+                    value.span,
+                    "this function returns a borrow; return `&place`, `&mut place` or a call that returns a borrow".to_owned(),
+                ));
+            }
+        };
+        let Some((place, ty, path)) = self.expr_place(operand)? else {
+            return Err(self.error(
+                CheckDiagnosticKind::BorrowOutlives,
+                operand.span,
+                "a returned borrow cannot name a temporary, which ends when the function returns"
+                    .to_owned(),
+            ));
+        };
+        self.require(operand.span, self.result, ty)?;
+        self.check_borrow(&place, &path, kind, operand.span)?;
+        if !self.from_parameters[place.local] {
+            return Err(self.error(
+                CheckDiagnosticKind::BorrowOutlives,
+                operand.span,
+                format!(
+                    "a returned borrow must come from a parameter passed by borrow; `{}` ends when the function returns",
+                    self.locals[place.local].name
+                ),
+            ));
+        }
+        Ok(Expr {
+            ty,
+            kind: ExprKind::Borrow(Box::new(BorrowTarget::Place(place))),
+        })
+    }
+
     fn require_exhaustive(
         &self,
         span: Span,
@@ -1475,6 +1636,21 @@ impl BodyChecker<'_> {
                 exclusive: inner.exclusive && exclusive,
                 ..inner.clone()
             }));
+        }
+        frozen
+    }
+
+    /// Takes the running borrows from position `base` of the borrow stack,
+    /// which the calls in a `let` value made, so the `let` holds them.
+    fn take_frozen(&mut self, base: usize) -> Vec<Frozen> {
+        let mut frozen = Vec::new();
+        for taken in self.frozen.split_off(base) {
+            let kind = if taken.exclusive {
+                BorrowKind::Mutable
+            } else {
+                BorrowKind::Shared
+            };
+            frozen.extend(self.held_frozen(taken.local, taken.path, kind));
         }
         frozen
     }
@@ -1577,6 +1753,9 @@ impl BodyChecker<'_> {
                 )),
             },
         };
+        if let Ok(binding) = &binding {
+            self.borrow_from(&binding.bindings(), frozen.as_ref().map(|f| f.local));
+        }
         let has_frozen = frozen.is_some();
         if let Some(frozen) = frozen {
             self.frozen.push(frozen);
@@ -1620,9 +1799,33 @@ impl BodyChecker<'_> {
                 Ok(Some((
                     Place {
                         local,
+                        call: None,
                         projections: Vec::new(),
                     },
                     self.locals[local].ty,
+                    Vec::new(),
+                )))
+            }
+            ResolvedExprKind::Call { callee, .. } => {
+                let Some(kind) = self.returned_borrow(expression) else {
+                    return Ok(None);
+                };
+                let call = self.check_expr(expression, None)?;
+                let ty = call.ty;
+                let local = self.push_local(
+                    callee_name(callee),
+                    ty,
+                    kind == BorrowKind::Mutable,
+                    Some(kind),
+                );
+                self.from_parameters[local] = self.call_from_parameters(&call);
+                Ok(Some((
+                    Place {
+                        local,
+                        call: Some(Box::new(call)),
+                        projections: Vec::new(),
+                    },
+                    ty,
                     Vec::new(),
                 )))
             }
@@ -1730,7 +1933,14 @@ impl BodyChecker<'_> {
             }
         }
         self.check_not_frozen(local, &path, target.span)?;
-        Ok((Place { local, projections }, ty))
+        Ok((
+            Place {
+                local,
+                call: None,
+                projections,
+            },
+            ty,
+        ))
     }
 
     /// Whether some binding of `pattern` holds an entity.
@@ -1793,9 +2003,13 @@ impl BodyChecker<'_> {
         ))
     }
 
+    /// Checks a condition, which is read at once, so the borrows it makes
+    /// end with it.
     fn check_condition(&mut self, condition: &ResolvedExpr) -> Result<Expr, CheckDiagnostic> {
+        let frozen_before = self.frozen.len();
         let checked = self.check_expr(condition, Some(Type::BOOL))?;
         self.require(condition.span, Type::BOOL, checked.ty)?;
+        self.frozen.truncate(frozen_before);
         Ok(checked)
     }
 
@@ -2668,6 +2882,9 @@ impl BodyChecker<'_> {
         }
         let patterns =
             self.check_arm_patterns(arms.iter().map(|arm| &arm.pattern), scrutinee.ty, mode)?;
+        for (pattern, _) in &patterns {
+            self.borrow_from(&pattern.bindings(), frozen.as_ref().map(|f| f.local));
+        }
         let scrutinee = if mode.is_none()
             && patterns
                 .iter()
@@ -2701,7 +2918,10 @@ impl BodyChecker<'_> {
             for &local in &readonly {
                 self.mutable[local] = true;
             }
+            // Each arm's value is stored when the arm ends.
+            let frozen_before = self.frozen.len();
             let body = self.check_consumed(&arm.body, expected)?;
+            self.frozen.truncate(frozen_before);
             ends.push((body.ty, self.moved.clone()));
             if body.ty != Type::NEVER {
                 match ty {
@@ -2768,6 +2988,7 @@ impl BodyChecker<'_> {
         }
         let mut patterns = self.check_arm_patterns([pattern], scrutinee.ty, mode)?;
         let (pattern, visible) = patterns.pop().expect("one pattern was checked");
+        self.borrow_from(&pattern.bindings(), frozen.as_ref().map(|f| f.local));
         let scrutinee = if mode.is_none() && self.binds_entity(&pattern) {
             self.consume(scrutinee, value.span)?
         } else {
@@ -3147,23 +3368,67 @@ impl BodyChecker<'_> {
                 ),
             ));
         }
-        let (index, parameters, result) = (
+        let (index, parameters, result, borrow) = (
             signature.index,
             signature.parameters.clone(),
             signature.result,
+            signature.result_borrow,
         );
+        // The borrowed arguments of a call that returns a borrow stay
+        // borrowed until the statement ends, or longer if a `let` binds it.
         let frozen_before = self.frozen.len();
         let checked = self.check_arguments(values, parameters);
-        self.frozen.truncate(frozen_before);
+        if borrow.is_none() {
+            self.frozen.truncate(frozen_before);
+        }
         let (arguments, checks) = checked?;
+        if borrow.is_some()
+            && arguments.iter().any(|argument| {
+                matches!(&argument.kind, ExprKind::Borrow(target)
+                    if matches!(target.as_ref(), BorrowTarget::Value(_)))
+            })
+        {
+            return Err(self.unsupported(span, "borrowed results of calls that borrow temporaries"));
+        }
         Ok((
             result,
             ExprKind::Call {
                 function: index,
                 arguments,
                 checks,
+                borrow,
             },
         ))
+    }
+
+    /// Whether `expression` is a call that returns a borrow, and how.
+    fn returned_borrow(&self, expression: &ResolvedExpr) -> Option<BorrowKind> {
+        match &expression.kind {
+            ResolvedExprKind::Parenthesized(inner) => self.returned_borrow(inner),
+            ResolvedExprKind::Call { callee, .. } => match &callee.kind {
+                ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => self
+                    .signatures
+                    .get(target)
+                    .and_then(|signature| signature.result_borrow),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether every borrowed argument of `call` reaches only places of the
+    /// parameters passed by borrow.
+    fn call_from_parameters(&self, call: &Expr) -> bool {
+        let ExprKind::Call { arguments, .. } = &call.kind else {
+            unreachable!("only calls are passed here")
+        };
+        arguments.iter().all(|argument| match &argument.kind {
+            ExprKind::Borrow(target) => match target.as_ref() {
+                BorrowTarget::Place(place) => self.from_parameters[place.local],
+                BorrowTarget::Value(_) => false,
+            },
+            _ => true,
+        })
     }
 
     /// Checks call arguments in order. A borrowed argument stays borrowed
@@ -3174,9 +3439,11 @@ impl BodyChecker<'_> {
         values: Vec<&ResolvedExpr>,
         parameters: Vec<(Type, Option<BorrowKind>)>,
     ) -> Result<(Vec<Expr>, Vec<DisjointCheck>), CheckDiagnostic> {
-        let frozen_before = self.frozen.len();
         let mut checked = Vec::new();
         let mut borrows: Vec<ArgumentBorrow> = Vec::new();
+        // The positions on the borrow stack of this call's own borrowed
+        // arguments, which are compared with each other below.
+        let mut own = Vec::new();
         let mut checks = Vec::new();
         for (position, (value, (ty, borrow))) in values.into_iter().zip(parameters).enumerate() {
             let Some(kind) = borrow else {
@@ -3210,27 +3477,7 @@ impl BodyChecker<'_> {
             let target = match self.expr_place(operand)? {
                 Some((place, place_ty, path)) => {
                     self.require(operand.span, ty, place_ty)?;
-                    if kind == BorrowKind::Mutable && !self.mutable[place.local] {
-                        return Err(self.error(
-                            CheckDiagnosticKind::NotAssignable,
-                            operand.span,
-                            format!(
-                                "`{}` is not declared `mut`, so it cannot be borrowed with `&mut`",
-                                self.locals[place.local].name
-                            ),
-                        ));
-                    }
-                    let access = match kind {
-                        BorrowKind::Shared => Access::Share,
-                        BorrowKind::Mutable => Access::Change,
-                    };
-                    self.check_access_in(
-                        &self.frozen[..frozen_before],
-                        place.local,
-                        &path,
-                        access,
-                        operand.span,
-                    )?;
+                    self.check_borrow_except(&own, &place, &path, kind, operand.span)?;
                     let keys = index_keys(operand);
                     for earlier in &borrows {
                         if earlier.local != place.local
@@ -3263,6 +3510,7 @@ impl BodyChecker<'_> {
                             }
                         }
                     }
+                    own.push(self.frozen.len());
                     self.frozen.push(Frozen {
                         local: place.local,
                         path: path.clone(),
@@ -3352,6 +3600,15 @@ struct ArgumentBorrow {
     path: Vec<Option<usize>>,
     kind: BorrowKind,
     keys: Vec<Option<String>>,
+}
+
+/// The name of a called function, for the local that holds its borrowed
+/// result.
+fn callee_name(callee: &ResolvedExpr) -> String {
+    match &callee.kind {
+        ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => target.name.clone(),
+        _ => "result".to_owned(),
+    }
 }
 
 /// The index of the last statement of `block` after `index` that mentions

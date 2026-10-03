@@ -1,0 +1,5 @@
+fn get(xs: &List<Int>) -> &mut Int {
+    &mut xs[0]
+}
+
+fn main() {}

@@ -467,9 +467,13 @@ fn prototype(types: &Types, index: usize, function: &Function) -> String {
     } else {
         parameters.join(", ")
     };
+    let result = if function.result_borrow.is_some() {
+        format!("{} *", c_type(types, function.result))
+    } else {
+        c_type(types, function.result)
+    };
     format!(
-        "static {} {}({parameters})",
-        c_type(types, function.result),
+        "static {result} {}({parameters})",
         function_name(index, function)
     )
 }
@@ -642,11 +646,7 @@ impl FunctionEmitter<'_> {
                 emitter.release_scopes_from(0);
                 emitter.line("return;");
             }
-            Value::Code { .. } => {
-                let value = emitter.owned(value, function.result);
-                emitter.release_scopes_from(0);
-                emitter.line(&format!("return {};", value.code()));
-            }
+            value @ Value::Code { .. } => emitter.return_value(value),
         }
         format!(
             "{} {{\n{}{}}}\n\n",
@@ -654,6 +654,18 @@ impl FunctionEmitter<'_> {
             emitter.declarations,
             emitter.body
         )
+    }
+
+    /// Returns `value` after releasing every scope. A borrowed result is a
+    /// pointer that owns nothing.
+    fn return_value(&mut self, value: Value) {
+        let value = if self.function.result_borrow.is_some() {
+            value
+        } else {
+            self.owned(value, self.function.result)
+        };
+        self.release_scopes_from(0);
+        self.line(&format!("return {};", value.code()));
     }
 
     fn line(&mut self, text: &str) {
@@ -820,6 +832,9 @@ impl FunctionEmitter<'_> {
                     Value::Unit
                 } else if matches!(value, Value::Never) || block.ty == Type::NEVER {
                     Value::Never
+                } else if matches!(tail.kind, ExprKind::Borrow(_)) {
+                    // A returned borrow is a pointer that owns nothing.
+                    value
                 } else {
                     self.owned(value, block.ty)
                 }
@@ -839,6 +854,13 @@ impl FunctionEmitter<'_> {
     /// and the temporaries that hold its list indices, in order. Returns
     /// `None` if an index diverges.
     fn place(&mut self, place: &Place) -> Option<(String, Type, Vec<String>)> {
+        if let Some(call) = &place.call {
+            let Value::Code { code, .. } = self.expr(call) else {
+                return None;
+            };
+            let name = local_name(place.local, &self.function.locals[place.local].name);
+            self.line(&format!("{name} = &{code};"));
+        }
         let mut code = self.local_code(place.local);
         let mut ty = self.function.locals[place.local].ty;
         let mut indices = Vec::new();
@@ -931,11 +953,7 @@ impl FunctionEmitter<'_> {
                         self.release_scopes_from(0);
                         self.line("return;");
                     }
-                    value => {
-                        let value = self.owned(value, self.function.result);
-                        self.release_scopes_from(0);
-                        self.line(&format!("return {};", value.code()));
-                    }
+                    value => self.return_value(value),
                 }
                 true
             }
@@ -1167,10 +1185,25 @@ impl FunctionEmitter<'_> {
                 function,
                 arguments,
                 checks,
-            } => self.call(*function, arguments, checks, expression.ty),
-            ExprKind::Borrow(_) => {
-                unreachable!("borrows appear only as call arguments, subjects and `let` values")
-            }
+                borrow,
+            } => self.call(
+                *function,
+                arguments,
+                checks,
+                expression.ty,
+                borrow.is_some(),
+            ),
+            // Other borrows are lowered where they appear.
+            ExprKind::Borrow(target) => match target.as_ref() {
+                BorrowTarget::Place(place) => match self.place(place) {
+                    Some((code, _, _)) => Value::Code {
+                        code: format!("(&{code})"),
+                        owned: false,
+                    },
+                    None => Value::Never,
+                },
+                BorrowTarget::Value(_) => unreachable!("only places are returned borrowed"),
+            },
             ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
@@ -1715,6 +1748,7 @@ impl FunctionEmitter<'_> {
         arguments: &[Expr],
         checks: &[crate::checker::DisjointCheck],
         ty: Type,
+        borrowed: bool,
     ) -> Value {
         // The C operands, the values to release after the call, and the
         // index temporaries of each borrowed place.
@@ -1783,7 +1817,22 @@ impl FunctionEmitter<'_> {
         }
         let name = function_name(function, &self.program.functions[function]);
         let code = format!("{name}({})", operands.join(", "));
-        let result = if self.types.has_storage(ty) {
+        let result = if borrowed {
+            // The result points at a place that the call borrowed.
+            let pointer = format!("t{}", self.temporaries);
+            self.temporaries += 1;
+            writeln!(
+                self.declarations,
+                "    {} *{pointer} = NULL;",
+                c_type(self.types, ty)
+            )
+            .unwrap();
+            self.line(&format!("{pointer} = {code};"));
+            Value::Code {
+                code: format!("(*{pointer})"),
+                owned: false,
+            }
+        } else if self.types.has_storage(ty) {
             self.store(ty, code, true)
         } else {
             self.line(&format!("{code};"));

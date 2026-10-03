@@ -1,0 +1,5 @@
+fn first(xs: List<Int>) -> &Int {
+    &xs[0]
+}
+
+fn main() {}

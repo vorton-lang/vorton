@@ -1,0 +1,10 @@
+fn first(xs: &List<List<Int>>) -> &List<Int> {
+    &xs[0]
+}
+
+fn take(xs: List<Int>) {}
+
+fn main() {
+    let xs = [[1]]
+    take(first(&xs))
+}

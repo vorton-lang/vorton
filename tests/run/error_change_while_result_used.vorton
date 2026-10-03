@@ -1,0 +1,10 @@
+fn first(xs: &List<Int>) -> &Int {
+    &xs[0]
+}
+
+fn main() {
+    let mut xs = [1, 2]
+    let f = first(&xs)
+    xs.push(3)
+    print(f)
+}

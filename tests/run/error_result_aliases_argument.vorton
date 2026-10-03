@@ -1,0 +1,12 @@
+struct P { a: Int, b: Int }
+
+fn whole(p: &mut P) -> &mut P {
+    &mut p
+}
+
+fn both(x: &mut Int, y: &mut Int) {}
+
+fn main() {
+    let mut p = P { a: 1, b: 2 }
+    both(&mut whole(&mut p).a, &mut p.b)
+}

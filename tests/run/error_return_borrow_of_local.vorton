@@ -1,0 +1,6 @@
+fn make() -> &List<Int> {
+    let xs = [1]
+    &xs
+}
+
+fn main() {}
