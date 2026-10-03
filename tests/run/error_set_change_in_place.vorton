@@ -1,0 +1,7 @@
+fn main() {
+    let mut s: Set<Int> = Set::new()
+    s.insert(1)
+    for x in &mut s {
+        print(x)
+    }
+}

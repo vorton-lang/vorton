@@ -36,6 +36,8 @@ pub(crate) enum TypeKind {
     List(Type),
     /// A map from keys to values in insertion order; an entity.
     Map(Type, Type),
+    /// A set of keys in insertion order; an entity.
+    Set(Type),
     /// `Range<Int>`, the value of `start..end` or `start..=end`.
     Range,
     /// A struct or enum declaration, by its index in [`Types::nominals`],
@@ -158,6 +160,7 @@ impl Types {
             TypeKind::List(element) => format!("List<{}>", self.name(*element)),
             TypeKind::Map(key, value) => format!("Map<{}, {}>", self.name(*key), self.name(*value)),
             TypeKind::Range => "Range<Int>".to_owned(),
+            TypeKind::Set(element) => format!("Set<{}>", self.name(*element)),
             TypeKind::Nominal {
                 declaration,
                 arguments,
@@ -189,7 +192,7 @@ impl Types {
     /// `Str` or owns heap storage.
     pub(crate) fn needs_release(&self, ty: Type) -> bool {
         match self.kind(ty) {
-            TypeKind::Str | TypeKind::List(_) | TypeKind::Map(..) => true,
+            TypeKind::Str | TypeKind::List(_) | TypeKind::Map(..) | TypeKind::Set(_) => true,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .components(ty)
                 .into_iter()
@@ -206,7 +209,7 @@ impl Types {
     /// Whether `ty` is an entity: it has identity and is moved, never copied.
     pub(crate) fn is_entity(&self, ty: Type) -> bool {
         match self.kind(ty) {
-            TypeKind::List(_) | TypeKind::Map(..) => true,
+            TypeKind::List(_) | TypeKind::Map(..) | TypeKind::Set(_) => true,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .components(ty)
                 .into_iter()
@@ -235,7 +238,7 @@ impl Types {
             TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
                 true
             }
-            TypeKind::Never | TypeKind::Map(..) | TypeKind::Range => false,
+            TypeKind::Never | TypeKind::Map(..) | TypeKind::Set(_) | TypeKind::Range => false,
             TypeKind::List(element) => self.has_equality_in(*element, pending),
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
                 if pending.contains(&ty) {
@@ -263,7 +266,11 @@ impl Types {
             TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
                 true
             }
-            TypeKind::Never | TypeKind::List(_) | TypeKind::Map(..) | TypeKind::Range => false,
+            TypeKind::Never
+            | TypeKind::List(_)
+            | TypeKind::Map(..)
+            | TypeKind::Set(_)
+            | TypeKind::Range => false,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
                 if pending.contains(&ty) {
                     return true;
@@ -294,6 +301,7 @@ impl Types {
             | TypeKind::Never
             | TypeKind::List(_)
             | TypeKind::Map(..)
+            | TypeKind::Set(_)
             | TypeKind::Range => false,
         }
     }

@@ -91,7 +91,7 @@ fn define(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
             )
             .unwrap();
         }
-        TypeKind::Map(..) => output.push_str("    vt_map m;\n"),
+        TypeKind::Map(..) | TypeKind::Set(_) => output.push_str("    vt_map m;\n"),
         _ if types.is_enum(ty) => {
             output.push_str("    int32_t tag;\n");
             let mut union = String::new();
@@ -156,6 +156,11 @@ fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String
     }
     if let TypeKind::Map(key, value) = *types.kind(ty) {
         map_helpers(types, ty, key, value, &mut function);
+        return;
+    }
+    // A set is a map whose values are `Unit`.
+    if let TypeKind::Set(element) = *types.kind(ty) {
+        map_helpers(types, ty, element, Type::UNIT, &mut function);
         return;
     }
     let parts = variant_fields(types, ty);
@@ -561,9 +566,11 @@ fn list_helpers(types: &Types, ty: Type, element: Type, function: &mut impl FnMu
 fn clone_code(types: &Types, ty: Type, code: &str) -> String {
     match types.kind(ty) {
         TypeKind::Str => format!("(vt_str_retain({code}), {code})"),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..) => {
-            format!("vt_clone_T{}({code})", ty.index())
-        }
+        TypeKind::Tuple(_)
+        | TypeKind::Nominal { .. }
+        | TypeKind::List(_)
+        | TypeKind::Map(..)
+        | TypeKind::Set(_) => format!("vt_clone_T{}({code})", ty.index()),
         _ => code.to_owned(),
     }
 }
@@ -593,7 +600,11 @@ fn field_code(types: &Types, ty: Type, variant: usize, index: usize, base: &str)
 fn is_aggregate(types: &Types, ty: Type) -> bool {
     matches!(
         types.kind(ty),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..)
+        TypeKind::Tuple(_)
+            | TypeKind::Nominal { .. }
+            | TypeKind::List(_)
+            | TypeKind::Map(..)
+            | TypeKind::Set(_)
     )
 }
 
@@ -605,7 +616,9 @@ fn equal_code(types: &Types, ty: Type, a: &str, b: &str) -> String {
         TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => {
             format!("vt_eq_T{}({a}, {b})", ty.index())
         }
-        TypeKind::Map(..) | TypeKind::Range => unreachable!("maps and ranges have no =="),
+        TypeKind::Map(..) | TypeKind::Set(_) | TypeKind::Range => {
+            unreachable!("maps, sets and ranges have no ==")
+        }
         TypeKind::Int | TypeKind::Float | TypeKind::Bool => format!("({a} == {b})"),
     }
 }
@@ -670,9 +683,11 @@ fn c_type(types: &Types, ty: Type) -> String {
         TypeKind::Str => "vt_str *".to_owned(),
         TypeKind::Unit | TypeKind::Never => "void".to_owned(),
         TypeKind::Range => "vt_range".to_owned(),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..) => {
-            format!("vt_T{}", ty.index())
-        }
+        TypeKind::Tuple(_)
+        | TypeKind::Nominal { .. }
+        | TypeKind::List(_)
+        | TypeKind::Map(..)
+        | TypeKind::Set(_) => format!("vt_T{}", ty.index()),
     }
 }
 
@@ -687,6 +702,7 @@ fn zero(types: &Types, ty: Type) -> &'static str {
         | TypeKind::Nominal { .. }
         | TypeKind::List(_)
         | TypeKind::Map(..)
+        | TypeKind::Set(_)
         | TypeKind::Range => "{0}",
         TypeKind::Unit | TypeKind::Never => unreachable!("unit values have no storage"),
     }
@@ -1460,7 +1476,17 @@ impl FunctionEmitter<'_> {
                         }
                         self.loop_body(body, Some((binding, entry, entry_ty)), true);
                     }
-                    _ => unreachable!("the checker iterates lists and maps"),
+                    // The elements of a set are its keys.
+                    TypeKind::Set(element) => {
+                        self.line(&format!(
+                            "for ({index} = 0; {index} < {container}.m.used; {index} += 1) {{"
+                        ));
+                        self.indent += 1;
+                        self.line(&format!("if (!{container}.m.live[{index}]) continue;"));
+                        let part = map_key(self.types, element, &format!("&{container}"), &index);
+                        self.loop_body(body, Some((binding, part, element)), false);
+                    }
+                    _ => unreachable!("the checker iterates lists, maps and sets"),
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -1493,7 +1519,17 @@ impl FunctionEmitter<'_> {
                         let part = map_value(self.types, value, &format!("&{container}"), &index);
                         self.loop_body(body, Some((binding, part, value)), false);
                     }
-                    _ => unreachable!("the checker iterates lists and maps"),
+                    // A borrowed set copies its elements.
+                    TypeKind::Set(element) => {
+                        self.line(&format!(
+                            "for ({index} = 0; {index} < {container}.m.used; {index} += 1) {{"
+                        ));
+                        self.indent += 1;
+                        self.line(&format!("if (!{container}.m.live[{index}]) continue;"));
+                        let part = map_key(self.types, element, &format!("&{container}"), &index);
+                        self.loop_body(body, Some((binding, part, element)), false);
+                    }
+                    _ => unreachable!("the checker iterates lists, maps and sets"),
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -1847,6 +1883,11 @@ impl FunctionEmitter<'_> {
             {
                 self.map_builtin(builtin, &code, receiver_ty, &values, ty)
             }
+            _ if builtin != Builtin::Clone
+                && matches!(self.types.kind(receiver_ty), TypeKind::Set(_)) =>
+            {
+                self.set_builtin(builtin, &code, receiver_ty, &values)
+            }
             Builtin::Push => {
                 let argument = owned_argument(self, 0);
                 self.line(&format!("vt_push_T{n}(&{code}{argument});"));
@@ -1949,6 +1990,85 @@ impl FunctionEmitter<'_> {
             self.release(&receiver_value, receiver_ty);
         }
         result
+    }
+
+    /// A built-in method other than `clone` of the set `code` of type
+    /// `set_ty`, a map whose values are `Unit`. `insert` moves its element
+    /// into the set; the other methods only read it.
+    fn set_builtin(
+        &mut self,
+        builtin: Builtin,
+        code: &str,
+        set_ty: Type,
+        values: &[(Value, Type)],
+    ) -> Value {
+        let TypeKind::Set(element) = *self.types.kind(set_ty) else {
+            unreachable!("only sets get here")
+        };
+        let set_type = format!("vt_maptype_T{}()", set_ty.index());
+        let read_element = |emitter: &mut Self| {
+            let key = emitter.entry_temporary(element);
+            emitter.line(&format!("{key} = {};", values[0].0.code()));
+            key
+        };
+        match builtin {
+            Builtin::Len => self.store(Type::INT, format!("{code}.m.len"), false),
+            Builtin::IsEmpty => self.store(Type::BOOL, format!("({code}.m.len == 0)"), false),
+            Builtin::Clear => {
+                self.line(&format!("vt_clear_T{}(&{code});", set_ty.index()));
+                Value::Unit
+            }
+            Builtin::Contains => {
+                let key = read_element(self);
+                self.store(
+                    Type::BOOL,
+                    format!("(vt_map_find(&{code}.m, {set_type}, &{key}) >= 0)"),
+                    false,
+                )
+            }
+            Builtin::Insert => {
+                let key = self.entry_operand(values[0].0.clone(), element);
+                let (unit, old) = (
+                    self.entry_temporary(Type::UNIT),
+                    self.entry_temporary(Type::UNIT),
+                );
+                let added = self.store(
+                    Type::BOOL,
+                    format!("!vt_map_insert(&{code}.m, {set_type}, &{key}, &{unit}, &{old})"),
+                    false,
+                );
+                // A present element keeps its stored copy.
+                if self.releases(element) {
+                    self.line(&format!(
+                        "if (!{}) {}",
+                        added.code(),
+                        count_line(element, "release", &key)
+                    ));
+                }
+                added
+            }
+            Builtin::Remove => {
+                let key = read_element(self);
+                let (old_key, old) = (
+                    self.entry_temporary(element),
+                    self.entry_temporary(Type::UNIT),
+                );
+                let removed = self.store(
+                    Type::BOOL,
+                    format!("vt_map_remove(&{code}.m, {set_type}, &{key}, &{old_key}, &{old})"),
+                    false,
+                );
+                if self.releases(element) {
+                    self.line(&format!(
+                        "if ({}) {}",
+                        removed.code(),
+                        count_line(element, "release", &old_key)
+                    ));
+                }
+                removed
+            }
+            _ => unreachable!("not a set method"),
+        }
     }
 
     /// A built-in method other than `clone` of the map `code` of type

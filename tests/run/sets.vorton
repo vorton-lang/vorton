@@ -1,0 +1,45 @@
+// `Set` keeps its elements in insertion order. `insert` and `remove` report
+// whether they changed the set.
+struct Cell { row: Int, col: Int }
+
+fn main() {
+    let mut seen: Set<Str> = Set::new()
+    print(seen.insert("b"))
+    print(seen.insert("a"))
+    print(seen.insert("b"))
+    print("${seen.len()} ${seen.contains("a")} ${seen.contains("z")}")
+    for name in &seen {
+        print(name)
+    }
+    print(seen.remove("b"))
+    print(seen.remove("b"))
+    seen.insert("b")
+    let copy = seen.clone()
+    seen.clear()
+    print("${seen.is_empty()} ${copy.len()}")
+    for name in copy {
+        print(name)
+    }
+
+    let mut cells: Set<Cell> = Set::new()
+    for i in 0..4 {
+        cells.insert(Cell { row: i % 2, col: 0 })
+    }
+    print(cells.len())
+    print(cells.contains(Cell { row: 1, col: 0 }))
+
+    let mut numbers: Set<Int> = Set::new()
+    for i in 0..1000 {
+        numbers.insert(i % 300)
+    }
+    for i in 0..300 {
+        if i % 2 == 0 {
+            numbers.remove(i)
+        }
+    }
+    let mut total = 0
+    for n in &numbers {
+        total += n
+    }
+    print("${numbers.len()} ${total}")
+}

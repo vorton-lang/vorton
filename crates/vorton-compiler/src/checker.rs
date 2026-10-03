@@ -282,7 +282,7 @@ pub(crate) enum ExprKind {
     /// fields, which is left empty.
     Move(Place),
     List(Vec<Expr>),
-    /// `Map::new()`.
+    /// `Map::new()` or `Set::new()`.
     EmptyMap,
     /// `start..end` or `start..=end` as a `Range<Int>` value.
     Range {
@@ -916,20 +916,25 @@ fn resolve_type(
                 return Ok(types.intern(TypeKind::Range));
             }
             if target.kind == EntityKind::LanguageType
-                && target.name == "Map"
-                && let [key, value] = arguments.as_slice()
+                && matches!(target.name.as_str(), "Map" | "Set")
+                && let Some(key) = arguments.first()
             {
+                let kind = match (target.name.as_str(), arguments.as_slice()) {
+                    ("Map", [_, value]) => TypeKind::Map(*key, *value),
+                    ("Set", [_]) => TypeKind::Set(*key),
+                    _ => return Err(unsupported(Some(at(origin, ty.span)), "this type")),
+                };
                 if !types.is_key(*key) {
                     return Err(CheckDiagnostic {
                         kind: CheckDiagnosticKind::TypeMismatch,
                         primary: Some(at(origin, ty.span)),
                         message: format!(
-                            "`{}` cannot be a map key; keys are values compared with `==`, without `Float`",
+                            "`{}` cannot be a map key or set element; those are values compared with `==`, without `Float`",
                             types.name(*key)
                         ),
                     });
                 }
-                return Ok(types.intern(TypeKind::Map(*key, *value)));
+                return Ok(types.intern(kind));
             }
             if target.kind == EntityKind::LanguageType && arguments.is_empty() {
                 let language = match target.name.as_str() {
@@ -2089,9 +2094,19 @@ impl BodyChecker<'_> {
                 let Operand::Place((place, ty, path)) = self.check_operand(operand, None)? else {
                     return Err(self.unsupported(operand.span, "borrowing loops over temporaries"));
                 };
-                // A borrowed map yields its values.
+                // A borrowed map yields its values, and a set copies its
+                // elements, which cannot change in place.
                 let element = match *self.types.kind(ty) {
                     TypeKind::List(element) | TypeKind::Map(_, element) => element,
+                    TypeKind::Set(element) if kind == BorrowKind::Shared => element,
+                    TypeKind::Set(_) => {
+                        return Err(self.error(
+                            CheckDiagnosticKind::TypeMismatch,
+                            operand.span,
+                            "the elements of a `Set` cannot be changed in place; loop over `&` instead"
+                                .to_owned(),
+                        ));
+                    }
                     _ => {
                         return Err(self.error(
                             CheckDiagnosticKind::TypeMismatch,
@@ -2118,7 +2133,7 @@ impl BodyChecker<'_> {
                 // A taken map yields `(key, value)`.
                 let element = match *self.types.kind(value.ty) {
                     TypeKind::Range => None,
-                    TypeKind::List(element) => Some(element),
+                    TypeKind::List(element) | TypeKind::Set(element) => Some(element),
                     TypeKind::Map(key, element) => {
                         Some(self.types.intern(TypeKind::Tuple(vec![key, element])))
                     }
@@ -2836,6 +2851,16 @@ impl BodyChecker<'_> {
                         self.types.intern(TypeKind::List(key)),
                         false,
                     ),
+                    "len" => (Builtin::Len, Vec::new(), Type::INT, false),
+                    "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
+                    "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
+                    _ => return Err(unknown(self)),
+                }
+            } else if let TypeKind::Set(element) = *self.types.kind(ty) {
+                match name {
+                    "insert" => (Builtin::Insert, vec![(element, true)], Type::BOOL, true),
+                    "remove" => (Builtin::Remove, vec![(element, true)], Type::BOOL, true),
+                    "contains" => (Builtin::Contains, vec![(element, true)], Type::BOOL, false),
                     "len" => (Builtin::Len, Vec::new(), Type::INT, false),
                     "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
                     "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
@@ -3943,25 +3968,29 @@ impl BodyChecker<'_> {
             }
             ResolvedExprKind::Path(ResolvedReference::Selection { base, members, .. })
                 if base.kind == EntityKind::LanguageType
-                    && base.name == "Map"
+                    && matches!(base.name.as_str(), "Map" | "Set")
                     && let [member] = members.as_slice()
                     && member.name == "new" =>
             {
+                let name = &base.name;
                 if !arguments.is_empty() {
                     return Err(self.error(
                         CheckDiagnosticKind::ArgumentCount,
                         span,
-                        "`Map::new` takes no arguments".to_owned(),
+                        format!("`{name}::new` takes no arguments"),
                     ));
                 }
-                let Some(ty) =
-                    expected.filter(|ty| matches!(self.types.kind(*ty), TypeKind::Map(..)))
-                else {
+                let Some(ty) = expected.filter(|ty| match self.types.kind(*ty) {
+                    TypeKind::Map(..) => name == "Map",
+                    TypeKind::Set(_) => name == "Set",
+                    _ => false,
+                }) else {
                     return Err(self.error(
                         CheckDiagnosticKind::CannotInfer,
                         span,
-                        "the key and value types of an empty map cannot be inferred here; write the expected type"
-                            .to_owned(),
+                        format!(
+                            "the types of an empty `{name}` cannot be inferred here; write the expected type"
+                        ),
                     ));
                 };
                 return Ok((ty, ExprKind::EmptyMap));

@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::project::*;
 
 const LANGUAGE_TYPES: &[&str] = &[
-    "Int", "Float", "Str", "Bool", "Unit", "Never", "List", "Map", "Range", "Ptr",
+    "Int", "Float", "Str", "Bool", "Unit", "Never", "List", "Map", "Set", "Range", "Ptr",
 ];
 const LANGUAGE_FUNCTIONS: &[&str] = &["print", "assert", "panic", "replace", "swap"];
 const CORE_ENUMS: &[&str] = &["Option", "Ordering"];

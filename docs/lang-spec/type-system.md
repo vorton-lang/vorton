@@ -35,7 +35,7 @@ Vorton 采用局部双向类型推断：具名函数的签名写出，函数体�
 
 ### Language intrinsic 与 core 角色
 
-以下类型由语言直接提供，不来自任何源文件：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`List<T>`、`Map<K, V>`、`Range<T>`、`Region`、`Handle<T>`、`Shared<T>`、`Weak<T>`、`Cell<T>`、`Ptr<T>`。
+以下类型由语言直接提供，不来自任何源文件：`Int`、`Float`、`Str`、`Bool`、`Unit`、`Never`、`List<T>`、`Map<K, V>`、`Set<T>`、`Range<T>`、`Region`、`Handle<T>`、`Shared<T>`、`Weak<T>`、`Cell<T>`、`Ptr<T>`。
 
 `Option`、`Ordering`，以及 trait `PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Hash`、`Display`、`Debug`、`Drop`、`Clone`、`Copy`、`Iterator`、`Iterable` 由宿主指定的唯一官方 core root 声明。
 
@@ -82,7 +82,7 @@ enum Expr {
 
 ### 实体
 
-**实体**有身份：`List`、`Map`、`Region`、`Shared`、`Weak`、`Cell`、实现 `Drop` 的类型，以及字段、payload、元素或捕获中含有实体的类型。
+**实体**有身份：`List`、`Map`、`Set`、`Region`、`Shared`、`Weak`、`Cell`、实现 `Drop` 的类型，以及字段、payload、元素或捕获中含有实体的类型。
 
 - 实体不会被隐式复制。不加标记的赋值、传参、返回与存储都是**移交**：移交之后，原来的名字不能再使用，除非重新赋值。需要副本时显式调用 `clone()`，要求类型实现 `Clone`。
 - 实体的所有者是一个变量、另一个实体（作为字段、payload 或元素），或一个 Region。所有者结束时实体释放：
@@ -261,14 +261,14 @@ fn chase(level: &mut Region, e: Handle<Enemy>) {
 
 ## 容器
 
-`List<T>` 与 `Map<K, V>` 是实体。
+`List<T>`、`Map<K, V>` 与 `Set<T>` 是实体。
 
 - `xs[i]` 与 `m[k]` 是位置。元素是值时，读取得到拷贝；元素是实体时，要借出（`&xs[i]`）、`clone()` 或用 `remove` 取出。
 - 在可修改的位置上，`xs[i] = v` 替换元素，`m[k] = v` 插入或替换。`xs[i]` 越界、读取 `m[k]` 时键不存在，都会 panic。
 - `xs.clone()` 复制整个容器，要求元素实现 `Clone`。
-- 借出遍历 `for e in &xs` 与 `for e in &mut xs` 在 0.1 中只对 `List`（逐个元素）与 `Map`（逐个值）成立。按值遍历 `for e in xs` 拿走容器：`List` 逐个产出元素，`Map` 逐个产出 `(键, 值)`。
+- 借出遍历 `for e in &xs` 与 `for e in &mut xs` 在 0.1 中只对 `List`（逐个元素）与 `Map`（逐个值）成立；`Set` 只能 `for e in &s`，逐个拷贝元素，元素不能原地修改。按值遍历 `for e in xs` 拿走容器：`List` 与 `Set` 逐个产出元素，`Map` 逐个产出 `(键, 值)`。
 
-`Map` 按插入顺序保存条目，遍历与 `keys()` 都按这个顺序；替换已有键的值不改变它的位置，删除后再插入的键排在最后。键的类型必须是能用 `==` 比较的值类型：`Int`、`Str`、`Bool`，以及只由它们（和 `Unit`）组成的 tuple、struct 与 enum；`Float` 不能作键。
+`Map` 按插入顺序保存条目，遍历与 `keys()` 都按这个顺序；替换已有键的值不改变它的位置，删除后再插入的键排在最后。键的类型必须是能用 `==` 比较的值类型：`Int`、`Str`、`Bool`，以及只由它们（和 `Unit`）组成的 tuple、struct 与 enum；`Float` 不能作键。`Set` 同样按插入顺序保存元素，元素类型的要求与 `Map` 的键相同。
 
 0.1 的容器方法如下，键与插入的值按值传入：
 
@@ -293,6 +293,15 @@ fn chase(level: &mut Region, e: Handle<Enemy>) {
 | `keys(&self) -> List<K>` | 按插入顺序的全部键 |
 | `clear(&mut self)` | 释放全部条目 |
 | `len(&self) -> Int`、`is_empty(&self) -> Bool` | 条目数 |
+
+| `Set<T>` | 说明 |
+|---|---|
+| `Set::new() -> Set<T>` | 空集；`T` 由期望类型确定 |
+| `insert(&mut self, value: T) -> Bool` | 加入元素；原来没有时返回 `true` |
+| `remove(&mut self, value: T) -> Bool` | 删除元素；原来有时返回 `true` |
+| `contains(&self, value: T) -> Bool` | 元素是否存在 |
+| `clear(&mut self)` | 删除全部元素 |
+| `len(&self) -> Int`、`is_empty(&self) -> Bool` | 元素数 |
 
 ## 代价模型
 
@@ -334,7 +343,7 @@ fn chase(level: &mut Region, e: Handle<Enemy>) {
 - **代码块、`if`、`match`**：值的规则见[语法](syntax.md#代码块与语句)。控制无法越过的代码块类型为 `Never`：其中某一项是 `return`、`break`、`continue`，或类型为 `Never` 的表达式，或没有 `break` 的 `loop`。`if` 与 `match` 的各分支必须同型；没有 `else` 的 `if` 类型为 `Unit`。`match` 必须穷尽，见[模式匹配](patterns.md)。
 - **字符串插值**：`"${e}"` 只读借出 `e`，要求它实现 `Display`，结果为 `Str`。
 - **`catch`、`handle`**：见 [Effect 系统](effects.md)。
-- **`for x in e`**：`e` 是 `&place` 或 `&mut place` 时，按[容器](#容器)借出遍历；`e` 是 `Range<Int>` 时编译为计数循环；`e` 是按值的 `List` 或 `Map` 时拿走它并逐个产出元素；`e` 实现 `Iterator` 时拿走它并反复调用 `next`；`e` 实现 `Iterable` 时先调用 `iter`。
+- **`for x in e`**：`e` 是 `&place` 或 `&mut place` 时，按[容器](#容器)借出遍历；`e` 是 `Range<Int>` 时编译为计数循环；`e` 是按值的 `List`、`Map` 或 `Set` 时拿走它并逐个产出元素；`e` 实现 `Iterator` 时拿走它并反复调用 `next`；`e` 实现 `Iterable` 时先调用 `iter`。
 
 同一表达式中，子表达式从左到右求值：被调函数或 receiver 先于参数，参数依次求值。复合赋值 `p op= e` 只求值 `e` 一次，然后读取 `p` 的当前值、运算并写回；`e` 失败时不写回。
 
@@ -383,7 +392,7 @@ let overflow = -min                   // 运行时 panic
 `receiver.method(args)` 总是方法调用，按以下顺序查找：
 
 1. receiver 类型的固有方法；
-2. `Str`、`Int`、`Float`、`List`、`Map`、`Region`、`Shared`、`Weak`、`Cell` 的语言内建方法；
+2. `Str`、`Int`、`Float`、`List`、`Map`、`Set`、`Region`、`Shared`、`Weak`、`Cell` 的语言内建方法；
 3. receiver 类型可用的 trait impl；
 4. receiver 是带 bound 的类型参数时，通过 bound 中的 trait 查找。
 
