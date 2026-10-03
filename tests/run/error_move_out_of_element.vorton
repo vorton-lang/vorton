@@ -1,0 +1,4 @@
+fn main() {
+    let lists = [[1], [2]]
+    let first = lists[0]
+}

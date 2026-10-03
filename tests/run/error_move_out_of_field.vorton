@@ -1,6 +1,0 @@
-struct Bag { items: List<Int> }
-
-fn main() {
-    let bag = Bag { items: [1] }
-    let items = bag.items
-}

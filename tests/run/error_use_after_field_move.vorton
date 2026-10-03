@@ -1,0 +1,7 @@
+struct Bag { items: List<Int>, tags: List<Str> }
+
+fn main() {
+    let bag = Bag { items: [1], tags: [] }
+    let items = bag.items
+    print(bag.tags.len())
+}

@@ -1174,11 +1174,12 @@ impl FunctionEmitter<'_> {
                     Value::Unit
                 }
             }
-            ExprKind::Move(local) => {
-                let ty = self.function.locals[*local].ty;
-                let name = self.local_code(*local);
-                let value = self.store(ty, name.clone(), true);
-                self.line(&format!("{name} = {};", zero_value(self.types, ty)));
+            ExprKind::Move(place) => {
+                let Some((code, ty, _)) = self.place(place) else {
+                    return Value::Never;
+                };
+                let value = self.store(ty, code.clone(), true);
+                self.line(&format!("{code} = {};", zero_value(self.types, ty)));
                 value
             }
             ExprKind::Call {

@@ -261,8 +261,9 @@ pub(crate) enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<Arm>,
     },
-    /// Takes the entity value of a local, which is left empty.
-    Move(usize),
+    /// Takes the entity value of a local, or of a part of it reached through
+    /// fields, which is left empty.
+    Move(Place),
     List(Vec<Expr>),
     /// Reads a value element of a list.
     Index {
@@ -1244,22 +1245,55 @@ impl BodyChecker<'_> {
             return Ok(expression);
         }
         match expression.kind {
-            ExprKind::Local(local) if self.locals[local].borrow.is_some() => Err(self.error(
+            ExprKind::Local(_)
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Call {
+                borrow: Some(_), ..
+            } => {
+                // Moving a part moves the whole variable.
+                let (local, fields) = self.movable_part(&expression, expression.ty, span)?;
+                let path = fields.iter().copied().map(Some).collect::<Vec<_>>();
+                self.check_not_frozen(local, &path, span)?;
+                self.moved.insert(local);
+                Ok(Expr {
+                    ty: expression.ty,
+                    kind: ExprKind::Move(Place {
+                        local,
+                        call: None,
+                        projections: fields.into_iter().map(Projection::Field).collect(),
+                    }),
+                })
+            }
+            _ => Ok(expression),
+        }
+    }
+
+    /// The local and the fields from it that `expression` reads, if a `ty`
+    /// can be moved out of there: a local the function owns, or a part of
+    /// one reached through fields only.
+    fn movable_part(
+        &self,
+        expression: &Expr,
+        ty: Type,
+        span: Span,
+    ) -> Result<(usize, Vec<usize>), CheckDiagnostic> {
+        let name = || self.types.name(ty);
+        match &expression.kind {
+            ExprKind::Local(local) if self.locals[*local].borrow.is_some() => Err(self.error(
                 CheckDiagnosticKind::CannotMove,
                 span,
                 format!(
                     "`{}` is borrowed, so its `{}` cannot be moved; use `clone()`",
-                    self.locals[local].name,
-                    self.types.name(expression.ty)
+                    self.locals[*local].name,
+                    name()
                 ),
             )),
-            ExprKind::Local(local) => {
-                self.check_not_frozen(local, &[], span)?;
-                self.moved.insert(local);
-                Ok(Expr {
-                    ty: expression.ty,
-                    kind: ExprKind::Move(local),
-                })
+            ExprKind::Local(local) => Ok((*local, Vec::new())),
+            ExprKind::Field { base, index } => {
+                let (local, mut fields) = self.movable_part(base, ty, span)?;
+                fields.push(*index);
+                Ok((local, fields))
             }
             ExprKind::Call {
                 borrow: Some(_), ..
@@ -1268,18 +1302,17 @@ impl BodyChecker<'_> {
                 span,
                 format!(
                     "this call returns a borrow, so its `{}` cannot be moved; use `clone()`",
-                    self.types.name(expression.ty)
+                    name()
                 ),
             )),
-            ExprKind::Field { .. } | ExprKind::Index { .. } => Err(self.error(
+            _ => Err(self.error(
                 CheckDiagnosticKind::CannotMove,
                 span,
                 format!(
-                    "a `{}` cannot be moved out of a field or element; use `clone()`, or take it with `remove` or `replace`",
-                    self.types.name(expression.ty)
+                    "a `{}` cannot be moved out of an element or a temporary; use `clone()`, or take it with `remove` or `replace`",
+                    name()
                 ),
             )),
-            _ => Ok(expression),
         }
     }
 

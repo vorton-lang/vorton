@@ -1,0 +1,33 @@
+// A part of a variable the function owns, reached through fields, can be
+// moved out; the whole variable then counts as moved until it is assigned
+// again, and its other parts are released when it ends.
+struct Inventory { items: List<Str>, owner: Str }
+
+impl Inventory {
+    fn into_items(self) -> List<Str> {
+        self.items
+    }
+}
+
+enum State {
+    Running { log: List<Str> },
+    Paused,
+}
+
+struct Machine { state: State, name: Str }
+
+fn main() {
+    let inv = Inventory { items: ["a", "b"], owner: "me" }
+    let items = inv.into_items()
+    print(items.len())
+    let pair = ([1, 2, 3], [4])
+    let first = pair.0
+    print(first.len())
+    let mut m = Machine { state: State::Running { log: ["x"] }, name: "m" }
+    match m.state {
+        State::Running { log } => print(log.len())
+        State::Paused => print(0)
+    }
+    m = Machine { state: State::Paused, name: "n" }
+    print(m.name)
+}
