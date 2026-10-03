@@ -1,0 +1,14 @@
+enum DuplicateChoice {
+    Pair(Int, Int),
+    Other(Int, Int),
+}
+
+fn read(choice: DuplicateChoice) -> Int {
+    match choice {
+        DuplicateChoice::Pair(value, value) | DuplicateChoice::Other(value, _) => 0
+    }
+}
+
+fn main() {
+    print(read(DuplicateChoice::Pair(1, 2)))
+}

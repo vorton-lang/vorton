@@ -1,0 +1,14 @@
+enum MixedBindingChoice {
+    Integer(Int),
+    Text(Str),
+}
+
+fn classify(choice: MixedBindingChoice) -> Int {
+    match choice {
+        MixedBindingChoice::Integer(value) | MixedBindingChoice::Text(value) => 0
+    }
+}
+
+fn main() {
+    print(classify(MixedBindingChoice::Integer(1)))
+}

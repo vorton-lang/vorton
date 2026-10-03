@@ -1,0 +1,14 @@
+enum MismatchedChoice {
+    Left(Int),
+    Right(Int),
+}
+
+fn read(choice: MismatchedChoice) -> Int {
+    match choice {
+        MismatchedChoice::Left(left) | MismatchedChoice::Right(right) => 0
+    }
+}
+
+fn main() {
+    print(read(MismatchedChoice::Left(1)))
+}
