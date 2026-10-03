@@ -1,0 +1,20 @@
+fn main() {
+  let mut s = {
+      let mut entries: Set<Int> = Set::new()
+      entries.insert(1)
+      entries.insert(2)
+      entries.insert(3)
+      entries.insert(2)
+      entries.insert(1)
+      entries
+  }
+  print(s.len())
+  print(s.contains(2))
+  print(s.is_empty())
+
+  s.insert(4)
+  print(s.len())
+
+  s.remove(1)
+  print(s.len())
+}

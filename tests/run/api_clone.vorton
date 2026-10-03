@@ -1,0 +1,34 @@
+fn main() {
+    // list_clone
+    let xs = [1, 2, 3]
+    let mut ys = xs.clone()
+    ys.push(4)
+    assert(xs.len() == 3, "original list unchanged after clone push")
+    assert(ys.len() == 4, "cloned list has new element")
+
+    // set_clone
+    let s1 = {
+        let mut entries: Set<Int> = Set::new()
+        entries.insert(10)
+        entries.insert(20)
+        entries.insert(30)
+        entries
+    }
+    let mut s2 = s1.clone()
+    s2.insert(40)
+    assert(s1.len() == 3, "original set unchanged after clone insert")
+    assert(s2.len() == 4, "cloned set has new element")
+
+    // map_clone (already existed, verify still works)
+    let m1 = {
+        let mut entries: Map<Str, Int> = Map::new()
+        entries.insert("a", 1)
+        entries
+    }
+    let mut m2 = m1.clone()
+    m2.insert("b", 2)
+    assert(m1.len() == 1, "original map unchanged after clone insert")
+    assert(m2.len() == 2, "cloned map has new entry")
+
+    print("api_clone: all tests passed")
+}

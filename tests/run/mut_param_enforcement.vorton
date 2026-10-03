@@ -1,0 +1,36 @@
+fn push_item(list: &mut List<Int>, item: Int) {
+    list.push(item)
+}
+
+fn add_to_map(m: &mut Map<Str, Int>, key: Str, value: Int) {
+    m.insert(key, value)
+}
+
+fn add_to_set(s: &mut Set<Int>, item: Int) {
+    s.insert(item)
+}
+
+fn main() {
+    let mut nums = [1, 2, 3]
+    push_item(&mut nums, 4)
+    assert(nums.len() == 4, "push through mut param")
+
+    let mut m = {
+        let mut entries: Map<Str, Int> = Map::new()
+        entries.insert("a", 1)
+        entries
+    }
+    add_to_map(&mut m, "b", 2)
+    assert(m.len() == 2, "insert through mut param")
+
+    let mut s = {
+        let mut entries: Set<Int> = Set::new()
+        entries.insert(1)
+        entries.insert(2)
+        entries
+    }
+    add_to_set(&mut s, 3)
+    assert(s.len() == 3, "insert through mut param to set")
+
+    print("mut_param_enforcement: all tests passed")
+}

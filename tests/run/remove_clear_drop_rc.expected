@@ -1,0 +1,8 @@
+map_rm: va len=1 hasA=false b=vb
+map_rm2: len=1 y=vy
+mi_rm: one len=1 two=two
+list_clear: r len=1 s=s
+map_clear: vy len=1 z=vz
+mi_clear: seven len=0
+loop: xs=0 m=0
+done

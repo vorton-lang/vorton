@@ -1,0 +1,16 @@
+nl_len=11
+tab_len=3
+bs_len=3
+quote_len=3
+empty_len=0
+raw_has_bs=true
+raw_len=12
+raw2_len=12
+raw3_has_quote=true
+raw3_len=8
+raw_esc_len=7
+ml_has_hello=true
+ml_has_world=true
+ml_len=11
+ml_interp=true
+concat=abcdef
