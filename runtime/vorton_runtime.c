@@ -270,6 +270,196 @@ static void vt_check_index(int64_t index, int64_t len) {
     }
 }
 
+/* `Str` methods. Positions and lengths count the bytes of UTF-8. */
+static int64_t vt_str_find_from(const vt_str *text, const vt_str *part, int64_t from) {
+    for (int64_t at = from; at + part->len <= text->len; at += 1) {
+        if (memcmp(text->data + at, part->data, (size_t)part->len) == 0) {
+            return at;
+        }
+    }
+    return -1;
+}
+
+static bool vt_str_starts_with(const vt_str *text, const vt_str *prefix) {
+    return prefix->len <= text->len &&
+           memcmp(text->data, prefix->data, (size_t)prefix->len) == 0;
+}
+
+static bool vt_str_ends_with(const vt_str *text, const vt_str *suffix) {
+    return suffix->len <= text->len &&
+           memcmp(text->data + text->len - suffix->len, suffix->data, (size_t)suffix->len) == 0;
+}
+
+/* Whether byte position `at` starts a character or ends the text. */
+static bool vt_str_is_boundary(const vt_str *text, int64_t at) {
+    return at == text->len || ((unsigned char)text->data[at] & 0xC0) != 0x80;
+}
+
+static vt_str *vt_str_slice(const vt_str *text, int64_t start, int64_t end) {
+    if (start < 0 || start > end || end > text->len) {
+        vt_panic("slice out of bounds");
+    }
+    if (!vt_str_is_boundary(text, start) || !vt_str_is_boundary(text, end)) {
+        vt_panic("slice is not on a character boundary");
+    }
+    return vt_str_from_bytes(text->data + start, (size_t)(end - start));
+}
+
+/* Appends a new string of `len` bytes from `bytes` to the array `*parts`
+ * of `*count` strings with room for `*cap`. */
+static void vt_str_add_part(vt_str ***parts, int64_t *count, int64_t *cap, const char *bytes,
+                            int64_t len) {
+    if (*count == *cap) {
+        *cap = *cap == 0 ? 4 : *cap * 2;
+        *parts = vt_items_resize(*parts, *cap, sizeof(vt_str *));
+    }
+    (*parts)[*count] = vt_str_from_bytes(bytes, (size_t)len);
+    *count += 1;
+}
+
+/* Splits `text` at every `separator`. The parts go to `*parts`, an array
+ * that the caller frees with `vt_items_free` after taking the strings; the
+ * result is their number. */
+static int64_t vt_str_split(const vt_str *text, const vt_str *separator, vt_str ***parts) {
+    if (separator->len == 0) {
+        vt_panic("empty separator");
+    }
+    int64_t count = 0;
+    int64_t cap = 0;
+    int64_t from = 0;
+    *parts = NULL;
+    for (;;) {
+        int64_t at = vt_str_find_from(text, separator, from);
+        int64_t end = at < 0 ? text->len : at;
+        vt_str_add_part(parts, &count, &cap, text->data + from, end - from);
+        if (at < 0) {
+            return count;
+        }
+        from = at + separator->len;
+    }
+}
+
+/* Splits `text` into its characters, like `vt_str_split`. */
+static int64_t vt_str_chars(const vt_str *text, vt_str ***parts) {
+    int64_t count = 0;
+    int64_t cap = 0;
+    *parts = NULL;
+    for (int64_t at = 0; at < text->len;) {
+        int64_t next = at + 1;
+        while (!vt_str_is_boundary(text, next)) {
+            next += 1;
+        }
+        vt_str_add_part(parts, &count, &cap, text->data + at, next - at);
+        at = next;
+    }
+    return count;
+}
+
+static bool vt_is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static vt_str *vt_str_trim(const vt_str *text) {
+    int64_t start = 0;
+    int64_t end = text->len;
+    while (start < end && vt_is_space(text->data[start])) {
+        start += 1;
+    }
+    while (end > start && vt_is_space(text->data[end - 1])) {
+        end -= 1;
+    }
+    return vt_str_from_bytes(text->data + start, (size_t)(end - start));
+}
+
+static vt_str *vt_str_replace(const vt_str *text, const vt_str *from, const vt_str *to) {
+    if (from->len == 0) {
+        vt_panic("empty pattern");
+    }
+    int64_t count = 0;
+    for (int64_t at = vt_str_find_from(text, from, 0); at >= 0;
+         at = vt_str_find_from(text, from, at + from->len)) {
+        count += 1;
+    }
+    vt_str *result = vt_str_alloc(text->len + count * (to->len - from->len));
+    char *out = (char *)result->data;
+    int64_t position = 0;
+    for (int64_t at = vt_str_find_from(text, from, 0); at >= 0;
+         at = vt_str_find_from(text, from, position)) {
+        memcpy(out, text->data + position, (size_t)(at - position));
+        out += at - position;
+        memcpy(out, to->data, (size_t)to->len);
+        out += to->len;
+        position = at + from->len;
+    }
+    memcpy(out, text->data + position, (size_t)(text->len - position));
+    return result;
+}
+
+static vt_str *vt_str_repeat(const vt_str *text, int64_t count) {
+    if (count < 0) {
+        vt_panic("negative repeat count");
+    }
+    if (text->len > 0 && count > INT64_MAX / text->len) {
+        vt_panic("string too long");
+    }
+    vt_str *result = vt_str_alloc(text->len * count);
+    char *out = (char *)result->data;
+    for (int64_t i = 0; i < count; i += 1) {
+        memcpy(out + i * text->len, text->data, (size_t)text->len);
+    }
+    return result;
+}
+
+/* Converts ASCII letters to upper case, or to lower case. */
+static vt_str *vt_str_case(const vt_str *text, bool upper) {
+    vt_str *result = vt_str_alloc(text->len);
+    char *out = (char *)result->data;
+    for (int64_t i = 0; i < text->len; i += 1) {
+        char c = text->data[i];
+        if (upper && c >= 'a' && c <= 'z') {
+            c = (char)(c - 'a' + 'A');
+        } else if (!upper && c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        out[i] = c;
+    }
+    return result;
+}
+
+/* Parses an optionally signed decimal `Int` into `*out`. The digits
+ * accumulate as a negative number so the smallest `Int` fits. */
+static bool vt_str_parse_int(const vt_str *text, int64_t *out) {
+    int64_t i = 0;
+    bool negative = false;
+    if (i < text->len && (text->data[i] == '-' || text->data[i] == '+')) {
+        negative = text->data[i] == '-';
+        i += 1;
+    }
+    if (i == text->len) {
+        return false;
+    }
+    int64_t value = 0;
+    for (; i < text->len; i += 1) {
+        char c = text->data[i];
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        int digit = c - '0';
+        if (value < (INT64_MIN + digit) / 10) {
+            return false;
+        }
+        value = value * 10 - digit;
+    }
+    if (!negative) {
+        if (value == INT64_MIN) {
+            return false;
+        }
+        value = -value;
+    }
+    *out = value;
+    return true;
+}
+
 /* A `Range<Int>` value: `start..end`, or `start..=end` when `inclusive`. */
 typedef struct vt_range {
     int64_t start;

@@ -1,0 +1,34 @@
+// `Str` methods count UTF-8 bytes; `chars()` splits into characters.
+fn show(o: Option<Int>) -> Str {
+    match o {
+        Option::Some(n) => "${n}"
+        Option::None => "none"
+    }
+}
+
+fn main() {
+    let s = "héllo, wörld"
+    print("${s.len()} ${s.chars().len()} ${"".is_empty()} ${s.is_empty()}")
+    print("${s.contains("wö")} ${s.contains("x")} ${s.starts_with("hé")} ${s.ends_with("rld")}")
+    print("${show(s.find("l"))} ${show(s.find("zz"))} ${show(s.find(""))}")
+    print(s.slice(0, 6))
+    print(s.slice(8, 14))
+    let parts = "a,b,,c".split(",")
+    print("${parts.len()} [${parts[2]}] ${parts[3]}")
+    print("x".split(",").len())
+    print("[${"  \t padded \n".trim()}]")
+    print("aXbXc".replace("X", "--"))
+    print("ab".repeat(3))
+    print("[${"ab".repeat(0)}]")
+    for c in "añ€😀".chars() {
+        print("${c} ${c.len()}")
+    }
+    print("Mixed Ünicode".to_upper())
+    print("Mixed Ünicode".to_lower())
+    print("${show("42".parse_int())} ${show("-17".parse_int())} ${show("+5".parse_int())}")
+    print("${show("".parse_int())} ${show("4x".parse_int())} ${show("-".parse_int())}")
+    print("${show("9223372036854775807".parse_int())} ${show("-9223372036854775808".parse_int())}")
+    print(show("9223372036854775808".parse_int()))
+    let name = "vorton"
+    print(name.to_upper().slice(0, 3))
+}

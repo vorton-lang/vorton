@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use crate::ast::{AssignmentOperator, BinaryOperator, UnaryOperator};
 use crate::checker::{
     Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, Intrinsic, Pattern,
-    Place, Program, Projection, Receiver, Statement, Type, TypeKind, Types,
+    Place, Program, Projection, Receiver, Statement, StrMethod, Type, TypeKind, Types,
 };
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
@@ -1977,6 +1977,7 @@ impl FunctionEmitter<'_> {
                     owned: true,
                 }
             }
+            Builtin::Str(method) => self.str_builtin(method, &code, &values, ty),
             Builtin::ContainsKey | Builtin::Keys => {
                 unreachable!("only maps have these methods")
             }
@@ -1990,6 +1991,102 @@ impl FunctionEmitter<'_> {
             self.release(&receiver_value, receiver_ty);
         }
         result
+    }
+
+    /// A method of the string `code`, with argument `values`, returning a
+    /// `ty`. New strings and lists are owned by the result.
+    fn str_builtin(
+        &mut self,
+        method: StrMethod,
+        code: &str,
+        values: &[(Value, Type)],
+        ty: Type,
+    ) -> Value {
+        use StrMethod as M;
+        let argument = |position: usize| values[position].0.code().to_owned();
+        let new_str = |emitter: &mut Self, call: String| emitter.store(Type::STR, call, true);
+        match method {
+            M::Len => self.store(Type::INT, format!("{code}->len"), false),
+            M::IsEmpty => self.store(Type::BOOL, format!("({code}->len == 0)"), false),
+            M::Contains => self.store(
+                Type::BOOL,
+                format!("(vt_str_find_from({code}, {}, 0) >= 0)", argument(0)),
+                false,
+            ),
+            M::StartsWith => self.store(
+                Type::BOOL,
+                format!("vt_str_starts_with({code}, {})", argument(0)),
+                false,
+            ),
+            M::EndsWith => self.store(
+                Type::BOOL,
+                format!("vt_str_ends_with({code}, {})", argument(0)),
+                false,
+            ),
+            M::Find => {
+                let at = self.counter();
+                self.line(&format!(
+                    "{at} = vt_str_find_from({code}, {}, 0);",
+                    argument(0)
+                ));
+                self.option_int(ty, &format!("{at} >= 0"), &at)
+            }
+            M::ParseInt => {
+                let (parsed, value) = (self.counter(), self.counter());
+                self.line(&format!("{parsed} = vt_str_parse_int({code}, &{value});"));
+                self.option_int(ty, &parsed, &value)
+            }
+            M::Slice => new_str(
+                self,
+                format!("vt_str_slice({code}, {}, {})", argument(0), argument(1)),
+            ),
+            M::Trim => new_str(self, format!("vt_str_trim({code})")),
+            M::Replace => new_str(
+                self,
+                format!("vt_str_replace({code}, {}, {})", argument(0), argument(1)),
+            ),
+            M::Repeat => new_str(self, format!("vt_str_repeat({code}, {})", argument(0))),
+            M::ToUpper => new_str(self, format!("vt_str_case({code}, true)")),
+            M::ToLower => new_str(self, format!("vt_str_case({code}, false)")),
+            M::Split | M::Chars => {
+                // The runtime returns the parts in a C array; the list takes
+                // the strings and the array is freed.
+                let parts = format!("t{}", self.temporaries);
+                self.temporaries += 1;
+                writeln!(self.declarations, "    vt_str **{parts} = NULL;").unwrap();
+                let (count, index) = (self.counter(), self.counter());
+                let call = if method == M::Split {
+                    format!("vt_str_split({code}, {}, &{parts})", argument(0))
+                } else {
+                    format!("vt_str_chars({code}, &{parts})")
+                };
+                self.line(&format!("{count} = {call};"));
+                let list = self.temporary(ty);
+                self.line(&format!(
+                    "for ({index} = 0; {index} < {count}; {index} += 1) vt_push_T{}(&{list}, {parts}[{index}]);",
+                    ty.index()
+                ));
+                self.line(&format!("vt_items_free({parts});"));
+                Value::Code {
+                    code: list,
+                    owned: true,
+                }
+            }
+        }
+    }
+
+    /// An `Option<Int>` of type `ty`: `Some(value)` when `test` holds.
+    fn option_int(&mut self, ty: Type, test: &str, value: &str) -> Value {
+        let (some, none) = option_variants(self.types, ty);
+        let result = self.temporary(ty);
+        self.line(&format!(
+            "if ({test}) {{ {result}.tag = {some}; {} = {value}; }} else {{ {result}.tag = {none}; }}",
+            field_code(self.types, ty, some, 0, &result)
+        ));
+        Value::Code {
+            code: result,
+            owned: true,
+        }
     }
 
     /// A built-in method other than `clone` of the set `code` of type

@@ -215,6 +215,28 @@ pub(crate) enum Builtin {
     Keys,
     /// `clone(&self)` of any type.
     Clone,
+    /// A method of `Str`.
+    Str(StrMethod),
+}
+
+/// The methods of `Str`; the spec lists their signatures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrMethod {
+    Len,
+    IsEmpty,
+    Contains,
+    StartsWith,
+    EndsWith,
+    Find,
+    Slice,
+    Split,
+    Trim,
+    Replace,
+    Repeat,
+    Chars,
+    ToUpper,
+    ToLower,
+    ParseInt,
 }
 
 pub(crate) struct Expr {
@@ -2856,6 +2878,37 @@ impl BodyChecker<'_> {
                     "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
                     _ => return Err(unknown(self)),
                 }
+            } else if ty == Type::STR {
+                use StrMethod as M;
+                let text = Type::STR;
+                let (method, parameters, result) = match name {
+                    "len" => (M::Len, Vec::new(), Type::INT),
+                    "is_empty" => (M::IsEmpty, Vec::new(), Type::BOOL),
+                    "contains" => (M::Contains, vec![text], Type::BOOL),
+                    "starts_with" => (M::StartsWith, vec![text], Type::BOOL),
+                    "ends_with" => (M::EndsWith, vec![text], Type::BOOL),
+                    "find" => (M::Find, vec![text], self.option_type(span, Type::INT)?),
+                    "slice" => (M::Slice, vec![Type::INT, Type::INT], text),
+                    "split" => (
+                        M::Split,
+                        vec![text],
+                        self.types.intern(TypeKind::List(text)),
+                    ),
+                    "trim" => (M::Trim, Vec::new(), text),
+                    "replace" => (M::Replace, vec![text, text], text),
+                    "repeat" => (M::Repeat, vec![Type::INT], text),
+                    "chars" => (
+                        M::Chars,
+                        Vec::new(),
+                        self.types.intern(TypeKind::List(text)),
+                    ),
+                    "to_upper" => (M::ToUpper, Vec::new(), text),
+                    "to_lower" => (M::ToLower, Vec::new(), text),
+                    "parse_int" => (M::ParseInt, Vec::new(), self.option_type(span, Type::INT)?),
+                    _ => return Err(unknown(self)),
+                };
+                let parameters = parameters.into_iter().map(|ty| (ty, false)).collect();
+                (Builtin::Str(method), parameters, result, false)
             } else if let TypeKind::Set(element) = *self.types.kind(ty) {
                 match name {
                     "insert" => (Builtin::Insert, vec![(element, true)], Type::BOOL, true),

@@ -303,6 +303,25 @@ fn chase(level: &mut Region, e: Handle<Enemy>) {
 | `clear(&mut self)` | 删除全部元素 |
 | `len(&self) -> Int`、`is_empty(&self) -> Bool` | 元素数 |
 
+## 字符串
+
+`Str` 是不可变的 UTF-8 字节序列。位置与长度都按字节计；需要逐个字符时用 `chars()`。下列方法的 receiver 都是 `&self`，参数按值传入，不改变原字符串：
+
+| 方法 | 说明 |
+|---|---|
+| `len(&self) -> Int`、`is_empty(&self) -> Bool` | 字节数 |
+| `contains(&self, part: Str) -> Bool` | 是否含有 `part` |
+| `starts_with(&self, prefix: Str) -> Bool`、`ends_with(&self, suffix: Str) -> Bool` | 前缀、后缀 |
+| `find(&self, part: Str) -> Option<Int>` | `part` 第一次出现的字节位置 |
+| `slice(&self, start: Int, end: Int) -> Str` | 字节位置 `start` 到 `end`（不含）；越界、`start > end` 或不在字符边界上时 panic |
+| `split(&self, separator: Str) -> List<Str>` | 按分隔符切开，相邻分隔符之间得到空串；分隔符为空时 panic |
+| `trim(&self) -> Str` | 去掉两端的 ASCII 空白（空格、`\t`、`\n`、`\r`） |
+| `replace(&self, from: Str, to: Str) -> Str` | 替换全部不重叠的出现；`from` 为空时 panic |
+| `repeat(&self, count: Int) -> Str` | 重复 `count` 次；`count` 为负时 panic |
+| `chars(&self) -> List<Str>` | 逐个 Unicode 字符 |
+| `to_upper(&self) -> Str`、`to_lower(&self) -> Str` | 只转换 ASCII 字母 |
+| `parse_int(&self) -> Option<Int>` | 可带一个 `+` 或 `-` 的十进制整数；有其他字符或超出 `Int` 时得到 `None` |
+
 ## 代价模型
 
 以下保证不需要阅读编译器也能推断；其余优化一律尽力而为，不可依赖：
