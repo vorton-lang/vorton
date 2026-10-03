@@ -1,0 +1,31 @@
+// `replace(&mut place, value)` puts `value` in the place and returns what was
+// there; `swap(&mut a, &mut b)` exchanges two places. They take entities out
+// of fields and elements, which cannot be moved out directly.
+struct Player { name: Str, items: List<Str> }
+
+fn main() {
+    let mut p = Player { name: "ann", items: ["sword", "shield"] }
+    let old = replace(&mut p.items, ["bow"])
+    print("${old.len()} ${p.items.len()} ${p.items[0]}")
+    let old_name = replace(&mut p.name, "bob")
+    print("${old_name} ${p.name}")
+    let mut lists = [[1], [2, 2], [3, 3, 3]]
+    let taken = replace(&mut lists[1], [])
+    print("${taken.len()} ${lists[1].len()}")
+    swap(&mut lists[0], &mut lists[2])
+    print("${lists[0].len()} ${lists[2].len()}")
+    let mut a = 1
+    let mut b = 2
+    swap(&mut a, &mut b)
+    print("${a} ${b}")
+    let i = 0
+    let j = 2
+    swap(&mut lists[i], &mut lists[j])
+    print(lists[0].len())
+    let mut names: Map<Str, Str> = Map::new()
+    names["x"] = "one"
+    names["y"] = "two"
+    swap(&mut names["x"], &mut names["y"])
+    print("${names["x"]} ${names["y"]}")
+    swap(&mut lists[i], &mut lists[i + 0])
+}

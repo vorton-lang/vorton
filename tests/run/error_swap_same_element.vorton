@@ -1,0 +1,4 @@
+fn main() {
+    let mut xs = [[1], [2]]
+    swap(&mut xs[0], &mut xs[0])
+}

@@ -236,6 +236,8 @@ pub(crate) enum ExprKind {
     Intrinsic {
         intrinsic: Intrinsic,
         arguments: Vec<Expr>,
+        /// For `swap`, places that must differ at run time.
+        checks: Vec<DisjointCheck>,
     },
     Unary {
         operator: UnaryOperator,
@@ -376,6 +378,10 @@ pub(crate) enum Intrinsic {
     Print,
     Assert,
     Panic,
+    /// `replace(place: &mut T, value: T) -> T`.
+    Replace,
+    /// `swap(a: &mut T, b: &mut T)`.
+    Swap,
 }
 
 struct Signature {
@@ -4161,6 +4167,74 @@ impl BodyChecker<'_> {
         Ok((checked, checks))
     }
 
+    /// Checks `replace(&mut place, value)` or `swap(&mut a, &mut b)`, whose
+    /// type `T` is that of the first place.
+    fn check_exchange(
+        &mut self,
+        span: Span,
+        intrinsic: Intrinsic,
+        values: &[&ResolvedExpr],
+    ) -> Result<(Type, ExprKind), CheckDiagnostic> {
+        let [first, second] = values else {
+            return Err(self.error(
+                CheckDiagnosticKind::ArgumentCount,
+                span,
+                format!("expected 2 arguments, found {}", values.len()),
+            ));
+        };
+        let ResolvedExprKind::Borrow {
+            kind: (_, BorrowKind::Mutable),
+            operand,
+        } = &first.kind
+        else {
+            return Err(self.error(
+                CheckDiagnosticKind::TypeMismatch,
+                first.span,
+                "this parameter borrows its argument; write `&mut` before it".to_owned(),
+            ));
+        };
+        let first_operand = self.check_operand(operand, None)?;
+        let ty = first_operand.ty();
+        let second_parameter = match intrinsic {
+            Intrinsic::Swap => Some(BorrowKind::Mutable),
+            _ => None,
+        };
+        let frozen_before = self.frozen.len();
+        let checked = self.check_arguments(
+            vec![
+                Argument::Receiver(first_operand, operand),
+                Argument::Written(second),
+            ],
+            vec![(ty, Some(BorrowKind::Mutable)), (ty, second_parameter)],
+        );
+        self.frozen.truncate(frozen_before);
+        let (arguments, checks) = checked?;
+        // Only places can be changed.
+        for (argument, value) in arguments.iter().zip([operand.as_ref(), second]) {
+            if let ExprKind::Borrow(target) = &argument.kind
+                && let BorrowTarget::Value(_) = target.as_ref()
+            {
+                return Err(self.error(
+                    CheckDiagnosticKind::NotAssignable,
+                    value.span,
+                    "this must be a variable or a part of one".to_owned(),
+                ));
+            }
+        }
+        let result = match intrinsic {
+            Intrinsic::Replace => ty,
+            _ => Type::UNIT,
+        };
+        Ok((
+            result,
+            ExprKind::Intrinsic {
+                intrinsic,
+                arguments,
+                checks,
+            },
+        ))
+    }
+
     fn check_intrinsic(
         &mut self,
         span: Span,
@@ -4175,6 +4249,8 @@ impl BodyChecker<'_> {
                 Type::UNIT,
             ),
             "panic" => (Intrinsic::Panic, &[Some(Type::STR)], Type::NEVER),
+            "replace" => return self.check_exchange(span, Intrinsic::Replace, values),
+            "swap" => return self.check_exchange(span, Intrinsic::Swap, values),
             _ => return Err(self.unsupported(span, "this intrinsic")),
         };
         if values.len() != parameters.len() {
@@ -4209,6 +4285,7 @@ impl BodyChecker<'_> {
             ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
+                checks: Vec::new(),
             },
         ))
     }

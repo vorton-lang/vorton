@@ -1562,8 +1562,14 @@ impl FunctionEmitter<'_> {
                 BorrowTarget::Value(_) => unreachable!("only places are returned borrowed"),
             },
             ExprKind::Intrinsic {
+                intrinsic: intrinsic @ (Intrinsic::Replace | Intrinsic::Swap),
+                arguments,
+                checks,
+            } => self.exchange(*intrinsic, arguments, checks),
+            ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
+                ..
             } => self.intrinsic(*intrinsic, arguments),
             ExprKind::Unary { operator, operand } => {
                 let operand = self.expr(operand);
@@ -2321,17 +2327,7 @@ impl FunctionEmitter<'_> {
             operands.extend(operand);
             indices.push(place_indices);
         }
-        for check in checks {
-            let same = indices[check.first]
-                .iter()
-                .zip(&indices[check.second])
-                .map(|((first, ty), (second, _))| equal_code(self.types, *ty, first, second))
-                .collect::<Vec<_>>();
-            self.line(&format!(
-                "if ({}) vt_panic(\"the same element is borrowed twice\");",
-                same.join(" && ")
-            ));
-        }
+        self.disjoint_checks(checks, &indices);
         let name = function_name(function, &self.program.functions[function]);
         let code = format!("{name}({})", operands.join(", "));
         let result = if borrowed {
@@ -2365,6 +2361,72 @@ impl FunctionEmitter<'_> {
         result
     }
 
+    /// Panics if two borrowed arguments name the same element: `indices`
+    /// holds the index and key temporaries of each argument's place.
+    fn disjoint_checks(
+        &mut self,
+        checks: &[crate::checker::DisjointCheck],
+        indices: &[Vec<(String, Type)>],
+    ) {
+        for check in checks {
+            let same = indices[check.first]
+                .iter()
+                .zip(&indices[check.second])
+                .map(|((first, ty), (second, _))| equal_code(self.types, *ty, first, second))
+                .collect::<Vec<_>>();
+            self.line(&format!(
+                "if ({}) vt_panic(\"the same element is borrowed twice\");",
+                same.join(" && ")
+            ));
+        }
+    }
+
+    /// `replace(&mut place, value)` or `swap(&mut a, &mut b)`.
+    fn exchange(
+        &mut self,
+        intrinsic: Intrinsic,
+        arguments: &[Expr],
+        checks: &[crate::checker::DisjointCheck],
+    ) -> Value {
+        fn place(argument: &Expr) -> &Place {
+            match &argument.kind {
+                ExprKind::Borrow(target) => match target.as_ref() {
+                    BorrowTarget::Place(place) => place,
+                    BorrowTarget::Value(_) => unreachable!("the checker exchanges only places"),
+                },
+                _ => unreachable!("the first argument is borrowed"),
+            }
+        }
+        let Some((first, ty, first_indices)) = self.place(place(&arguments[0])) else {
+            return Value::Never;
+        };
+        if intrinsic == Intrinsic::Replace {
+            let value = self.expr(&arguments[1]);
+            if matches!(value, Value::Never) {
+                return Value::Never;
+            }
+            if !self.types.has_storage(ty) {
+                return Value::Unit;
+            }
+            // The old value moves out to the caller.
+            let value = self.owned(value, ty);
+            let old = self.store(ty, first.clone(), true);
+            self.line(&format!("{first} = {};", value.code()));
+            return old;
+        }
+        let Some((second, _, second_indices)) = self.place(place(&arguments[1])) else {
+            return Value::Never;
+        };
+        self.disjoint_checks(checks, &[first_indices, second_indices]);
+        if self.types.has_storage(ty) {
+            let temporary = self.temporary(ty);
+            self.line(&format!(
+                "{temporary} = {first}; {first} = {second}; {second} = {temporary};"
+            ));
+        }
+        Value::Unit
+    }
+
     fn intrinsic(&mut self, intrinsic: Intrinsic, arguments: &[Expr]) -> Value {
         let Some(values) = self.operands(arguments) else {
             return Value::Never;
@@ -2390,6 +2452,7 @@ impl FunctionEmitter<'_> {
                 self.line(&format!("vt_panic_str({});", values[0].code()));
                 Value::Never
             }
+            Intrinsic::Replace | Intrinsic::Swap => unreachable!("lowered by `exchange`"),
         }
     }
 

@@ -1,0 +1,13 @@
+// A function the module declares shadows a language function of the same
+// name in the value namespace.
+fn assert(ok: Bool) -> Str {
+    if ok {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn main() {
+    print(assert(false))
+}

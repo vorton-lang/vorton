@@ -6,7 +6,7 @@ use crate::project::*;
 const LANGUAGE_TYPES: &[&str] = &[
     "Int", "Float", "Str", "Bool", "Unit", "Never", "List", "Map", "Range", "Ptr",
 ];
-const LANGUAGE_FUNCTIONS: &[&str] = &["print", "assert", "panic"];
+const LANGUAGE_FUNCTIONS: &[&str] = &["print", "assert", "panic", "replace", "swap"];
 const CORE_ENUMS: &[&str] = &["Option", "Ordering"];
 const CORE_TRAITS: &[&str] = &[
     "PartialEq",
@@ -1908,8 +1908,19 @@ impl ResolverState {
             }
         }
         if include_language {
+            // A value the module declares or imports shadows a language
+            // function of the same name.
+            let shadows_value = self.bindings.get(module).is_some_and(|table| {
+                table
+                    .keys()
+                    .any(|(namespace, spelling)| spelling == name && *namespace == Namespace::Value)
+            });
             for entity in self.entities.keys() {
-                if entity.module.is_language() && entity.owner.is_none() && entity.name == name {
+                if entity.module.is_language()
+                    && entity.owner.is_none()
+                    && entity.name == name
+                    && !(shadows_value && entity.namespace == Namespace::Value)
+                {
                     result
                         .accessible
                         .insert(LookupContainer::Entity(entity.clone()));

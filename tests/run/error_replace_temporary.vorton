@@ -1,0 +1,7 @@
+fn make() -> List<Int> {
+    [1]
+}
+
+fn main() {
+    let old = replace(&mut make(), [2])
+}
