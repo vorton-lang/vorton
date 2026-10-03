@@ -151,6 +151,8 @@ pub(crate) enum ForSource {
         end: Expr,
         inclusive: bool,
     },
+    /// Counts through a `Range<Int>` value.
+    RangeValue(Expr),
     /// Takes the list or map and yields its elements of type `element`: a
     /// map's entries as `(key, value)` tuples.
     Taken { container: Expr, element: Type },
@@ -276,6 +278,12 @@ pub(crate) enum ExprKind {
     List(Vec<Expr>),
     /// `Map::new()`.
     EmptyMap,
+    /// `start..end` or `start..=end` as a `Range<Int>` value.
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        inclusive: bool,
+    },
     /// Reads a value element of a list, or the value of a key in a map.
     Index {
         base: Box<Expr>,
@@ -877,6 +885,18 @@ fn resolve_type(
                 && let [element] = arguments.as_slice()
             {
                 return Ok(types.intern(TypeKind::List(*element)));
+            }
+            if target.kind == EntityKind::LanguageType
+                && target.name == "Range"
+                && let [element] = arguments.as_slice()
+            {
+                if *element != Type::INT {
+                    return Err(unsupported(
+                        Some(at(origin, ty.span)),
+                        "ranges of other types than `Int`",
+                    ));
+                }
+                return Ok(types.intern(TypeKind::Range));
             }
             if target.kind == EntityKind::LanguageType
                 && target.name == "Map"
@@ -2080,9 +2100,10 @@ impl BodyChecker<'_> {
                 let value = self.check_expr(iterable, None)?;
                 // A taken map yields `(key, value)`.
                 let element = match *self.types.kind(value.ty) {
-                    TypeKind::List(element) => element,
+                    TypeKind::Range => None,
+                    TypeKind::List(element) => Some(element),
                     TypeKind::Map(key, element) => {
-                        self.types.intern(TypeKind::Tuple(vec![key, element]))
+                        Some(self.types.intern(TypeKind::Tuple(vec![key, element])))
                     }
                     _ => {
                         return Err(self.error(
@@ -2092,16 +2113,21 @@ impl BodyChecker<'_> {
                         ));
                     }
                 };
-                let value = self.consume(value, iterable.span)?;
-                (
-                    ForSource::Taken {
-                        container: value,
-                        element,
-                    },
-                    element,
-                    None,
-                    None,
-                )
+                match element {
+                    None => (ForSource::RangeValue(value), Type::INT, None, None),
+                    Some(element) => {
+                        let value = self.consume(value, iterable.span)?;
+                        (
+                            ForSource::Taken {
+                                container: value,
+                                element,
+                            },
+                            element,
+                            None,
+                            None,
+                        )
+                    }
+                }
             }
         };
         let scope = self.local_ids.clone();
@@ -3826,11 +3852,21 @@ impl BodyChecker<'_> {
             }
             Op::Equal | Op::NotEqual => self.has_equality(ty).then_some(Type::BOOL),
             Op::Less | Op::Greater | Op::LessEqual | Op::GreaterEqual => {
-                is_printable(ty).then_some(Type::BOOL)
+                self.types.has_order(ty).then_some(Type::BOOL)
             }
             Op::LogicAnd | Op::LogicOr => (ty == Type::BOOL).then_some(Type::BOOL),
             Op::RangeExclusive | Op::RangeInclusive => {
-                return Err(self.unsupported(span, "ranges"));
+                if ty != Type::INT {
+                    return Err(self.mismatch(span, Type::INT, ty));
+                }
+                return Ok((
+                    self.types.intern(TypeKind::Range),
+                    ExprKind::Range {
+                        start: Box::new(left),
+                        end: Box::new(right),
+                        inclusive: operator == Op::RangeInclusive,
+                    },
+                ));
             }
         };
         let Some(result) = result else {

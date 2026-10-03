@@ -36,6 +36,8 @@ pub(crate) enum TypeKind {
     List(Type),
     /// A map from keys to values in insertion order; an entity.
     Map(Type, Type),
+    /// `Range<Int>`, the value of `start..end` or `start..=end`.
+    Range,
     /// A struct or enum declaration, by its index in [`Types::nominals`],
     /// applied to type arguments.
     Nominal {
@@ -155,6 +157,7 @@ impl Types {
             TypeKind::Tuple(elements) => format!("({})", self.names(elements)),
             TypeKind::List(element) => format!("List<{}>", self.name(*element)),
             TypeKind::Map(key, value) => format!("Map<{}, {}>", self.name(*key), self.name(*value)),
+            TypeKind::Range => "Range<Int>".to_owned(),
             TypeKind::Nominal {
                 declaration,
                 arguments,
@@ -191,9 +194,12 @@ impl Types {
                 .components(ty)
                 .into_iter()
                 .any(|component| self.needs_release(component)),
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Unit | TypeKind::Never => {
-                false
-            }
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::Unit
+            | TypeKind::Never
+            | TypeKind::Range => false,
         }
     }
 
@@ -210,7 +216,8 @@ impl Types {
             | TypeKind::Bool
             | TypeKind::Str
             | TypeKind::Unit
-            | TypeKind::Never => false,
+            | TypeKind::Never
+            | TypeKind::Range => false,
         }
     }
 
@@ -228,7 +235,7 @@ impl Types {
             TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
                 true
             }
-            TypeKind::Never | TypeKind::Map(..) => false,
+            TypeKind::Never | TypeKind::Map(..) | TypeKind::Range => false,
             TypeKind::List(element) => self.has_equality_in(*element, pending),
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
                 if pending.contains(&ty) {
@@ -239,6 +246,33 @@ impl Types {
                     .components(ty)
                     .into_iter()
                     .all(|component| self.has_equality_in(component, pending));
+                pending.pop();
+                result
+            }
+        }
+    }
+
+    /// Whether `<`, `>`, `<=` and `>=` apply to `ty`: built-in scalars, and
+    /// tuples, structs and enums of them, compared field by field.
+    pub(crate) fn has_order(&self, ty: Type) -> bool {
+        self.has_order_in(ty, &mut Vec::new())
+    }
+
+    fn has_order_in(&self, ty: Type, pending: &mut Vec<Type>) -> bool {
+        match self.kind(ty) {
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
+                true
+            }
+            TypeKind::Never | TypeKind::List(_) | TypeKind::Map(..) | TypeKind::Range => false,
+            TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
+                if pending.contains(&ty) {
+                    return true;
+                }
+                pending.push(ty);
+                let result = self
+                    .components(ty)
+                    .into_iter()
+                    .all(|component| self.has_order_in(component, pending));
                 pending.pop();
                 result
             }
@@ -259,7 +293,8 @@ impl Types {
             | TypeKind::Unit
             | TypeKind::Never
             | TypeKind::List(_)
-            | TypeKind::Map(..) => false,
+            | TypeKind::Map(..)
+            | TypeKind::Range => false,
         }
     }
 

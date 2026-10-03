@@ -1,0 +1,30 @@
+// `<`, `>`, `<=` and `>=` compare structs and tuples field by field in
+// declaration order, and enums by variant order first. A `NaN` field makes
+// the values unordered, so every comparison is false.
+struct Version { major: Int, minor: Int, tag: Str }
+
+enum Priority {
+    Low,
+    Medium(Int),
+    High { level: Int },
+}
+
+struct Reading { major: Int, sample: Float }
+
+fn main() {
+    let a = Version { major: 1, minor: 2, tag: "a" }
+    let b = Version { major: 1, minor: 10, tag: "a" }
+    let c = Version { major: 1, minor: 2, tag: "b" }
+    print("${a < b} ${b > a} ${a <= c} ${c >= a} ${a < a} ${a <= a}")
+    print("${(1, "z") < (2, "a")} ${(2, "a") < (2, "b")} ${(true, 1) > (false, 9)}")
+    let low = Priority::Low
+    let mid = Priority::Medium(5)
+    let high = Priority::High { level: 1 }
+    print("${low < mid} ${mid < high} ${Priority::Medium(5) < Priority::Medium(7)} ${high >= mid}")
+    let nan = 0.0 / 0.0
+    let x = Reading { major: 1, sample: nan }
+    let y = Reading { major: 1, sample: 2.0 }
+    print("${x < y} ${x > y} ${x <= y} ${x >= y}")
+    let z = Reading { major: 0, sample: nan }
+    print("${z < y} ${() <= ()} ${() < ()}")
+}

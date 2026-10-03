@@ -261,6 +261,46 @@ fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String
         body.push_str("    return true;\n");
         function(format!("bool vt_eq_T{n}({name} a, {name} b)"), body);
     }
+    if types.has_order(ty) {
+        // Fields in declaration order; an enum compares variants first.
+        let mut body = String::from("    int c = 0;\n");
+        if types.is_enum(ty) {
+            body.push_str("    if (a.tag != b.tag) return a.tag < b.tag ? -1 : 1;\n");
+        }
+        for (variant, fields) in parts.iter().enumerate() {
+            let steps = fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| types.has_storage(**field))
+                .map(|(index, field)| {
+                    let compare = compare_code(
+                        types,
+                        *field,
+                        &field_code(types, ty, variant, index, "a"),
+                        &field_code(types, ty, variant, index, "b"),
+                    );
+                    format!("c = {compare}; if (c != 0) return c;")
+                })
+                .collect::<Vec<_>>();
+            if steps.is_empty() {
+                continue;
+            }
+            if types.is_enum(ty) {
+                writeln!(
+                    body,
+                    "    if (a.tag == {variant}) {{ {} }}",
+                    steps.join(" ")
+                )
+                .unwrap();
+            } else {
+                for step in steps {
+                    writeln!(body, "    {step}").unwrap();
+                }
+            }
+        }
+        body.push_str("    return c;\n");
+        function(format!("int vt_cmp_T{n}({name} a, {name} b)"), body);
+    }
     if types.is_key(ty) {
         let tag = if types.is_enum(ty) {
             "    h = vt_hash_mix(h, (uint64_t)v.tag);\n"
@@ -279,6 +319,22 @@ fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String
             format!("uint64_t vt_hash_T{n}({name} v)"),
             format!("    uint64_t h = 0;\n{tag}{fields}    return h;\n"),
         );
+    }
+}
+
+/// A C expression that compares two values of type `ty` three ways: -1, 0
+/// or 1, or 2 when they are unordered.
+fn compare_code(types: &Types, ty: Type, a: &str, b: &str) -> String {
+    match types.kind(ty) {
+        TypeKind::Int => format!("vt_cmp_int({a}, {b})"),
+        TypeKind::Bool => format!("vt_cmp_int((int64_t){a}, (int64_t){b})"),
+        TypeKind::Float => format!("vt_cmp_float({a}, {b})"),
+        TypeKind::Str => format!("vt_cmp_str({a}, {b})"),
+        TypeKind::Unit => "0".to_owned(),
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
+            format!("vt_cmp_T{}({a}, {b})", ty.index())
+        }
+        _ => unreachable!("the checker orders only these types"),
     }
 }
 
@@ -549,7 +605,7 @@ fn equal_code(types: &Types, ty: Type, a: &str, b: &str) -> String {
         TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => {
             format!("vt_eq_T{}({a}, {b})", ty.index())
         }
-        TypeKind::Map(..) => unreachable!("maps have no =="),
+        TypeKind::Map(..) | TypeKind::Range => unreachable!("maps and ranges have no =="),
         TypeKind::Int | TypeKind::Float | TypeKind::Bool => format!("({a} == {b})"),
     }
 }
@@ -613,6 +669,7 @@ fn c_type(types: &Types, ty: Type) -> String {
         TypeKind::Bool => "bool".to_owned(),
         TypeKind::Str => "vt_str *".to_owned(),
         TypeKind::Unit | TypeKind::Never => "void".to_owned(),
+        TypeKind::Range => "vt_range".to_owned(),
         TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..) => {
             format!("vt_T{}", ty.index())
         }
@@ -626,16 +683,18 @@ fn zero(types: &Types, ty: Type) -> &'static str {
         TypeKind::Float => "0.0",
         TypeKind::Bool => "false",
         TypeKind::Str => "NULL",
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..) => {
-            "{0}"
-        }
+        TypeKind::Tuple(_)
+        | TypeKind::Nominal { .. }
+        | TypeKind::List(_)
+        | TypeKind::Map(..)
+        | TypeKind::Range => "{0}",
         TypeKind::Unit | TypeKind::Never => unreachable!("unit values have no storage"),
     }
 }
 
 /// An expression for the zero value of `ty`, assignable to an existing place.
 fn zero_value(types: &Types, ty: Type) -> String {
-    if is_aggregate(types, ty) {
+    if is_aggregate(types, ty) || *types.kind(ty) == TypeKind::Range {
         format!("({}){{0}}", c_type(types, ty))
     } else {
         zero(types, ty).to_owned()
@@ -1318,6 +1377,32 @@ impl FunctionEmitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
+            ForSource::RangeValue(range) => {
+                let ty = range.ty;
+                let value = self.expr(range);
+                if matches!(value, Value::Never) {
+                    return;
+                }
+                let range = self.store(ty, value.code().to_owned(), false);
+                let range = range.code().to_owned();
+                // Counts from `start` to the last value inclusively, so the
+                // loop never steps past the largest `Int`.
+                let (current, last, going) = (self.counter(), self.counter(), self.counter());
+                self.line(&format!("{current} = {range}.start;"));
+                self.line(&format!(
+                    "{going} = {range}.inclusive ? {range}.start <= {range}.end : {range}.start < {range}.end;"
+                ));
+                self.line(&format!(
+                    "{last} = {range}.inclusive || !{going} ? {range}.end : {range}.end - 1;"
+                ));
+                self.line(&format!(
+                    "for (; {going}; {going} = {current} != {last} && ({current} += 1, 1)) {{"
+                ));
+                self.indent += 1;
+                self.loop_body(body, Some((binding, current, Type::INT)), false);
+                self.indent -= 1;
+                self.line("}");
+            }
             ForSource::Taken { container, element } => {
                 let ty = container.ty;
                 let value = self.expr(container);
@@ -1531,6 +1616,21 @@ impl FunctionEmitter<'_> {
                 code: self.temporary(expression.ty),
                 owned: true,
             },
+            ExprKind::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let Some(bounds) = self.operands([start.as_ref(), end.as_ref()]) else {
+                    return Value::Never;
+                };
+                let code = format!(
+                    "(vt_range){{{}, {}, {inclusive}}}",
+                    bounds[0].code(),
+                    bounds[1].code()
+                );
+                self.store(expression.ty, code, false)
+            }
             ExprKind::Index { base, index } => self.index(base, index, expression.ty),
             ExprKind::Builtin {
                 builtin,
@@ -2379,7 +2479,8 @@ impl FunctionEmitter<'_> {
             return Value::Never;
         }
         if !self.types.has_storage(operand_ty) {
-            let code = if operator == Op::Equal {
+            // Two `Unit` values are equal.
+            let code = if matches!(operator, Op::Equal | Op::LessEqual | Op::GreaterEqual) {
                 "true"
             } else {
                 "false"
@@ -2387,7 +2488,22 @@ impl FunctionEmitter<'_> {
             return self.store(ty, code.to_owned(), false);
         }
         let (a, b) = (left.code(), right.code());
+        let ordered = matches!(
+            self.types.kind(operand_ty),
+            TypeKind::Tuple(_) | TypeKind::Nominal { .. }
+        );
         let code = match (operator, operand_ty) {
+            (Op::Less | Op::Greater | Op::LessEqual | Op::GreaterEqual, _) if ordered => {
+                let compare = compare_code(self.types, operand_ty, a, b);
+                match operator {
+                    Op::Less => format!("({compare} == -1)"),
+                    Op::Greater => format!("({compare} == 1)"),
+                    // -1 or 0.
+                    Op::LessEqual => format!("((unsigned)({compare} + 1) <= 1u)"),
+                    // 0 or 1.
+                    _ => format!("((unsigned)({compare}) <= 1u)"),
+                }
+            }
             (Op::Add, Type::INT) => format!("vt_int_add({a}, {b})"),
             (Op::Subtract, Type::INT) => format!("vt_int_sub({a}, {b})"),
             (Op::Multiply, Type::INT) => format!("vt_int_mul({a}, {b})"),

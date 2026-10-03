@@ -270,6 +270,34 @@ static void vt_check_index(int64_t index, int64_t len) {
     }
 }
 
+/* A `Range<Int>` value: `start..end`, or `start..=end` when `inclusive`. */
+typedef struct vt_range {
+    int64_t start;
+    int64_t end;
+    bool inclusive;
+} vt_range;
+
+/* Three-way comparisons for `<`, `>`, `<=` and `>=` on structs, enums and
+ * tuples: -1, 0 or 1, or 2 when the operands are unordered (a NaN). */
+static int vt_cmp_int(int64_t left, int64_t right) {
+    return (left > right) - (left < right);
+}
+
+static int vt_cmp_float(double left, double right) {
+    if (left < right) {
+        return -1;
+    }
+    if (left > right) {
+        return 1;
+    }
+    return left == right ? 0 : 2;
+}
+
+static int vt_cmp_str(const vt_str *left, const vt_str *right) {
+    int result = vt_str_compare(left, right);
+    return (result > 0) - (result < 0);
+}
+
 /* Hashes for map keys. */
 static uint64_t vt_hash_mix(uint64_t hash, uint64_t value) {
     return hash ^ (value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2));

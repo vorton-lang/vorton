@@ -1,0 +1,47 @@
+// `start..end` and `start..=end` are `Range<Int>` values: they can be stored,
+// passed and returned, and a `for` loop counts through them.
+struct Window { span: Range<Int>, label: Str }
+
+fn evens(limit: Int) -> Range<Int> {
+    0..limit
+}
+
+fn total(r: Range<Int>) -> Int {
+    let mut sum = 0
+    for i in r {
+        sum += i
+    }
+    sum
+}
+
+fn main() {
+    let r = 0..=3
+    let mut total_inclusive = 0
+    for i in r {
+        total_inclusive += i
+    }
+    print(total_inclusive)
+    print(total(r))
+    print(total(evens(5)))
+    print(total(5..5))
+    print(total(5..=5))
+    print(total(3..1))
+    let w = Window { span: 10..13, label: "w" }
+    print("${w.label} ${total(w.span)}")
+    let ends = [1..3, 4..=6]
+    for e in &ends {
+        print(total(e))
+    }
+    let mut last = 0
+    for i in 9223372036854775806..=9223372036854775807 {
+        last = i
+    }
+    print(last)
+    let top = 9223372036854775806..=9223372036854775807
+    let mut steps = 0
+    for i in top {
+        steps += 1
+        last = i
+    }
+    print("${steps} ${last}")
+}
