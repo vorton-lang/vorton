@@ -281,6 +281,7 @@ fn chase(level: &mut Region, e: Handle<Enemy>) {
 | `clear(&mut self)` | 释放全部元素 |
 | `len(&self) -> Int`、`is_empty(&self) -> Bool` | 长度 |
 | `contains(&self, value: T) -> Bool` | 只对能用 `==` 比较的值元素提供 |
+| `get(&self, index: Int) -> Option<T>` | 只对值元素提供，返回拷贝；越界得到 `None` |
 
 | `Map<K, V>` | 说明 |
 |---|---|

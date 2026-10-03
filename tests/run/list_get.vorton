@@ -1,0 +1,17 @@
+// `List::get` returns a copy of a value element, or `None` out of range.
+fn show(o: Option<Str>) -> Str {
+    match o {
+        Option::Some(s) => s
+        Option::None => "none"
+    }
+}
+
+fn main() {
+    let words = ["a", "b"]
+    print(show(words.get(0)))
+    print(show(words.get(1)))
+    print(show(words.get(2)))
+    print(show(words.get(-1)))
+    let empty: List<Str> = []
+    print(show(empty.get(0)))
+}

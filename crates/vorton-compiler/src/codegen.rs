@@ -1915,7 +1915,28 @@ impl FunctionEmitter<'_> {
                     Value::Unit
                 }
             }
-            Builtin::Get | Builtin::ContainsKey | Builtin::Keys => {
+            Builtin::Get => {
+                let element = element.expect("get is a list method here");
+                let (some, none) = option_variants(self.types, ty);
+                let index = self.store(Type::INT, values[0].0.code().to_owned(), false);
+                let index = index.code().to_owned();
+                let result = self.temporary(ty);
+                self.line(&format!("if ({index} >= 0 && {index} < {code}.len) {{"));
+                self.line(&format!("    {result}.tag = {some};"));
+                if self.types.has_storage(element) {
+                    self.line(&format!(
+                        "    {} = {};",
+                        field_code(self.types, ty, some, 0, &result),
+                        clone_code(self.types, element, &format!("{code}.items[{index}]"))
+                    ));
+                }
+                self.line(&format!("}} else {{ {result}.tag = {none}; }}"));
+                Value::Code {
+                    code: result,
+                    owned: true,
+                }
+            }
+            Builtin::ContainsKey | Builtin::Keys => {
                 unreachable!("only maps have these methods")
             }
         };

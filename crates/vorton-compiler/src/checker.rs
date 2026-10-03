@@ -206,7 +206,8 @@ pub(crate) enum Builtin {
     Clear,
     /// `List::contains(&self, value) -> Bool`.
     Contains,
-    /// `Map::get(&self, key) -> Option<V>` for a value `V`.
+    /// `List::get(&self, index) -> Option<T>` or
+    /// `Map::get(&self, key) -> Option<V>`, for a value element.
     Get,
     /// `Map::contains_key(&self, key) -> Bool`.
     ContainsKey,
@@ -2800,6 +2801,12 @@ impl BodyChecker<'_> {
                     "contains" if !self.types.is_entity(element) && self.has_equality(element) => {
                         (Builtin::Contains, vec![(element, false)], Type::BOOL, false)
                     }
+                    "get" if !self.types.is_entity(element) => (
+                        Builtin::Get,
+                        vec![(Type::INT, false)],
+                        self.option_type(span, element)?,
+                        false,
+                    ),
                     _ => return Err(unknown(self)),
                 }
             } else if let TypeKind::Map(key, value) = *self.types.kind(ty) {
