@@ -1,0 +1,52 @@
+// `let t = &place` and `let t = &mut place` name the place itself. The borrow
+// lasts until the last statement that mentions `t`; after that the place can
+// be changed again.
+struct Player { name: Str, hp: Int, items: List<Str> }
+
+struct World { player: Player, turn: Int }
+
+fn grow(p: &mut Player) {
+    let items = &mut p.items
+    items.push("gem")
+    p.hp += items.len()
+}
+
+fn main() {
+    let mut world = World { player: Player { name: "ann", hp: 10, items: [] }, turn: 0 }
+    let p = &mut world.player
+    p.hp -= 3
+    p.items.push("sword")
+    p = Player { name: "bob", hp: p.hp * 2, items: ["shield", p.name] }
+    world.player.hp += 1
+    grow(&mut world.player)
+    let player = &world.player
+    print("${player.name} ${player.hp} ${player.items.len()} ${player.items[1]}")
+
+    let hp = &world.player.hp
+    let copy = hp
+    print(hp + copy)
+    world.player.hp = 0
+    print(world.player.hp)
+
+    let mut pair = ([1, 2], [3])
+    let (a, b) = &mut pair
+    a.push(b.len())
+    b.clear()
+    print("${pair.0.len()} ${pair.1.len()}")
+
+    let mut xs = [1, 2, 3]
+    let t = &mut xs
+    let u = &mut t
+    u.push(4)
+    xs.push(5)
+    print(xs.len())
+
+    let mut total = 0
+    let mut counts = [0, 0, 0]
+    for i in 0..3 {
+        let c = &mut counts[i]
+        c += i * 10
+        total += c
+    }
+    print("${total} ${counts[2]}")
+}

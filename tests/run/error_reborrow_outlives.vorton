@@ -1,0 +1,7 @@
+fn main() {
+    let mut xs = [1]
+    let t = &mut xs
+    let u = &mut t
+    xs.push(2)
+    u.push(3)
+}

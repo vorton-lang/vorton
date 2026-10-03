@@ -253,9 +253,9 @@ pub(crate) enum ExprKind {
         receiver: Box<Receiver>,
         arguments: Vec<Expr>,
     },
-    /// `&x` or `&mut x` as a call argument or `match` subject: a pointer to
-    /// a place, or to a temporary that lives until the end of the enclosing
-    /// statement.
+    /// `&x` or `&mut x` as a call argument, `match` subject or `let` value: a
+    /// pointer to a place, or to a temporary that lives until the end of the
+    /// enclosing statement.
     Borrow(Box<BorrowTarget>),
 }
 
@@ -493,6 +493,8 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             result: signature.result,
             moved: BTreeSet::new(),
             frozen: Vec::new(),
+            held: Vec::new(),
+            depth: 0,
         };
         let mut parameters = Vec::new();
         for (parameter, (ty, borrow)) in function.parameters.iter().zip(&signature.parameters) {
@@ -800,12 +802,24 @@ type PlaceAccess = (Place, Type, Vec<Option<usize>>);
 type ArmPattern = (Pattern, BTreeMap<EntityId, usize>);
 
 /// A place that a running loop reads, so the loop body may not change it.
+#[derive(Clone)]
 struct Frozen {
     local: usize,
     /// Field indices from the local; `None` stands for any list element.
     path: Vec<Option<usize>>,
     /// Whether the borrow is `&mut`, which excludes even shared access.
     exclusive: bool,
+}
+
+/// The borrow that `let` bindings hold. It ends after the last statement of
+/// their block that mentions one of them.
+struct HeldBorrow {
+    locals: Vec<usize>,
+    frozen: Vec<Frozen>,
+    /// The depth of the block, and the index of that last statement; the
+    /// tail counts as the index after the last statement.
+    depth: usize,
+    until: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -836,6 +850,9 @@ struct BodyChecker<'a> {
     /// Locals whose entity value may have been moved on some path to here.
     moved: BTreeSet<usize>,
     frozen: Vec<Frozen>,
+    held: Vec<HeldBorrow>,
+    /// How many blocks enclose the statement being checked.
+    depth: usize,
 }
 
 impl BodyChecker<'_> {
@@ -1025,9 +1042,9 @@ impl BodyChecker<'_> {
     }
 
     /// Rejects an access to `local` along `path` that conflicts with a
-    /// running borrow of an overlapping place: any change conflicts with a
-    /// borrow, and a shared access conflicts with an exclusive one. Reading a
-    /// value never conflicts.
+    /// running or held borrow of an overlapping place: any change conflicts
+    /// with a borrow, and a shared access conflicts with an exclusive one.
+    /// Reading a value never conflicts.
     fn check_access(
         &self,
         local: usize,
@@ -1055,7 +1072,8 @@ impl BodyChecker<'_> {
                     .zip(path)
                     .all(|(left, right)| left.is_none() || right.is_none() || left == right)
         };
-        if frozen.iter().any(conflicts) {
+        let held = self.held.iter().flat_map(|held| &held.frozen);
+        if frozen.iter().chain(held).any(conflicts) {
             let what = if access == Access::Change {
                 "change"
             } else {
@@ -1131,10 +1149,14 @@ impl BodyChecker<'_> {
         let scope = self.local_ids.clone();
         let mut statements = Vec::new();
         let mut diverges = false;
-        for statement in &block.statements {
-            let (statement, statement_diverges) = self.check_statement(statement)?;
+        self.depth += 1;
+        for index in 0..block.statements.len() {
+            let (statement, statement_diverges) = self.check_statement(block, index)?;
             diverges |= statement_diverges;
             statements.push(statement);
+            let depth = self.depth;
+            self.held
+                .retain(|held| held.depth != depth || held.until > index);
         }
         let (tail, ty) = match &block.tail {
             Some(tail) => {
@@ -1156,6 +1178,9 @@ impl BodyChecker<'_> {
             let span = block.tail.as_ref().map_or(block.span, |tail| tail.span);
             self.require(span, expected, ty)?;
         }
+        let depth = self.depth;
+        self.held.retain(|held| held.depth != depth);
+        self.depth -= 1;
         self.local_ids = scope;
         Ok(Block {
             statements,
@@ -1164,62 +1189,17 @@ impl BodyChecker<'_> {
         })
     }
 
-    /// Returns the checked statement and whether control cannot continue after it.
+    /// Checks statement `index` of `block`. Returns the checked statement and
+    /// whether control cannot continue after it.
     fn check_statement(
         &mut self,
-        statement: &ResolvedStatement,
+        block: &ResolvedBlock,
+        index: usize,
     ) -> Result<(Statement, bool), CheckDiagnostic> {
+        let statement = &block.statements[index];
         let span = statement.span;
         match &statement.kind {
-            ResolvedStatementKind::Let {
-                bindings,
-                pattern,
-                mutable,
-                annotation_borrow,
-                annotation,
-                value,
-            } => {
-                if annotation_borrow.is_some() {
-                    return Err(self.unsupported(span, "borrowed bindings"));
-                }
-                if let Some(pattern) = pattern {
-                    let value_span = value.span;
-                    let value = self.check_expr(value, None)?;
-                    if value.ty == Type::NEVER {
-                        return Ok((Statement::Expr(value), true));
-                    }
-                    let pattern =
-                        self.check_pattern(pattern, value.ty, None, &mut BTreeMap::new())?;
-                    if let Some(missing) = exhaustive::missing(self.types, &[&pattern], value.ty) {
-                        return Err(self.error(
-                            CheckDiagnosticKind::NonExhaustive,
-                            span,
-                            format!("this destructuring does not cover `{missing}`"),
-                        ));
-                    }
-                    let value = if self.binds_entity(&pattern) {
-                        self.consume(value, value_span)?
-                    } else {
-                        value
-                    };
-                    return Ok((Statement::LetPattern { pattern, value }, false));
-                }
-                let [binding] = bindings.as_slice() else {
-                    unreachable!("a let without a pattern binds one name")
-                };
-                let expected = match annotation {
-                    Some(annotation) => Some(self.resolve_type(annotation, &BTreeMap::new())?),
-                    None => None,
-                };
-                let value = self.check_consumed(value, expected)?;
-                if let Some(expected) = expected {
-                    self.require(span, expected, value.ty)?;
-                }
-                let ty = expected.unwrap_or(value.ty);
-                let diverges = value.ty == Type::NEVER;
-                let local = self.declare(&binding.identity, ty, mutable.is_some());
-                Ok((Statement::Let { local, value }, diverges))
-            }
+            ResolvedStatementKind::Let { .. } => self.check_let(block, index),
             ResolvedStatementKind::Assignment {
                 target,
                 operator: (operator_span, operator),
@@ -1324,6 +1304,179 @@ impl BodyChecker<'_> {
                 body,
             } => self.check_for(span, bindings, iterable, body),
         }
+    }
+
+    /// Checks the `let` statement `index` of `block`. A value written `&place`
+    /// or `&mut place` makes the bindings point into the place, which stays
+    /// borrowed until the last statement of the block that mentions one of
+    /// them.
+    fn check_let(
+        &mut self,
+        block: &ResolvedBlock,
+        index: usize,
+    ) -> Result<(Statement, bool), CheckDiagnostic> {
+        let statement = &block.statements[index];
+        let span = statement.span;
+        let ResolvedStatementKind::Let {
+            bindings,
+            pattern,
+            mutable,
+            annotation_borrow,
+            annotation,
+            value,
+        } = &statement.kind
+        else {
+            unreachable!("only `let` statements are checked here")
+        };
+        let expected = match annotation {
+            Some(annotation) => Some(self.resolve_type(annotation, &BTreeMap::new())?),
+            None => None,
+        };
+        if let ResolvedExprKind::Borrow {
+            kind: (_, kind),
+            operand,
+        } = &value.kind
+        {
+            let kind = *kind;
+            if let Some(mutable) = mutable {
+                return Err(self.error(
+                    CheckDiagnosticKind::NotAssignable,
+                    *mutable,
+                    "a borrowed binding cannot be `mut`; it always names the place it borrows"
+                        .to_owned(),
+                ));
+            }
+            if let Some((annotation_span, written)) = annotation_borrow
+                && *written != kind
+            {
+                return Err(self.error(
+                    CheckDiagnosticKind::TypeMismatch,
+                    *annotation_span,
+                    "the annotation and the value borrow in different ways".to_owned(),
+                ));
+            }
+            let Some((place, ty, path)) = self.expr_place(operand)? else {
+                return Err(self.unsupported(operand.span, "borrowed bindings of temporaries"));
+            };
+            if let Some(expected) = expected {
+                self.require(operand.span, expected, ty)?;
+            }
+            self.check_borrow(&place, &path, kind, operand.span)?;
+            let frozen = self.held_frozen(place.local, path, kind);
+            let target = Expr {
+                ty,
+                kind: ExprKind::Borrow(Box::new(BorrowTarget::Place(place))),
+            };
+            let (statement, mut locals) = match pattern {
+                Some(pattern) => {
+                    let pattern =
+                        self.check_pattern(pattern, ty, Some(kind), &mut BTreeMap::new())?;
+                    self.require_exhaustive(span, &pattern, ty)?;
+                    let locals = pattern.bindings();
+                    (
+                        Statement::LetPattern {
+                            pattern,
+                            value: target,
+                        },
+                        locals,
+                    )
+                }
+                None => {
+                    let [binding] = bindings.as_slice() else {
+                        unreachable!("a let without a pattern binds one name")
+                    };
+                    let local = self.declare_borrow(&binding.identity, ty, kind);
+                    (
+                        Statement::Let {
+                            local,
+                            value: target,
+                        },
+                        vec![local],
+                    )
+                }
+            };
+            locals.retain(|&local| self.locals[local].borrow.is_some());
+            if !locals.is_empty() {
+                let names = bindings
+                    .iter()
+                    .map(|binding| binding.identity.clone())
+                    .collect::<Vec<_>>();
+                self.held.push(HeldBorrow {
+                    locals,
+                    frozen,
+                    depth: self.depth,
+                    until: last_mention(block, index, &names),
+                });
+            }
+            return Ok((statement, false));
+        }
+        if let Some((annotation_span, _)) = annotation_borrow {
+            return Err(self.error(
+                CheckDiagnosticKind::TypeMismatch,
+                *annotation_span,
+                "this binding borrows its value; write `&` or `&mut` before the value".to_owned(),
+            ));
+        }
+        if let Some(pattern) = pattern {
+            let value_span = value.span;
+            let value = self.check_expr(value, None)?;
+            if value.ty == Type::NEVER {
+                return Ok((Statement::Expr(value), true));
+            }
+            let pattern = self.check_pattern(pattern, value.ty, None, &mut BTreeMap::new())?;
+            self.require_exhaustive(span, &pattern, value.ty)?;
+            let value = if self.binds_entity(&pattern) {
+                self.consume(value, value_span)?
+            } else {
+                value
+            };
+            return Ok((Statement::LetPattern { pattern, value }, false));
+        }
+        let [binding] = bindings.as_slice() else {
+            unreachable!("a let without a pattern binds one name")
+        };
+        let value = self.check_consumed(value, expected)?;
+        if let Some(expected) = expected {
+            self.require(span, expected, value.ty)?;
+        }
+        let ty = expected.unwrap_or(value.ty);
+        let diverges = value.ty == Type::NEVER;
+        let local = self.declare(&binding.identity, ty, mutable.is_some());
+        Ok((Statement::Let { local, value }, diverges))
+    }
+
+    fn require_exhaustive(
+        &self,
+        span: Span,
+        pattern: &Pattern,
+        ty: Type,
+    ) -> Result<(), CheckDiagnostic> {
+        match exhaustive::missing(self.types, &[pattern], ty) {
+            Some(missing) => Err(self.error(
+                CheckDiagnosticKind::NonExhaustive,
+                span,
+                format!("this destructuring does not cover `{missing}`"),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// What a new `let` borrow of `local` along `path` holds: that place, and
+    /// what the held borrow that `local` belongs to holds.
+    fn held_frozen(&self, local: usize, path: Vec<Option<usize>>, kind: BorrowKind) -> Vec<Frozen> {
+        let exclusive = kind == BorrowKind::Mutable;
+        let mut frozen = vec![Frozen {
+            local,
+            path,
+            exclusive,
+        }];
+        for held in self.held.iter().filter(|held| held.locals.contains(&local)) {
+            frozen.extend(held.frozen.iter().map(|inner| Frozen {
+                exclusive: inner.exclusive && exclusive,
+                ..inner.clone()
+            }));
+        }
+        frozen
     }
 
     fn check_for(
@@ -3189,6 +3342,171 @@ struct ArgumentBorrow {
     path: Vec<Option<usize>>,
     kind: BorrowKind,
     keys: Vec<Option<String>>,
+}
+
+/// The index of the last statement of `block` after `index` that mentions
+/// one of `names`, `index` if none does, and the number of statements if the
+/// tail does.
+fn last_mention(block: &ResolvedBlock, index: usize, names: &[EntityId]) -> usize {
+    if block
+        .tail
+        .as_deref()
+        .is_some_and(|tail| expr_mentions(tail, names))
+    {
+        return block.statements.len();
+    }
+    block.statements[index + 1..]
+        .iter()
+        .rposition(|statement| statement_mentions(statement, names))
+        .map_or(index, |position| index + 1 + position)
+}
+
+fn block_mentions(block: &ResolvedBlock, names: &[EntityId]) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|statement| statement_mentions(statement, names))
+        || block
+            .tail
+            .as_deref()
+            .is_some_and(|tail| expr_mentions(tail, names))
+}
+
+fn statement_mentions(statement: &ResolvedStatement, names: &[EntityId]) -> bool {
+    match &statement.kind {
+        ResolvedStatementKind::Let { value, .. } | ResolvedStatementKind::Expression(value) => {
+            expr_mentions(value, names)
+        }
+        ResolvedStatementKind::Return(value) => value
+            .as_ref()
+            .is_some_and(|value| expr_mentions(value, names)),
+        ResolvedStatementKind::Break | ResolvedStatementKind::Continue => false,
+        ResolvedStatementKind::Assignment { target, value, .. } => {
+            reference_mentions(&target.root, names)
+                || target.projections.iter().any(|projection| {
+                    matches!(projection, ResolvedPlaceProjection::Index(index)
+                        if expr_mentions(index, names))
+                })
+                || expr_mentions(value, names)
+        }
+        ResolvedStatementKind::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_mentions(value, names)
+                || block_mentions(then_branch, names)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|block| block_mentions(block, names))
+        }
+        ResolvedStatementKind::While { condition, body } => {
+            expr_mentions(condition, names) || block_mentions(body, names)
+        }
+        ResolvedStatementKind::For { iterable, body, .. } => {
+            expr_mentions(iterable, names) || block_mentions(body, names)
+        }
+        ResolvedStatementKind::Loop(body) => block_mentions(body, names),
+    }
+}
+
+fn expr_mentions(expression: &ResolvedExpr, names: &[EntityId]) -> bool {
+    let any = |expressions: &[ResolvedExpr]| {
+        expressions
+            .iter()
+            .any(|expression| expr_mentions(expression, names))
+    };
+    let arms = |arms: &[ResolvedMatchArm]| {
+        arms.iter().any(|arm| {
+            arm.guard
+                .as_ref()
+                .is_some_and(|guard| expr_mentions(guard, names))
+                || expr_mentions(&arm.body, names)
+        })
+    };
+    match &expression.kind {
+        ResolvedExprKind::Integer(_)
+        | ResolvedExprKind::Float(_)
+        | ResolvedExprKind::String(_)
+        | ResolvedExprKind::RawString { .. }
+        | ResolvedExprKind::Boolean(_)
+        | ResolvedExprKind::Unit => false,
+        ResolvedExprKind::InterpolatedString(parts) => parts.iter().any(|part| {
+            matches!(part, ResolvedInterpolationPart::Expression(part)
+                if expr_mentions(part, names))
+        }),
+        ResolvedExprKind::Path(reference) => reference_mentions(reference, names),
+        ResolvedExprKind::NamedConstruct { entries, .. } => {
+            entries.iter().any(|entry| match entry {
+                ResolvedConstructEntry::Spread(value) => expr_mentions(value, names),
+                ResolvedConstructEntry::Field {
+                    value, shorthand, ..
+                } => {
+                    value
+                        .as_deref()
+                        .is_some_and(|value| expr_mentions(value, names))
+                        || shorthand
+                            .as_deref()
+                            .is_some_and(|reference| reference_mentions(reference, names))
+                }
+            })
+        }
+        ResolvedExprKind::List(elements) | ResolvedExprKind::Tuple(elements) => any(elements),
+        ResolvedExprKind::Parenthesized(inner)
+        | ResolvedExprKind::Unary { operand: inner, .. }
+        | ResolvedExprKind::Borrow { operand: inner, .. }
+        | ResolvedExprKind::Field {
+            receiver: inner, ..
+        }
+        | ResolvedExprKind::TupleField {
+            receiver: inner, ..
+        } => expr_mentions(inner, names),
+        ResolvedExprKind::Block(block) | ResolvedExprKind::Unsafe(block) => {
+            block_mentions(block, names)
+        }
+        ResolvedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            expr_mentions(condition, names)
+                || block_mentions(then_branch, names)
+                || else_branch
+                    .as_deref()
+                    .is_some_and(|branch| expr_mentions(branch, names))
+        }
+        ResolvedExprKind::Match {
+            scrutinee: subject,
+            arms: cases,
+        }
+        | ResolvedExprKind::Catch {
+            expression: subject,
+            arms: cases,
+        } => expr_mentions(subject, names) || arms(cases),
+        // The checker rejects these; counting them as mentions is safe.
+        ResolvedExprKind::Handle { .. } | ResolvedExprKind::Closure(_) => true,
+        ResolvedExprKind::Binary { left, right, .. }
+        | ResolvedExprKind::Index {
+            receiver: left,
+            index: right,
+        } => expr_mentions(left, names) || expr_mentions(right, names),
+        ResolvedExprKind::Call { callee, arguments } => {
+            expr_mentions(callee, names) || any(arguments)
+        }
+        ResolvedExprKind::MethodCall {
+            receiver,
+            arguments,
+            ..
+        } => expr_mentions(receiver, names) || any(arguments),
+    }
+}
+
+fn reference_mentions(reference: &ResolvedReference, names: &[EntityId]) -> bool {
+    match reference {
+        ResolvedReference::Exact { target, .. } => names.contains(target),
+        ResolvedReference::Selection { base, .. } => names.contains(base),
+    }
 }
 
 /// Whether every type parameter that `ty` mentions is bound in `substitution`.

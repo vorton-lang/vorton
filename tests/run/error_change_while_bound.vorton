@@ -1,0 +1,6 @@
+fn main() {
+    let mut xs = [1, 2]
+    let first = &xs[0]
+    xs.push(3)
+    print(first)
+}

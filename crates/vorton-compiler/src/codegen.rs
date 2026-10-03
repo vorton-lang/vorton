@@ -835,6 +835,22 @@ impl FunctionEmitter<'_> {
     /// Emits `statement` and returns whether control cannot continue after it.
     fn statement(&mut self, statement: &Statement) -> bool {
         match statement {
+            Statement::Let { local, value } if self.function.locals[*local].borrow.is_some() => {
+                let ExprKind::Borrow(target) = &value.kind else {
+                    unreachable!("a borrowed binding is initialized by a borrow")
+                };
+                let BorrowTarget::Place(place) = target.as_ref() else {
+                    unreachable!("the checker binds borrows of places only")
+                };
+                let Some((code, ty, _)) = self.place(place) else {
+                    return true;
+                };
+                if self.types.has_storage(ty) {
+                    let name = local_name(*local, &self.function.locals[*local].name);
+                    self.line(&format!("{name} = &{code};"));
+                }
+                false
+            }
             Statement::Let { local, value } => {
                 let ty = self.function.locals[*local].ty;
                 let value = self.expr(value);
@@ -851,13 +867,10 @@ impl FunctionEmitter<'_> {
                 false
             }
             Statement::LetPattern { pattern, value } => {
-                let ty = value.ty;
-                let subject = self.expr(value);
-                if matches!(subject, Value::Never) {
+                let Some(code) = self.subject(value) else {
                     return true;
-                }
-                let code = self.subject(subject, ty);
-                self.bind(pattern, &code, ty);
+                };
+                self.bind(pattern, &code, value.ty);
                 self.close_scope();
                 self.register_bindings(pattern);
                 false
@@ -1121,7 +1134,7 @@ impl FunctionEmitter<'_> {
                 checks,
             } => self.call(*function, arguments, checks, expression.ty),
             ExprKind::Borrow(_) => {
-                unreachable!("borrows appear only as call arguments and `match` subjects")
+                unreachable!("borrows appear only as call arguments, subjects and `let` values")
             }
             ExprKind::Intrinsic {
                 intrinsic,
@@ -1449,50 +1462,45 @@ impl FunctionEmitter<'_> {
         result
     }
 
-    /// Keeps a match subject in a temporary that the tests and bindings read.
-    /// An owned subject is owned by a new scope that [`Self::close_scope`]
-    /// closes.
-    fn subject(&mut self, value: Value, ty: Type) -> Option<String> {
-        self.scopes.push(Vec::new());
-        match value {
-            Value::Code { code, owned } => {
-                let temporary = self.store(ty, code, owned);
-                if owned {
-                    self.own(temporary.code().to_owned(), ty);
+    /// Evaluates the subject of a `match` or destructuring, which the tests
+    /// and bindings read, and opens a scope that [`Self::close_scope`]
+    /// closes. A borrowed place is matched where it is; any other subject is
+    /// kept in a temporary, owned by the new scope if the subject is owned.
+    /// Returns `None` if the subject diverges, and its C code if it has
+    /// storage.
+    fn subject(&mut self, subject: &Expr) -> Option<Option<String>> {
+        let value = match &subject.kind {
+            ExprKind::Borrow(target) => match target.as_ref() {
+                BorrowTarget::Place(place) => {
+                    let (code, _, _) = self.place(place)?;
+                    self.scopes.push(Vec::new());
+                    return Some(self.types.has_storage(subject.ty).then_some(code));
                 }
-                Some(temporary.code().to_owned())
+                BorrowTarget::Value(value) => self.expr(value),
+            },
+            _ => self.expr(subject),
+        };
+        match value {
+            Value::Never => None,
+            Value::Unit => {
+                self.scopes.push(Vec::new());
+                Some(None)
             }
-            Value::Unit | Value::Never => None,
+            Value::Code { code, owned } => {
+                self.scopes.push(Vec::new());
+                let temporary = self.store(subject.ty, code, owned);
+                if owned {
+                    self.own(temporary.code().to_owned(), subject.ty);
+                }
+                Some(Some(temporary.code().to_owned()))
+            }
         }
     }
 
     fn match_expr(&mut self, scrutinee: &Expr, arms: &[Arm], ty: Type) -> Value {
         let subject_ty = scrutinee.ty;
-        let code = match &scrutinee.kind {
-            // A borrowed place is matched where it is.
-            ExprKind::Borrow(target) => match target.as_ref() {
-                BorrowTarget::Place(place) => {
-                    let Some((code, _, _)) = self.place(place) else {
-                        return Value::Never;
-                    };
-                    self.scopes.push(Vec::new());
-                    self.types.has_storage(subject_ty).then_some(code)
-                }
-                BorrowTarget::Value(value) => {
-                    let value = self.expr(value);
-                    if matches!(value, Value::Never) {
-                        return Value::Never;
-                    }
-                    self.subject(value, subject_ty)
-                }
-            },
-            _ => {
-                let value = self.expr(scrutinee);
-                if matches!(value, Value::Never) {
-                    return Value::Never;
-                }
-                self.subject(value, subject_ty)
-            }
+        let Some(code) = self.subject(scrutinee) else {
+            return Value::Never;
         };
         let result = self.types.has_storage(ty).then(|| self.temporary(ty));
         let end = format!("vt_m{}", self.labels);

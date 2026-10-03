@@ -1,0 +1,5 @@
+fn main() {
+    let mut xs = [1]
+    let t: &mut List<Int> = xs
+    t.push(2)
+}
