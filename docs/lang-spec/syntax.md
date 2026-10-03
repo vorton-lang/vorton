@@ -18,8 +18,8 @@ Vorton 用换行结束语句，行尾不写分号。
 `;` 只用于在同一行分隔多项，其后同一行必须还有一项；行尾的 `;` 是语法错误。构造的开括号 `{` 必须与构造头部写在同一行。
 
 ```vorton
-fn update(world: mut World, dt: Float) {
-    for e in mut world.enemies {
+fn update(world: &mut World, dt: Float) {
+    for e in &mut world.enemies {
         e.pos.x += e.vel.x * dt
         e.pos.y += e.vel.y * dt
     }
