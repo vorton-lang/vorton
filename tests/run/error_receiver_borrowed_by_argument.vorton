@@ -1,0 +1,9 @@
+fn clear(xs: &mut List<Int>) -> Int {
+    xs.clear()
+    0
+}
+
+fn main() {
+    let mut xs = [1, 2]
+    xs.push(clear(&mut xs))
+}

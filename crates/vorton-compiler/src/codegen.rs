@@ -729,6 +729,41 @@ impl FunctionEmitter<'_> {
         }
     }
 
+    /// Copies a value that reads a place into a temporary, so that operands
+    /// evaluated after it cannot change what it read. A counted copy is
+    /// retained and owned.
+    fn settle(&mut self, value: Value, ty: Type) -> Value {
+        match value {
+            Value::Code { code, owned: false } if !self.types.is_entity(ty) => {
+                if self.releases(ty) {
+                    self.owned(Value::Code { code, owned: false }, ty)
+                } else {
+                    self.store(ty, code, false)
+                }
+            }
+            value => value,
+        }
+    }
+
+    /// Evaluates `operands` from left to right, settling each one that more
+    /// operands follow. Returns `None` if one diverges.
+    fn operands<'e>(&mut self, operands: impl IntoIterator<Item = &'e Expr>) -> Option<Vec<Value>> {
+        let operands = operands.into_iter().collect::<Vec<_>>();
+        let mut values = Vec::new();
+        for (position, operand) in operands.iter().enumerate() {
+            let value = self.expr(operand);
+            if matches!(value, Value::Never) {
+                return None;
+            }
+            values.push(if position + 1 < operands.len() {
+                self.settle(value, operand.ty)
+            } else {
+                value
+            });
+        }
+        Some(values)
+    }
+
     /// Releases `value` after a borrowing use if it owns what it holds.
     fn release(&mut self, value: &Value, ty: Type) {
         if let Value::Code { code, owned: true } = value
@@ -1215,14 +1250,14 @@ impl FunctionEmitter<'_> {
             }
             None => None,
         };
-        let mut values = Vec::new();
-        for (index, field) in fields {
-            let value = self.expr(field);
-            if matches!(value, Value::Never) {
-                return Value::Never;
-            }
-            values.push((*index, field.ty, value));
-        }
+        let Some(values) = self.operands(fields.iter().map(|(_, field)| *field)) else {
+            return Value::Never;
+        };
+        let values = fields
+            .iter()
+            .zip(values)
+            .map(|((index, field), value)| (*index, field.ty, value))
+            .collect::<Vec<_>>();
         let result = self.temporary(ty);
         if let Some(base) = &base {
             self.line(&format!("{result} = {};", base.code()));
@@ -1313,16 +1348,11 @@ impl FunctionEmitter<'_> {
     }
 
     fn list(&mut self, ty: Type, elements: &[Expr]) -> Value {
-        let mut values = Vec::new();
-        for element in elements {
-            let value = self.expr(element);
-            if matches!(value, Value::Never) {
-                return Value::Never;
-            }
-            values.push((value, element.ty));
-        }
+        let Some(values) = self.operands(elements) else {
+            return Value::Never;
+        };
         let result = self.temporary(ty);
-        for (value, element_ty) in values {
+        for (value, element_ty) in values.into_iter().zip(elements.iter().map(|e| e.ty)) {
             let argument = match value {
                 Value::Unit => String::new(),
                 value => {
@@ -1361,14 +1391,13 @@ impl FunctionEmitter<'_> {
                 (evaluated.code().to_owned(), receiver_ty, Some(evaluated))
             }
         };
-        let mut values = Vec::new();
-        for argument in arguments {
-            let value = self.expr(argument);
-            if matches!(value, Value::Never) {
-                return Value::Never;
-            }
-            values.push((value, argument.ty));
-        }
+        let Some(values) = self.operands(arguments) else {
+            return Value::Never;
+        };
+        let values = values
+            .into_iter()
+            .zip(arguments.iter().map(|argument| argument.ty))
+            .collect::<Vec<_>>();
         let n = receiver_ty.index();
         let element = match self.types.kind(receiver_ty) {
             TypeKind::List(element) => Some(*element),
@@ -1692,7 +1721,7 @@ impl FunctionEmitter<'_> {
         let mut operands = Vec::new();
         let mut releases = Vec::new();
         let mut indices = Vec::new();
-        for argument in arguments {
+        for (position, argument) in arguments.iter().enumerate() {
             let ty = argument.ty;
             let mut place_indices = Vec::new();
             let operand = match &argument.kind {
@@ -1724,6 +1753,11 @@ impl FunctionEmitter<'_> {
                     Value::Never => return Value::Never,
                     Value::Unit => None,
                     value => {
+                        let value = if position + 1 < arguments.len() {
+                            self.settle(value, ty)
+                        } else {
+                            value
+                        };
                         let operand = value.code().to_owned();
                         // The callee owns entity arguments and borrows the others.
                         if !self.types.is_entity(ty) {
@@ -1766,14 +1800,9 @@ impl FunctionEmitter<'_> {
     }
 
     fn intrinsic(&mut self, intrinsic: Intrinsic, arguments: &[Expr]) -> Value {
-        let mut values = Vec::new();
-        for argument in arguments {
-            let value = self.expr(argument);
-            if matches!(value, Value::Never) {
-                return Value::Never;
-            }
-            values.push(value);
-        }
+        let Some(values) = self.operands(arguments) else {
+            return Value::Never;
+        };
         match intrinsic {
             Intrinsic::Print => {
                 let text = self.stringify(&values[0], arguments[0].ty);
@@ -1820,14 +1849,13 @@ impl FunctionEmitter<'_> {
     }
 
     fn interpolate(&mut self, parts: &[Expr]) -> Value {
-        let mut values = Vec::new();
-        for part in parts {
-            let value = self.expr(part);
-            if matches!(value, Value::Never) {
-                return Value::Never;
-            }
-            values.push((value, part.ty));
-        }
+        let Some(values) = self.operands(parts) else {
+            return Value::Never;
+        };
+        let values = values
+            .into_iter()
+            .zip(parts.iter().map(|part| part.ty))
+            .collect::<Vec<_>>();
         let mut texts = Vec::new();
         for (value, ty) in &values {
             texts.push(self.stringify(value, *ty));
@@ -1878,6 +1906,7 @@ impl FunctionEmitter<'_> {
         if matches!(left, Value::Never) {
             return Value::Never;
         }
+        let left = self.settle(left, operand_ty);
         let right = self.expr(right);
         if matches!(right, Value::Never) {
             self.release(&left, operand_ty);

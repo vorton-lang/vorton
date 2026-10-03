@@ -1,0 +1,37 @@
+// Operands are evaluated from left to right: a value read from a place is
+// taken before later operands run, even when they change the place.
+struct Counter { count: Int, name: Str }
+
+fn bump(c: &mut Counter) -> Int {
+    c.count += 10
+    c.name = "${c.name}+"
+    0
+}
+
+fn show(a: Int, b: Int) {
+    print("${a} ${b}")
+}
+
+fn label(a: Str, b: Int) -> Str {
+    "${a}/${b}"
+}
+
+fn set(n: &mut Int, value: Int) -> Int {
+    n = value
+    0
+}
+
+fn main() {
+    let mut c = Counter { count: 1, name: "c" }
+    show(c.count, bump(&mut c))
+    print(label(c.name, bump(&mut c)))
+    print(c.count + bump(&mut c))
+    print("${c.count} ${bump(&mut c)} ${c.count}")
+    let xs = [c.count, bump(&mut c), c.count]
+    print("${xs[0]} ${xs[2]}")
+    let pair = (c.name, bump(&mut c))
+    print(pair.0)
+    let mut n = 1
+    show(n, set(&mut n, 5))
+    print(n)
+}

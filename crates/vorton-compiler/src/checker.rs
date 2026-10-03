@@ -2106,6 +2106,15 @@ impl BodyChecker<'_> {
                 ),
             ));
         }
+        // The receiver is borrowed while the arguments are checked.
+        let frozen_before = self.frozen.len();
+        if let (Receiver::Place(place), Some(path)) = (&receiver_value, path) {
+            self.frozen.push(Frozen {
+                local: place.local,
+                path,
+                exclusive: mutates,
+            });
+        }
         let mut checked = Vec::new();
         for (argument, (parameter, consumed)) in arguments.iter().zip(parameters) {
             let value = if consumed {
@@ -2116,6 +2125,7 @@ impl BodyChecker<'_> {
             self.require(argument.span, parameter, value.ty)?;
             checked.push(value);
         }
+        self.frozen.truncate(frozen_before);
         Ok((
             result,
             ExprKind::Builtin {
