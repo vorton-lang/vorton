@@ -1,0 +1,12 @@
+fn find(x: Int) -> Option<Int> {
+    if x > 0 { Option::Some(x) } else { Option::None }
+}
+
+fn main() {
+    let a = find(42)
+    let result = match a {
+        Option::Some(v) => v
+        Option::None => 0
+    }
+    print(result)
+}

@@ -1,0 +1,17 @@
+fn main() {
+  let x = Option::Some(1)
+  match x {
+    Option::Some(v) => print(v)
+    Option::None => print(0)
+  }
+  let y = Option::Some(2)
+  match y {
+    Option::Some(v) => print(v)
+    Option::None => print(0)
+  }
+  let z = Option::Some(3)
+  match z {
+    Option::Some(v) => print(v)
+    Option::None => print(0)
+  }
+}

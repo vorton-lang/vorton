@@ -1,0 +1,15 @@
+enum EmptyBindingChoice {
+    EmptyShape,
+    PayloadShape(Int, Int),
+}
+
+fn classify(choice: EmptyBindingChoice) -> Int {
+    match choice {
+        EmptyBindingChoice::EmptyShape | EmptyBindingChoice::PayloadShape(_, _) => 1
+    }
+}
+
+fn main() {
+    print(classify(EmptyBindingChoice::EmptyShape))
+    print(classify(EmptyBindingChoice::PayloadShape(2, 3)))
+}

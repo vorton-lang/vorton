@@ -1,0 +1,24 @@
+// Regression: nested match in statement context must use unique labels
+fn main() {
+    let x: Option<Option<Int>> = Option::Some(Option::Some(42))
+    match x {
+        Option::Some(inner) => match inner {
+            Option::Some(v) => print(v)
+            Option::None => print("inner none")
+        }
+        Option::None => print("outer none")
+    }
+
+    // Triple nesting
+    let y: Option<Option<Option<Str>>> = Option::Some(Option::Some(Option::Some("deep")))
+    match y {
+        Option::Some(a) => match a {
+            Option::Some(b) => match b {
+                Option::Some(s) => print(s)
+                Option::None => print("none3")
+            }
+            Option::None => print("none2")
+        }
+        Option::None => print("none1")
+    }
+}

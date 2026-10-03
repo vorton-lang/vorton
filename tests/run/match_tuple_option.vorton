@@ -1,0 +1,25 @@
+fn main() {
+    let a: Option<Int> = Option::None
+    let b: Option<Int> = Option::None
+
+    // nested tuple pattern with bare enum variants
+    let result = match (a, b) {
+        (Option::Some(x), Option::Some(y)) => x + y
+        (Option::Some(x), Option::None) => x
+        (Option::None, Option::Some(y)) => y
+        (Option::None, Option::None) => 0
+    }
+    assert(result == 0, "both none should give 0")
+
+    let c: Option<Int> = Option::Some(3)
+    let d: Option<Int> = Option::Some(4)
+    let result2 = match (c, d) {
+        (Option::Some(x), Option::Some(y)) => x + y
+        (Option::Some(x), Option::None) => x
+        (Option::None, Option::Some(y)) => y
+        (Option::None, Option::None) => 0
+    }
+    assert(result2 == 7, "both some should give 7")
+
+    print("pass: match tuple bare variant")
+}
