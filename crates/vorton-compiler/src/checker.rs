@@ -81,6 +81,9 @@ pub enum CheckDiagnosticKind {
     BorrowOutlives,
     /// Two impls give a type methods of the same name.
     DuplicateMethod,
+    /// A struct, enum or tuple contains itself by value and has no finite
+    /// size.
+    RecursiveType,
 }
 
 /// A checked program ready for code generation.
@@ -752,7 +755,14 @@ fn instantiate(
     // A type that contains itself by value has no finite size. It is
     // rejected as soon as its fields are known, before anything walks them.
     if contains_by_value(types, ty, ty, &mut BTreeSet::new()) {
-        return Err(unsupported(Some(info.origin.clone()), "recursive types"));
+        return Err(CheckDiagnostic {
+            kind: CheckDiagnosticKind::RecursiveType,
+            primary: Some(info.origin.clone()),
+            message: format!(
+                "`{}` contains itself, so it has no finite size; keep the inner values in a `List` or a `Map`",
+                types.name(ty)
+            ),
+        });
     }
     Ok(ty)
 }

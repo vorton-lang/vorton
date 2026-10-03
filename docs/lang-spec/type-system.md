@@ -59,6 +59,17 @@ List 字面量产生 `List<T>`，range 表达式产生 `Range<Int>`。`Ptr<T>` �
 
 字段的 visibility 与编译器所需的布局信息分离。Public struct 的 private 字段可以包含 private 类型；只有 private 类型进入 public 签名、pub 字段或 public enum payload 时才报错。
 
+### 递归类型
+
+struct、enum 与 tuple 不能按值包含自身，无论直接还是经由其他 struct、enum、tuple；这样的类型没有有限的大小，是编译错误。需要递归的数据经由 `List`、`Map` 或 Region 与 `Handle<T>` 保存，它们把内容放在别处：
+
+```vorton
+enum Expr {
+    Num(Int),
+    Add(List<Expr>),           // 可以：元素在 List 里
+}
+```
+
 ## 值与实体
 
 ### 值
