@@ -1,0 +1,6 @@
+fn main() {
+    let mut ages: Map<Str, Int> = Map::new()
+    ages["ann"] = 30
+    print(ages["ann"])
+    print(ages["bob"])
+}

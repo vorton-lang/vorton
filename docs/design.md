@@ -37,9 +37,9 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 
 ### 当前支持范围
 
-类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`List` 及其 `push`、`pop`、`len`、`is_empty`、`insert`、`remove`、`clear`、`contains` 与任意类型的 `clone`、下标读写、`for` 遍历 range 与列表（拿走，或用 `&`／`&mut` 借出）、`match`、`if let` 与解构（含穷尽性检查，可按值或借出）、结构化 `==`、函数、非泛型类型的固有方法与关联函数、`let`/`let mut`、`mut` 按值参数、借出的参数、绑定与返回、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`。其他构造都报告 `Unsupported`。
+类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`List` 与 `Map` 及其[规范列出的方法](lang-spec/type-system.md#容器)、任意类型的 `clone`、下标读写、`for` 遍历 range、列表与 Map（拿走，或用 `&`／`&mut` 借出）、`match`、`if let` 与解构（含穷尽性检查，可按值或借出）、结构化 `==`、函数、非泛型类型的固有方法与关联函数、`let`/`let mut`、`mut` 按值参数、借出的参数、绑定与返回、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`。其他构造都报告 `Unsupported`。
 
-`Str` 是不可变的值，用引用计数实现 O(1) 拷贝。`List` 与含有它的聚合值是实体：
+`Str` 是不可变的值，用引用计数实现 O(1) 拷贝。`Map` 由运行时里一个通用的按插入顺序的哈希表实现：条目按插入顺序存放，删除留下空位，空位多于条目时整体压实；开放寻址的索引按键找到条目。每个具体的 `Map<K, V>` 只生成键的哈希、判等与释放、复制。`List`、`Map` 与含有它们的聚合值是实体：
 
 - **移交检查在类型检查中完成。** 检查器沿每条路径记录哪些局部变量可能已被移走，分支汇合时取并集。移走变量经字段到达的部分时，整个变量记为已移走。之后再使用、从元素或借出中移出、或在循环里移走外层变量让下一轮看到，都是编译错误。
 - **生成代码不需要释放标记。** 移交时把源清零，作用域结束时一律释放，释放清零的值什么也不做。

@@ -270,6 +270,199 @@ static void vt_check_index(int64_t index, int64_t len) {
     }
 }
 
+/* Hashes for map keys. */
+static uint64_t vt_hash_mix(uint64_t hash, uint64_t value) {
+    return hash ^ (value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2));
+}
+
+static uint64_t vt_hash_int(int64_t value) {
+    uint64_t x = (uint64_t)value + 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+static uint64_t vt_hash_str(const vt_str *value) {
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    for (int64_t i = 0; i < value->len; i += 1) {
+        hash = (hash ^ (unsigned char)value->data[i]) * 0x100000001b3ULL;
+    }
+    return hash;
+}
+
+/* How a map stores its entries: the sizes of keys and values, and how keys
+ * hash and compare. */
+typedef struct vt_map_type {
+    size_t key_size;
+    size_t value_size;
+    uint64_t (*hash)(const void *key);
+    bool (*eq)(const void *left, const void *right);
+} vt_map_type;
+
+/* A map that keeps its entries in insertion order. Entry `i` has its key at
+ * `keys + i * key_size` and its value at `values + i * value_size`; a removed
+ * entry stays behind as a gap (`live[i]` is false) until the map is rebuilt.
+ * `slots` finds entries by hash with open addressing: -1 marks an empty slot
+ * and -2 the slot of a removed entry. Every entry, live or removed, holds one
+ * slot, and `slot_cap` is at least twice `cap`, so a search always reaches an
+ * empty slot. A zeroed map is empty. */
+typedef struct vt_map {
+    int64_t len;
+    int64_t used;
+    int64_t cap;
+    char *keys;
+    char *values;
+    bool *live;
+    int64_t *slots;
+    int64_t slot_cap;
+} vt_map;
+
+static int64_t vt_map_find(const vt_map *map, const vt_map_type *type, const void *key) {
+    if (map->len == 0) {
+        return -1;
+    }
+    uint64_t mask = (uint64_t)map->slot_cap - 1;
+    for (uint64_t slot = type->hash(key) & mask;; slot = (slot + 1) & mask) {
+        int64_t entry = map->slots[slot];
+        if (entry == -1) {
+            return -1;
+        }
+        if (entry >= 0 && type->eq(map->keys + (size_t)entry * type->key_size, key)) {
+            return entry;
+        }
+    }
+}
+
+/* Records entry `entry` in the first free slot for its key. */
+static void vt_map_place(vt_map *map, const vt_map_type *type, int64_t entry) {
+    uint64_t mask = (uint64_t)map->slot_cap - 1;
+    uint64_t slot = type->hash(map->keys + (size_t)entry * type->key_size) & mask;
+    while (map->slots[slot] >= 0) {
+        slot = (slot + 1) & mask;
+    }
+    map->slots[slot] = entry;
+}
+
+/* Closes the gaps of removed entries, grows to room for `need` entries, and
+ * rebuilds the slots. */
+static void vt_map_rebuild(vt_map *map, const vt_map_type *type, int64_t need) {
+    int64_t to = 0;
+    for (int64_t from = 0; from < map->used; from += 1) {
+        if (!map->live[from]) {
+            continue;
+        }
+        if (to != from) {
+            memcpy(map->keys + (size_t)to * type->key_size,
+                   map->keys + (size_t)from * type->key_size, type->key_size);
+            memcpy(map->values + (size_t)to * type->value_size,
+                   map->values + (size_t)from * type->value_size, type->value_size);
+            map->live[to] = true;
+        }
+        to += 1;
+    }
+    map->used = to;
+    if (need > map->cap) {
+        int64_t cap = map->cap == 0 ? 4 : map->cap;
+        while (cap < need) {
+            cap *= 2;
+        }
+        map->keys = vt_items_resize(map->keys, cap, type->key_size);
+        map->values = vt_items_resize(map->values, cap, type->value_size);
+        map->live = vt_items_resize(map->live, cap, sizeof(bool));
+        map->cap = cap;
+        int64_t slot_cap = 8;
+        while (slot_cap < 2 * cap) {
+            slot_cap *= 2;
+        }
+        vt_items_free(map->slots);
+        map->slots = vt_items_resize(NULL, slot_cap, sizeof(int64_t));
+        map->slot_cap = slot_cap;
+    }
+    for (int64_t slot = 0; slot < map->slot_cap; slot += 1) {
+        map->slots[slot] = -1;
+    }
+    for (int64_t entry = 0; entry < map->used; entry += 1) {
+        vt_map_place(map, type, entry);
+    }
+}
+
+/* Adds `key` with `value`, both moved into the map. If the key is present,
+ * only its value is replaced: the old value is moved to `old`, `key` stays
+ * with the caller, and the result is true. */
+static bool vt_map_insert(vt_map *map, const vt_map_type *type, const void *key,
+                          const void *value, void *old) {
+    int64_t entry = vt_map_find(map, type, key);
+    if (entry >= 0) {
+        char *place = map->values + (size_t)entry * type->value_size;
+        memcpy(old, place, type->value_size);
+        memcpy(place, value, type->value_size);
+        return true;
+    }
+    if (map->used == map->cap) {
+        int64_t need = map->len + 1;
+        vt_map_rebuild(map, type, need * 2 > map->cap ? need * 2 : need);
+    }
+    entry = map->used;
+    memcpy(map->keys + (size_t)entry * type->key_size, key, type->key_size);
+    memcpy(map->values + (size_t)entry * type->value_size, value, type->value_size);
+    map->live[entry] = true;
+    map->used += 1;
+    map->len += 1;
+    vt_map_place(map, type, entry);
+    return false;
+}
+
+/* Removes `key`. If it was present, its key and value are moved to
+ * `old_key` and `old_value`, and the result is true. */
+static bool vt_map_remove(vt_map *map, const vt_map_type *type, const void *key,
+                          void *old_key, void *old_value) {
+    if (map->len == 0) {
+        return false;
+    }
+    uint64_t mask = (uint64_t)map->slot_cap - 1;
+    for (uint64_t slot = type->hash(key) & mask;; slot = (slot + 1) & mask) {
+        int64_t entry = map->slots[slot];
+        if (entry == -1) {
+            return false;
+        }
+        if (entry >= 0 && type->eq(map->keys + (size_t)entry * type->key_size, key)) {
+            memcpy(old_key, map->keys + (size_t)entry * type->key_size, type->key_size);
+            memcpy(old_value, map->values + (size_t)entry * type->value_size, type->value_size);
+            map->slots[slot] = -2;
+            map->live[entry] = false;
+            map->len -= 1;
+            return true;
+        }
+    }
+}
+
+/* The value of `key`; panics if the key is absent. */
+static void *vt_map_at(const vt_map *map, const vt_map_type *type, const void *key) {
+    int64_t entry = vt_map_find(map, type, key);
+    if (entry < 0) {
+        vt_panic("key not found");
+    }
+    return map->values + (size_t)entry * type->value_size;
+}
+
+/* Empties a map whose keys and values were already released, keeping its
+ * storage. */
+static void vt_map_reset(vt_map *map) {
+    map->len = 0;
+    map->used = 0;
+    for (int64_t slot = 0; slot < map->slot_cap; slot += 1) {
+        map->slots[slot] = -1;
+    }
+}
+
+/* Frees the storage of a map whose keys and values were already released. */
+static void vt_map_free(vt_map *map) {
+    vt_items_free(map->keys);
+    vt_items_free(map->values);
+    vt_items_free(map->live);
+    vt_items_free(map->slots);
+}
+
 static vt_str vt_str_true = {-1, 4, "true"};
 static vt_str vt_str_false = {-1, 5, "false"};
 

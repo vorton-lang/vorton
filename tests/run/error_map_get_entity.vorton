@@ -1,0 +1,5 @@
+fn main() {
+    let mut m: Map<Int, List<Int>> = Map::new()
+    m[1] = [1]
+    print(m.get(1))
+}

@@ -34,6 +34,8 @@ pub(crate) enum TypeKind {
     Tuple(Vec<Type>),
     /// A growable list that owns its elements; an entity.
     List(Type),
+    /// A map from keys to values in insertion order; an entity.
+    Map(Type, Type),
     /// A struct or enum declaration, by its index in [`Types::nominals`],
     /// applied to type arguments.
     Nominal {
@@ -152,6 +154,7 @@ impl Types {
             TypeKind::Never => "Never".to_owned(),
             TypeKind::Tuple(elements) => format!("({})", self.names(elements)),
             TypeKind::List(element) => format!("List<{}>", self.name(*element)),
+            TypeKind::Map(key, value) => format!("Map<{}, {}>", self.name(*key), self.name(*value)),
             TypeKind::Nominal {
                 declaration,
                 arguments,
@@ -183,7 +186,7 @@ impl Types {
     /// `Str` or owns heap storage.
     pub(crate) fn needs_release(&self, ty: Type) -> bool {
         match self.kind(ty) {
-            TypeKind::Str | TypeKind::List(_) => true,
+            TypeKind::Str | TypeKind::List(_) | TypeKind::Map(..) => true,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .components(ty)
                 .into_iter()
@@ -197,7 +200,7 @@ impl Types {
     /// Whether `ty` is an entity: it has identity and is moved, never copied.
     pub(crate) fn is_entity(&self, ty: Type) -> bool {
         match self.kind(ty) {
-            TypeKind::List(_) => true,
+            TypeKind::List(_) | TypeKind::Map(..) => true,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .components(ty)
                 .into_iter()
@@ -211,8 +214,27 @@ impl Types {
         }
     }
 
+    /// Whether `ty` can be a map key: a value compared with `==` that has
+    /// no `Float` in it.
+    pub(crate) fn is_key(&self, ty: Type) -> bool {
+        match self.kind(ty) {
+            TypeKind::Int | TypeKind::Bool | TypeKind::Str => true,
+            // A `Unit` part adds nothing to a key, but `Unit` alone is no key.
+            TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
+                .components(ty)
+                .into_iter()
+                .all(|component| component == Type::UNIT || self.is_key(component)),
+            TypeKind::Float
+            | TypeKind::Unit
+            | TypeKind::Never
+            | TypeKind::List(_)
+            | TypeKind::Map(..) => false,
+        }
+    }
+
     /// The types stored inside `ty` by value: tuple elements, or the fields
-    /// of every variant. List elements live on the heap and are not included.
+    /// of every variant. Container contents live on the heap and are not
+    /// included.
     pub(crate) fn components(&self, ty: Type) -> Vec<Type> {
         match self.kind(ty) {
             TypeKind::Tuple(elements) => elements.clone(),

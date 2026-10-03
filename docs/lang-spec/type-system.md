@@ -255,9 +255,32 @@ fn chase(level: &mut Region, e: Handle<Enemy>) {
 - `xs[i]` 与 `m[k]` 是位置。元素是值时，读取得到拷贝；元素是实体时，要借出（`&xs[i]`）、`clone()` 或用 `remove` 取出。
 - 在可修改的位置上，`xs[i] = v` 替换元素，`m[k] = v` 插入或替换。`xs[i]` 越界、读取 `m[k]` 时键不存在，都会 panic。
 - `xs.clone()` 复制整个容器，要求元素实现 `Clone`。
-- 借出遍历 `for e in &xs` 与 `for e in &mut xs` 在 0.1 中只对 `List`（逐个元素）与 `Map`（逐个值）成立。
+- 借出遍历 `for e in &xs` 与 `for e in &mut xs` 在 0.1 中只对 `List`（逐个元素）与 `Map`（逐个值）成立。按值遍历 `for e in xs` 拿走容器：`List` 逐个产出元素，`Map` 逐个产出 `(键, 值)`。
 
-容器 API 不在本页定义。
+`Map` 按插入顺序保存条目，遍历与 `keys()` 都按这个顺序；替换已有键的值不改变它的位置，删除后再插入的键排在最后。键的类型必须是能用 `==` 比较的值类型：`Int`、`Str`、`Bool`，以及只由它们（和 `Unit`）组成的 tuple、struct 与 enum；`Float` 不能作键。
+
+0.1 的容器方法如下，键与插入的值按值传入：
+
+| `List<T>` | 说明 |
+|---|---|
+| `push(&mut self, value: T)` | 追加到末尾 |
+| `pop(&mut self) -> Option<T>` | 取出最后一个元素 |
+| `insert(&mut self, index: Int, value: T)` | 插入到 `index`，`index` 可以等于长度 |
+| `remove(&mut self, index: Int) -> T` | 取出 `index` 处的元素，后面的元素前移 |
+| `clear(&mut self)` | 释放全部元素 |
+| `len(&self) -> Int`、`is_empty(&self) -> Bool` | 长度 |
+| `contains(&self, value: T) -> Bool` | 只对能用 `==` 比较的值元素提供 |
+
+| `Map<K, V>` | 说明 |
+|---|---|
+| `Map::new() -> Map<K, V>` | 空表；`K`、`V` 由期望类型确定 |
+| `insert(&mut self, key: K, value: V) -> Option<V>` | 插入或替换，返回原来的值 |
+| `remove(&mut self, key: K) -> Option<V>` | 删除并返回值 |
+| `get(&self, key: K) -> Option<V>` | 只对值类型的 `V` 提供，返回拷贝 |
+| `contains_key(&self, key: K) -> Bool` | 键是否存在 |
+| `keys(&self) -> List<K>` | 按插入顺序的全部键 |
+| `clear(&mut self)` | 释放全部条目 |
+| `len(&self) -> Int`、`is_empty(&self) -> Bool` | 条目数 |
 
 ## 代价模型
 

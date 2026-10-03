@@ -1,0 +1,96 @@
+// `Map` keeps its entries in insertion order. `m[k]` is a place: reading an
+// absent key panics, `m[k] = v` inserts or replaces, and `&m[k]` borrows the
+// value. Replacing keeps an entry's position; removing and inserting again
+// moves it to the end.
+struct Point { x: Int, y: Int }
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+fn total(scores: &Map<Str, Int>) -> Int {
+    let mut sum = 0
+    for v in &scores {
+        sum += v
+    }
+    sum
+}
+
+fn bump(n: &mut Int) {
+    n += 100
+}
+
+fn main() {
+    let mut scores: Map<Str, Int> = Map::new()
+    scores["bob"] = 3
+    scores["amy"] = 5
+    scores.insert("cat", 7)
+    print(scores.len())
+    print(scores["amy"])
+    scores["amy"] = 6
+    print(total(&scores))
+    for name in scores.keys() {
+        print("${name}=${scores[name]}")
+    }
+    match scores.insert("bob", 4) {
+        Option::Some(old) => print("old bob ${old}")
+        Option::None => print("new bob")
+    }
+    match scores.remove("amy") {
+        Option::Some(old) => print("removed ${old}")
+        Option::None => print("no amy")
+    }
+    print(scores.contains_key("amy"))
+    scores["amy"] = 1
+    for name in scores.keys() {
+        print(name)
+    }
+    bump(&mut scores["cat"])
+    scores["cat"] += 1
+    match scores.get("cat") {
+        Option::Some(v) => print(v)
+        Option::None => print("none")
+    }
+    for v in &mut scores {
+        v *= 2
+    }
+    print(total(&scores))
+
+    let mut groups: Map<Color, List<Str>> = Map::new()
+    groups[Color::Red] = ["apple"]
+    groups[Color::Green] = []
+    groups[Color::Red].push("cherry")
+    let reds = &mut groups[Color::Red]
+    reds.push("plum")
+    print(groups[Color::Red].len())
+    let copy = groups.clone()
+    groups.clear()
+    print("${groups.len()} ${groups.is_empty()} ${copy.len()}")
+    for (color, names) in copy {
+        match color {
+            Color::Red => print("red ${names.len()}")
+            Color::Green => print("green ${names.len()}")
+            Color::Blue => print("blue")
+        }
+    }
+
+    let mut grid: Map<(Int, Int), Point> = Map::new()
+    for i in 0..3 {
+        grid[(i, i * 2)] = Point { x: i, y: -i }
+    }
+    print(grid[(2, 4)].y)
+    print(grid.contains_key((1, 1)))
+
+    let mut big: Map<Int, Int> = Map::new()
+    for i in 0..1000 {
+        big[i] = i * i
+    }
+    for i in 0..1000 {
+        if i % 3 != 0 {
+            big.remove(i)
+        }
+    }
+    print("${big.len()} ${big[999]}")
+}

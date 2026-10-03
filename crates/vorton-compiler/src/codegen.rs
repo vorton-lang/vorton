@@ -91,6 +91,7 @@ fn define(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
             )
             .unwrap();
         }
+        TypeKind::Map(..) => output.push_str("    vt_map m;\n"),
         _ if types.is_enum(ty) => {
             output.push_str("    int32_t tag;\n");
             let mut union = String::new();
@@ -151,6 +152,10 @@ fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String
     };
     if let TypeKind::List(element) = *types.kind(ty) {
         list_helpers(types, ty, element, &mut function);
+        return;
+    }
+    if let TypeKind::Map(key, value) = *types.kind(ty) {
+        map_helpers(types, ty, key, value, &mut function);
         return;
     }
     let parts = variant_fields(types, ty);
@@ -256,6 +261,131 @@ fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String
         body.push_str("    return true;\n");
         function(format!("bool vt_eq_T{n}({name} a, {name} b)"), body);
     }
+    if types.is_key(ty) {
+        let tag = if types.is_enum(ty) {
+            "    h = vt_hash_mix(h, (uint64_t)v.tag);\n"
+        } else {
+            ""
+        };
+        let fields = per_field(
+            &|field, code| {
+                types
+                    .has_storage(field)
+                    .then(|| format!("h = vt_hash_mix(h, {});", hash_code(types, field, code)))
+            },
+            "v",
+        );
+        function(
+            format!("uint64_t vt_hash_T{n}({name} v)"),
+            format!("    uint64_t h = 0;\n{tag}{fields}    return h;\n"),
+        );
+    }
+}
+
+/// A C expression that hashes the map key `code` of type `ty`.
+fn hash_code(types: &Types, ty: Type, code: &str) -> String {
+    match types.kind(ty) {
+        TypeKind::Int => format!("vt_hash_int({code})"),
+        TypeKind::Bool => format!("vt_hash_int((int64_t){code})"),
+        TypeKind::Str => format!("vt_hash_str({code})"),
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } => format!("vt_hash_T{}({code})", ty.index()),
+        _ => unreachable!("the checker admits only these key types"),
+    }
+}
+
+/// The helpers of a map type: how its keys hash and compare, and release,
+/// clone and clear.
+fn map_helpers(
+    types: &Types,
+    ty: Type,
+    key: Type,
+    value: Type,
+    function: &mut impl FnMut(String, String),
+) {
+    let name = c_type(types, ty);
+    let n = ty.index();
+    let (key_item, value_item) = (item_type(types, key), item_type(types, value));
+    function(
+        format!("uint64_t vt_maphash_T{n}(const void *key)"),
+        format!(
+            "    return {};\n",
+            hash_code(types, key, &format!("*(const {key_item} *)key"))
+        ),
+    );
+    function(
+        format!("bool vt_mapeq_T{n}(const void *left, const void *right)"),
+        format!(
+            "    return {};\n",
+            equal_code(
+                types,
+                key,
+                &format!("*(const {key_item} *)left"),
+                &format!("*(const {key_item} *)right")
+            )
+        ),
+    );
+    function(
+        format!("const vt_map_type *vt_maptype_T{n}(void)"),
+        format!(
+            "    static const vt_map_type type = {{sizeof({key_item}), sizeof({value_item}), vt_maphash_T{n}, vt_mapeq_T{n}}};\n    return &type;\n"
+        ),
+    );
+    let mut release_entry = String::new();
+    if types.needs_release(key) {
+        release_entry.push_str(&count_line(
+            key,
+            "release",
+            &map_key(types, key, "map", "i"),
+        ));
+    }
+    if types.needs_release(value) {
+        release_entry.push_str(&count_line(
+            value,
+            "release",
+            &map_value(types, value, "map", "i"),
+        ));
+    }
+    let release_all = if release_entry.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "    for (int64_t i = 0; i < map->m.used; i += 1) {{\n        if (map->m.live[i]) {{ {release_entry} }}\n    }}\n"
+        )
+    };
+    function(
+        format!("void vt_clear_T{n}({name} *map)"),
+        format!("{release_all}    vt_map_reset(&map->m);\n"),
+    );
+    let map = if release_all.is_empty() {
+        String::new()
+    } else {
+        format!("    {name} *map = &v;\n")
+    };
+    function(
+        format!("void vt_release_T{n}({name} v)"),
+        format!("{map}{release_all}    vt_map_free(&v.m);\n"),
+    );
+    function(
+        format!("{name} vt_clone_T{n}({name} v)"),
+        format!(
+            "    {name} r = {{0}};\n    for (int64_t i = 0; i < v.m.used; i += 1) {{\n        if (!v.m.live[i]) continue;\n        {key_item} key = {};\n        {value_item} value = {};\n        {value_item} old;\n        vt_map_insert(&r.m, vt_maptype_T{n}(), &key, &value, &old);\n    }}\n    return r;\n",
+            clone_code(types, key, &map_key(types, key, "&v", "i")),
+            clone_code(types, value, &map_value(types, value, "&v", "i")),
+        ),
+    );
+}
+
+/// The C lvalue of the key of entry `entry` of the map `*map`.
+fn map_key(types: &Types, key: Type, map: &str, entry: &str) -> String {
+    format!("(({} *)({map})->m.keys)[{entry}]", item_type(types, key))
+}
+
+/// The C lvalue of the value of entry `entry` of the map `*map`.
+fn map_value(types: &Types, value: Type, map: &str, entry: &str) -> String {
+    format!(
+        "(({} *)({map})->m.values)[{entry}]",
+        item_type(types, value)
+    )
 }
 
 fn list_helpers(types: &Types, ty: Type, element: Type, function: &mut impl FnMut(String, String)) {
@@ -375,7 +505,7 @@ fn list_helpers(types: &Types, ty: Type, element: Type, function: &mut impl FnMu
 fn clone_code(types: &Types, ty: Type, code: &str) -> String {
     match types.kind(ty) {
         TypeKind::Str => format!("(vt_str_retain({code}), {code})"),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => {
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..) => {
             format!("vt_clone_T{}({code})", ty.index())
         }
         _ => code.to_owned(),
@@ -407,14 +537,14 @@ fn field_code(types: &Types, ty: Type, variant: usize, index: usize, base: &str)
 fn is_aggregate(types: &Types, ty: Type) -> bool {
     matches!(
         types.kind(ty),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_)
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..)
     )
 }
 
 fn has_equality(types: &Types, ty: Type) -> bool {
     match types.kind(ty) {
         TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => true,
-        TypeKind::Never => false,
+        TypeKind::Never | TypeKind::Map(..) => false,
         TypeKind::List(element) => has_equality(types, *element),
         TypeKind::Tuple(_) | TypeKind::Nominal { .. } => types
             .components(ty)
@@ -431,6 +561,7 @@ fn equal_code(types: &Types, ty: Type, a: &str, b: &str) -> String {
         TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => {
             format!("vt_eq_T{}({a}, {b})", ty.index())
         }
+        TypeKind::Map(..) => unreachable!("maps have no =="),
         TypeKind::Int | TypeKind::Float | TypeKind::Bool => format!("({a} == {b})"),
     }
 }
@@ -494,7 +625,7 @@ fn c_type(types: &Types, ty: Type) -> String {
         TypeKind::Bool => "bool".to_owned(),
         TypeKind::Str => "vt_str *".to_owned(),
         TypeKind::Unit | TypeKind::Never => "void".to_owned(),
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => {
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..) => {
             format!("vt_T{}", ty.index())
         }
     }
@@ -507,7 +638,9 @@ fn zero(types: &Types, ty: Type) -> &'static str {
         TypeKind::Float => "0.0",
         TypeKind::Bool => "false",
         TypeKind::Str => "NULL",
-        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) => "{0}",
+        TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_) | TypeKind::Map(..) => {
+            "{0}"
+        }
         TypeKind::Unit | TypeKind::Never => unreachable!("unit values have no storage"),
     }
 }
@@ -559,6 +692,10 @@ fn escape_c(value: &str) -> String {
     }
     escaped
 }
+
+/// The C lvalue of an evaluated place, its type, and the temporaries that
+/// hold its list indices and map keys, with their types.
+type PlaceCode = (String, Type, Vec<(String, Type)>);
 
 /// A lowered operand. `owned` operands that need releasing belong to the
 /// consumer, which must store or release them.
@@ -850,10 +987,16 @@ impl FunctionEmitter<'_> {
         value
     }
 
-    /// Evaluates the indices of `place` and returns its C lvalue, its type,
-    /// and the temporaries that hold its list indices, in order. Returns
-    /// `None` if an index diverges.
-    fn place(&mut self, place: &Place) -> Option<(String, Type, Vec<String>)> {
+    /// Evaluates the indices and keys of `place` and returns its C lvalue,
+    /// its type, and the temporaries that hold its list indices and map
+    /// keys, in order, with their types. Returns `None` if one diverges.
+    fn place(&mut self, place: &Place) -> Option<PlaceCode> {
+        self.place_prefix(place, place.projections.len())
+    }
+
+    /// Like [`Self::place`], for the place reached by the first `count`
+    /// projections of `place`.
+    fn place_prefix(&mut self, place: &Place, count: usize) -> Option<PlaceCode> {
         if let Some(call) = &place.call {
             let Value::Code { code, .. } = self.expr(call) else {
                 return None;
@@ -864,7 +1007,7 @@ impl FunctionEmitter<'_> {
         let mut code = self.local_code(place.local);
         let mut ty = self.function.locals[place.local].ty;
         let mut indices = Vec::new();
-        for projection in &place.projections {
+        for projection in &place.projections[..count] {
             match projection {
                 Projection::Field(index) => {
                     code = field_code(self.types, ty, 0, *index, &code);
@@ -875,18 +1018,74 @@ impl FunctionEmitter<'_> {
                     if matches!(value, Value::Never) {
                         return None;
                     }
-                    let index = self.store(Type::INT, value.code().to_owned(), false);
-                    self.line(&format!("vt_check_index({}, {code}.len);", index.code()));
-                    code = format!("{code}.items[{}]", index.code());
-                    indices.push(index.code().to_owned());
-                    let TypeKind::List(element) = *self.types.kind(ty) else {
-                        unreachable!("the checker indexes only lists")
-                    };
-                    ty = element;
+                    match *self.types.kind(ty) {
+                        TypeKind::List(element) => {
+                            let index = self.store(Type::INT, value.code().to_owned(), false);
+                            self.line(&format!("vt_check_index({}, {code}.len);", index.code()));
+                            code = format!("{code}.items[{}]", index.code());
+                            indices.push((index.code().to_owned(), Type::INT));
+                            ty = element;
+                        }
+                        TypeKind::Map(key, element) => {
+                            let key_code = self.key_operand(value, key);
+                            code = self.map_at(&code, ty, element, &key_code);
+                            indices.push((key_code, key));
+                            ty = element;
+                        }
+                        _ => unreachable!("the checker indexes only lists and maps"),
+                    }
                 }
             }
         }
         Some((code, ty, indices))
+    }
+
+    /// Moves an owned key or value into a temporary of the map's entry
+    /// storage, whose address the map functions take.
+    fn entry_operand(&mut self, value: Value, ty: Type) -> String {
+        let temporary = self.entry_temporary(ty);
+        if let Value::Code { .. } = value {
+            let value = self.owned(value, ty);
+            self.line(&format!("{temporary} = {};", value.code()));
+        }
+        temporary
+    }
+
+    /// A temporary of the storage type of map keys or values of type `ty`.
+    fn entry_temporary(&mut self, ty: Type) -> String {
+        let name = format!("t{}", self.temporaries);
+        self.temporaries += 1;
+        let initial = if self.types.has_storage(ty) {
+            zero(self.types, ty)
+        } else {
+            "0"
+        };
+        writeln!(
+            self.declarations,
+            "    {} {name} = {initial};",
+            item_type(self.types, ty)
+        )
+        .unwrap();
+        name
+    }
+
+    /// Keeps a map key in a temporary whose address can be taken, alive
+    /// until the innermost scope ends.
+    fn key_operand(&mut self, value: Value, key: Type) -> String {
+        let value = self.defer(value, key);
+        self.store(key, value.code().to_owned(), false)
+            .code()
+            .to_owned()
+    }
+
+    /// The C lvalue of the value of the key in `key_code` in the map `map`
+    /// of type `ty`; the program panics if the key is absent.
+    fn map_at(&mut self, map: &str, ty: Type, element: Type, key_code: &str) -> String {
+        format!(
+            "(*({} *)vt_map_at(&{map}.m, vt_maptype_T{}(), &{key_code}))",
+            item_type(self.types, element),
+            ty.index()
+        )
     }
 
     /// Emits `statement` and returns whether control cannot continue after it.
@@ -976,7 +1175,7 @@ impl FunctionEmitter<'_> {
                 let condition = self.expr(condition);
                 if !matches!(condition, Value::Never) {
                     self.line(&format!("if (!{}) break;", condition.code()));
-                    self.loop_body(body, None);
+                    self.loop_body(body, None, false);
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -985,7 +1184,7 @@ impl FunctionEmitter<'_> {
             Statement::Loop(body) => {
                 self.line("for (;;) {");
                 self.indent += 1;
-                self.loop_body(body, None);
+                self.loop_body(body, None, false);
                 self.indent -= 1;
                 self.line("}");
                 body.ty == Type::NEVER && !loop_breaks(body)
@@ -1002,6 +1201,39 @@ impl FunctionEmitter<'_> {
     }
 
     fn assign(&mut self, place: &Place, operator: AssignmentOperator, value: &Expr) -> bool {
+        if operator == AssignmentOperator::Assign
+            && let Some(Projection::Index(key)) = place.projections.last()
+        {
+            // `map[key] = value` inserts the key or replaces its value.
+            let count = place.projections.len() - 1;
+            let Some((map, map_ty, _)) = self.place_prefix(place, count) else {
+                return true;
+            };
+            if let TypeKind::Map(key_ty, value_ty) = *self.types.kind(map_ty) {
+                let key = self.expr(key);
+                if matches!(key, Value::Never) {
+                    return true;
+                }
+                let key = self.entry_operand(key, key_ty);
+                let value = self.expr(value);
+                if matches!(value, Value::Never) {
+                    return true;
+                }
+                let value = self.entry_operand(value, value_ty);
+                let old = self.entry_temporary(value_ty);
+                let release = [(key.as_str(), key_ty), (old.as_str(), value_ty)]
+                    .iter()
+                    .filter(|(_, ty)| self.releases(*ty))
+                    .map(|(code, ty)| count_line(*ty, "release", code))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.line(&format!(
+                    "if (vt_map_insert(&{map}.m, vt_maptype_T{}(), &{key}, &{value}, &{old})) {{ {release} }}",
+                    map_ty.index()
+                ));
+                return false;
+            }
+        }
         let Some((name, ty, _)) = self.place(place) else {
             return true;
         };
@@ -1047,11 +1279,15 @@ impl FunctionEmitter<'_> {
     }
 
     /// Emits a loop body. `binding` assigns the loop variable at the start of
-    /// each iteration; the variable is owned by the iteration.
-    fn loop_body(&mut self, body: &Block, binding: Option<(&Pattern, String, Type)>) {
+    /// each iteration; the variable is owned by the iteration, and so is the
+    /// element itself when `owned`, after the binding took its parts.
+    fn loop_body(&mut self, body: &Block, binding: Option<(&Pattern, String, Type)>, owned: bool) {
         self.loops.push(self.scopes.len());
         self.scopes.push(Vec::new());
         if let Some((pattern, code, ty)) = binding {
+            if owned {
+                self.own(code.clone(), ty);
+            }
             self.bind(pattern, &Some(code), ty);
             self.register_bindings(pattern);
         }
@@ -1090,55 +1326,102 @@ impl FunctionEmitter<'_> {
                     self.line(&format!("for (; {current} < {end}; {current} += 1) {{"));
                 }
                 self.indent += 1;
-                self.loop_body(body, Some((binding, current, Type::INT)));
+                self.loop_body(body, Some((binding, current, Type::INT)), false);
                 self.indent -= 1;
                 self.line("}");
             }
-            ForSource::List(list) => {
-                let ty = list.ty;
-                let TypeKind::List(element) = *self.types.kind(ty) else {
-                    unreachable!("the checker iterates lists")
-                };
-                let value = self.expr(list);
+            ForSource::Taken { container, element } => {
+                let ty = container.ty;
+                let value = self.expr(container);
                 if matches!(value, Value::Never) {
                     return;
                 }
-                // The loop owns the list. Binding an entity element takes it
-                // and zeroes its slot, so the list later releases only what
-                // the iterations did not take.
+                // The loop owns the container. Binding an entity element
+                // takes it and zeroes its slot, so the container later
+                // releases only what the iterations did not take.
                 self.scopes.push(Vec::new());
-                let list = self.store(ty, value.code().to_owned(), true);
-                let list = list.code().to_owned();
-                self.own(list.clone(), ty);
+                let container = self.store(ty, value.code().to_owned(), true);
+                let container = container.code().to_owned();
+                self.own(container.clone(), ty);
                 let index = self.counter();
-                self.line(&format!(
-                    "for ({index} = 0; {index} < {list}.len; {index} += 1) {{"
-                ));
-                self.indent += 1;
-                self.loop_body(
-                    body,
-                    Some((binding, format!("{list}.items[{index}]"), element)),
-                );
+                match *self.types.kind(ty) {
+                    TypeKind::List(_) => {
+                        self.line(&format!(
+                            "for ({index} = 0; {index} < {container}.len; {index} += 1) {{"
+                        ));
+                        self.indent += 1;
+                        self.loop_body(
+                            body,
+                            Some((binding, format!("{container}.items[{index}]"), *element)),
+                            false,
+                        );
+                    }
+                    TypeKind::Map(key, value) => {
+                        // Each entry moves into a `(key, value)` tuple that
+                        // the iteration owns.
+                        let entry_ty = *element;
+                        let entry = self.temporary(entry_ty);
+                        self.line(&format!(
+                            "for ({index} = 0; {index} < {container}.m.used; {index} += 1) {{"
+                        ));
+                        self.indent += 1;
+                        self.line(&format!("if (!{container}.m.live[{index}]) continue;"));
+                        let source = format!("&{container}");
+                        for (position, (part_ty, part)) in [
+                            (key, map_key(self.types, key, &source, &index)),
+                            (value, map_value(self.types, value, &source, &index)),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            if self.types.has_storage(part_ty) {
+                                let field = field_code(self.types, entry_ty, 0, position, &entry);
+                                self.line(&format!("{field} = {part};"));
+                                if self.releases(part_ty) {
+                                    self.line(&format!(
+                                        "{part} = {};",
+                                        zero_value(self.types, part_ty)
+                                    ));
+                                }
+                            }
+                        }
+                        self.loop_body(body, Some((binding, entry, entry_ty)), true);
+                    }
+                    _ => unreachable!("the checker iterates lists and maps"),
+                }
                 self.indent -= 1;
                 self.line("}");
                 self.close_scope();
             }
             ForSource::Borrowed(place) => {
-                let Some((list, ty, _)) = self.place(place) else {
+                let Some((container, ty, _)) = self.place(place) else {
                     return;
                 };
-                let TypeKind::List(element) = *self.types.kind(ty) else {
-                    unreachable!("the checker iterates lists")
-                };
                 let index = self.counter();
-                self.line(&format!(
-                    "for ({index} = 0; {index} < {list}.len; {index} += 1) {{"
-                ));
-                self.indent += 1;
-                self.loop_body(
-                    body,
-                    Some((binding, format!("{list}.items[{index}]"), element)),
-                );
+                match *self.types.kind(ty) {
+                    TypeKind::List(element) => {
+                        self.line(&format!(
+                            "for ({index} = 0; {index} < {container}.len; {index} += 1) {{"
+                        ));
+                        self.indent += 1;
+                        self.loop_body(
+                            body,
+                            Some((binding, format!("{container}.items[{index}]"), element)),
+                            false,
+                        );
+                    }
+                    // A borrowed map yields its values.
+                    TypeKind::Map(_, value) => {
+                        self.line(&format!(
+                            "for ({index} = 0; {index} < {container}.m.used; {index} += 1) {{"
+                        ));
+                        self.indent += 1;
+                        self.line(&format!("if (!{container}.m.live[{index}]) continue;"));
+                        let part = map_value(self.types, value, &format!("&{container}"), &index);
+                        self.loop_body(body, Some((binding, part, value)), false);
+                    }
+                    _ => unreachable!("the checker iterates lists and maps"),
+                }
                 self.indent -= 1;
                 self.line("}");
             }
@@ -1256,6 +1539,10 @@ impl FunctionEmitter<'_> {
             ExprKind::Field { base, index } => self.field(base, *index, expression.ty),
             ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, expression.ty),
             ExprKind::List(elements) => self.list(expression.ty, elements),
+            ExprKind::EmptyMap => Value::Code {
+                code: self.temporary(expression.ty),
+                owned: true,
+            },
             ExprKind::Index { base, index } => self.index(base, index, expression.ty),
             ExprKind::Builtin {
                 builtin,
@@ -1374,10 +1661,26 @@ impl FunctionEmitter<'_> {
             self.release(&value, base.ty);
             return Value::Never;
         }
-        let list = value.code().to_owned();
-        let position = self.store(Type::INT, position.code().to_owned(), false);
-        self.line(&format!("vt_check_index({}, {list}.len);", position.code()));
-        let part = format!("{list}.items[{}]", position.code());
+        let container = value.code().to_owned();
+        let part = match *self.types.kind(base.ty) {
+            TypeKind::Map(key, _) => {
+                let key = self.key_operand(position, key);
+                let part = self.map_at(&container, base.ty, ty, &key);
+                if !self.types.has_storage(ty) {
+                    // The lookup still panics for an absent key.
+                    self.line(&format!("(void){part};"));
+                }
+                part
+            }
+            _ => {
+                let position = self.store(Type::INT, position.code().to_owned(), false);
+                self.line(&format!(
+                    "vt_check_index({}, {container}.len);",
+                    position.code()
+                ));
+                format!("{container}.items[{}]", position.code())
+            }
+        };
         self.part(value, base.ty, part, ty)
     }
 
@@ -1445,6 +1748,11 @@ impl FunctionEmitter<'_> {
             }
         };
         let result = match builtin {
+            _ if builtin != Builtin::Clone
+                && matches!(self.types.kind(receiver_ty), TypeKind::Map(..)) =>
+            {
+                self.map_builtin(builtin, &code, receiver_ty, &values, ty)
+            }
             Builtin::Push => {
                 let argument = owned_argument(self, 0);
                 self.line(&format!("vt_push_T{n}(&{code}{argument});"));
@@ -1513,6 +1821,9 @@ impl FunctionEmitter<'_> {
                     Value::Unit
                 }
             }
+            Builtin::Get | Builtin::ContainsKey | Builtin::Keys => {
+                unreachable!("only maps have these methods")
+            }
         };
         for (value, value_ty) in &values {
             if !matches!(builtin, Builtin::Push | Builtin::Insert) {
@@ -1523,6 +1834,123 @@ impl FunctionEmitter<'_> {
             self.release(&receiver_value, receiver_ty);
         }
         result
+    }
+
+    /// A built-in method other than `clone` of the map `code` of type
+    /// `map_ty`, with argument `values`, returning a `ty`. `insert` moves
+    /// its key and value into the map; the other methods only read the key.
+    fn map_builtin(
+        &mut self,
+        builtin: Builtin,
+        code: &str,
+        map_ty: Type,
+        values: &[(Value, Type)],
+        ty: Type,
+    ) -> Value {
+        let TypeKind::Map(key_ty, value_ty) = *self.types.kind(map_ty) else {
+            unreachable!("only maps get here")
+        };
+        let n = map_ty.index();
+        let map_type = format!("vt_maptype_T{n}()");
+        let read_key = |emitter: &mut Self| {
+            let key = emitter.entry_temporary(key_ty);
+            emitter.line(&format!("{key} = {};", values[0].0.code()));
+            key
+        };
+        // Starts a `Option` result: `Some` with `field` when `test` holds,
+        // and `None` otherwise.
+        let option = |emitter: &mut Self, test: &str, then: &[String], field: String| {
+            let (some, none) = option_variants(emitter.types, ty);
+            let result = emitter.temporary(ty);
+            emitter.line(&format!("if ({test}) {{"));
+            for line in then {
+                emitter.line(&format!("    {line}"));
+            }
+            emitter.line(&format!("    {result}.tag = {some};"));
+            if emitter.types.has_storage(value_ty) {
+                emitter.line(&format!(
+                    "    {} = {field};",
+                    field_code(emitter.types, ty, some, 0, &result)
+                ));
+            }
+            emitter.line(&format!("}} else {{ {result}.tag = {none}; }}"));
+            Value::Code {
+                code: result,
+                owned: true,
+            }
+        };
+        match builtin {
+            Builtin::Len => self.store(Type::INT, format!("{code}.m.len"), false),
+            Builtin::IsEmpty => self.store(Type::BOOL, format!("({code}.m.len == 0)"), false),
+            Builtin::Clear => {
+                self.line(&format!("vt_clear_T{n}(&{code});"));
+                Value::Unit
+            }
+            Builtin::ContainsKey => {
+                let key = read_key(self);
+                self.store(
+                    Type::BOOL,
+                    format!("(vt_map_find(&{code}.m, {map_type}, &{key}) >= 0)"),
+                    false,
+                )
+            }
+            Builtin::Get => {
+                let key = read_key(self);
+                let entry = self.counter();
+                self.line(&format!(
+                    "{entry} = vt_map_find(&{code}.m, {map_type}, &{key});"
+                ));
+                let value = map_value(self.types, value_ty, &format!("&{code}"), &entry);
+                let field = clone_code(self.types, value_ty, &value);
+                option(self, &format!("{entry} >= 0"), &[], field)
+            }
+            Builtin::Insert => {
+                let key = self.entry_operand(values[0].0.clone(), key_ty);
+                let value = self.entry_operand(values[1].0.clone(), value_ty);
+                let old = self.entry_temporary(value_ty);
+                // A present key keeps its stored copy.
+                let release_key = if self.releases(key_ty) {
+                    vec![count_line(key_ty, "release", &key)]
+                } else {
+                    Vec::new()
+                };
+                let test =
+                    format!("vt_map_insert(&{code}.m, {map_type}, &{key}, &{value}, &{old})");
+                option(self, &test, &release_key, old)
+            }
+            Builtin::Remove => {
+                let key = read_key(self);
+                let old_key = self.entry_temporary(key_ty);
+                let old = self.entry_temporary(value_ty);
+                let release_key = if self.releases(key_ty) {
+                    vec![count_line(key_ty, "release", &old_key)]
+                } else {
+                    Vec::new()
+                };
+                let test =
+                    format!("vt_map_remove(&{code}.m, {map_type}, &{key}, &{old_key}, &{old})");
+                option(self, &test, &release_key, old)
+            }
+            Builtin::Keys => {
+                let result = self.temporary(ty);
+                let entry = self.counter();
+                let key = map_key(self.types, key_ty, &format!("&{code}"), &entry);
+                self.line(&format!(
+                    "for ({entry} = 0; {entry} < {code}.m.used; {entry} += 1) {{"
+                ));
+                self.line(&format!(
+                    "    if ({code}.m.live[{entry}]) vt_push_T{}(&{result}, {});",
+                    ty.index(),
+                    clone_code(self.types, key_ty, &key)
+                ));
+                self.line("}");
+                Value::Code {
+                    code: result,
+                    owned: true,
+                }
+            }
+            _ => unreachable!("not a map method"),
+        }
     }
 
     /// Evaluates the subject of a `match` or destructuring, which the tests
@@ -1809,7 +2237,7 @@ impl FunctionEmitter<'_> {
             let same = indices[check.first]
                 .iter()
                 .zip(&indices[check.second])
-                .map(|(first, second)| format!("{first} == {second}"))
+                .map(|((first, ty), (second, _))| equal_code(self.types, *ty, first, second))
                 .collect::<Vec<_>>();
             self.line(&format!(
                 "if ({}) vt_panic(\"the same element is borrowed twice\");",

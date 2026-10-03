@@ -1,0 +1,13 @@
+fn both(a: &mut Int, b: &mut Int) {
+    a += b
+}
+
+fn main() {
+    let mut m: Map<Str, Int> = Map::new()
+    m["a"] = 1
+    m["b"] = 2
+    both(&mut m["a"], &mut m["b"])
+    print(m["a"])
+    let k = "${"b"}"
+    both(&mut m["b"], &mut m[k])
+}

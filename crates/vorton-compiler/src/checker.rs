@@ -2,7 +2,7 @@
 //!
 //! The checker covers `Int`, `Float`, `Bool`, `Str` and `Unit` values,
 //! tuples, structs and enums (generic ones are instantiated at concrete type
-//! arguments), `List` with its built-in methods, `match`, `if let` and tuple
+//! arguments), `List` and `Map` with their built-in methods, `match`, `if let` and tuple
 //! destructuring with exhaustiveness, named functions with written
 //! signatures, inherent methods and associated functions of non-generic
 //! types, local bindings, assignment to `let mut` locals and their parts,
@@ -151,8 +151,9 @@ pub(crate) enum ForSource {
         end: Expr,
         inclusive: bool,
     },
-    /// Takes the list and yields its elements.
-    List(Expr),
+    /// Takes the list or map and yields its elements of type `element`: a
+    /// map's entries as `(key, value)` tuples.
+    Taken { container: Expr, element: Type },
     /// Borrows the elements of a list place without taking them.
     Borrowed(Place),
 }
@@ -186,18 +187,26 @@ pub(crate) enum Builtin {
     Push,
     /// `List::pop(&mut self) -> Option<T>`.
     Pop,
-    /// `List::len(&self) -> Int`.
+    /// `len(&self) -> Int` of a list or map.
     Len,
-    /// `List::is_empty(&self) -> Bool`.
+    /// `is_empty(&self) -> Bool` of a list or map.
     IsEmpty,
-    /// `List::insert(&mut self, index, value)`.
+    /// `List::insert(&mut self, index, value)`, or
+    /// `Map::insert(&mut self, key, value) -> Option<V>`.
     Insert,
-    /// `List::remove(&mut self, index) -> T`.
+    /// `List::remove(&mut self, index) -> T`, or
+    /// `Map::remove(&mut self, key) -> Option<V>`.
     Remove,
-    /// `List::clear(&mut self)`.
+    /// `clear(&mut self)` of a list or map.
     Clear,
     /// `List::contains(&self, value) -> Bool`.
     Contains,
+    /// `Map::get(&self, key) -> Option<V>` for a value `V`.
+    Get,
+    /// `Map::contains_key(&self, key) -> Bool`.
+    ContainsKey,
+    /// `Map::keys(&self) -> List<K>`.
+    Keys,
     /// `clone(&self)` of any type.
     Clone,
 }
@@ -265,7 +274,9 @@ pub(crate) enum ExprKind {
     /// fields, which is left empty.
     Move(Place),
     List(Vec<Expr>),
-    /// Reads a value element of a list.
+    /// `Map::new()`.
+    EmptyMap,
+    /// Reads a value element of a list, or the value of a key in a map.
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
@@ -879,6 +890,22 @@ fn resolve_type(
                 && let [element] = arguments.as_slice()
             {
                 return Ok(types.intern(TypeKind::List(*element)));
+            }
+            if target.kind == EntityKind::LanguageType
+                && target.name == "Map"
+                && let [key, value] = arguments.as_slice()
+            {
+                if !types.is_key(*key) {
+                    return Err(CheckDiagnostic {
+                        kind: CheckDiagnosticKind::TypeMismatch,
+                        primary: Some(at(origin, ty.span)),
+                        message: format!(
+                            "`{}` cannot be a map key; keys are values compared with `==`, without `Float`",
+                            types.name(*key)
+                        ),
+                    });
+                }
+                return Ok(types.intern(TypeKind::Map(*key, *value)));
             }
             if target.kind == EntityKind::LanguageType && arguments.is_empty() {
                 let language = match target.name.as_str() {
@@ -2038,12 +2065,16 @@ impl BodyChecker<'_> {
                 let Operand::Place((place, ty, path)) = self.check_operand(operand, None)? else {
                     return Err(self.unsupported(operand.span, "borrowing loops over temporaries"));
                 };
-                let TypeKind::List(element) = *self.types.kind(ty) else {
-                    return Err(self.error(
-                        CheckDiagnosticKind::TypeMismatch,
-                        operand.span,
-                        format!("`for` cannot iterate over `{}`", self.types.name(ty)),
-                    ));
+                // A borrowed map yields its values.
+                let element = match *self.types.kind(ty) {
+                    TypeKind::List(element) | TypeKind::Map(_, element) => element,
+                    _ => {
+                        return Err(self.error(
+                            CheckDiagnosticKind::TypeMismatch,
+                            operand.span,
+                            format!("`for` cannot iterate over `{}`", self.types.name(ty)),
+                        ));
+                    }
                 };
                 self.check_borrow(&place, &path, kind, operand.span)?;
                 let frozen = Frozen {
@@ -2060,15 +2091,30 @@ impl BodyChecker<'_> {
             }
             _ => {
                 let value = self.check_expr(iterable, None)?;
-                let TypeKind::List(element) = *self.types.kind(value.ty) else {
-                    return Err(self.error(
-                        CheckDiagnosticKind::TypeMismatch,
-                        iterable.span,
-                        format!("`for` cannot iterate over `{}`", self.types.name(value.ty)),
-                    ));
+                // A taken map yields `(key, value)`.
+                let element = match *self.types.kind(value.ty) {
+                    TypeKind::List(element) => element,
+                    TypeKind::Map(key, element) => {
+                        self.types.intern(TypeKind::Tuple(vec![key, element]))
+                    }
+                    _ => {
+                        return Err(self.error(
+                            CheckDiagnosticKind::TypeMismatch,
+                            iterable.span,
+                            format!("`for` cannot iterate over `{}`", self.types.name(value.ty)),
+                        ));
+                    }
                 };
                 let value = self.consume(value, iterable.span)?;
-                (ForSource::List(value), element, None, None)
+                (
+                    ForSource::Taken {
+                        container: value,
+                        element,
+                    },
+                    element,
+                    None,
+                    None,
+                )
             }
         };
         let scope = self.local_ids.clone();
@@ -2187,8 +2233,7 @@ impl BodyChecker<'_> {
             }
             ResolvedExprKind::Index { receiver, index } => {
                 let base = self.check_operand(receiver, None)?;
-                let element = self.list_element(base.ty(), receiver.span)?;
-                let index = self.check_index(index)?;
+                let (element, index) = self.check_subscript(base.ty(), receiver.span, index)?;
                 Ok(self.project(base, Projection::Index(Box::new(index)), None, element))
             }
             _ => Ok(Operand::Value(self.check_expr(expression, expected)?)),
@@ -2271,26 +2316,33 @@ impl BodyChecker<'_> {
 
     fn list_element_type(&self, ty: Type) -> Type {
         match self.types.kind(ty) {
-            TypeKind::List(element) => *element,
-            _ => unreachable!("only lists are indexed"),
+            TypeKind::List(element) | TypeKind::Map(_, element) => *element,
+            _ => unreachable!("only lists and maps are indexed"),
         }
     }
 
-    fn list_element(&self, ty: Type, span: Span) -> Result<Type, CheckDiagnostic> {
-        match self.types.kind(ty) {
-            TypeKind::List(element) => Ok(*element),
-            _ => Err(self.error(
-                CheckDiagnosticKind::TypeMismatch,
-                span,
-                format!("`{}` cannot be indexed", self.types.name(ty)),
-            )),
-        }
-    }
-
-    fn check_index(&mut self, index: &ResolvedExpr) -> Result<Expr, CheckDiagnostic> {
-        let checked = self.check_expr(index, Some(Type::INT))?;
-        self.require(index.span, Type::INT, checked.ty)?;
-        Ok(checked)
+    /// Checks `container[index]`: an `Int` index into a list, or a key into
+    /// a map. Returns the element type and the checked index.
+    fn check_subscript(
+        &mut self,
+        container: Type,
+        span: Span,
+        index: &ResolvedExpr,
+    ) -> Result<(Type, Expr), CheckDiagnostic> {
+        let (key, element) = match *self.types.kind(container) {
+            TypeKind::List(element) => (Type::INT, element),
+            TypeKind::Map(key, value) => (key, value),
+            _ => {
+                return Err(self.error(
+                    CheckDiagnosticKind::TypeMismatch,
+                    span,
+                    format!("`{}` cannot be indexed", self.types.name(container)),
+                ));
+            }
+        };
+        let checked = self.check_expr(index, Some(key))?;
+        self.require(index.span, key, checked.ty)?;
+        Ok((element, checked))
     }
 
     /// Checks an assignment target and returns it with its type. Assigning
@@ -2336,8 +2388,7 @@ impl BodyChecker<'_> {
                     ty = field_ty;
                 }
                 ResolvedPlaceProjection::Index(index) => {
-                    let element = self.list_element(ty, target.span)?;
-                    let index = self.check_index(index)?;
+                    let (element, index) = self.check_subscript(ty, target.span, index)?;
                     projections.push(Projection::Index(Box::new(index)));
                     path.push(None);
                     ty = element;
@@ -2579,8 +2630,7 @@ impl BodyChecker<'_> {
             ResolvedExprKind::List(elements) => self.check_list(span, elements, expected)?,
             ResolvedExprKind::Index { receiver, index } => {
                 let base = self.check_expr(receiver, None)?;
-                let element = self.list_element(base.ty, receiver.span)?;
-                let index = self.check_index(index)?;
+                let (element, index) = self.check_subscript(base.ty, receiver.span, index)?;
                 (
                     element,
                     ExprKind::Index {
@@ -2721,6 +2771,38 @@ impl BodyChecker<'_> {
                     "contains" if !self.types.is_entity(element) && self.has_equality(element) => {
                         (Builtin::Contains, vec![(element, false)], Type::BOOL, false)
                     }
+                    _ => return Err(unknown(self)),
+                }
+            } else if let TypeKind::Map(key, value) = *self.types.kind(ty) {
+                match name {
+                    "insert" => (
+                        Builtin::Insert,
+                        vec![(key, true), (value, true)],
+                        self.option_type(span, value)?,
+                        true,
+                    ),
+                    "remove" => (
+                        Builtin::Remove,
+                        vec![(key, true)],
+                        self.option_type(span, value)?,
+                        true,
+                    ),
+                    "get" if !self.types.is_entity(value) => (
+                        Builtin::Get,
+                        vec![(key, true)],
+                        self.option_type(span, value)?,
+                        false,
+                    ),
+                    "contains_key" => (Builtin::ContainsKey, vec![(key, true)], Type::BOOL, false),
+                    "keys" => (
+                        Builtin::Keys,
+                        Vec::new(),
+                        self.types.intern(TypeKind::List(key)),
+                        false,
+                    ),
+                    "len" => (Builtin::Len, Vec::new(), Type::INT, false),
+                    "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
+                    "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
                     _ => return Err(unknown(self)),
                 }
             } else {
@@ -3787,7 +3869,7 @@ impl BodyChecker<'_> {
             TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
                 true
             }
-            TypeKind::Never => false,
+            TypeKind::Never | TypeKind::Map(..) => false,
             TypeKind::List(element) => self.has_equality(*element),
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .types
@@ -3824,6 +3906,31 @@ impl BodyChecker<'_> {
                     return Err(self.unsupported(callee.span, "calls of this kind"));
                 };
                 signature
+            }
+            ResolvedExprKind::Path(ResolvedReference::Selection { base, members, .. })
+                if base.kind == EntityKind::LanguageType
+                    && base.name == "Map"
+                    && let [member] = members.as_slice()
+                    && member.name == "new" =>
+            {
+                if !arguments.is_empty() {
+                    return Err(self.error(
+                        CheckDiagnosticKind::ArgumentCount,
+                        span,
+                        "`Map::new` takes no arguments".to_owned(),
+                    ));
+                }
+                let Some(ty) =
+                    expected.filter(|ty| matches!(self.types.kind(*ty), TypeKind::Map(..)))
+                else {
+                    return Err(self.error(
+                        CheckDiagnosticKind::CannotInfer,
+                        span,
+                        "the key and value types of an empty map cannot be inferred here; write the expected type"
+                            .to_owned(),
+                    ));
+                };
+                return Ok((ty, ExprKind::EmptyMap));
             }
             // `Type::function(...)` names a function of an inherent impl.
             ResolvedExprKind::Path(ResolvedReference::Selection { base, members, .. })
