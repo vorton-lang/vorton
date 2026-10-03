@@ -1,0 +1,11 @@
+fn main() {
+    let mut xs = [1]
+    let t = &mut xs
+    loop {
+        if xs.len() > 0 {
+            xs.push(1)
+            break
+        }
+    }
+    t.push(2)
+}

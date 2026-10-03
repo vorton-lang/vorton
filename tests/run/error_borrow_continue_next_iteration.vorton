@@ -1,0 +1,11 @@
+fn main() {
+    let mut xs = [1]
+    let t = &mut xs
+    for i in 0..3 {
+        if i == 1 {
+            xs.push(1)
+            continue
+        }
+        t.push(i)
+    }
+}

@@ -1,0 +1,42 @@
+// A `let` borrow lasts until its last use, as in Rust: after it the place can
+// change again, even inside the statement that uses the borrow last, and a
+// change on a path that never reaches a later use does not count.
+fn count(xs: &mut List<Int>) -> Int {
+    let t = &mut xs
+    if xs.len() > 100 {
+        xs.clear()
+        return 0
+    }
+    t.push(7)
+    xs.len()
+}
+
+fn main() {
+    let mut xs = [1]
+    let t = &mut xs
+    {
+        t.push(2)
+        xs.push(3)
+    }
+    let big = xs.len() > 10
+    let u = &mut xs
+    if big {
+        u.push(0)
+    } else {
+        xs.push(4)
+    }
+    let v = &mut xs
+    for i in 0..v.len() {
+        xs.push(i)
+    }
+    let w = &mut xs
+    loop {
+        w.push(5)
+        xs.push(6)
+        break
+    }
+    print(count(&mut xs))
+    let r = &xs
+    let ys = xs
+    print(ys.len())
+}

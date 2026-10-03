@@ -1,0 +1,13 @@
+fn bump(xs: &mut List<Int>) -> Bool {
+    xs.push(0)
+    false
+}
+
+fn main() {
+    let mut xs = [1]
+    let t = &mut xs
+    match xs.len() {
+        1 if bump(&mut xs) => {}
+        _ => t.push(1)
+    }
+}

@@ -20,8 +20,8 @@
 //! names cannot be changed, moved or, after `&mut`, borrowed again: a call
 //! argument lasts until the call ends, a loop or `match` subject until it
 //! ends, the arguments of a call that returns a borrow until the statement
-//! ends, and a `let` borrow until the last statement of its block that
-//! mentions it.
+//! ends, and a `let` borrow until the last use of its bindings on some path,
+//! as in Rust.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -513,6 +513,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             moved: BTreeSet::new(),
             frozen: Vec::new(),
             held: Vec::new(),
+            conflicts: 0,
             depth: 0,
             from_parameters: Vec::new(),
         };
@@ -817,6 +818,11 @@ fn unsupported(primary: Option<OriginRef>, what: &str) -> CheckDiagnostic {
 
 struct LoopFrame {
     breaks: bool,
+    /// The number of conflicts recorded when the loop starts.
+    entry_conflicts: usize,
+    /// The conflicts of the held borrows at each `break` and `continue`.
+    break_conflicts: Vec<Vec<Option<Conflict>>>,
+    continue_conflicts: Vec<Vec<Option<Conflict>>>,
     /// The locals that may be moved when the loop starts.
     entry_moved: BTreeSet<usize>,
     /// Locals with a smaller index are declared outside the loop.
@@ -841,15 +847,29 @@ struct Frozen {
     exclusive: bool,
 }
 
-/// The borrow that `let` bindings hold. It ends after the last statement of
-/// their block that mentions one of them.
+/// The borrow that `let` bindings hold until their last use. A conflicting
+/// access is recorded instead of rejected, and the next use of a binding
+/// after it is an error; so is a conflict in a loop that uses a binding,
+/// because the next iteration uses it after the conflict.
 struct HeldBorrow {
     locals: Vec<usize>,
+    /// The names of the bindings, to find their uses in a loop.
+    names: Vec<EntityId>,
     frozen: Vec<Frozen>,
-    /// The depth of the block, and the index of that last statement; the
-    /// tail counts as the index after the last statement.
+    /// The depth of the block that declares the bindings.
     depth: usize,
-    until: usize,
+    /// How many loops enclose the declaration.
+    loops: usize,
+    /// The first conflict on some path to here.
+    conflict: Option<Conflict>,
+}
+
+#[derive(Clone)]
+struct Conflict {
+    span: Span,
+    message: String,
+    /// How many conflicts were recorded before this one.
+    order: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -882,6 +902,8 @@ struct BodyChecker<'a> {
     moved: BTreeSet<usize>,
     frozen: Vec<Frozen>,
     held: Vec<HeldBorrow>,
+    /// How many conflicts with held borrows have been recorded.
+    conflicts: usize,
     /// How many blocks enclose the statement being checked.
     depth: usize,
     /// For each local, whether it is a borrow that reaches only places of
@@ -950,7 +972,7 @@ impl BodyChecker<'_> {
     /// Checks that `place` may be borrowed with `kind` now: `&mut` needs a
     /// changeable place, and neither may conflict with a running borrow.
     fn check_borrow(
-        &self,
+        &mut self,
         place: &Place,
         path: &[Option<usize>],
         kind: BorrowKind,
@@ -962,7 +984,7 @@ impl BodyChecker<'_> {
     /// Like [`Self::check_borrow`], ignoring the running borrows at the
     /// positions `skip` of the borrow stack.
     fn check_borrow_except(
-        &self,
+        &mut self,
         skip: &[usize],
         place: &Place,
         path: &[Option<usize>],
@@ -1046,7 +1068,8 @@ impl BodyChecker<'_> {
         }
     }
 
-    /// Rejects a use of `local` after its value may have been moved.
+    /// Rejects a use of `local` after its value may have been moved, or
+    /// after a conflict with the borrow it holds.
     fn use_local(&self, local: usize, span: Span) -> Result<(), CheckDiagnostic> {
         if self.moved.contains(&local) {
             return Err(self.error(
@@ -1057,6 +1080,26 @@ impl BodyChecker<'_> {
                     self.locals[local].name
                 ),
             ));
+        }
+        self.check_held_use(local)
+    }
+
+    /// Rejects a use of a `let` borrow binding after a conflict with its
+    /// borrow; the error points at the conflict.
+    fn check_held_use(&self, local: usize) -> Result<(), CheckDiagnostic> {
+        for held in &self.held {
+            if held.locals.contains(&local)
+                && let Some(conflict) = &held.conflict
+            {
+                return Err(self.error(
+                    CheckDiagnosticKind::BorrowConflict,
+                    conflict.span,
+                    format!(
+                        "{}, and `{}` is used later",
+                        conflict.message, self.locals[local].name
+                    ),
+                ));
+            }
         }
         Ok(())
     }
@@ -1116,12 +1159,13 @@ impl BodyChecker<'_> {
         self.consume(checked, expression.span)
     }
 
-    /// Rejects an access to `local` along `path` that conflicts with a
-    /// running or held borrow of an overlapping place: any change conflicts
-    /// with a borrow, and a shared access conflicts with an exclusive one.
-    /// Reading a value never conflicts.
+    /// Checks an access to `local` along `path` against the borrows of
+    /// overlapping places: any change conflicts with a borrow, and a shared
+    /// access conflicts with an exclusive one. Reading a value never
+    /// conflicts. A conflict with a running borrow is rejected; one with a
+    /// held borrow is recorded for its later uses.
     fn check_access(
-        &self,
+        &mut self,
         local: usize,
         path: &[Option<usize>],
         access: Access,
@@ -1133,7 +1177,7 @@ impl BodyChecker<'_> {
     /// Like [`Self::check_access`], ignoring the running borrows at the
     /// positions `skip` of the borrow stack.
     fn check_access_except(
-        &self,
+        &mut self,
         skip: &[usize],
         local: usize,
         path: &[Option<usize>],
@@ -1149,38 +1193,136 @@ impl BodyChecker<'_> {
                     .zip(path)
                     .all(|(left, right)| left.is_none() || right.is_none() || left == right)
         };
-        let running = self
+        let what = if access == Access::Change {
+            "change"
+        } else {
+            "be borrowed"
+        };
+        let name = &self.locals[local].name;
+        if self
             .frozen
             .iter()
             .enumerate()
-            .filter(|(position, _)| !skip.contains(position))
-            .map(|(_, frozen)| frozen);
-        let held = self.held.iter().flat_map(|held| &held.frozen);
-        if running.chain(held).any(conflicts) {
-            let what = if access == Access::Change {
-                "change"
-            } else {
-                "be borrowed"
-            };
+            .any(|(position, frozen)| !skip.contains(&position) && conflicts(frozen))
+        {
             return Err(self.error(
                 CheckDiagnosticKind::BorrowConflict,
                 span,
-                format!(
-                    "`{}` cannot {what} while it is borrowed",
-                    self.locals[local].name
-                ),
+                format!("`{name}` cannot {what} while it is borrowed"),
             ));
+        }
+        let mut recorded = false;
+        for held in &mut self.held {
+            if held.conflict.is_none() && held.frozen.iter().any(conflicts) {
+                held.conflict = Some(Conflict {
+                    span,
+                    message: format!("`{name}` cannot {what} while it is borrowed"),
+                    order: self.conflicts,
+                });
+                recorded = true;
+            }
+        }
+        if recorded {
+            self.conflicts += 1;
         }
         Ok(())
     }
 
     fn check_not_frozen(
-        &self,
+        &mut self,
         local: usize,
         path: &[Option<usize>],
         span: Span,
     ) -> Result<(), CheckDiagnostic> {
         self.check_access(local, path, Access::Change, span)
+    }
+
+    /// Ends the body of the innermost loop. `reaches_end` tells whether an
+    /// iteration can finish normally, and `head` is the state where the loop
+    /// may stop between iterations (`None` for `loop`). A conflict that
+    /// reaches the next iteration, with a borrow held from outside that each
+    /// iteration uses as `mentions` tells, is an error. Afterwards the held
+    /// borrows have the conflicts that reach the code after the loop.
+    fn end_loop_conflicts(
+        &mut self,
+        reaches_end: bool,
+        head: Option<Vec<Option<Conflict>>>,
+        mentions: impl Fn(&[EntityId]) -> bool,
+    ) -> Result<(), CheckDiagnostic> {
+        let loops = self.loops.len();
+        let frame = self.loops.last().expect("inside a loop");
+        let mut back = frame.continue_conflicts.clone();
+        if reaches_end {
+            back.push(self.held_conflicts());
+        }
+        let back = self.joined_conflicts(&back);
+        for (held, conflict) in self.held.iter().zip(&back) {
+            if held.loops < loops
+                && let Some(conflict) = conflict
+                && conflict.order >= frame.entry_conflicts
+                && mentions(&held.names)
+            {
+                return Err(self.error(
+                    CheckDiagnosticKind::BorrowConflict,
+                    conflict.span,
+                    format!(
+                        "{}, and `{}` is used in the next iteration",
+                        conflict.message, self.locals[held.locals[0]].name
+                    ),
+                ));
+            }
+        }
+        let mut exits = frame.break_conflicts.clone();
+        if let Some(head) = head {
+            exits.push(head);
+            exits.push(back);
+        }
+        if !exits.is_empty() {
+            let after = self.joined_conflicts(&exits);
+            self.set_held_conflicts(&after);
+        }
+        Ok(())
+    }
+
+    /// The conflicts of the held borrows, to check branches from the same
+    /// state.
+    fn held_conflicts(&self) -> Vec<Option<Conflict>> {
+        self.held.iter().map(|held| held.conflict.clone()).collect()
+    }
+
+    fn set_held_conflicts(&mut self, conflicts: &[Option<Conflict>]) {
+        for (held, conflict) in self.held.iter_mut().zip(conflicts) {
+            held.conflict = conflict.clone();
+        }
+    }
+
+    /// Where paths join, a held borrow has a conflict if it has one on some
+    /// path. A state taken inside a nested block may hold more borrows,
+    /// which have ended by now.
+    fn joined_conflicts(&self, states: &[Vec<Option<Conflict>>]) -> Vec<Option<Conflict>> {
+        (0..self.held.len())
+            .map(|position| states.iter().find_map(|state| state[position].clone()))
+            .collect()
+    }
+
+    /// Joins the conflicts at the ends of branches; a branch of type
+    /// `Never` does not reach the join.
+    fn join_branch_conflicts(&mut self, branches: &[(Type, Vec<Option<Conflict>>)]) {
+        let reaching = branches
+            .iter()
+            .filter(|(ty, _)| *ty != Type::NEVER)
+            .map(|(_, state)| state.clone())
+            .collect::<Vec<_>>();
+        let joined = if reaching.is_empty() {
+            let all = branches
+                .iter()
+                .map(|(_, state)| state.clone())
+                .collect::<Vec<_>>();
+            self.joined_conflicts(&all)
+        } else {
+            self.joined_conflicts(&reaching)
+        };
+        self.set_held_conflicts(&joined);
     }
     /// Ends one path through a loop body: an outer local that the next
     /// iteration would see moved is an error.
@@ -1206,6 +1348,9 @@ impl BodyChecker<'_> {
     fn enter_loop(&mut self) {
         self.loops.push(LoopFrame {
             breaks: false,
+            entry_conflicts: self.conflicts,
+            break_conflicts: Vec::new(),
+            continue_conflicts: Vec::new(),
             entry_moved: self.moved.clone(),
             outer_locals: self.locals.len(),
             break_states: Vec::new(),
@@ -1233,15 +1378,12 @@ impl BodyChecker<'_> {
         let mut statements = Vec::new();
         let mut diverges = false;
         self.depth += 1;
-        for index in 0..block.statements.len() {
+        for statement in &block.statements {
             let frozen_before = self.frozen.len();
-            let (statement, statement_diverges) = self.check_statement(block, index)?;
+            let (statement, statement_diverges) = self.check_statement(statement)?;
             diverges |= statement_diverges;
             statements.push(statement);
             self.frozen.truncate(frozen_before);
-            let depth = self.depth;
-            self.held
-                .retain(|held| held.depth != depth || held.until > index);
         }
         let (tail, ty) = match &block.tail {
             Some(tail) => {
@@ -1278,17 +1420,14 @@ impl BodyChecker<'_> {
         })
     }
 
-    /// Checks statement `index` of `block`. Returns the checked statement and
-    /// whether control cannot continue after it.
+    /// Returns the checked statement and whether control cannot continue after it.
     fn check_statement(
         &mut self,
-        block: &ResolvedBlock,
-        index: usize,
+        statement: &ResolvedStatement,
     ) -> Result<(Statement, bool), CheckDiagnostic> {
-        let statement = &block.statements[index];
         let span = statement.span;
         match &statement.kind {
-            ResolvedStatementKind::Let { .. } => self.check_let(block, index),
+            ResolvedStatementKind::Let { .. } => self.check_let(statement),
             ResolvedStatementKind::Assignment {
                 target,
                 operator: (operator_span, operator),
@@ -1337,6 +1476,7 @@ impl BodyChecker<'_> {
             }
             ResolvedStatementKind::Break | ResolvedStatementKind::Continue => {
                 let is_break = matches!(statement.kind, ResolvedStatementKind::Break);
+                let conflicts = self.held_conflicts();
                 let Some(frame) = self.loops.last_mut() else {
                     return Err(self.error(
                         CheckDiagnosticKind::OutsideLoop,
@@ -1347,32 +1487,43 @@ impl BodyChecker<'_> {
                 if is_break {
                     frame.breaks = true;
                     frame.break_states.push(self.moved.clone());
+                    frame.break_conflicts.push(conflicts);
                     Ok((Statement::Break, true))
                 } else {
+                    frame.continue_conflicts.push(conflicts);
                     self.check_loop_back(span)?;
                     Ok((Statement::Continue, true))
                 }
             }
             ResolvedStatementKind::While { condition, body } => {
                 self.enter_loop();
-                let condition = self.check_condition(condition);
-                let body = condition.and_then(|condition| {
-                    let body = self.check_block(body, Some(Type::UNIT))?;
-                    if body.ty != Type::NEVER {
+                let checked = self.check_condition(condition);
+                let checked = checked.and_then(|checked| {
+                    let head = self.held_conflicts();
+                    let checked_body = self.check_block(body, Some(Type::UNIT))?;
+                    let reaches_end = checked_body.ty != Type::NEVER;
+                    if reaches_end {
                         self.check_loop_back(span)?;
                     }
-                    Ok((condition, body))
+                    self.end_loop_conflicts(reaches_end, Some(head), |names| {
+                        statement_mentions(statement, names)
+                    })?;
+                    Ok((checked, checked_body))
                 });
                 self.exit_loop();
-                let (condition, body) = body?;
+                let (condition, body) = checked?;
                 Ok((Statement::While { condition, body }, false))
             }
             ResolvedStatementKind::Loop(body) => {
                 self.enter_loop();
                 let body = self.check_block(body, Some(Type::UNIT)).and_then(|body| {
-                    if body.ty != Type::NEVER {
+                    let reaches_end = body.ty != Type::NEVER;
+                    if reaches_end {
                         self.check_loop_back(span)?;
                     }
+                    self.end_loop_conflicts(reaches_end, None, |names| {
+                        statement_mentions(statement, names)
+                    })?;
                     Ok(body)
                 });
                 let frame = self.exit_loop();
@@ -1392,20 +1543,17 @@ impl BodyChecker<'_> {
                 bindings,
                 iterable,
                 body,
-            } => self.check_for(span, bindings, iterable, body),
+            } => self.check_for(statement, bindings, iterable, body),
         }
     }
 
-    /// Checks the `let` statement `index` of `block`. A value written `&place`
-    /// or `&mut place` makes the bindings point into the place, which stays
-    /// borrowed until the last statement of the block that mentions one of
-    /// them.
+    /// Checks a `let` statement. A value written `&place` or `&mut place`, or
+    /// a call that returns a borrow, makes the bindings point into the place,
+    /// which stays borrowed until their last use.
     fn check_let(
         &mut self,
-        block: &ResolvedBlock,
-        index: usize,
+        statement: &ResolvedStatement,
     ) -> Result<(Statement, bool), CheckDiagnostic> {
-        let statement = &block.statements[index];
         let span = statement.span;
         let ResolvedStatementKind::Let {
             bindings,
@@ -1500,9 +1648,11 @@ impl BodyChecker<'_> {
                     .collect::<Vec<_>>();
                 self.held.push(HeldBorrow {
                     locals,
+                    names,
                     frozen,
                     depth: self.depth,
-                    until: last_mention(block, index, &names),
+                    loops: self.loops.len(),
+                    conflict: None,
                 });
             }
             return Ok((statement, false));
@@ -1657,11 +1807,12 @@ impl BodyChecker<'_> {
 
     fn check_for(
         &mut self,
-        span: Span,
+        statement: &ResolvedStatement,
         bindings: &[crate::project::ResolvedBinding],
         iterable: &ResolvedExpr,
         body: &ResolvedBlock,
     ) -> Result<(Statement, bool), CheckDiagnostic> {
+        let span = statement.span;
         let (source, element, frozen, mode) = match &iterable.kind {
             ResolvedExprKind::Binary {
                 left,
@@ -1760,12 +1911,19 @@ impl BodyChecker<'_> {
         if let Some(frozen) = frozen {
             self.frozen.push(frozen);
         }
-        let body = binding.and_then(|binding| {
-            let body = self.check_block(body, Some(Type::UNIT))?;
-            if body.ty != Type::NEVER {
+        let body = binding.and_then(|checked| {
+            let head = self.held_conflicts();
+            let checked_body = self.check_block(body, Some(Type::UNIT))?;
+            let reaches_end = checked_body.ty != Type::NEVER;
+            if reaches_end {
                 self.check_loop_back(span)?;
             }
-            Ok((binding, body))
+            // A range or a taken list is evaluated once; a borrowed one is
+            // used by every iteration.
+            self.end_loop_conflicts(reaches_end, Some(head), |names| {
+                block_mentions(body, names) || (has_frozen && expr_mentions(iterable, names))
+            })?;
+            Ok((checked, checked_body))
         });
         if has_frozen {
             self.frozen.pop();
@@ -1905,6 +2063,8 @@ impl BodyChecker<'_> {
         if !(reinitializes && target.projections.is_empty()) {
             self.use_local(local, target.span)?;
         }
+        // Assigning through a borrow binding uses it.
+        self.check_held_use(local)?;
         let mut ty = self.locals[local].ty;
         let mut projections = Vec::new();
         let mut path = Vec::new();
@@ -2741,9 +2901,11 @@ impl BodyChecker<'_> {
         let condition = self.check_condition(condition)?;
         let before = self.moved.clone();
         let Some(else_branch) = else_branch else {
+            let conflicts = self.held_conflicts();
             let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
             if then_branch.ty == Type::NEVER {
                 self.moved = before;
+                self.set_held_conflicts(&conflicts);
             } else {
                 self.moved.extend(before);
             }
@@ -2756,14 +2918,22 @@ impl BodyChecker<'_> {
                 },
             ));
         };
+        let conflicts = self.held_conflicts();
         let then_branch = self.check_block(then_branch, expected)?;
         let after_then = std::mem::replace(&mut self.moved, before);
+        let then_conflicts = self.held_conflicts();
+        self.set_held_conflicts(&conflicts);
         let expected = expected.or(Some(then_branch.ty).filter(|ty| *ty != Type::NEVER));
         let else_span = else_branch.span;
         let else_branch = self.check_consumed(else_branch, expected)?;
         self.merge_moved([
             (then_branch.ty, after_then),
             (else_branch.ty, self.moved.clone()),
+        ]);
+        let else_conflicts = self.held_conflicts();
+        self.join_branch_conflicts(&[
+            (then_branch.ty, then_conflicts),
+            (else_branch.ty, else_conflicts),
         ]);
         let ty = match (then_branch.ty, else_branch.ty) {
             (Type::NEVER, other) | (other, Type::NEVER) => other,
@@ -2898,6 +3068,10 @@ impl BodyChecker<'_> {
         self.frozen.extend(frozen);
         let scope = self.local_ids.clone();
         let before = self.moved.clone();
+        // Every arm starts from the conflicts before the `match` and those of
+        // the guards before it, which may fail and fall through.
+        let mut conflicts = self.held_conflicts();
+        let mut arm_conflicts = Vec::new();
         let mut ends = Vec::new();
         let mut expected = expected;
         let mut ty = None;
@@ -2905,6 +3079,7 @@ impl BodyChecker<'_> {
         for (arm, (pattern, visible)) in arms.iter().zip(patterns) {
             self.local_ids = visible;
             self.moved = before.clone();
+            self.set_held_conflicts(&conflicts);
             // A guard only reads the bindings; they become `&mut` once it holds.
             let readonly = self.mutable_bindings(&pattern);
             for &local in &readonly {
@@ -2918,11 +3093,13 @@ impl BodyChecker<'_> {
             for &local in &readonly {
                 self.mutable[local] = true;
             }
+            conflicts = self.held_conflicts();
             // Each arm's value is stored when the arm ends.
             let frozen_before = self.frozen.len();
             let body = self.check_consumed(&arm.body, expected)?;
             self.frozen.truncate(frozen_before);
             ends.push((body.ty, self.moved.clone()));
+            arm_conflicts.push((body.ty, self.held_conflicts()));
             if body.ty != Type::NEVER {
                 match ty {
                     None => {
@@ -2945,8 +3122,10 @@ impl BodyChecker<'_> {
         self.local_ids = scope;
         if ends.is_empty() {
             self.moved = before;
+            self.set_held_conflicts(&conflicts);
         } else {
             self.merge_moved(ends);
+            self.join_branch_conflicts(&arm_conflicts);
         }
         let unguarded = checked
             .iter()
@@ -2998,12 +3177,15 @@ impl BodyChecker<'_> {
         self.frozen.extend(frozen);
         let scope = std::mem::replace(&mut self.local_ids, visible);
         let before = self.moved.clone();
+        let conflicts = self.held_conflicts();
         let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
         if has_frozen {
             self.frozen.pop();
         }
         self.local_ids = scope;
         let after_then = std::mem::replace(&mut self.moved, before);
+        let then_conflicts = self.held_conflicts();
+        self.set_held_conflicts(&conflicts);
         let else_body = match else_branch {
             Some(block) => self.check_block(block, Some(Type::UNIT))?,
             None => Block {
@@ -3015,6 +3197,11 @@ impl BodyChecker<'_> {
         self.merge_moved([
             (then_branch.ty, after_then),
             (else_body.ty, self.moved.clone()),
+        ]);
+        let else_conflicts = self.held_conflicts();
+        self.join_branch_conflicts(&[
+            (then_branch.ty, then_conflicts),
+            (else_body.ty, else_conflicts),
         ]);
         let ty = if then_branch.ty == Type::NEVER && else_body.ty == Type::NEVER {
             Type::NEVER
@@ -3609,23 +3796,6 @@ fn callee_name(callee: &ResolvedExpr) -> String {
         ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => target.name.clone(),
         _ => "result".to_owned(),
     }
-}
-
-/// The index of the last statement of `block` after `index` that mentions
-/// one of `names`, `index` if none does, and the number of statements if the
-/// tail does.
-fn last_mention(block: &ResolvedBlock, index: usize, names: &[EntityId]) -> usize {
-    if block
-        .tail
-        .as_deref()
-        .is_some_and(|tail| expr_mentions(tail, names))
-    {
-        return block.statements.len();
-    }
-    block.statements[index + 1..]
-        .iter()
-        .rposition(|statement| statement_mentions(statement, names))
-        .map_or(index, |position| index + 1 + position)
 }
 
 fn block_mentions(block: &ResolvedBlock, names: &[EntityId]) -> bool {
