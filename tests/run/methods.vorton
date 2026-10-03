@@ -1,0 +1,107 @@
+// Inherent methods: `Type::function(...)` calls a function of an impl, and
+// `value.method(...)` borrows or takes the receiver as the method's `self`
+// says. A method that returns a borrow is a place like any such call.
+struct Point { x: Int, y: Int }
+
+impl Point {
+    fn new(x: Int, y: Int) -> Self {
+        Self { x, y }
+    }
+
+    fn origin() -> Point {
+        Point::new(0, 0)
+    }
+
+    fn sum(&self) -> Int {
+        self.x + self.y
+    }
+
+    fn shift(&mut self, dx: Int) {
+        self.x += dx
+    }
+
+    fn swapped(self) -> Point {
+        Point { x: self.y, y: self.x }
+    }
+
+    fn absorb(&mut self, other: &Point) {
+        self.x += other.x
+        self.y += other.y
+    }
+}
+
+enum Shape {
+    Dot(Point),
+    Line(Point, Point),
+}
+
+impl Shape {
+    fn length(&self) -> Int {
+        match &self {
+            Self::Dot(_) => 0
+            Self::Line(a, b) => b.x - a.x + b.y - a.y
+        }
+    }
+
+    fn stretch(&mut self, by: Int) {
+        match &mut self {
+            Shape::Dot(p) => p.shift(by)
+            Shape::Line(_, end) => end.shift(by)
+        }
+    }
+}
+
+struct Inventory { items: List<Str>, owner: Point }
+
+impl Inventory {
+    fn items(&self) -> &List<Str> {
+        &self.items
+    }
+
+    fn items_mut(&mut self) -> &mut List<Str> {
+        &mut self.items
+    }
+
+    fn into_owner(self) -> Point {
+        self.owner
+    }
+
+    fn count(&self) -> Int {
+        self.items().len()
+    }
+}
+
+fn main() {
+    let mut p = Point::new(1, 2)
+    p.shift(10)
+    print(p.sum())
+    let q = p.swapped()
+    print("${q.x} ${q.y} ${p.x}")
+    p.absorb(&q)
+    print(p.sum())
+    Point::shift(&mut p, 1)
+    print(p.x)
+    print(Point::origin().sum() + Point::new(3, 4).sum())
+
+    let mut shapes = [Shape::Dot(Point::origin()), Shape::Line(Point::new(0, 0), Point::new(2, 3))]
+    for s in &mut shapes {
+        s.stretch(1)
+    }
+    for s in &shapes {
+        print(s.length())
+    }
+    shapes[1].stretch(4)
+    print(shapes[1].length())
+
+    let mut inv = Inventory { items: [], owner: Point::new(5, 5) }
+    inv.items_mut().push("sword")
+    inv.items_mut().push("shield")
+    inv.owner.shift(-5)
+    print("${inv.count()} ${inv.items().len()} ${inv.owner.sum()}")
+    let names = inv.items()
+    for name in &names {
+        print(name)
+    }
+    let owner = inv.into_owner()
+    print(owner.sum())
+}

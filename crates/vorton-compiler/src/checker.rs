@@ -4,7 +4,8 @@
 //! tuples, structs and enums (generic ones are instantiated at concrete type
 //! arguments), `List` with its built-in methods, `match`, `if let` and tuple
 //! destructuring with exhaustiveness, named functions with written
-//! signatures, local bindings, assignment to `let mut` locals and their parts,
+//! signatures, inherent methods and associated functions of non-generic
+//! types, local bindings, assignment to `let mut` locals and their parts,
 //! `if`, `while`, `loop`, `for` over ranges and lists, `break`, `continue`,
 //! `return`, string interpolation, and the `print`, `assert` and `panic`
 //! intrinsics. Every other construct reports
@@ -28,12 +29,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::exhaustive;
 use crate::project::{
-    EntityId, EntityKind, LibraryId, ModuleRef, OriginRef, ResolvedBlock, ResolvedConstructEntry,
-    ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedField, ResolvedFunction,
-    ResolvedInterpolationPart, ResolvedMatchArm, ResolvedPattern, ResolvedPatternFields,
-    ResolvedPatternKind, ResolvedPlace, ResolvedPlaceProjection, ResolvedProject,
-    ResolvedReference, ResolvedStatement, ResolvedStatementKind, ResolvedType,
-    ResolvedTypeArgument, ResolvedTypeKind, ResolvedVariant, ResolvedVariantFields, SourceRef,
+    EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
+    ResolvedConstructEntry, ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedField,
+    ResolvedFunction, ResolvedImplMemberKind, ResolvedInterpolationPart, ResolvedMatchArm,
+    ResolvedPattern, ResolvedPatternFields, ResolvedPatternKind, ResolvedPlace,
+    ResolvedPlaceProjection, ResolvedProject, ResolvedReference, ResolvedStatement,
+    ResolvedStatementKind, ResolvedType, ResolvedTypeArgument, ResolvedTypeKind, ResolvedVariant,
+    ResolvedVariantFields, SourceRef,
 };
 pub(crate) use crate::types::{Field, NominalInfo, Type, TypeKind, Types, Variant};
 
@@ -77,6 +79,8 @@ pub enum CheckDiagnosticKind {
     BorrowConflict,
     /// A returned borrow names a place that ends when the function returns.
     BorrowOutlives,
+    /// Two impls give a type methods of the same name.
+    DuplicateMethod,
 }
 
 /// A checked program ready for code generation.
@@ -356,6 +360,8 @@ pub(crate) enum Intrinsic {
 
 struct Signature {
     index: usize,
+    /// Whether the first parameter is the `self` of a method.
+    receiver: bool,
     parameters: Vec<(Type, Option<BorrowKind>)>,
     result: Type,
     result_borrow: Option<BorrowKind>,
@@ -385,8 +391,24 @@ struct Nominals<'a> {
 /// How deep generic instantiation may nest before it is reported.
 const INSTANTIATION_DEPTH: usize = 64;
 
+/// A function or inherent method to check.
+struct FoundFunction<'a> {
+    identity: EntityId,
+    /// The name in the generated code; a method's includes its type.
+    name: String,
+    function: &'a ResolvedFunction,
+    origin: OriginRef,
+    /// The type a method belongs to.
+    owner: Option<Type>,
+}
+
+/// The inherent methods and associated functions of each struct or enum
+/// declaration, by name.
+type Methods = BTreeMap<(usize, String), EntityId>;
+
 pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnostic> {
     let mut functions_found = Vec::new();
+    let mut impls = Vec::new();
     let mut nominals = Nominals {
         declarations: Vec::new(),
         by_identity: BTreeMap::new(),
@@ -452,7 +474,17 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             }
             match &declaration.kind {
                 ResolvedDeclarationKind::Function(function) => {
-                    functions_found.push((identity(), function, declaration.origin.clone()));
+                    let identity = identity();
+                    functions_found.push(FoundFunction {
+                        name: identity.name.clone(),
+                        identity,
+                        function,
+                        origin: declaration.origin.clone(),
+                        owner: None,
+                    });
+                }
+                ResolvedDeclarationKind::InherentImpl(implementation) => {
+                    impls.push((implementation, declaration.origin.clone()));
                 }
                 ResolvedDeclarationKind::Module(_) => {}
                 _ => {
@@ -489,19 +521,76 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         }
     }
 
+    let mut methods = BTreeMap::new();
+    for (implementation, origin) in impls {
+        if !implementation.type_parameters.is_empty() {
+            return Err(unsupported(Some(origin), "generic impls"));
+        }
+        let target = ResolvedType {
+            span: implementation.target.span,
+            kind: ResolvedTypeKind::Named(Box::new(implementation.target.clone())),
+        };
+        let owner = resolve_type(&mut types, &nominals, &target, &BTreeMap::new(), &origin, 0)?;
+        let &TypeKind::Nominal { declaration, .. } = types.kind(owner) else {
+            return Err(unsupported(Some(origin), "methods of built-in types"));
+        };
+        if !nominals.declarations[declaration]
+            .type_parameters
+            .is_empty()
+        {
+            return Err(unsupported(Some(origin), "methods of generic types"));
+        }
+        for member in &implementation.members {
+            let member_origin = match &member.identity.site {
+                EntitySite::Source(site) => site.clone(),
+                _ => origin.clone(),
+            };
+            let ResolvedImplMemberKind::Function(function) = &member.kind else {
+                return Err(unsupported(Some(member_origin), "associated types"));
+            };
+            let name = member.identity.name.clone();
+            if methods
+                .insert((declaration, name.clone()), member.identity.clone())
+                .is_some()
+            {
+                return Err(CheckDiagnostic {
+                    kind: CheckDiagnosticKind::DuplicateMethod,
+                    primary: Some(member_origin),
+                    message: format!("`{}` already has a method `{name}`", types.name(owner)),
+                });
+            }
+            functions_found.push(FoundFunction {
+                name: format!("{}_{name}", types.name(owner)),
+                identity: member.identity.clone(),
+                function,
+                origin: member_origin,
+                owner: Some(owner),
+            });
+        }
+    }
+
     let mut signatures = BTreeMap::new();
-    for (index, (identity, function, origin)) in functions_found.iter().enumerate() {
-        let signature = check_signature(index, function, origin, &nominals, &mut types)?;
-        signatures.insert(identity.clone(), signature);
+    for (index, found) in functions_found.iter().enumerate() {
+        let signature = check_signature(
+            index,
+            found.function,
+            &found.origin,
+            found.owner,
+            &nominals,
+            &mut types,
+        )?;
+        signatures.insert(found.identity.clone(), signature);
     }
 
     let mut functions = Vec::new();
-    for (identity, function, origin) in &functions_found {
-        let signature = &signatures[identity];
+    for found in &functions_found {
+        let (function, origin) = (found.function, &found.origin);
+        let signature = &signatures[&found.identity];
         let mut checker = BodyChecker {
             types: &mut types,
             nominals: &nominals,
             signatures: &signatures,
+            methods: &methods,
             library: origin.library,
             source: origin.source.clone(),
             locals: Vec::new(),
@@ -534,7 +623,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         }
         let body = checker.check_block(&function.body, Some(signature.result))?;
         functions.push(Function {
-            name: identity.name.clone(),
+            name: found.name.clone(),
             parameters,
             locals: checker.locals,
             result: signature.result,
@@ -546,14 +635,13 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
 
     let main = functions_found
         .iter()
-        .position(|(identity, _, _)| {
-            identity.module == ModuleRef::root(project.entry)
-                && identity.kind == EntityKind::Function
-                && identity.name == "main"
+        .position(|found| {
+            found.identity.module == ModuleRef::root(project.entry)
+                && found.identity.kind == EntityKind::Function
+                && found.identity.name == "main"
         })
         .filter(|&index| {
-            let (identity, _, _) = &functions_found[index];
-            let signature = &signatures[identity];
+            let signature = &signatures[&functions_found[index].identity];
             signature.parameters.is_empty() && signature.result == Type::UNIT
         })
         .ok_or_else(|| CheckDiagnostic {
@@ -663,10 +751,12 @@ fn contains_by_value(types: &Types, ty: Type, target: Type, seen: &mut BTreeSet<
     })
 }
 
+/// Checks the signature of a function, or of a method of `self_type`.
 fn check_signature(
     index: usize,
     function: &ResolvedFunction,
     origin: &OriginRef,
+    self_type: Option<Type>,
     nominals: &Nominals,
     types: &mut Types,
 ) -> Result<Signature, CheckDiagnostic> {
@@ -677,11 +767,9 @@ fn check_signature(
         return Err(unsupported(Some(origin.clone()), "effect annotations"));
     }
     let mut parameters = Vec::new();
+    let mut receiver = false;
     for parameter in &function.parameters {
         let at = Some(parameter.binding.origin.clone());
-        let Some(annotation) = &parameter.annotation else {
-            return Err(unsupported(at, "receivers outside methods"));
-        };
         if parameter.borrow.is_some() && parameter.mutable.is_some() {
             return Err(CheckDiagnostic {
                 kind: CheckDiagnosticKind::NotAssignable,
@@ -691,7 +779,17 @@ fn check_signature(
                         .to_owned(),
             });
         }
-        let ty = resolve_type(types, nominals, annotation, &BTreeMap::new(), origin, 0)?;
+        // Only the `self` of a method has no written type.
+        let ty = match (&parameter.annotation, self_type) {
+            (Some(annotation), _) => {
+                resolve_type(types, nominals, annotation, &BTreeMap::new(), origin, 0)?
+            }
+            (None, Some(self_type)) => {
+                receiver = true;
+                self_type
+            }
+            (None, None) => return Err(unsupported(at, "receivers outside methods")),
+        };
         parameters.push((ty, parameter.borrow.map(|(_, kind)| kind)));
     }
     let result = match &function.return_type {
@@ -707,6 +805,7 @@ fn check_signature(
     }
     Ok(Signature {
         index,
+        receiver,
         parameters,
         result,
         result_borrow,
@@ -735,9 +834,26 @@ fn resolve_type(
             Ok(types.intern(TypeKind::Tuple(elements)))
         }
         ResolvedTypeKind::Named(named) => {
-            let ResolvedReference::Exact { target, .. } = &named.reference else {
+            let ResolvedReference::Exact {
+                target,
+                self_reference,
+                ..
+            } = &named.reference
+            else {
                 return Err(unsupported(Some(at(origin, ty.span)), "this type"));
             };
+            // `Self` in an impl stands for the impl's target type.
+            if target.kind == EntityKind::SelfType
+                && let Some(self_target) = self_reference
+                    .as_ref()
+                    .and_then(|reference| reference.target.as_ref())
+            {
+                let self_type = ResolvedType {
+                    span: ty.span,
+                    kind: ResolvedTypeKind::Named(self_target.clone()),
+                };
+                return resolve_type(types, nominals, &self_type, substitution, origin, depth);
+            }
             let mut arguments = Vec::new();
             for argument in &named.arguments {
                 let ResolvedTypeArgument::Type(argument) = argument else {
@@ -834,6 +950,22 @@ struct LoopFrame {
 /// A place, its type, and the path that loops freeze while reading it.
 type PlaceAccess = (Place, Type, Vec<Option<usize>>);
 
+/// A checked operand of a borrow, a method call or a loop.
+enum Operand {
+    Place(PlaceAccess),
+    /// Any other expression; a borrow of it borrows a temporary.
+    Value(Expr),
+}
+
+impl Operand {
+    fn ty(&self) -> Type {
+        match self {
+            Self::Place((_, ty, _)) => *ty,
+            Self::Value(value) => value.ty,
+        }
+    }
+}
+
 /// A checked arm pattern and the locals visible in its arm.
 type ArmPattern = (Pattern, BTreeMap<EntityId, usize>);
 
@@ -890,6 +1022,7 @@ struct BodyChecker<'a> {
     types: &'a mut Types,
     nominals: &'a Nominals<'a>,
     signatures: &'a BTreeMap<EntityId, Signature>,
+    methods: &'a Methods,
     library: LibraryId,
     source: SourceRef,
     locals: Vec<Local>,
@@ -1570,15 +1703,37 @@ impl BodyChecker<'_> {
             Some(annotation) => Some(self.resolve_type(annotation, &BTreeMap::new())?),
             None => None,
         };
-        // `&place`, `&mut place`, or a call that returns a borrow.
+        // `&place`, `&mut place`, or a call that returns a borrow, binds a
+        // borrow. Any other call is checked here and used below.
+        let frozen_before = self.frozen.len();
+        let mut checked = None;
         let borrowed = match &value.kind {
             ResolvedExprKind::Borrow {
                 kind: (_, kind),
                 operand,
-            } => Some((*kind, operand.as_ref())),
-            _ => self.returned_borrow(value).map(|kind| (kind, value)),
+            } => match self.check_operand(operand, None)? {
+                Operand::Place(access) => Some((*kind, access, operand.span)),
+                Operand::Value(_) => {
+                    return Err(self.unsupported(operand.span, "borrowed bindings of temporaries"));
+                }
+            },
+            ResolvedExprKind::Call { .. } | ResolvedExprKind::MethodCall { .. } => {
+                match self.check_operand(value, expected)? {
+                    Operand::Place(access) => {
+                        let kind = self.locals[access.0.local]
+                            .borrow
+                            .expect("the result of a call is a borrowed place");
+                        Some((kind, access, value.span))
+                    }
+                    Operand::Value(call) => {
+                        checked = Some(call);
+                        None
+                    }
+                }
+            }
+            _ => None,
         };
-        if let Some((kind, operand)) = borrowed {
+        if let Some((kind, (place, ty, path), operand_span)) = borrowed {
             if let Some(mutable) = mutable {
                 return Err(self.error(
                     CheckDiagnosticKind::NotAssignable,
@@ -1596,14 +1751,10 @@ impl BodyChecker<'_> {
                     "the annotation and the value borrow in different ways".to_owned(),
                 ));
             }
-            let frozen_before = self.frozen.len();
-            let Some((place, ty, path)) = self.expr_place(operand)? else {
-                return Err(self.unsupported(operand.span, "borrowed bindings of temporaries"));
-            };
             if let Some(expected) = expected {
-                self.require(operand.span, expected, ty)?;
+                self.require(operand_span, expected, ty)?;
             }
-            self.check_borrow(&place, &path, kind, operand.span)?;
+            self.check_borrow(&place, &path, kind, operand_span)?;
             let root = place.local;
             let mut frozen = self.held_frozen(root, path, kind);
             frozen.extend(self.take_frozen(frozen_before));
@@ -1664,9 +1815,12 @@ impl BodyChecker<'_> {
                 "this binding borrows its value; write `&` or `&mut` before the value".to_owned(),
             ));
         }
+        let value_span = value.span;
         if let Some(pattern) = pattern {
-            let value_span = value.span;
-            let value = self.check_expr(value, None)?;
+            let value = match checked {
+                Some(value) => value,
+                None => self.check_expr(value, None)?,
+            };
             if value.ty == Type::NEVER {
                 return Ok((Statement::Expr(value), true));
             }
@@ -1682,7 +1836,10 @@ impl BodyChecker<'_> {
         let [binding] = bindings.as_slice() else {
             unreachable!("a let without a pattern binds one name")
         };
-        let value = self.check_consumed(value, expected)?;
+        let value = match checked {
+            Some(value) => self.consume(value, value_span)?,
+            None => self.check_consumed(value, expected)?,
+        };
         if let Some(expected) = expected {
             self.require(span, expected, value.ty)?;
         }
@@ -1700,7 +1857,7 @@ impl BodyChecker<'_> {
         value: &ResolvedExpr,
         kind: BorrowKind,
     ) -> Result<Expr, CheckDiagnostic> {
-        let operand = match &value.kind {
+        let (place, ty, path, span) = match &value.kind {
             ResolvedExprKind::Parenthesized(inner) => {
                 return self.check_returned_borrow(inner, kind);
             }
@@ -1715,35 +1872,40 @@ impl BodyChecker<'_> {
                         "the value borrows differently from the declared result".to_owned(),
                     ));
                 }
-                operand.as_ref()
-            }
-            _ if self.returned_borrow(value).is_some() => value,
-            _ => {
-                let checked = self.check_expr(value, None)?;
-                if checked.ty == Type::NEVER {
-                    return Ok(checked);
+                match self.check_operand(operand, None)? {
+                    Operand::Place((place, ty, path)) => (place, ty, path, operand.span),
+                    Operand::Value(_) => {
+                        return Err(self.error(
+                            CheckDiagnosticKind::BorrowOutlives,
+                            operand.span,
+                            "a returned borrow cannot name a temporary, which ends when the function returns"
+                                .to_owned(),
+                        ));
+                    }
                 }
-                return Err(self.error(
-                    CheckDiagnosticKind::TypeMismatch,
-                    value.span,
-                    "this function returns a borrow; return `&place`, `&mut place` or a call that returns a borrow".to_owned(),
-                ));
             }
+            _ => match self.check_operand(value, None)? {
+                Operand::Place((place, ty, path))
+                    if place.call.is_some() && place.projections.is_empty() =>
+                {
+                    (place, ty, path, value.span)
+                }
+                Operand::Value(checked) if checked.ty == Type::NEVER => return Ok(checked),
+                _ => {
+                    return Err(self.error(
+                        CheckDiagnosticKind::TypeMismatch,
+                        value.span,
+                        "this function returns a borrow; return `&place`, `&mut place` or a call that returns a borrow".to_owned(),
+                    ));
+                }
+            },
         };
-        let Some((place, ty, path)) = self.expr_place(operand)? else {
-            return Err(self.error(
-                CheckDiagnosticKind::BorrowOutlives,
-                operand.span,
-                "a returned borrow cannot name a temporary, which ends when the function returns"
-                    .to_owned(),
-            ));
-        };
-        self.require(operand.span, self.result, ty)?;
-        self.check_borrow(&place, &path, kind, operand.span)?;
+        self.require(span, self.result, ty)?;
+        self.check_borrow(&place, &path, kind, span)?;
         if !self.from_parameters[place.local] {
             return Err(self.error(
                 CheckDiagnosticKind::BorrowOutlives,
-                operand.span,
+                span,
                 format!(
                     "a returned borrow must come from a parameter passed by borrow; `{}` ends when the function returns",
                     self.locals[place.local].name
@@ -1840,7 +2002,7 @@ impl BodyChecker<'_> {
                 operand,
             } => {
                 let kind = *kind;
-                let Some((place, ty, path)) = self.expr_place(operand)? else {
+                let Operand::Place((place, ty, path)) = self.check_operand(operand, None)? else {
                     return Err(self.unsupported(operand.span, "borrowing loops over temporaries"));
                 };
                 let TypeKind::List(element) = *self.types.kind(ty) else {
@@ -1941,20 +2103,23 @@ impl BodyChecker<'_> {
         ))
     }
 
-    /// Converts a local followed by field, tuple-element and index accesses
-    /// into a place, with its type and the path that loops freeze. Returns
-    /// `None` for any other expression.
-    fn expr_place(
+    /// Checks an expression that may be borrowed or used as a receiver. A
+    /// local followed by field, tuple-element and index accesses is a place,
+    /// returned with the path that loops freeze; so is a call that returns a
+    /// borrow, and the parts of such a place. Anything else is a value,
+    /// checked against `expected`.
+    fn check_operand(
         &mut self,
         expression: &ResolvedExpr,
-    ) -> Result<Option<PlaceAccess>, CheckDiagnostic> {
+        expected: Option<Type>,
+    ) -> Result<Operand, CheckDiagnostic> {
+        let span = expression.span;
         match &expression.kind {
-            ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => {
-                let Some(&local) = self.local_ids.get(target) else {
-                    return Ok(None);
-                };
-                self.use_local(local, expression.span)?;
-                Ok(Some((
+            ResolvedExprKind::Path(ResolvedReference::Exact { target, .. })
+                if let Some(&local) = self.local_ids.get(target) =>
+            {
+                self.use_local(local, span)?;
+                Ok(Operand::Place((
                     Place {
                         local,
                         call: None,
@@ -1965,62 +2130,116 @@ impl BodyChecker<'_> {
                 )))
             }
             ResolvedExprKind::Call { callee, .. } => {
-                let Some(kind) = self.returned_borrow(expression) else {
-                    return Ok(None);
-                };
-                let call = self.check_expr(expression, None)?;
-                let ty = call.ty;
-                let local = self.push_local(
-                    callee_name(callee),
-                    ty,
-                    kind == BorrowKind::Mutable,
-                    Some(kind),
-                );
-                self.from_parameters[local] = self.call_from_parameters(&call);
-                Ok(Some((
-                    Place {
-                        local,
-                        call: Some(Box::new(call)),
-                        projections: Vec::new(),
-                    },
-                    ty,
-                    Vec::new(),
-                )))
+                let call = self.check_expr(expression, expected)?;
+                Ok(self.call_operand(call, callee_name(callee)))
             }
-            ResolvedExprKind::Parenthesized(inner) => self.expr_place(inner),
+            ResolvedExprKind::MethodCall { method, .. } => {
+                let call = self.check_expr(expression, expected)?;
+                Ok(self.call_operand(call, method.name.clone()))
+            }
+            ResolvedExprKind::Parenthesized(inner) => self.check_operand(inner, expected),
             ResolvedExprKind::Field { receiver, field } => {
-                let Some((mut place, ty, mut path)) = self.expr_place(receiver)? else {
-                    return Ok(None);
-                };
-                let (index, ty) = self.named_field(ty, &field.name, field.origin.span)?;
-                place.projections.push(Projection::Field(index));
-                path.push(Some(index));
-                Ok(Some((place, ty, path)))
+                let base = self.check_operand(receiver, None)?;
+                let (index, ty) = self.named_field(base.ty(), &field.name, field.origin.span)?;
+                Ok(self.project(base, Projection::Field(index), Some(index), ty))
             }
             ResolvedExprKind::TupleField {
                 receiver,
                 index,
                 origin,
             } => {
-                let Some((mut place, ty, mut path)) = self.expr_place(receiver)? else {
-                    return Ok(None);
-                };
-                let (index, ty) = self.tuple_element(ty, index, origin.span)?;
-                place.projections.push(Projection::Field(index));
-                path.push(Some(index));
-                Ok(Some((place, ty, path)))
+                let base = self.check_operand(receiver, None)?;
+                let (index, ty) = self.tuple_element(base.ty(), index, origin.span)?;
+                Ok(self.project(base, Projection::Field(index), Some(index), ty))
             }
             ResolvedExprKind::Index { receiver, index } => {
-                let Some((mut place, ty, mut path)) = self.expr_place(receiver)? else {
-                    return Ok(None);
-                };
-                let element = self.list_element(ty, receiver.span)?;
+                let base = self.check_operand(receiver, None)?;
+                let element = self.list_element(base.ty(), receiver.span)?;
                 let index = self.check_index(index)?;
-                place.projections.push(Projection::Index(Box::new(index)));
-                path.push(None);
-                Ok(Some((place, element, path)))
+                Ok(self.project(base, Projection::Index(Box::new(index)), None, element))
             }
-            _ => Ok(None),
+            _ => Ok(Operand::Value(self.check_expr(expression, expected)?)),
+        }
+    }
+
+    /// A call that returns a borrow is a place, reached through a local
+    /// named after the function; any other call is a value.
+    fn call_operand(&mut self, call: Expr, name: String) -> Operand {
+        let ExprKind::Call {
+            borrow: Some(kind), ..
+        } = call.kind
+        else {
+            return Operand::Value(call);
+        };
+        let ty = call.ty;
+        let local = self.push_local(name, ty, kind == BorrowKind::Mutable, Some(kind));
+        self.from_parameters[local] = self.call_from_parameters(&call);
+        Operand::Place((
+            Place {
+                local,
+                call: Some(Box::new(call)),
+                projections: Vec::new(),
+            },
+            ty,
+            Vec::new(),
+        ))
+    }
+
+    /// A part of type `ty` of `base`: a part of a place is a place, `step`
+    /// extending its loop path; a part of a value is read from it.
+    fn project(
+        &self,
+        base: Operand,
+        projection: Projection,
+        step: Option<usize>,
+        ty: Type,
+    ) -> Operand {
+        match base {
+            Operand::Place((mut place, _, mut path)) => {
+                place.projections.push(projection);
+                path.push(step);
+                Operand::Place((place, ty, path))
+            }
+            Operand::Value(base) => {
+                let base = Box::new(base);
+                let kind = match projection {
+                    Projection::Field(index) => ExprKind::Field { base, index },
+                    Projection::Index(index) => ExprKind::Index { base, index },
+                };
+                Operand::Value(Expr { ty, kind })
+            }
+        }
+    }
+
+    /// The value a place holds, as an expression that reads it.
+    fn place_value(&self, place: Place) -> Expr {
+        let mut value = match place.call {
+            Some(call) => *call,
+            None => Expr {
+                ty: self.locals[place.local].ty,
+                kind: ExprKind::Local(place.local),
+            },
+        };
+        for projection in place.projections {
+            let base = Box::new(value);
+            value = match projection {
+                Projection::Field(index) => Expr {
+                    ty: self.types.components(base.ty)[index],
+                    kind: ExprKind::Field { base, index },
+                },
+                Projection::Index(index) => Expr {
+                    ty: self.list_element_type(base.ty),
+                    kind: ExprKind::Index { base, index },
+                },
+            };
+        }
+        value
+    }
+
+    fn list_element_type(&self, ty: Type) -> Type {
+        match self.types.kind(ty) {
+            TypeKind::List(element) => *element,
+            _ => unreachable!("only lists are indexed"),
         }
     }
 
@@ -2393,7 +2612,8 @@ impl BodyChecker<'_> {
         instantiate(self.types, self.nominals, declaration, vec![element], 0)
     }
 
-    /// Checks a call of a built-in method.
+    /// Checks a method call: an inherent method of the receiver's type, or
+    /// else a built-in method.
     fn check_method(
         &mut self,
         span: Span,
@@ -2401,13 +2621,40 @@ impl BodyChecker<'_> {
         name: &str,
         arguments: &[ResolvedExpr],
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
-        let (receiver_value, ty, path) = match self.expr_place(receiver)? {
-            Some((place, ty, path)) => (Receiver::Place(place), ty, Some(path)),
-            None => {
-                let value = self.check_expr(receiver, None)?;
-                let ty = value.ty;
-                (Receiver::Value(Box::new(value)), ty, None)
+        let operand = self.check_operand(receiver, None)?;
+        let ty = operand.ty();
+        let signatures = self.signatures;
+        if let &TypeKind::Nominal { declaration, .. } = self.types.kind(ty)
+            && let Some(identity) = self.methods.get(&(declaration, name.to_owned()))
+        {
+            let signature = &signatures[identity];
+            if !signature.receiver {
+                let owner = self.types.name(ty);
+                return Err(self.error(
+                    CheckDiagnosticKind::UnknownMethod,
+                    span,
+                    format!("`{owner}::{name}` has no `self`; call it as `{owner}::{name}(...)`"),
+                ));
             }
+            if arguments.len() + 1 != signature.parameters.len() {
+                return Err(self.error(
+                    CheckDiagnosticKind::ArgumentCount,
+                    span,
+                    format!(
+                        "`{name}` takes {} arguments, found {}",
+                        signature.parameters.len() - 1,
+                        arguments.len()
+                    ),
+                ));
+            }
+            let arguments = std::iter::once(Argument::Receiver(operand, receiver))
+                .chain(arguments.iter().map(Argument::Written))
+                .collect();
+            return self.finish_call(span, signature, arguments);
+        }
+        let (receiver_value, path) = match operand {
+            Operand::Place((place, _, path)) => (Receiver::Place(place), Some(path)),
+            Operand::Value(value) => (Receiver::Value(Box::new(value)), None),
         };
         let unknown = |checker: &Self| {
             checker.error(
@@ -3002,8 +3249,8 @@ impl BodyChecker<'_> {
             return Ok((self.check_expr(subject, None)?, None, None));
         };
         let kind = *kind;
-        let (target, ty, frozen) = match self.expr_place(operand)? {
-            Some((place, ty, path)) => {
+        let (target, ty, frozen) = match self.check_operand(operand, None)? {
+            Operand::Place((place, ty, path)) => {
                 self.check_borrow(&place, &path, kind, operand.span)?;
                 let frozen = Frozen {
                     local: place.local,
@@ -3012,8 +3259,7 @@ impl BodyChecker<'_> {
                 };
                 (BorrowTarget::Place(place), ty, Some(frozen))
             }
-            None => {
-                let value = self.check_expr(operand, None)?;
+            Operand::Value(value) => {
                 if value.ty == Type::NEVER {
                     return Ok((value, None, None));
                 }
@@ -3525,46 +3771,70 @@ impl BodyChecker<'_> {
         arguments: &[ResolvedExpr],
         expected: Option<Type>,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
-        let ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) = &callee.kind else {
-            return Err(self.unsupported(callee.span, "calls of computed functions"));
+        let signatures = self.signatures;
+        let signature = match &callee.kind {
+            ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => {
+                if let Some(&(declaration, variant)) = self.nominals.constructors.get(target) {
+                    return self.check_variant(
+                        span,
+                        declaration,
+                        variant,
+                        Some(Arguments::Positional(arguments)),
+                        expected,
+                    );
+                }
+                if target.kind == EntityKind::LanguageFunction {
+                    let values = arguments.iter().collect::<Vec<_>>();
+                    return self.check_intrinsic(span, &target.name, &values);
+                }
+                let Some(signature) = signatures.get(target) else {
+                    return Err(self.unsupported(callee.span, "calls of this kind"));
+                };
+                signature
+            }
+            // `Type::function(...)` names a function of an inherent impl.
+            ResolvedExprKind::Path(ResolvedReference::Selection { base, members, .. })
+                if let [member] = members.as_slice()
+                    && let Some(&declaration) = self.nominals.by_identity.get(base) =>
+            {
+                let Some(identity) = self.methods.get(&(declaration, member.name.clone())) else {
+                    return Err(self.error(
+                        CheckDiagnosticKind::UnknownMethod,
+                        member.origin.span,
+                        format!("`{}` has no function `{}`", base.name, member.name),
+                    ));
+                };
+                &signatures[identity]
+            }
+            _ => return Err(self.unsupported(callee.span, "calls of computed functions")),
         };
-        if let Some(&(declaration, variant)) = self.nominals.constructors.get(target) {
-            return self.check_variant(
-                span,
-                declaration,
-                variant,
-                Some(Arguments::Positional(arguments)),
-                expected,
-            );
-        }
-        let values = arguments.iter().collect::<Vec<_>>();
-        if target.kind == EntityKind::LanguageFunction {
-            return self.check_intrinsic(span, &target.name, &values);
-        }
-        let Some(signature) = self.signatures.get(target) else {
-            return Err(self.unsupported(callee.span, "calls of this kind"));
-        };
-        if values.len() != signature.parameters.len() {
+        if arguments.len() != signature.parameters.len() {
             return Err(self.error(
                 CheckDiagnosticKind::ArgumentCount,
                 span,
                 format!(
                     "expected {} arguments, found {}",
                     signature.parameters.len(),
-                    values.len()
+                    arguments.len()
                 ),
             ));
         }
-        let (index, parameters, result, borrow) = (
-            signature.index,
-            signature.parameters.clone(),
-            signature.result,
-            signature.result_borrow,
-        );
+        let arguments = arguments.iter().map(Argument::Written).collect();
+        self.finish_call(span, signature, arguments)
+    }
+
+    /// Checks the arguments of a call of the function with `signature`.
+    fn finish_call(
+        &mut self,
+        span: Span,
+        signature: &Signature,
+        arguments: Vec<Argument>,
+    ) -> Result<(Type, ExprKind), CheckDiagnostic> {
+        let borrow = signature.result_borrow;
         // The borrowed arguments of a call that returns a borrow stay
         // borrowed until the statement ends, or longer if a `let` binds it.
         let frozen_before = self.frozen.len();
-        let checked = self.check_arguments(values, parameters);
+        let checked = self.check_arguments(arguments, signature.parameters.clone());
         if borrow.is_none() {
             self.frozen.truncate(frozen_before);
         }
@@ -3578,29 +3848,14 @@ impl BodyChecker<'_> {
             return Err(self.unsupported(span, "borrowed results of calls that borrow temporaries"));
         }
         Ok((
-            result,
+            signature.result,
             ExprKind::Call {
-                function: index,
+                function: signature.index,
                 arguments,
                 checks,
                 borrow,
             },
         ))
-    }
-
-    /// Whether `expression` is a call that returns a borrow, and how.
-    fn returned_borrow(&self, expression: &ResolvedExpr) -> Option<BorrowKind> {
-        match &expression.kind {
-            ResolvedExprKind::Parenthesized(inner) => self.returned_borrow(inner),
-            ResolvedExprKind::Call { callee, .. } => match &callee.kind {
-                ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => self
-                    .signatures
-                    .get(target)
-                    .and_then(|signature| signature.result_borrow),
-                _ => None,
-            },
-            _ => None,
-        }
     }
 
     /// Whether every borrowed argument of `call` reaches only places of the
@@ -3623,7 +3878,7 @@ impl BodyChecker<'_> {
     /// differ only in list indices are checked at run time.
     fn check_arguments(
         &mut self,
-        values: Vec<&ResolvedExpr>,
+        values: Vec<Argument>,
         parameters: Vec<(Type, Option<BorrowKind>)>,
     ) -> Result<(Vec<Expr>, Vec<DisjointCheck>), CheckDiagnostic> {
         let mut checked = Vec::new();
@@ -3633,36 +3888,59 @@ impl BodyChecker<'_> {
         let mut own = Vec::new();
         let mut checks = Vec::new();
         for (position, (value, (ty, borrow))) in values.into_iter().zip(parameters).enumerate() {
-            let Some(kind) = borrow else {
-                let argument = self.check_consumed(value, Some(ty))?;
-                self.require(value.span, ty, argument.ty)?;
-                checked.push(argument);
-                continue;
+            let (checked_operand, operand, is_receiver) = match (value, borrow) {
+                (Argument::Written(value), None) => {
+                    let argument = self.check_consumed(value, Some(ty))?;
+                    self.require(value.span, ty, argument.ty)?;
+                    checked.push(argument);
+                    continue;
+                }
+                // A method that takes `self` takes the receiver.
+                (Argument::Receiver(receiver, value), None) => {
+                    let receiver = match receiver {
+                        Operand::Place((place, _, _)) => self.place_value(place),
+                        Operand::Value(value) => value,
+                    };
+                    checked.push(self.consume(receiver, value.span)?);
+                    continue;
+                }
+                // The receiver of `&self` and `&mut self` is borrowed as is.
+                (Argument::Receiver(receiver, value), Some(_)) => (receiver, value, true),
+                (Argument::Written(value), Some(kind)) => {
+                    let spelled = match kind {
+                        BorrowKind::Shared => "&",
+                        BorrowKind::Mutable => "&mut",
+                    };
+                    let ResolvedExprKind::Borrow {
+                        kind: (_, written),
+                        operand,
+                    } = &value.kind
+                    else {
+                        return Err(self.error(
+                            CheckDiagnosticKind::TypeMismatch,
+                            value.span,
+                            format!(
+                                "this parameter borrows its argument; write `{spelled}` before it"
+                            ),
+                        ));
+                    };
+                    if *written != kind {
+                        return Err(self.error(
+                            CheckDiagnosticKind::TypeMismatch,
+                            value.span,
+                            format!("this parameter borrows with `{spelled}`"),
+                        ));
+                    }
+                    (
+                        self.check_operand(operand, Some(ty))?,
+                        operand.as_ref(),
+                        false,
+                    )
+                }
             };
-            let spelled = match kind {
-                BorrowKind::Shared => "&",
-                BorrowKind::Mutable => "&mut",
-            };
-            let ResolvedExprKind::Borrow {
-                kind: (_, written),
-                operand,
-            } = &value.kind
-            else {
-                return Err(self.error(
-                    CheckDiagnosticKind::TypeMismatch,
-                    value.span,
-                    format!("this parameter borrows its argument; write `{spelled}` before it"),
-                ));
-            };
-            if *written != kind {
-                return Err(self.error(
-                    CheckDiagnosticKind::TypeMismatch,
-                    value.span,
-                    format!("this parameter borrows with `{spelled}`"),
-                ));
-            }
-            let target = match self.expr_place(operand)? {
-                Some((place, place_ty, path)) => {
+            let kind = borrow.expect("only borrowed arguments get here");
+            let target = match checked_operand {
+                Operand::Place((place, place_ty, path)) => {
                     self.require(operand.span, ty, place_ty)?;
                     self.check_borrow_except(&own, &place, &path, kind, operand.span)?;
                     let keys = index_keys(operand);
@@ -3712,8 +3990,14 @@ impl BodyChecker<'_> {
                     });
                     BorrowTarget::Place(place)
                 }
-                None => {
-                    let value = self.check_expr(operand, Some(ty))?;
+                Operand::Value(value) => {
+                    if is_receiver && kind == BorrowKind::Mutable {
+                        return Err(self.error(
+                            CheckDiagnosticKind::NotAssignable,
+                            operand.span,
+                            "a method with `&mut self` changes its receiver, which must be a variable or a part of one".to_owned(),
+                        ));
+                    }
                     self.require(operand.span, ty, value.ty)?;
                     BorrowTarget::Value(value)
                 }
@@ -3777,6 +4061,14 @@ impl BodyChecker<'_> {
             },
         ))
     }
+}
+
+/// A call argument: an expression as written, or the receiver of a method,
+/// checked already to find the method, which the call borrows or takes as
+/// the method declares.
+enum Argument<'r> {
+    Written(&'r ResolvedExpr),
+    Receiver(Operand, &'r ResolvedExpr),
 }
 
 /// A borrowed call argument: its position, the place it borrows, and the

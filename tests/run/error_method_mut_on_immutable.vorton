@@ -1,0 +1,22 @@
+struct Point { x: Int, y: Int }
+
+impl Point {
+    fn new(x: Int, y: Int) -> Point { Point { x, y } }
+    fn origin() -> Point { Point { x: 0, y: 0 } }
+    fn shift(&mut self, dx: Int) { self.x += dx }
+    fn absorb(&mut self, other: &Point) { self.x += other.x }
+}
+
+struct Inventory { items: List<Str>, owner: Point }
+
+impl Inventory {
+    fn items(&self) -> &List<Str> { &self.items }
+    fn items_mut(&mut self) -> &mut List<Str> { &mut self.items }
+    fn into_owner(self) -> Point { self.owner }
+    fn count(&self) -> Int { self.items.len() }
+}
+fn main() {
+    let p = Point::new(1, 2)
+    p.shift(1)
+}
+

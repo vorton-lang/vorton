@@ -1,0 +1,11 @@
+struct P { x: Int }
+
+impl P {
+    fn a(&self) -> Int { 1 }
+}
+
+impl P {
+    fn a(&self) -> Int { 2 }
+}
+
+fn main() {}
