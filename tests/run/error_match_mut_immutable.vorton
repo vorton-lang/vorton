@@ -1,0 +1,7 @@
+fn main() {
+    let o = Option::Some(1)
+    match &mut o {
+        Option::Some(n) => { n += 1 }
+        Option::None => {}
+    }
+}

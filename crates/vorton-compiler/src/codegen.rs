@@ -1120,7 +1120,9 @@ impl FunctionEmitter<'_> {
                 arguments,
                 checks,
             } => self.call(*function, arguments, checks, expression.ty),
-            ExprKind::Borrow(_) => unreachable!("borrows appear only as call arguments"),
+            ExprKind::Borrow(_) => {
+                unreachable!("borrows appear only as call arguments and `match` subjects")
+            }
             ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
@@ -1466,11 +1468,32 @@ impl FunctionEmitter<'_> {
 
     fn match_expr(&mut self, scrutinee: &Expr, arms: &[Arm], ty: Type) -> Value {
         let subject_ty = scrutinee.ty;
-        let value = self.expr(scrutinee);
-        if matches!(value, Value::Never) {
-            return Value::Never;
-        }
-        let code = self.subject(value, subject_ty);
+        let code = match &scrutinee.kind {
+            // A borrowed place is matched where it is.
+            ExprKind::Borrow(target) => match target.as_ref() {
+                BorrowTarget::Place(place) => {
+                    let Some((code, _, _)) = self.place(place) else {
+                        return Value::Never;
+                    };
+                    self.scopes.push(Vec::new());
+                    self.types.has_storage(subject_ty).then_some(code)
+                }
+                BorrowTarget::Value(value) => {
+                    let value = self.expr(value);
+                    if matches!(value, Value::Never) {
+                        return Value::Never;
+                    }
+                    self.subject(value, subject_ty)
+                }
+            },
+            _ => {
+                let value = self.expr(scrutinee);
+                if matches!(value, Value::Never) {
+                    return Value::Never;
+                }
+                self.subject(value, subject_ty)
+            }
+        };
         let result = self.types.has_storage(ty).then(|| self.temporary(ty));
         let end = format!("vt_m{}", self.labels);
         self.labels += 1;
@@ -1605,7 +1628,7 @@ impl FunctionEmitter<'_> {
                 }
             }
             Pattern::Or(alternatives) => {
-                if !binds(pattern) {
+                if pattern.bindings().is_empty() {
                     return;
                 }
                 let mut keyword = "if";
@@ -1629,9 +1652,7 @@ impl FunctionEmitter<'_> {
 
     /// Makes the innermost scope own the binding locals of `pattern`.
     fn register_bindings(&mut self, pattern: &Pattern) {
-        let mut locals = Vec::new();
-        collect_bindings(pattern, &mut locals);
-        for local in locals {
+        for local in pattern.bindings() {
             if self.function.locals[local].borrow.is_some() {
                 continue;
             }
@@ -1963,41 +1984,6 @@ fn conjunction(tests: &[String]) -> String {
         "true".to_owned()
     } else {
         format!("({})", tests.join(" && "))
-    }
-}
-
-/// Whether `pattern` binds any local.
-fn binds(pattern: &Pattern) -> bool {
-    let mut locals = Vec::new();
-    collect_bindings(pattern, &mut locals);
-    !locals.is_empty()
-}
-
-/// The binding locals of `pattern`; the alternatives of an or-pattern bind
-/// the same locals, so only the first is read.
-fn collect_bindings(pattern: &Pattern, locals: &mut Vec<usize>) {
-    match pattern {
-        Pattern::Binding(local) => locals.push(*local),
-        Pattern::Tuple(elements) => {
-            for element in elements {
-                collect_bindings(element, locals);
-            }
-        }
-        Pattern::Variant { fields, .. } => {
-            for (_, field) in fields {
-                collect_bindings(field, locals);
-            }
-        }
-        Pattern::Or(alternatives) => {
-            if let Some(first) = alternatives.first() {
-                collect_bindings(first, locals);
-            }
-        }
-        Pattern::Wildcard
-        | Pattern::Int(_)
-        | Pattern::Float(_)
-        | Pattern::Bool(_)
-        | Pattern::Str(_) => {}
     }
 }
 

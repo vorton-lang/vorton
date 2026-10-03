@@ -1,0 +1,9 @@
+fn main() {
+    let mut xs = [[1], [2]]
+    match &xs[0] {
+        first => {
+            xs.push([3])
+            print(first.len())
+        }
+    }
+}

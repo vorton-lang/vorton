@@ -1,0 +1,12 @@
+fn bump(n: &mut Int) -> Bool {
+    n += 1
+    true
+}
+
+fn main() {
+    let mut o = Option::Some(1)
+    match &mut o {
+        Option::Some(n) if bump(&mut n) => print(n)
+        _ => {}
+    }
+}

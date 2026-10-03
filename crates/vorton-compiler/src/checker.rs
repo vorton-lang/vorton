@@ -253,8 +253,9 @@ pub(crate) enum ExprKind {
         receiver: Box<Receiver>,
         arguments: Vec<Expr>,
     },
-    /// `&x` or `&mut x` as a call argument: a pointer to a place, or to a
-    /// temporary that lives until the end of the enclosing statement.
+    /// `&x` or `&mut x` as a call argument or `match` subject: a pointer to
+    /// a place, or to a temporary that lives until the end of the enclosing
+    /// statement.
     Borrow(Box<BorrowTarget>),
 }
 
@@ -292,6 +293,41 @@ pub(crate) enum Pattern {
     },
     /// Alternatives that bind the same locals.
     Or(Vec<Pattern>),
+}
+
+impl Pattern {
+    /// The binding locals; the alternatives of an or-pattern bind the same
+    /// locals, so only the first is read.
+    pub(crate) fn bindings(&self) -> Vec<usize> {
+        fn collect(pattern: &Pattern, locals: &mut Vec<usize>) {
+            match pattern {
+                Pattern::Binding(local) => locals.push(*local),
+                Pattern::Tuple(elements) => {
+                    for element in elements {
+                        collect(element, locals);
+                    }
+                }
+                Pattern::Variant { fields, .. } => {
+                    for (_, field) in fields {
+                        collect(field, locals);
+                    }
+                }
+                Pattern::Or(alternatives) => {
+                    if let Some(first) = alternatives.first() {
+                        collect(first, locals);
+                    }
+                }
+                Pattern::Wildcard
+                | Pattern::Int(_)
+                | Pattern::Float(_)
+                | Pattern::Bool(_)
+                | Pattern::Str(_) => {}
+            }
+        }
+        let mut locals = Vec::new();
+        collect(self, &mut locals);
+        locals
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -843,8 +879,9 @@ impl BodyChecker<'_> {
         self.declare_local(identity, ty, mutable, None)
     }
 
-    /// Declares a pattern binding: a copy or move without `mode`, otherwise a
-    /// pointer into the matched place.
+    /// Declares a binding of a part of type `ty` that a pattern or loop
+    /// reaches with `mode`: a copy or move without it, otherwise a pointer
+    /// into the place. A value read through `&` is copied instead.
     fn declare_binding(
         &mut self,
         identity: &EntityId,
@@ -852,8 +889,10 @@ impl BodyChecker<'_> {
         mode: Option<BorrowKind>,
     ) -> usize {
         match mode {
-            Some(kind) => self.declare_borrow(identity, ty, kind),
-            None => self.declare(identity, ty, false),
+            Some(kind) if kind == BorrowKind::Mutable || self.types.is_entity(ty) => {
+                self.declare_borrow(identity, ty, kind)
+            }
+            _ => self.declare(identity, ty, false),
         }
     }
 
@@ -1149,7 +1188,8 @@ impl BodyChecker<'_> {
                     if value.ty == Type::NEVER {
                         return Ok((Statement::Expr(value), true));
                     }
-                    let pattern = self.check_pattern(pattern, value.ty, &mut BTreeMap::new())?;
+                    let pattern =
+                        self.check_pattern(pattern, value.ty, None, &mut BTreeMap::new())?;
                     if let Some(missing) = exhaustive::missing(self.types, &[&pattern], value.ty) {
                         return Err(self.error(
                             CheckDiagnosticKind::NonExhaustive,
@@ -1336,11 +1376,12 @@ impl BodyChecker<'_> {
                     path,
                     exclusive: kind == BorrowKind::Mutable,
                 };
-                // Value elements read through `&` are copied; anything else
-                // binds a pointer to the element.
-                let mode =
-                    (kind == BorrowKind::Mutable || self.types.is_entity(element)).then_some(kind);
-                (ForSource::Borrowed(place), element, Some(frozen), mode)
+                (
+                    ForSource::Borrowed(place),
+                    element,
+                    Some(frozen),
+                    Some(kind),
+                )
             }
             _ => {
                 let value = self.check_expr(iterable, None)?;
@@ -2379,23 +2420,75 @@ impl BodyChecker<'_> {
         self.moved = reaching.unwrap_or(all);
     }
 
-    /// Checks the patterns of `arms` against `ty`; returns each pattern with
-    /// the locals visible in its arm.
+    /// Checks the patterns of `arms` against `ty`, binding with `mode`;
+    /// returns each pattern with the locals visible in its arm.
     fn check_arm_patterns<'p>(
         &mut self,
         patterns: impl IntoIterator<Item = &'p ResolvedPattern>,
         ty: Type,
+        mode: Option<BorrowKind>,
     ) -> Result<Vec<ArmPattern>, CheckDiagnostic> {
         let scope = self.local_ids.clone();
         let mut checked = Vec::new();
         for pattern in patterns {
-            let pattern = self.check_pattern(pattern, ty, &mut BTreeMap::new())?;
+            let pattern = self.check_pattern(pattern, ty, mode, &mut BTreeMap::new())?;
             checked.push((
                 pattern,
                 std::mem::replace(&mut self.local_ids, scope.clone()),
             ));
         }
         Ok(checked)
+    }
+
+    /// Checks the subject of a `match` or `if let`. A subject written `&e`
+    /// or `&mut e` is borrowed: it returns the borrow mode, and for a place
+    /// the borrow that the arms keep.
+    fn check_subject(
+        &mut self,
+        subject: &ResolvedExpr,
+    ) -> Result<(Expr, Option<BorrowKind>, Option<Frozen>), CheckDiagnostic> {
+        let ResolvedExprKind::Borrow {
+            kind: (_, kind),
+            operand,
+        } = &subject.kind
+        else {
+            return Ok((self.check_expr(subject, None)?, None, None));
+        };
+        let kind = *kind;
+        let (target, ty, frozen) = match self.expr_place(operand)? {
+            Some((place, ty, path)) => {
+                self.check_borrow(&place, &path, kind, operand.span)?;
+                let frozen = Frozen {
+                    local: place.local,
+                    path,
+                    exclusive: kind == BorrowKind::Mutable,
+                };
+                (BorrowTarget::Place(place), ty, Some(frozen))
+            }
+            None => {
+                let value = self.check_expr(operand, None)?;
+                if value.ty == Type::NEVER {
+                    return Ok((value, None, None));
+                }
+                let ty = value.ty;
+                (BorrowTarget::Value(value), ty, None)
+            }
+        };
+        Ok((
+            Expr {
+                ty,
+                kind: ExprKind::Borrow(Box::new(target)),
+            },
+            Some(kind),
+            frozen,
+        ))
+    }
+
+    /// The bindings of `pattern` that point into the matched place with `&mut`.
+    fn mutable_bindings(&self, pattern: &Pattern) -> Vec<usize> {
+        let mut locals = pattern.bindings();
+        locals.retain(|&local| self.locals[local].borrow == Some(BorrowKind::Mutable));
+        locals
     }
 
     fn check_match(
@@ -2405,24 +2498,24 @@ impl BodyChecker<'_> {
         arms: &[ResolvedMatchArm],
         expected: Option<Type>,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
-        if matches!(scrutinee.kind, ResolvedExprKind::Borrow { .. }) {
-            return Err(self.unsupported(scrutinee.span, "borrowed `match` subjects"));
-        }
         let scrutinee_span = scrutinee.span;
-        let scrutinee = self.check_expr(scrutinee, None)?;
+        let (scrutinee, mode, frozen) = self.check_subject(scrutinee)?;
         if scrutinee.ty == Type::NEVER {
             return Ok((Type::NEVER, scrutinee.kind));
         }
         let patterns =
-            self.check_arm_patterns(arms.iter().map(|arm| &arm.pattern), scrutinee.ty)?;
-        let scrutinee = if patterns
-            .iter()
-            .any(|(pattern, _)| self.binds_entity(pattern))
+            self.check_arm_patterns(arms.iter().map(|arm| &arm.pattern), scrutinee.ty, mode)?;
+        let scrutinee = if mode.is_none()
+            && patterns
+                .iter()
+                .any(|(pattern, _)| self.binds_entity(pattern))
         {
             self.consume(scrutinee, scrutinee_span)?
         } else {
             scrutinee
         };
+        let has_frozen = frozen.is_some();
+        self.frozen.extend(frozen);
         let scope = self.local_ids.clone();
         let before = self.moved.clone();
         let mut ends = Vec::new();
@@ -2432,11 +2525,19 @@ impl BodyChecker<'_> {
         for (arm, (pattern, visible)) in arms.iter().zip(patterns) {
             self.local_ids = visible;
             self.moved = before.clone();
+            // A guard only reads the bindings; they become `&mut` once it holds.
+            let readonly = self.mutable_bindings(&pattern);
+            for &local in &readonly {
+                self.mutable[local] = false;
+            }
             let guard = arm
                 .guard
                 .as_ref()
                 .map(|guard| self.check_condition(guard))
                 .transpose()?;
+            for &local in &readonly {
+                self.mutable[local] = true;
+            }
             let body = self.check_consumed(&arm.body, expected)?;
             ends.push((body.ty, self.moved.clone()));
             if body.ty != Type::NEVER {
@@ -2454,6 +2555,9 @@ impl BodyChecker<'_> {
                 guard,
                 body,
             });
+        }
+        if has_frozen {
+            self.frozen.pop();
         }
         self.local_ids = scope;
         if ends.is_empty() {
@@ -2495,23 +2599,25 @@ impl BodyChecker<'_> {
         then_branch: &ResolvedBlock,
         else_branch: &Option<ResolvedBlock>,
     ) -> Result<Expr, CheckDiagnostic> {
-        if matches!(value.kind, ResolvedExprKind::Borrow { .. }) {
-            return Err(self.unsupported(value.span, "borrowed `if let` subjects"));
-        }
-        let scrutinee = self.check_expr(value, None)?;
+        let (scrutinee, mode, frozen) = self.check_subject(value)?;
         if scrutinee.ty == Type::NEVER {
             return Ok(scrutinee);
         }
-        let mut patterns = self.check_arm_patterns([pattern], scrutinee.ty)?;
+        let mut patterns = self.check_arm_patterns([pattern], scrutinee.ty, mode)?;
         let (pattern, visible) = patterns.pop().expect("one pattern was checked");
-        let scrutinee = if self.binds_entity(&pattern) {
+        let scrutinee = if mode.is_none() && self.binds_entity(&pattern) {
             self.consume(scrutinee, value.span)?
         } else {
             scrutinee
         };
+        let has_frozen = frozen.is_some();
+        self.frozen.extend(frozen);
         let scope = std::mem::replace(&mut self.local_ids, visible);
         let before = self.moved.clone();
         let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
+        if has_frozen {
+            self.frozen.pop();
+        }
         self.local_ids = scope;
         let after_then = std::mem::replace(&mut self.moved, before);
         let else_body = match else_branch {
@@ -2547,12 +2653,15 @@ impl BodyChecker<'_> {
             },
         })
     }
-    /// Checks `pattern` against a value of type `ty`, declaring its bindings.
-    /// `shared` maps binding names to the locals of earlier alternatives.
+
+    /// Checks `pattern` against a value of type `ty`, declaring its bindings
+    /// with `mode`. `shared` maps binding names to the locals of earlier
+    /// alternatives.
     fn check_pattern(
         &mut self,
         pattern: &ResolvedPattern,
         ty: Type,
+        mode: Option<BorrowKind>,
         shared: &mut BTreeMap<String, usize>,
     ) -> Result<Pattern, CheckDiagnostic> {
         let span = pattern.span;
@@ -2590,7 +2699,7 @@ impl BodyChecker<'_> {
                     self.local_ids.insert(binding.identity.clone(), local);
                     Pattern::Binding(local)
                 } else {
-                    let local = self.declare(&binding.identity, ty, false);
+                    let local = self.declare_binding(&binding.identity, ty, mode);
                     shared.insert(name, local);
                     Pattern::Binding(local)
                 }
@@ -2620,7 +2729,7 @@ impl BodyChecker<'_> {
                         .iter()
                         .zip(element_types)
                         .map(|(element, element_ty)| {
-                            self.check_pattern(element, element_ty, shared)
+                            self.check_pattern(element, element_ty, mode, shared)
                         })
                         .collect::<Result<_, _>>()?,
                 )
@@ -2628,7 +2737,7 @@ impl BodyChecker<'_> {
             ResolvedPatternKind::Or(alternatives) => {
                 let mut checked = Vec::new();
                 for alternative in alternatives {
-                    checked.push(self.check_pattern(alternative, ty, shared)?);
+                    checked.push(self.check_pattern(alternative, ty, mode, shared)?);
                 }
                 Pattern::Or(checked)
             }
@@ -2695,7 +2804,10 @@ impl BodyChecker<'_> {
                         for (index, (pattern, (_, field_ty))) in
                             patterns.iter().zip(&field_types).enumerate()
                         {
-                            checked.push((index, self.check_pattern(pattern, *field_ty, shared)?));
+                            checked.push((
+                                index,
+                                self.check_pattern(pattern, *field_ty, mode, shared)?,
+                            ));
                         }
                     }
                     Some(ResolvedPatternFields::Named {
@@ -2720,7 +2832,7 @@ impl BodyChecker<'_> {
                             let field_ty = field_types[index].1;
                             checked.push((
                                 index,
-                                self.check_pattern(&field.pattern, field_ty, shared)?,
+                                self.check_pattern(&field.pattern, field_ty, mode, shared)?,
                             ));
                         }
                         if rest.is_none() && checked.len() != field_types.len() {
