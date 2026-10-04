@@ -3989,7 +3989,9 @@ impl BodyChecker<'_> {
             return Ok((Type::INT, ExprKind::Int(i64::MIN)));
         }
         let operand = self.check_expr(operand, None)?;
+        // An operand that never produces a value fits any operator.
         let valid = match operator {
+            _ if operand.ty == Type::NEVER => true,
             UnaryOperator::Negate => matches!(operand.ty, Type::INT | Type::FLOAT),
             UnaryOperator::Not => operand.ty == Type::BOOL,
         };
@@ -4021,11 +4023,25 @@ impl BodyChecker<'_> {
         use BinaryOperator as Op;
         let left = self.check_expr(left, None)?;
         let right_span = right.span;
-        let right = self.check_expr(right, Some(left.ty))?;
-        if left.ty != right.ty {
-            return Err(self.mismatch(right_span, left.ty, right.ty));
+        let expected = (left.ty != Type::NEVER).then_some(left.ty);
+        let right = self.check_expr(right, expected)?;
+        // An operand that never produces a value fits the other one, as it
+        // fits wherever a value is expected.
+        let ty = match expected {
+            Some(ty) => {
+                self.require(right_span, ty, right.ty)?;
+                ty
+            }
+            None => right.ty,
+        };
+        if ty == Type::NEVER {
+            let kind = ExprKind::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+            return Ok((Type::NEVER, kind));
         }
-        let ty = left.ty;
         let result = match operator {
             Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Remainder => {
                 matches!(ty, Type::INT | Type::FLOAT).then_some(ty)

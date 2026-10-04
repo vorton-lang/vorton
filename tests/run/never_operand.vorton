@@ -1,0 +1,18 @@
+fn die() -> Never {
+    panic("stopped")
+}
+
+fn pick(stop: Bool) -> Int {
+    if stop {
+        1 + die()
+    } else {
+        2
+    }
+}
+
+fn main() {
+    print(pick(false))
+    let a: Bool = false && die() == 3
+    print(a)
+    print(pick(true))
+}
