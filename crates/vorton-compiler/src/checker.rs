@@ -4145,10 +4145,7 @@ impl BodyChecker<'_> {
     /// Whether `ty` implements `comparison`, a type parameter through its
     /// bounds.
     fn compares(&self, ty: Type, comparison: Comparison) -> bool {
-        let trait_index = self.traits.comparisons[comparison as usize];
-        self.types.compares(ty, comparison, &|index| {
-            self.type_parameters[index].traits.contains(&trait_index)
-        })
+        self.implements(ty, self.traits.comparisons[comparison as usize])
     }
 
     fn check_call(
