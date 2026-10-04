@@ -1,0 +1,25 @@
+struct Marker {
+    u: Unit,
+}
+
+fn main() {
+    let mut m: Map<Unit, Int> = Map::new()
+    m[()] = 1
+    m[()] = 2
+    print(m.len())
+    print(m[()])
+    let mut s: Set<Unit> = Set::new()
+    print(s.insert(()))
+    print(s.insert(()))
+    print(s.contains(()))
+    let mut k: Map<(Int, Unit), Str> = Map::new()
+    k[(1, ())] = "a"
+    print(k[(1, ())])
+    let mut n: Map<Marker, Int> = Map::new()
+    n[Marker { u: () }] = 3
+    for (key, value) in n {
+        print(value)
+    }
+    print(m.remove(()) == Option::Some(2))
+    print(m.len())
+}

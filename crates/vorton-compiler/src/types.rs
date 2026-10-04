@@ -666,26 +666,23 @@ impl Types {
     /// hash agrees with its equality. A `Unit` part adds nothing to a key,
     /// but `Unit` alone is no key.
     pub(crate) fn is_key(&self, ty: Type) -> bool {
-        ty != Type::UNIT
-            && !self.search(ty, |ty| {
-                let written = self.written.get(&ty);
-                if written.is_some_and(|written| written.eq.is_some() || written.drop.is_some()) {
-                    return Search::Found;
-                }
-                match self.kind(ty) {
-                    TypeKind::Int | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => Search::Leaf,
-                    TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
-                        Search::Into(self.components(ty))
-                    }
-                    TypeKind::Float
-                    | TypeKind::Never
-                    | TypeKind::List(_)
-                    | TypeKind::Map(..)
-                    | TypeKind::Set(_)
-                    | TypeKind::Range
-                    | TypeKind::Param { .. } => Search::Found,
-                }
-            })
+        !self.search(ty, |ty| {
+            let written = self.written.get(&ty);
+            if written.is_some_and(|written| written.eq.is_some() || written.drop.is_some()) {
+                return Search::Found;
+            }
+            match self.kind(ty) {
+                TypeKind::Int | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => Search::Leaf,
+                TypeKind::Tuple(_) | TypeKind::Nominal { .. } => Search::Into(self.components(ty)),
+                TypeKind::Float
+                | TypeKind::Never
+                | TypeKind::List(_)
+                | TypeKind::Map(..)
+                | TypeKind::Set(_)
+                | TypeKind::Range
+                | TypeKind::Param { .. } => Search::Found,
+            }
+        })
     }
 
     /// How the compiler carries out `operation` on a value of `ty`. This is

@@ -383,6 +383,8 @@ fn hash_code(types: &Types, ty: Type, code: &str) -> String {
         TypeKind::Int => format!("vt_hash_int({code})"),
         TypeKind::Bool => format!("vt_hash_int((int64_t){code})"),
         TypeKind::Str => format!("vt_hash_str({code})"),
+        // `Unit` has one value.
+        TypeKind::Unit => "0".to_owned(),
         TypeKind::Tuple(_) | TypeKind::Nominal { .. } => format!("vt_hash_T{}({code})", ty.index()),
         _ => unreachable!("the checker admits only these key types"),
     }

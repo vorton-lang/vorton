@@ -343,6 +343,8 @@ impl<'a> Emitter<'a> {
         let map = self.place(map).expect("a map has storage");
         let new_key = self.entry_temporary(key_ty);
         let key = match key {
+            // A key without storage is the one value of its type.
+            _ if !types.has_storage(key_ty) => "0".to_owned(),
             Projection::Index(local) => clone_code(types, key_ty, &self.variable(local)),
             Projection::ConstantIndex(value) => int_literal(value),
             _ => unreachable!("a key is an index"),
@@ -396,7 +398,13 @@ impl<'a> Emitter<'a> {
                 ),
                 Projection::Index(local) => {
                     let index = self.variable(local);
-                    let key = format!("&{index}");
+                    // A key without storage is the one value of its type.
+                    let key = match types.kind(ty) {
+                        TypeKind::Map(key, _) if !types.has_storage(*key) => {
+                            "&(char){0}".to_owned()
+                        }
+                        _ => format!("&{index}"),
+                    };
                     self.element(&code, ty, &index, &key)
                 }
                 Projection::ConstantIndex(value) => {
