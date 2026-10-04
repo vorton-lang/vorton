@@ -1,0 +1,5 @@
+fn main() {
+    print("".repeat(9223372036854775807).len())
+    print("ab".repeat(0).len())
+    print("ab".repeat(3))
+}

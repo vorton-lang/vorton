@@ -399,7 +399,12 @@ static vt_str *vt_str_repeat(const vt_str *text, int64_t count) {
     if (count < 0) {
         vt_panic("negative repeat count");
     }
-    if (text->len > 0 && count > INT64_MAX / text->len) {
+    /* The work follows the length of the result, which is empty here
+     * however large the count. */
+    if (text->len == 0 || count == 0) {
+        return vt_str_alloc(0);
+    }
+    if (count > INT64_MAX / text->len) {
         vt_panic("string too long");
     }
     vt_str *result = vt_str_alloc(text->len * count);
