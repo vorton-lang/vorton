@@ -1,0 +1,17 @@
+struct E {}
+
+fn less<T: PartialOrd>(a: T, b: T) -> Bool { a < b }
+fn more<T: PartialOrd>(a: T, b: T) -> Bool { a > b }
+fn at_most<T: PartialOrd>(a: T, b: T) -> Bool { a <= b }
+fn at_least<T: PartialOrd>(a: T, b: T) -> Bool { a >= b }
+fn same<T: PartialEq>(a: T, b: T) -> Bool { a == b }
+fn differ<T: PartialEq>(a: T, b: T) -> Bool { a != b }
+
+fn main() {
+    print("${() < ()} ${() > ()} ${() <= ()} ${() >= ()} ${() == ()} ${() != ()}")
+    print("${less((), ())} ${more((), ())} ${at_most((), ())} ${at_least((), ())} ${same((), ())} ${differ((), ())}")
+    print("${E {} < E {}} ${E {} > E {}} ${E {} <= E {}} ${E {} >= E {}} ${E {} == E {}} ${E {} != E {}}")
+    print("${less(E {}, E {})} ${more(E {}, E {})} ${at_most(E {}, E {})} ${at_least(E {}, E {})} ${same(E {}, E {})} ${differ(E {}, E {})}")
+    print("${less(1, 2)} ${more(1, 2)} ${at_least(2.5, 2.5)}")
+    print(less("a", "b"))
+}

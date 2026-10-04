@@ -637,38 +637,16 @@ impl<'a> Emitter<'a> {
         ty: Type,
         operands: &[Operand],
     ) -> Option<String> {
-        use BinaryOperator as Op;
         let types = self.types;
         let values = operands
             .iter()
             .map(|operand| self.read(operand))
             .collect::<Vec<_>>();
         match operation {
-            Operation::Equal => {
-                let operator = operator.expect("`==` or `!=`");
-                let (Some(a), Some(b)) = (&values[0], &values[1]) else {
-                    return Some((operator == Op::Equal).to_string());
-                };
-                let equal = equal_code(types, ty, a, b);
-                Some(if operator == Op::Equal {
-                    equal
-                } else {
-                    format!("(!{equal})")
-                })
-            }
-            Operation::Order => {
-                let (Some(a), Some(b)) = (&values[0], &values[1]) else {
-                    return Some(true.to_string());
-                };
-                let compare = compare_code(types, ty, a, b);
-                Some(match operator.expect("an ordering operator") {
-                    Op::Less => format!("({compare} == -1)"),
-                    Op::Greater => format!("({compare} == 1)"),
-                    // -1 or 0.
-                    Op::LessEqual => format!("((unsigned)({compare} + 1) <= 1u)"),
-                    // 0 or 1.
-                    _ => format!("((unsigned)({compare}) <= 1u)"),
-                })
+            Operation::Equal | Operation::Order => {
+                let operator = operator.expect("a comparison operator");
+                let pair = values[0].as_deref().zip(values[1].as_deref());
+                Some(comparison(types, operator, ty, pair))
             }
             Operation::Clone => values[0].as_ref().map(|code| clone_code(types, ty, code)),
             Operation::Contains => {
@@ -695,10 +673,15 @@ impl<'a> Emitter<'a> {
             "values with parts are compared by `Glue`"
         );
         let (left, right) = (self.read(left), self.read(right));
+        if matches!(
+            operator,
+            Op::Equal | Op::NotEqual | Op::Less | Op::Greater | Op::LessEqual | Op::GreaterEqual
+        ) {
+            let pair = left.as_deref().zip(right.as_deref());
+            return comparison(self.types, operator, operand_ty, pair);
+        }
         let (Some(a), Some(b)) = (left, right) else {
-            // Two `Unit` values are equal.
-            let equal = matches!(operator, Op::Equal | Op::LessEqual | Op::GreaterEqual);
-            return equal.to_string();
+            unreachable!("arithmetic and logic have operands with storage")
         };
         match (operator, operand_ty) {
             (Op::Add, Type::INT) => format!("vt_int_add({a}, {b})"),
@@ -711,18 +694,17 @@ impl<'a> Emitter<'a> {
             (Op::Multiply, _) => format!("({a} * {b})"),
             (Op::Divide, _) => format!("({a} / {b})"),
             (Op::Remainder, _) => format!("fmod({a}, {b})"),
-            (Op::Equal, _) => equal_code(self.types, operand_ty, &a, &b),
-            (Op::NotEqual, _) => format!("(!{})", equal_code(self.types, operand_ty, &a, &b)),
-            (Op::Less, Type::STR) => format!("(vt_str_compare({a}, {b}) < 0)"),
-            (Op::Greater, Type::STR) => format!("(vt_str_compare({a}, {b}) > 0)"),
-            (Op::LessEqual, Type::STR) => format!("(vt_str_compare({a}, {b}) <= 0)"),
-            (Op::GreaterEqual, Type::STR) => format!("(vt_str_compare({a}, {b}) >= 0)"),
-            (Op::Less, _) => format!("({a} < {b})"),
-            (Op::Greater, _) => format!("({a} > {b})"),
-            (Op::LessEqual, _) => format!("({a} <= {b})"),
-            (Op::GreaterEqual, _) => format!("({a} >= {b})"),
             (Op::LogicAnd, _) => format!("({a} && {b})"),
             (Op::LogicOr, _) => format!("({a} || {b})"),
+            (
+                Op::Equal
+                | Op::NotEqual
+                | Op::Less
+                | Op::Greater
+                | Op::LessEqual
+                | Op::GreaterEqual,
+                _,
+            ) => unreachable!("comparisons are handled above"),
             (Op::RangeExclusive | Op::RangeInclusive, _) => {
                 unreachable!("ranges are built by `Range`")
             }
@@ -1258,6 +1240,46 @@ impl<'a> Emitter<'a> {
                 ));
                 self.line(&format!("vt_items_free({parts});"));
                 list
+            }
+        }
+    }
+}
+
+/// `operator` applied to the values `a` and `b` of type `ty`, given as
+/// `pair`. A type without storage has one value, so `pair` is `None` and the
+/// two are equal.
+fn comparison(
+    types: &Types,
+    operator: BinaryOperator,
+    ty: Type,
+    pair: Option<(&str, &str)>,
+) -> String {
+    use BinaryOperator as Op;
+    let Some((a, b)) = pair else {
+        return matches!(operator, Op::Equal | Op::LessEqual | Op::GreaterEqual).to_string();
+    };
+    let symbol = match operator {
+        Op::Equal => return equal_code(types, ty, a, b),
+        Op::NotEqual => return format!("(!{})", equal_code(types, ty, a, b)),
+        Op::Less => "<",
+        Op::Greater => ">",
+        Op::LessEqual => "<=",
+        Op::GreaterEqual => ">=",
+        _ => unreachable!("not a comparison"),
+    };
+    match types.kind(ty) {
+        TypeKind::Int | TypeKind::Float | TypeKind::Bool => format!("({a} {symbol} {b})"),
+        TypeKind::Str => format!("(vt_str_compare({a}, {b}) {symbol} 0)"),
+        _ => {
+            // -1, 0 or 1, or 2 for values that are not ordered.
+            let compare = compare_code(types, ty, a, b);
+            match operator {
+                Op::Less => format!("({compare} == -1)"),
+                Op::Greater => format!("({compare} == 1)"),
+                // -1 or 0.
+                Op::LessEqual => format!("((unsigned)({compare} + 1) <= 1u)"),
+                // 0 or 1.
+                _ => format!("((unsigned)({compare}) <= 1u)"),
             }
         }
     }
