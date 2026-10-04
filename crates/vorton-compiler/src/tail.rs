@@ -94,7 +94,7 @@ impl<'a> TailCalls<'a> {
         let (destination, value) = match &data.statements[index].kind {
             StatementKind::Assign(destination, value) => (destination.clone(), value),
             StatementKind::Bind(reference, value) => (Place::local(*reference), value),
-            StatementKind::Release(_) => return None,
+            StatementKind::Release(_) | StatementKind::Unpack(_) => return None,
         };
         let Rvalue::Call {
             callee: Callee::Function(callee),
@@ -159,7 +159,9 @@ impl<'a> TailCalls<'a> {
                         place,
                         Rvalue::Use(Operand::Constant(Constant::Unit)),
                     ) if body.place_type(self.types, place) == Type::UNIT => {}
-                    StatementKind::Assign(..) | StatementKind::Bind(..) => return None,
+                    StatementKind::Assign(..)
+                    | StatementKind::Bind(..)
+                    | StatementKind::Unpack(_) => return None,
                 }
             }
             match body.blocks[current].terminator.kind {

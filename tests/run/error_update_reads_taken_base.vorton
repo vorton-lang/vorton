@@ -1,0 +1,13 @@
+struct Pair {
+    items: List<Int>,
+    count: Int,
+}
+
+fn count(pair: &Pair) -> Int {
+    pair.items.len()
+}
+
+fn main() {
+    let pair = Pair { items: [1], count: 0 }
+    let other = Pair { ..pair, count: count(&pair) }
+}

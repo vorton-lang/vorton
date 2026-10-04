@@ -1,0 +1,21 @@
+// One pattern or one `..base` takes several parts of a variable together.
+struct Pair {
+    left: List<Int>,
+    right: List<Int>,
+    count: Int,
+}
+
+fn make() -> Pair {
+    Pair { left: [1], right: [2, 3], count: 7 }
+}
+
+fn main() {
+    let triple = ([1], [2, 3], 7)
+    let (left, right, count) = triple
+    print(left.len() + right.len() + count)
+    let other = make()
+    let rebuilt = Pair { ..other, count: 1 }
+    print(rebuilt.right.len() + rebuilt.count)
+    let items = make().right
+    print(items.len())
+}

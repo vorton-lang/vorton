@@ -1,0 +1,20 @@
+// A guard reads an owned binding where it is; a rejected arm takes nothing,
+// so the next arm can take the same part.
+enum Shape {
+    Points(List<Int>),
+    Nothing,
+}
+
+fn describe(shape: Shape) -> Str {
+    match shape {
+        Shape::Points(points) if points.len() > 5 => "long"
+        Shape::Points(points) => "short ${points.len()}"
+        Shape::Nothing => "nothing"
+    }
+}
+
+fn main() {
+    print(describe(Shape::Points([1, 2, 3])))
+    print(describe(Shape::Points([1, 2, 3, 4, 5, 6])))
+    print(describe(Shape::Nothing))
+}

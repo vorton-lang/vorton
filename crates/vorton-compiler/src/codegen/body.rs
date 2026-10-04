@@ -160,6 +160,14 @@ impl<'a> Emitter<'a> {
             match &statement.kind {
                 StatementKind::Assign(destination, value) => self.assign(destination, value),
                 StatementKind::Bind(reference, value) => self.bind(*reference, value),
+                StatementKind::Unpack(taken) => {
+                    for (local, place) in taken {
+                        if let Some(value) = self.owned(&Operand::Move(place.clone())) {
+                            let name = self.variable(*local);
+                            self.line(&format!("{name} = {value};"));
+                        }
+                    }
+                }
                 StatementKind::Release(local) => self.release(*local),
             }
         }
@@ -452,7 +460,10 @@ impl<'a> Emitter<'a> {
                 let ty = self.body.place_type(self.types, place);
                 let code = self.place(place)?;
                 Some(if self.types.needs_release(ty) {
-                    debug_assert!(!self.types.is_entity(ty), "entities are moved");
+                    assert!(
+                        !self.types.is_entity(ty),
+                        "entities are moved, never copied"
+                    );
                     debug_assert!(
                         self.types.glue_functions(ty, Operation::Clone).is_empty(),
                         "copying a value runs no code the program wrote"
@@ -592,19 +603,11 @@ impl<'a> Emitter<'a> {
                     self.line(&format!("{call};"));
                     return None;
                 }
-                if borrow.is_none() {
-                    return Some(call);
-                }
-                // A copy of the value that the returned borrow points at.
-                let pointer = self.pointer_temporary(ty);
-                self.line(&format!("{pointer} = {call};"));
-                let value = format!("(*{pointer})");
-                Some(if types.needs_release(ty) {
-                    debug_assert!(!types.is_entity(ty), "entities are borrowed");
-                    clone_code(types, ty, &value)
-                } else {
-                    value
-                })
+                assert!(
+                    borrow.is_none(),
+                    "a call that returns a borrow is only in a `Bind`"
+                );
+                Some(call)
             }
             Rvalue::Builtin {
                 builtin,

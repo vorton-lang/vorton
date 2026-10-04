@@ -2,10 +2,11 @@
 //! lowering turns into the IR.
 //!
 //! Types are resolved, names are local indices or function indices, and the
-//! checker's decisions are explicit: where a value moves, where a borrow
-//! begins, which built-in method or intrinsic runs, and which callee a call
-//! names. What happens in what order, and whether moves and borrows are
-//! valid, is the IR's business.
+//! checker's decisions are explicit: where a borrow begins, which built-in
+//! method or intrinsic runs, and which callee a call names. A local, or a
+//! part of one, read for its value is moved or copied by its type, which
+//! lowering decides where the value is used. What happens in what order,
+//! and whether moves and borrows are valid, is the IR's business.
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
 use std::collections::BTreeMap;
@@ -253,9 +254,6 @@ pub(crate) enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<Arm>,
     },
-    /// Takes the entity value of a local, or of a part of it reached through
-    /// fields, which is left empty.
-    Move(Place),
     List(Vec<Expr>),
     /// `Map::new()` or `Set::new()`.
     EmptyMap,
@@ -310,7 +308,8 @@ pub(crate) struct Arm {
 #[derive(Debug, Clone)]
 pub(crate) enum Pattern {
     Wildcard,
-    Binding(usize),
+    /// A local, and where the pattern names it.
+    Binding(usize, Span),
     Int(i64),
     Float(f64),
     Str(String),
@@ -331,7 +330,7 @@ impl Pattern {
     pub(crate) fn bindings(&self) -> Vec<usize> {
         fn collect(pattern: &Pattern, locals: &mut Vec<usize>) {
             match pattern {
-                Pattern::Binding(local) => locals.push(*local),
+                Pattern::Binding(local, _) => locals.push(*local),
                 Pattern::Tuple(elements) => {
                     for element in elements {
                         collect(element, locals);

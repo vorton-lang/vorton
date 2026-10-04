@@ -1,0 +1,14 @@
+struct S { xs: List<Int> }
+
+struct D { s: S }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        self.s
+        ()
+    }
+}
+
+fn main() {
+    let d = D { s: S { xs: [1] } }
+}

@@ -101,7 +101,7 @@ fn expand(row: Vec<Pattern>, output: &mut Vec<Vec<Pattern>>) {
 }
 
 fn is_wild(pattern: &Pattern) -> bool {
-    matches!(pattern, Pattern::Wildcard | Pattern::Binding(_))
+    matches!(pattern, Pattern::Wildcard | Pattern::Binding(..))
 }
 
 /// The number of constructors of a closed type, or `None` for an open one.
@@ -131,7 +131,7 @@ fn field_types(types: &Types, ty: Type, constructor: usize) -> Vec<Type> {
 /// pattern cannot match them.
 fn specialize(row: &[Pattern], constructor: usize, arity: usize) -> Option<Vec<Pattern>> {
     let mut result = match &row[0] {
-        Pattern::Wildcard | Pattern::Binding(_) => vec![Pattern::Wildcard; arity],
+        Pattern::Wildcard | Pattern::Binding(..) => vec![Pattern::Wildcard; arity],
         Pattern::Bool(value) => {
             if usize::from(*value) != constructor {
                 return None;

@@ -1,0 +1,20 @@
+// `..base` takes only the fields that are not given. The given ones stay in
+// the base and are released when the base variable ends.
+struct Guard { tag: Str }
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        assert(self.tag != "old", "dropped ${self.tag}")
+    }
+}
+
+struct Pair {
+    guard: Guard,
+    items: List<Int>,
+}
+
+fn main() {
+    let old = Pair { guard: Guard { tag: "old" }, items: [1] }
+    let new = Pair { ..old, guard: Guard { tag: "new" } }
+    print("built with ${new.items.len()} item")
+}

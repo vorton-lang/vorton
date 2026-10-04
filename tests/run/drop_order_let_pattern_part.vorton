@@ -1,0 +1,14 @@
+// Destructuring takes only the parts it binds.
+struct Guard { tag: Str }
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        assert(false, "dropped ${self.tag}")
+    }
+}
+
+fn main() {
+    let pair = ([1, 2, 3], Guard { tag: "rest" })
+    let (items, _) = pair
+    print("bound ${items.len()}")
+}

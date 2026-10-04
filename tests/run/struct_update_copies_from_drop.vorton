@@ -1,0 +1,16 @@
+// `..base` copies the value fields of a value with a hand-written `Drop`,
+// which keeps it whole.
+struct Res {
+    id: Int,
+    name: Str,
+}
+
+impl Drop for Res {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let r = Res { id: 1, name: "r" }
+    let s = Res { ..r, id: 2 }
+    print("${r.id} ${s.id} ${s.name}")
+}

@@ -3,10 +3,15 @@
 //! Both checks follow the edges of the control-flow graph, so every
 //! construct that branches, loops or skips code is covered alike.
 //!
-//! - **Moves.** A forward analysis finds the places that may hold nothing at
-//!   each point: not yet assigned, moved away, or released. Using one is an
-//!   error. Moving a part of a variable counts as moving all of it, as the
-//!   spec says; the temporaries of lowering are tracked part by part.
+//! - **Moves.** An entity can be moved out of a local or a part of one
+//!   reached through fields, but not through a borrow, out of an element of
+//!   a container, or out of a value with a hand-written `drop`; every move
+//!   in the IR is checked against this. A forward analysis finds the places
+//!   that may hold nothing at each point: not yet assigned, moved away, or
+//!   released. Using one is an error. Moving a part of a variable counts as
+//!   moving all of it, as the spec says, so the parts that one construct
+//!   takes are taken in one `Unpack`; the temporaries of lowering are
+//!   tracked part by part.
 //! - **Borrows.** Each `Ref` makes a loan of a place. A reference local
 //!   carries the loans it was made from: its own, those of the reference it
 //!   reborrows, and for the result of a call that returns a borrow, those of
@@ -26,6 +31,7 @@ use crate::ast::Span;
 use crate::checker::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::mir::{
     BlockId, Body, Operand, Place, Projection, RefKind, Rvalue, StatementKind, TerminatorKind,
+    projection_type,
 };
 use crate::project::OriginRef;
 use crate::types::Types;
@@ -37,6 +43,7 @@ pub(crate) fn check(
 ) -> Result<(), CheckDiagnostic> {
     let graph = Graph::new(body);
     let mut errors = Vec::new();
+    check_move_sources(body, types, &mut errors);
     check_moves(body, &graph, &mut errors);
     check_borrows(body, types, &graph, &mut errors);
     match errors.into_iter().min_by_key(|error| error.span.start) {
@@ -119,6 +126,85 @@ fn forward<S: Clone + PartialEq>(
     starts
 }
 
+// Where entities can be moved out of.
+
+/// Reports each move out of a place that an entity cannot leave: through a
+/// borrow, out of an element of a container, or out of a value with a
+/// hand-written `drop`, which runs on the whole value.
+fn check_move_sources(body: &Body, types: &Types, errors: &mut Vec<Error>) {
+    // The reference locals that point where a call's result points.
+    let mut from_call = vec![false; body.locals.len()];
+    for block in &body.blocks {
+        for statement in &block.statements {
+            if let StatementKind::Bind(reference, Rvalue::Call { .. }) = &statement.kind {
+                from_call[*reference] = true;
+            }
+        }
+    }
+    for block in &body.blocks {
+        for statement in &block.statements {
+            let moved = match &statement.kind {
+                StatementKind::Assign(_, value) | StatementKind::Bind(_, value) => value
+                    .operands()
+                    .into_iter()
+                    .filter_map(|operand| match operand {
+                        Operand::Move(place) => Some(place),
+                        _ => None,
+                    })
+                    .collect(),
+                StatementKind::Unpack(taken) => taken.iter().map(|(_, place)| place).collect(),
+                StatementKind::Release(_) => Vec::new(),
+            };
+            for place in moved {
+                if let Some(message) = immovable(body, types, &from_call, place) {
+                    errors.push(Error {
+                        kind: CheckDiagnosticKind::CannotMove,
+                        span: statement.span,
+                        message,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Why the entity at `place` cannot be moved out, if it cannot.
+fn immovable(body: &Body, types: &Types, from_call: &[bool], place: &Place) -> Option<String> {
+    let moved = types.name(body.place_type(types, place));
+    let local = &body.locals[place.local];
+    if local.reference.is_some() {
+        return Some(if from_call[place.local] {
+            format!("this call returns a borrow, so its `{moved}` cannot be moved; use `clone()`")
+        } else if local.temporary {
+            format!("this value is borrowed, so its `{moved}` cannot be moved; use `clone()`")
+        } else {
+            format!(
+                "`{}` is borrowed, so its `{moved}` cannot be moved; use `clone()`",
+                local.name
+            )
+        });
+    }
+    let mut ty = local.ty;
+    for projection in &place.projections {
+        match projection {
+            Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_) => {
+                return Some(format!(
+                    "a `{moved}` cannot be moved out of an element; use `clone()`, or take it with `remove` or `replace`"
+                ));
+            }
+            Projection::Field(_) | Projection::VariantField { .. } if types.has_drop(ty) => {
+                return Some(format!(
+                    "`{}` implements `Drop`, so no part of it can be moved out; borrow it, or use `replace`",
+                    types.name(ty)
+                ));
+            }
+            Projection::Field(_) | Projection::VariantField { .. } => {}
+        }
+        ty = projection_type(types, ty, projection);
+    }
+    None
+}
+
 // Moves.
 
 /// The places that may hold nothing.
@@ -179,6 +265,22 @@ fn move_statement(
         StatementKind::Release(local) => {
             state.retain(|place| place.local != *local);
             state.insert(Place::local(*local));
+            return;
+        }
+        StatementKind::Unpack(taken) => {
+            if let Some(errors) = errors {
+                for (_, place) in taken {
+                    for used in operand_places(&Operand::Move(place.clone())) {
+                        check_filled(body, state, &used, span, errors);
+                    }
+                }
+            }
+            for (_, place) in taken {
+                state.insert(moved_place(body, place));
+            }
+            for (local, _) in taken {
+                fill(state, &Place::local(*local));
+            }
             return;
         }
     };
@@ -430,7 +532,7 @@ fn carry(
             carried[*reference] = loans;
         }
         StatementKind::Release(local) => carried[*local].clear(),
-        StatementKind::Assign(..) => {}
+        StatementKind::Assign(..) | StatementKind::Unpack(_) => {}
     }
 }
 
@@ -497,6 +599,15 @@ fn reference_uses(body: &Body, statement: &StatementKind) -> (Vec<usize>, Option
         StatementKind::Assign(_, value) | StatementKind::Bind(_, value) => value,
         StatementKind::Release(local) if is_reference(*local) => return (Vec::new(), Some(*local)),
         StatementKind::Release(_) => return (Vec::new(), None),
+        StatementKind::Unpack(taken) => {
+            let uses = taken
+                .iter()
+                .flat_map(|(_, place)| operand_places(&Operand::Move(place.clone())))
+                .map(|place| place.local)
+                .filter(|&local| is_reference(local))
+                .collect();
+            return (uses, None);
+        }
     };
     let mut uses = rvalue_places(value)
         .into_iter()
@@ -516,7 +627,7 @@ fn reference_uses(body: &Body, statement: &StatementKind) -> (Vec<usize>, Option
             }
             (uses, None)
         }
-        StatementKind::Release(_) => unreachable!("handled above"),
+        StatementKind::Release(_) | StatementKind::Unpack(_) => unreachable!("handled above"),
     }
 }
 
@@ -582,6 +693,13 @@ fn accesses(
         StatementKind::Release(local) => {
             if body.locals[*local].reference.is_none() {
                 access(&Place::local(*local), Access::Release);
+            }
+            return made;
+        }
+        StatementKind::Unpack(taken) => {
+            for (local, place) in taken {
+                access(place, Access::Move);
+                access(&Place::local(*local), Access::Write);
             }
             return made;
         }
@@ -797,7 +915,7 @@ fn check_returned(
                 .find(|statement| match &statement.kind {
                     StatementKind::Assign(destination, _) => destination.local == body.result,
                     StatementKind::Bind(reference, _) => *reference == body.result,
-                    StatementKind::Release(_) => false,
+                    StatementKind::Release(_) | StatementKind::Unpack(_) => false,
                 })
                 .map_or(block.terminator.span, |statement| statement.span);
             errors.push(Error {

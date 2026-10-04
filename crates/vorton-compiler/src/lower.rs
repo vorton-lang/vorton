@@ -6,6 +6,11 @@
 //! temporary before the later arguments are evaluated. An assignment
 //! evaluates the indices of its target, then its value, and writes last.
 //!
+//! Lowering also decides how a place is used where its value is needed:
+//! an entity is moved and a value is copied, by its type, wherever the
+//! value goes, a discarded one included. Whether the place can be moved
+//! out of is the business of move checking on the IR.
+//!
 //! Every temporary belongs to the statement that makes it and is released
 //! when the statement ends; the locals of a block are released when the
 //! block ends, and `break`, `continue` and `return` release the scopes they
@@ -52,6 +57,7 @@ pub(crate) fn lower(function: &Function, types: &Types) -> Body {
         scopes: Vec::new(),
         loops: Vec::new(),
         index_copies: None,
+        redirects: Vec::new(),
     };
     builder.current = builder.body.new_block();
     builder.scopes.push(Scope {
@@ -122,6 +128,10 @@ struct Builder<'a> {
     /// While the arguments of a call are lowered, the temporaries that hold
     /// variables used as indices in them.
     index_copies: Option<Vec<IndexCopy>>,
+    /// While a guard is lowered, the owned entity bindings of its arm, which
+    /// take their parts only once the guard holds, and the parts of the
+    /// subject that the guard reads in their place.
+    redirects: Vec<(Local, Place)>,
 }
 
 /// A temporary that holds the value of a variable used as an index, made
@@ -145,8 +155,7 @@ impl Builder<'_> {
     /// a whole reference local makes it point there; anything else into a
     /// place rooted at a reference local writes where it points.
     fn assign(&mut self, place: Place, value: Rvalue, span: Span) {
-        let points = place.projections.is_empty()
-            && self.body.locals[place.local].reference.is_some()
+        let points = self.is_reference(&place)
             && matches!(
                 value,
                 Rvalue::Ref(..)
@@ -159,7 +168,14 @@ impl Builder<'_> {
             StatementKind::Bind(place.local, value)
         } else {
             debug_assert!(
-                !matches!(value, Rvalue::Ref(..)),
+                !matches!(
+                    value,
+                    Rvalue::Ref(..)
+                        | Rvalue::Call {
+                            borrow: Some(_),
+                            ..
+                        }
+                ),
                 "only a `Bind` holds a borrow"
             );
             StatementKind::Assign(place, value)
@@ -328,7 +344,7 @@ impl Builder<'_> {
                 for local in pattern.bindings() {
                     self.declare(local);
                 }
-                self.bind(pattern, &base, ty, value.span);
+                self.bind_all(pattern, &base, ty);
                 true
             }
             TypedStatement::Assign {
@@ -549,7 +565,7 @@ impl Builder<'_> {
         self.open(true);
         match element {
             Element::Counter => {
-                let Pattern::Binding(local) = binding else {
+                let Pattern::Binding(local, _) = binding else {
                     unreachable!("a counting loop binds one name")
                 };
                 self.declare(*local);
@@ -572,14 +588,14 @@ impl Builder<'_> {
                 for local in binding.bindings() {
                     self.declare(local);
                 }
-                self.bind(binding, &Place::local(item), element_ty, span);
+                self.bind_all(binding, &Place::local(item), element_ty);
             }
             Element::Borrow(reference) => {
                 let item = Place::local(reference).project(Projection::Position(position));
                 for local in binding.bindings() {
                     self.declare(local);
                 }
-                self.bind(binding, &item, element_ty, span);
+                self.bind_all(binding, &item, element_ty);
             }
         }
         let continues = self.block_into(None, body);
@@ -873,6 +889,17 @@ impl Builder<'_> {
                 left,
                 right,
             } => return self.logic_into(destination, *operator, left, right, span),
+            // A call that returns a borrow makes a reference point where its
+            // result points; anywhere else its value is that of the place.
+            ExprKind::Call {
+                borrow: Some(_), ..
+            } if !destination
+                .as_ref()
+                .is_some_and(|place| self.is_reference(place)) =>
+            {
+                self.place(expression)
+                    .map(|place| Rvalue::Use(self.take(place, ty)))
+            }
             _ => self.rvalue(expression),
         };
         let Some(value) = value else {
@@ -907,12 +934,9 @@ impl Builder<'_> {
             ExprKind::Str(value) => Rvalue::Use(Operand::Constant(Constant::Str(value.clone()))),
             ExprKind::Unit => Rvalue::Use(Operand::Constant(Constant::Unit)),
             ExprKind::Local(_) | ExprKind::Field { .. } | ExprKind::Index { .. } => {
-                // The checker moves or borrows entities wherever they are
-                // used as values, so this reads a value.
-                debug_assert!(!self.types.is_entity(ty), "an entity read as a value");
-                Rvalue::Use(Operand::Copy(self.place(expression)?))
+                let place = self.place(expression)?;
+                Rvalue::Use(self.take(place, ty))
             }
-            ExprKind::Move(place) => Rvalue::Use(Operand::Move(self.typed_place(place)?)),
             ExprKind::Call {
                 callee,
                 type_arguments,
@@ -1002,20 +1026,10 @@ impl Builder<'_> {
                         fields: fields.iter().map(|(index, _)| *index).zip(values).collect(),
                     }
                 }
-                Some(base) => {
-                    // The base, then each given field in its place.
-                    let result = self.temporary(ty);
-                    if !self.expr_into(Some(Place::local(result)), base) {
-                        return None;
-                    }
-                    for (index, value) in fields {
-                        let field_place = Place::local(result).project(Projection::Field(*index));
-                        if !self.expr_into(Some(field_place), value) {
-                            return None;
-                        }
-                    }
-                    Rvalue::Use(Operand::Move(Place::local(result)))
-                }
+                Some(base) => Rvalue::Construct {
+                    variant: *variant,
+                    fields: self.updated_fields(ty, base, fields)?,
+                },
             },
             ExprKind::EmptyMap => Rvalue::EmptyMap,
             ExprKind::Range {
@@ -1077,7 +1091,60 @@ impl Builder<'_> {
         }
     }
 
-    /// An operand that reads or takes a temporary.
+    /// The fields of a struct of type `ty` built with `..base` and the
+    /// given `fields`, by declaration index. The base comes first: the
+    /// fields it gives are taken out of it before the given ones are
+    /// evaluated, its entities together in one step, and the fields that
+    /// are given stay where they are.
+    fn updated_fields(
+        &mut self,
+        ty: Type,
+        base: &Expr,
+        fields: &[(usize, Expr)],
+    ) -> Option<Vec<(usize, Operand)>> {
+        let span = base.span;
+        let base = self.place(base)?;
+        let field_types = self.types.components(ty);
+        let mut values = vec![None; field_types.len()];
+        let mut taken = Vec::new();
+        for (index, field_ty) in field_types.into_iter().enumerate() {
+            if fields.iter().any(|(given, _)| *given == index) {
+                continue;
+            }
+            let part = base.project(Projection::Field(index));
+            let temporary = self.temporary(field_ty);
+            if self.types.is_entity(field_ty) {
+                taken.push((temporary, part, span));
+            } else {
+                self.assign(
+                    Place::local(temporary),
+                    Rvalue::Use(Operand::Copy(part)),
+                    span,
+                );
+            }
+            values[index] = Some(self.take(Place::local(temporary), field_ty));
+        }
+        self.unpack(taken);
+        for (index, value) in fields {
+            values[*index] = Some(self.operand(value)?);
+        }
+        Some(
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| (index, value.expect("every field has a value")))
+                .collect(),
+        )
+    }
+
+    /// Whether `place` is a whole reference local, which a borrow or a call
+    /// that returns one makes point somewhere.
+    fn is_reference(&self, place: &Place) -> bool {
+        place.projections.is_empty() && self.body.locals[place.local].reference.is_some()
+    }
+
+    /// An operand that takes what is at `place`: it moves an entity and
+    /// copies a value.
     fn take(&self, place: Place, ty: Type) -> Operand {
         if self.types.is_entity(ty) {
             Operand::Move(place)
@@ -1088,6 +1155,7 @@ impl Builder<'_> {
 
     /// `operand` as a temporary, unless it is a constant.
     fn settle(&mut self, operand: Operand, ty: Type, span: Span) -> Operand {
+        debug_assert!(!self.types.is_entity(ty), "only values are settled");
         match operand {
             Operand::Constant(_) | Operand::Borrowed(_) => operand,
             Operand::Copy(place) | Operand::Move(place)
@@ -1333,7 +1401,7 @@ impl Builder<'_> {
     /// part of a value kept in a temporary.
     fn place(&mut self, expression: &Expr) -> Option<Place> {
         match &expression.kind {
-            ExprKind::Local(local) => Some(Place::local(*local)),
+            ExprKind::Local(local) => Some(self.local_place(*local)),
             ExprKind::Field { base, index } => {
                 let base = self.place(base)?;
                 Some(base.project(Projection::Field(*index)))
@@ -1371,7 +1439,7 @@ impl Builder<'_> {
                 return None;
             }
         }
-        let mut lowered = Place::local(place.local);
+        let mut lowered = self.local_place(place.local);
         for projection in &place.projections {
             lowered = match projection {
                 TypedProjection::Field(index) => lowered.project(Projection::Field(*index)),
@@ -1431,6 +1499,16 @@ impl Builder<'_> {
             .iter()
             .all(|statement| !changes(&statement.kind, variable))
             .then_some(copy.temporary)
+    }
+
+    /// The place of `local`: the part of a match subject that a guard reads
+    /// for an owned binding, or the local itself.
+    fn local_place(&self, local: Local) -> Place {
+        self.redirects
+            .iter()
+            .rev()
+            .find(|(binding, _)| *binding == local)
+            .map_or_else(|| Place::local(local), |(_, part)| part.clone())
     }
 
     /// The type of the value at `place`.
@@ -1617,9 +1695,20 @@ impl Builder<'_> {
                     next_arm
                 };
                 self.test(alternative, &base, subject_ty, fail, span);
-                self.bind(alternative, &base, subject_ty, span);
+                let mut taken = Vec::new();
+                self.bind(alternative, &base, subject_ty, &mut taken);
                 if let Some(guard) = &arm.guard {
-                    let Some(condition) = self.operand(guard) else {
+                    // The guard reads the owned entity bindings where they
+                    // are in the subject; they take their parts once it holds.
+                    let outer = self.redirects.len();
+                    self.redirects.extend(
+                        taken
+                            .iter()
+                            .map(|(local, place, _)| (*local, place.clone())),
+                    );
+                    let condition = self.operand(guard);
+                    self.redirects.truncate(outer);
+                    let Some(condition) = condition else {
                         self.current = fail;
                         continue;
                     };
@@ -1633,16 +1722,16 @@ impl Builder<'_> {
                         },
                         guard.span,
                     );
-                    // A rejected arm gives back what its bindings took, so
-                    // the next arms see the subject whole, and releases the
-                    // rest of its bindings and the guard's temporaries.
+                    // A rejected arm has taken nothing from the subject; it
+                    // releases its other bindings and the guard's
+                    // temporaries.
                     self.current = rejected;
-                    self.unbind(alternative, &base, subject_ty, guard.span);
                     let depth = self.scopes.len() - 1;
                     self.release_from(depth, guard.span);
                     self.goto(next_arm, guard.span);
                     self.current = accepted;
                 }
+                self.unpack(taken);
                 self.goto(matched, span);
                 self.current = fail;
             }
@@ -1670,7 +1759,7 @@ impl Builder<'_> {
     /// which has no alternatives.
     fn test(&mut self, pattern: &Pattern, place: &Place, ty: Type, fail: BlockId, span: Span) {
         let constant = match pattern {
-            Pattern::Wildcard | Pattern::Binding(_) => return,
+            Pattern::Wildcard | Pattern::Binding(..) => return,
             Pattern::Int(value) => Constant::Int(*value),
             Pattern::Float(value) => Constant::Float(*value),
             Pattern::Bool(value) => Constant::Bool(*value),
@@ -1734,28 +1823,42 @@ impl Builder<'_> {
     }
 
     /// Gives the binding locals of `pattern` the parts of the value at
-    /// `place`: a pointer for a borrowed binding, the part itself for an
-    /// owned entity, and a copy otherwise.
-    fn bind(&mut self, pattern: &Pattern, place: &Place, ty: Type, span: Span) {
+    /// `place`, all at once.
+    fn bind_all(&mut self, pattern: &Pattern, place: &Place, ty: Type) {
+        let mut taken = Vec::new();
+        self.bind(pattern, place, ty, &mut taken);
+        self.unpack(taken);
+    }
+
+    /// Gives the binding locals of `pattern` the parts of the value at
+    /// `place`: a pointer for a borrowed binding and a copy for a value now,
+    /// while an owned entity binding and the part it takes are added to
+    /// `taken`, for [`Self::unpack`] to move together.
+    fn bind(
+        &mut self,
+        pattern: &Pattern,
+        place: &Place,
+        ty: Type,
+        taken: &mut Vec<(Local, Place, Span)>,
+    ) {
         match pattern {
-            Pattern::Binding(local) => {
+            Pattern::Binding(local, span) => {
                 let value = match self.body.locals[*local].reference {
                     Some(kind) => Rvalue::Ref(ref_kind(kind), place.clone()),
-                    None if self.types.is_entity(ty) => Rvalue::Use(Operand::Move(place.clone())),
+                    None if self.types.is_entity(ty) => {
+                        taken.push((*local, place.clone(), *span));
+                        return;
+                    }
                     None => Rvalue::Use(Operand::Copy(place.clone())),
                 };
-                self.assign(Place::local(*local), value, span);
+                self.assign(Place::local(*local), value, *span);
             }
             Pattern::Tuple(elements) => {
                 let element_types = self.types.components(ty);
                 for (index, (element, element_ty)) in elements.iter().zip(element_types).enumerate()
                 {
-                    self.bind(
-                        element,
-                        &place.project(Projection::Field(index)),
-                        element_ty,
-                        span,
-                    );
+                    let element_place = place.project(Projection::Field(index));
+                    self.bind(element, &element_place, element_ty, taken);
                 }
             }
             Pattern::Variant { variant, fields } => {
@@ -1765,14 +1868,14 @@ impl Builder<'_> {
                         variant: *variant,
                         field: *field,
                     });
-                    self.bind(field_pattern, &field_place, field_ty, span);
+                    self.bind(field_pattern, &field_place, field_ty, taken);
                 }
             }
             Pattern::Or(alternatives) => {
                 // Destructuring and loop bindings have no alternatives that
                 // bind; a match expands them before binding.
                 if let Some(first) = alternatives.first() {
-                    self.bind(first, place, ty, span);
+                    self.bind(first, place, ty, taken);
                 }
             }
             Pattern::Wildcard
@@ -1783,39 +1886,17 @@ impl Builder<'_> {
         }
     }
 
-    /// Moves the owned entity bindings of `pattern` back into the parts of
-    /// the value at `place` they were taken from.
-    fn unbind(&mut self, pattern: &Pattern, place: &Place, ty: Type, span: Span) {
-        match pattern {
-            Pattern::Binding(local)
-                if self.body.locals[*local].reference.is_none() && self.types.is_entity(ty) =>
-            {
-                self.assign(
-                    place.clone(),
-                    Rvalue::Use(Operand::Move(Place::local(*local))),
-                    span,
-                );
-            }
-            Pattern::Tuple(elements) => {
-                let element_types = self.types.components(ty);
-                for (index, (element, element_ty)) in elements.iter().zip(element_types).enumerate()
-                {
-                    let element_place = place.project(Projection::Field(index));
-                    self.unbind(element, &element_place, element_ty, span);
-                }
-            }
-            Pattern::Variant { variant, fields } => {
-                for (field, field_pattern) in fields {
-                    let field_ty = self.types.variants(ty)[*variant].fields[*field].ty;
-                    let field_place = place.project(Projection::VariantField {
-                        variant: *variant,
-                        field: *field,
-                    });
-                    self.unbind(field_pattern, &field_place, field_ty, span);
-                }
-            }
-            _ => {}
-        }
+    /// Moves each part in `taken` into its local, in one step, at the span
+    /// of the first.
+    fn unpack(&mut self, taken: Vec<(Local, Place, Span)>) {
+        let Some(&(_, _, span)) = taken.first() else {
+            return;
+        };
+        let moves = taken
+            .into_iter()
+            .map(|(local, place, _)| (local, place))
+            .collect();
+        self.push(StatementKind::Unpack(moves), span);
     }
 }
 
@@ -1834,6 +1915,9 @@ fn changes(statement: &StatementKind, variable: Local) -> bool {
             place.local == variable && *kind != RefKind::Shared
         }
         StatementKind::Bind(_, value) => moves(value),
+        StatementKind::Unpack(taken) => taken
+            .iter()
+            .any(|(local, place)| *local == variable || place.local == variable),
         StatementKind::Release(local) => *local == variable,
     }
 }

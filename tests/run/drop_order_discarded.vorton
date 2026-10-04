@@ -1,0 +1,16 @@
+// An entity whose value an expression statement discards is moved out and
+// released there.
+struct Guard { tag: Str }
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        assert(false, "dropped ${self.tag}")
+    }
+}
+
+fn main() {
+    let guard = Guard { tag: "discarded" }
+    print("before")
+    guard
+    print("after")
+}

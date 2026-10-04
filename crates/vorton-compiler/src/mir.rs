@@ -87,6 +87,11 @@ pub(crate) enum StatementKind {
     /// Makes the reference local point at the place the right side names:
     /// a `Ref` of a place, or a call that returns a borrow.
     Bind(Local, Rvalue),
+    /// Moves the entity at each place into its local, as one step: the
+    /// parts that one pattern binds, or that one `..base` takes. Moving a
+    /// part of a variable counts as moving all of it, so the parts that one
+    /// construct takes together are taken in one step.
+    Unpack(Vec<(Local, Place)>),
     /// The local's scope ends: what it owns is released, and it holds
     /// nothing afterwards.
     Release(Local),
@@ -257,9 +262,8 @@ pub(crate) enum Rvalue {
         container: Place,
         position: Local,
     },
-    /// A call. A `Bind` of one that returns a borrow makes the reference
-    /// local point where the result points; an `Assign` of it copies the
-    /// value there.
+    /// A call. One that returns a borrow is only in a `Bind`, which makes
+    /// the reference local point where the result points.
     Call {
         callee: Callee,
         /// The type arguments of a generic callee; instantiation makes the
@@ -438,6 +442,15 @@ impl Body {
                 filled.remove(local);
                 return;
             }
+            // Only parts are taken, so the variables may still hold the rest.
+            StatementKind::Unpack(moves) => {
+                for (local, _) in moves {
+                    if self.owns(types, *local) {
+                        filled.insert(*local);
+                    }
+                }
+                return;
+            }
         };
         for operand in value.operands() {
             if let Operand::Move(place) = operand
@@ -471,22 +484,28 @@ impl Body {
 
     /// The type of the value at `place`.
     pub(crate) fn place_type(&self, types: &Types, place: &Place) -> Type {
-        let mut ty = self.locals[place.local].ty;
-        for projection in &place.projections {
-            ty = match projection {
-                Projection::Field(index) => match types.kind(ty) {
-                    TypeKind::Range => [Type::INT, Type::INT, Type::BOOL][*index],
-                    _ => types.components(ty)[*index],
-                },
-                Projection::VariantField { variant, field } => {
-                    types.variants(ty)[*variant].fields[*field].ty
-                }
-                Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_) => {
-                    element_type(types, ty)
-                }
-            };
+        place
+            .projections
+            .iter()
+            .fold(self.locals[place.local].ty, |ty, projection| {
+                projection_type(types, ty, projection)
+            })
+    }
+}
+
+/// The type of the part that `projection` reaches in a value of type `ty`.
+pub(crate) fn projection_type(types: &Types, ty: Type, projection: &Projection) -> Type {
+    match projection {
+        Projection::Field(index) => match types.kind(ty) {
+            TypeKind::Range => [Type::INT, Type::INT, Type::BOOL][*index],
+            _ => types.components(ty)[*index],
+        },
+        Projection::VariantField { variant, field } => {
+            types.variants(ty)[*variant].fields[*field].ty
         }
-        ty
+        Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_) => {
+            element_type(types, ty)
+        }
     }
 }
 

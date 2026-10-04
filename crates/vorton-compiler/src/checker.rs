@@ -1986,100 +1986,6 @@ impl BodyChecker<'_> {
         }
     }
 
-    /// Turns `expression` into a value that its consumer owns: an entity
-    /// local is moved, and an entity inside a field or element is rejected.
-    fn consume(&mut self, expression: Expr, span: Span) -> Result<Expr, CheckDiagnostic> {
-        if !self.types.is_entity(expression.ty) {
-            return Ok(expression);
-        }
-        match expression.kind {
-            ExprKind::Local(_)
-            | ExprKind::Field { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::Call {
-                borrow: Some(_), ..
-            } => {
-                let (local, fields) = self.movable_part(&expression, expression.ty, span)?;
-                Ok(Expr {
-                    ty: expression.ty,
-                    span,
-                    kind: ExprKind::Move(Place {
-                        local,
-                        span,
-                        call: None,
-                        projections: fields.into_iter().map(Projection::Field).collect(),
-                    }),
-                })
-            }
-            _ => Ok(expression),
-        }
-    }
-
-    /// The local and the fields from it that `expression` reads, if a `ty`
-    /// can be moved out of there: a local the function owns, or a part of
-    /// one reached through fields only.
-    fn movable_part(
-        &self,
-        expression: &Expr,
-        ty: Type,
-        span: Span,
-    ) -> Result<(usize, Vec<usize>), CheckDiagnostic> {
-        let name = || self.types.name(ty);
-        match &expression.kind {
-            ExprKind::Local(local) if self.locals[*local].borrow.is_some() => Err(self.error(
-                CheckDiagnosticKind::CannotMove,
-                span,
-                format!(
-                    "`{}` is borrowed, so its `{}` cannot be moved; use `clone()`",
-                    self.locals[*local].name,
-                    name()
-                ),
-            )),
-            ExprKind::Local(local) => Ok((*local, Vec::new())),
-            ExprKind::Field { base, .. } if self.types.has_drop(base.ty) => Err(self.error(
-                CheckDiagnosticKind::CannotMove,
-                span,
-                format!(
-                    "`{}` implements `Drop`, so its `{}` cannot be moved out; use `replace`",
-                    self.types.name(base.ty),
-                    name()
-                ),
-            )),
-            ExprKind::Field { base, index } => {
-                let (local, mut fields) = self.movable_part(base, ty, span)?;
-                fields.push(*index);
-                Ok((local, fields))
-            }
-            ExprKind::Call {
-                borrow: Some(_), ..
-            } => Err(self.error(
-                CheckDiagnosticKind::CannotMove,
-                span,
-                format!(
-                    "this call returns a borrow, so its `{}` cannot be moved; use `clone()`",
-                    name()
-                ),
-            )),
-            _ => Err(self.error(
-                CheckDiagnosticKind::CannotMove,
-                span,
-                format!(
-                    "a `{}` cannot be moved out of an element or a temporary; use `clone()`, or take it with `remove` or `replace`",
-                    name()
-                ),
-            )),
-        }
-    }
-
-    fn check_consumed(
-        &mut self,
-        expression: &ResolvedExpr,
-        expected: Option<Type>,
-    ) -> Result<Expr, CheckDiagnostic> {
-        let checked = self.check_expr(expression, expected)?;
-        self.consume(checked, expression.span)
-    }
-
     fn check_block(
         &mut self,
         block: &ResolvedBlock,
@@ -2100,7 +2006,7 @@ impl BodyChecker<'_> {
                 // The tail of the function body is its result.
                 let tail = match self.result_borrow {
                     Some(kind) if self.depth == 1 => self.check_returned_borrow(tail, kind)?,
-                    _ => self.check_consumed(tail, expected)?,
+                    _ => self.check_expr(tail, expected)?,
                 };
                 let ty = if tail.ty == Type::NEVER || diverges {
                     Type::NEVER
@@ -2141,7 +2047,7 @@ impl BodyChecker<'_> {
                 value,
             } => {
                 let (place, ty) = self.check_place(target)?;
-                let value = self.check_consumed(value, Some(ty))?;
+                let value = self.check_expr(value, Some(ty))?;
                 self.require(span, ty, value.ty)?;
                 if *operator != AssignmentOperator::Assign && !matches!(ty, Type::INT | Type::FLOAT)
                 {
@@ -2167,7 +2073,7 @@ impl BodyChecker<'_> {
                 let value = match (value, self.result_borrow) {
                     (Some(value), Some(kind)) => Some(self.check_returned_borrow(value, kind)?),
                     (Some(value), None) => {
-                        let checked = self.check_consumed(value, Some(self.result))?;
+                        let checked = self.check_expr(value, Some(self.result))?;
                         self.require(value.span, self.result, checked.ty)?;
                         Some(checked)
                     }
@@ -2335,7 +2241,6 @@ impl BodyChecker<'_> {
                 "this binding borrows its value; write `&` or `&mut` before the value".to_owned(),
             ));
         }
-        let value_span = value.span;
         if let Some(pattern) = pattern {
             let value = match checked {
                 Some(value) => value,
@@ -2346,19 +2251,14 @@ impl BodyChecker<'_> {
             }
             let pattern = self.check_pattern(pattern, value.ty, None, &mut BTreeMap::new())?;
             self.require_exhaustive(span, &pattern, value.ty)?;
-            let value = if self.binds_entity(&pattern) {
-                self.consume(value, value_span)?
-            } else {
-                value
-            };
             return Ok((Statement::LetPattern { pattern, value }, false));
         }
         let [binding] = bindings.as_slice() else {
             unreachable!("a let without a pattern binds one name")
         };
         let value = match checked {
-            Some(value) => self.consume(value, value_span)?,
-            None => self.check_consumed(value, expected)?,
+            Some(value) => value,
+            None => self.check_expr(value, expected)?,
         };
         if let Some(expected) = expected {
             self.require(span, expected, value.ty)?;
@@ -2529,34 +2429,33 @@ impl BodyChecker<'_> {
                 };
                 match element {
                     None => (ForSource::RangeValue(value), Type::INT, None),
-                    Some(element) => {
-                        let value = self.consume(value, iterable.span)?;
-                        (
-                            ForSource::Taken {
-                                container: value,
-                                element,
-                            },
+                    Some(element) => (
+                        ForSource::Taken {
+                            container: value,
                             element,
-                            None,
-                        )
-                    }
+                        },
+                        element,
+                        None,
+                    ),
                 }
             }
         };
         let scope = self.local_ids.clone();
         self.loops.push(false);
         let binding = match bindings {
-            [single] => Ok(Pattern::Binding(self.declare_binding(
-                &single.identity,
-                element,
-                mode,
-            ))),
+            [single] => Ok(Pattern::Binding(
+                self.declare_binding(&single.identity, element, mode),
+                single.origin.span,
+            )),
             many => match self.types.kind(element).clone() {
                 TypeKind::Tuple(elements) if elements.len() == many.len() => Ok(Pattern::Tuple(
                     many.iter()
                         .zip(elements)
                         .map(|(binding, ty)| {
-                            Pattern::Binding(self.declare_binding(&binding.identity, ty, mode))
+                            Pattern::Binding(
+                                self.declare_binding(&binding.identity, ty, mode),
+                                binding.origin.span,
+                            )
                         })
                         .collect(),
                 )),
@@ -2789,25 +2688,6 @@ impl BodyChecker<'_> {
             },
             ty,
         ))
-    }
-
-    /// Whether some binding of `pattern` holds an entity.
-    fn binds_entity(&self, pattern: &Pattern) -> bool {
-        match pattern {
-            Pattern::Binding(local) => self.types.is_entity(self.locals[*local].ty),
-            Pattern::Tuple(elements) => elements.iter().any(|element| self.binds_entity(element)),
-            Pattern::Variant { fields, .. } => {
-                fields.iter().any(|(_, field)| self.binds_entity(field))
-            }
-            Pattern::Or(alternatives) => alternatives
-                .iter()
-                .any(|alternative| self.binds_entity(alternative)),
-            Pattern::Wildcard
-            | Pattern::Int(_)
-            | Pattern::Float(_)
-            | Pattern::Str(_)
-            | Pattern::Bool(_) => false,
-        }
     }
 
     fn named_field(
@@ -3060,7 +2940,7 @@ impl BodyChecker<'_> {
         };
         let mut checked = Vec::new();
         for value in elements {
-            let value_checked = self.check_consumed(value, element)?;
+            let value_checked = self.check_expr(value, element)?;
             if value_checked.ty == Type::NEVER {
                 return Err(self.unsupported(value.span, "diverging list elements"));
             }
@@ -3136,12 +3016,12 @@ impl BodyChecker<'_> {
                 format!("`{}` has no method `{name}`", checker.types.name(ty)),
             )
         };
-        let (builtin, parameters, result, mutates): (Builtin, Vec<(Type, bool)>, Type, bool) =
+        let (builtin, parameters, result, mutates): (Builtin, Vec<Type>, Type, bool) =
             if name == "clone" && self.can_clone(ty) {
                 (Builtin::Clone, Vec::new(), ty, false)
             } else if let TypeKind::List(element) = *self.types.kind(ty) {
                 match name {
-                    "push" => (Builtin::Push, vec![(element, true)], Type::UNIT, true),
+                    "push" => (Builtin::Push, vec![element], Type::UNIT, true),
                     "pop" => (
                         Builtin::Pop,
                         Vec::new(),
@@ -3150,20 +3030,15 @@ impl BodyChecker<'_> {
                     ),
                     "len" => (Builtin::Len, Vec::new(), Type::INT, false),
                     "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
-                    "insert" => (
-                        Builtin::Insert,
-                        vec![(Type::INT, false), (element, true)],
-                        Type::UNIT,
-                        true,
-                    ),
-                    "remove" => (Builtin::Remove, vec![(Type::INT, false)], element, true),
+                    "insert" => (Builtin::Insert, vec![Type::INT, element], Type::UNIT, true),
+                    "remove" => (Builtin::Remove, vec![Type::INT], element, true),
                     "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
                     "contains" if !self.types.is_entity(element) && self.has_equality(element) => {
-                        (Builtin::Contains, vec![(element, false)], Type::BOOL, false)
+                        (Builtin::Contains, vec![element], Type::BOOL, false)
                     }
                     "get" if !self.types.is_entity(element) => (
                         Builtin::Get,
-                        vec![(Type::INT, false)],
+                        vec![Type::INT],
                         self.option_type(span, element)?,
                         false,
                     ),
@@ -3173,23 +3048,23 @@ impl BodyChecker<'_> {
                 match name {
                     "insert" => (
                         Builtin::Insert,
-                        vec![(key, true), (value, true)],
+                        vec![key, value],
                         self.option_type(span, value)?,
                         true,
                     ),
                     "remove" => (
                         Builtin::Remove,
-                        vec![(key, true)],
+                        vec![key],
                         self.option_type(span, value)?,
                         true,
                     ),
                     "get" if !self.types.is_entity(value) => (
                         Builtin::Get,
-                        vec![(key, true)],
+                        vec![key],
                         self.option_type(span, value)?,
                         false,
                     ),
-                    "contains_key" => (Builtin::ContainsKey, vec![(key, true)], Type::BOOL, false),
+                    "contains_key" => (Builtin::ContainsKey, vec![key], Type::BOOL, false),
                     "keys" => (
                         Builtin::Keys,
                         Vec::new(),
@@ -3230,13 +3105,12 @@ impl BodyChecker<'_> {
                     "parse_int" => (M::ParseInt, Vec::new(), self.option_type(span, Type::INT)?),
                     _ => return Err(unknown(self)),
                 };
-                let parameters = parameters.into_iter().map(|ty| (ty, false)).collect();
                 (Builtin::Str(method), parameters, result, false)
             } else if let TypeKind::Set(element) = *self.types.kind(ty) {
                 match name {
-                    "insert" => (Builtin::Insert, vec![(element, true)], Type::BOOL, true),
-                    "remove" => (Builtin::Remove, vec![(element, true)], Type::BOOL, true),
-                    "contains" => (Builtin::Contains, vec![(element, true)], Type::BOOL, false),
+                    "insert" => (Builtin::Insert, vec![element], Type::BOOL, true),
+                    "remove" => (Builtin::Remove, vec![element], Type::BOOL, true),
+                    "contains" => (Builtin::Contains, vec![element], Type::BOOL, false),
                     "len" => (Builtin::Len, Vec::new(), Type::INT, false),
                     "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
                     "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
@@ -3278,12 +3152,8 @@ impl BodyChecker<'_> {
             ));
         }
         let mut checked = Vec::new();
-        for (argument, (parameter, consumed)) in arguments.iter().zip(parameters) {
-            let value = if consumed {
-                self.check_consumed(argument, Some(parameter))?
-            } else {
-                self.check_expr(argument, Some(parameter))?
-            };
+        for (argument, parameter) in arguments.iter().zip(parameters) {
+            let value = self.check_expr(argument, Some(parameter))?;
             self.require(argument.span, parameter, value.ty)?;
             checked.push(value);
         }
@@ -3372,7 +3242,7 @@ impl BodyChecker<'_> {
         let mut checked = Vec::new();
         for (position, element) in elements.iter().enumerate() {
             let expected = expected_elements.as_ref().map(|types| types[position]);
-            let value = self.check_consumed(element, expected)?;
+            let value = self.check_expr(element, expected)?;
             if value.ty == Type::NEVER {
                 return Err(self.unsupported(element.span, "diverging tuple elements"));
             }
@@ -3566,7 +3436,7 @@ impl BodyChecker<'_> {
 
         let base = match base_expression {
             Some(expression) => {
-                let base = self.check_consumed(expression, expected)?;
+                let base = self.check_expr(expression, expected)?;
                 if base.ty == Type::NEVER {
                     return Err(self.unsupported(expression.span, "diverging bases"));
                 }
@@ -3606,7 +3476,7 @@ impl BodyChecker<'_> {
             } else {
                 None
             };
-            let checked = self.check_consumed(value, field_expected)?;
+            let checked = self.check_expr(value, field_expected)?;
             if checked.ty == Type::NEVER {
                 return Err(self.unsupported(value_span, "diverging fields"));
             }
@@ -3653,16 +3523,6 @@ impl BodyChecker<'_> {
             type_arguments.push(argument);
         }
         let ty = instantiate(self.types, nominals, declaration, type_arguments)?;
-        if base.is_some() && self.types.has_drop(ty) {
-            return Err(self.error(
-                CheckDiagnosticKind::CannotMove,
-                span,
-                format!(
-                    "`{}` implements `Drop`, so `..` cannot take the other fields out of a value",
-                    self.types.name(ty)
-                ),
-            ));
-        }
         for (index, value) in &fields {
             let field_ty = self.types.variants(ty)[variant].fields[*index].ty;
             if value.ty != field_ty {
@@ -3813,7 +3673,7 @@ impl BodyChecker<'_> {
         let then_branch = self.check_block(then_branch, expected)?;
         let expected = expected.or(Some(then_branch.ty).filter(|ty| *ty != Type::NEVER));
         let else_span = else_branch.span;
-        let else_branch = self.check_consumed(else_branch, expected)?;
+        let else_branch = self.check_expr(else_branch, expected)?;
         let ty = match (then_branch.ty, else_branch.ty) {
             (Type::NEVER, other) | (other, Type::NEVER) => other,
             _ if expected == Some(Type::UNIT) => Type::UNIT,
@@ -3903,22 +3763,12 @@ impl BodyChecker<'_> {
         arms: &[ResolvedMatchArm],
         expected: Option<Type>,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
-        let scrutinee_span = scrutinee.span;
         let (scrutinee, mode) = self.check_subject(scrutinee)?;
         if scrutinee.ty == Type::NEVER {
             return Ok((Type::NEVER, scrutinee.kind));
         }
         let patterns =
             self.check_arm_patterns(arms.iter().map(|arm| &arm.pattern), scrutinee.ty, mode)?;
-        let scrutinee = if mode.is_none()
-            && patterns
-                .iter()
-                .any(|(pattern, _)| self.binds_entity(pattern))
-        {
-            self.consume(scrutinee, scrutinee_span)?
-        } else {
-            scrutinee
-        };
         let scope = self.local_ids.clone();
         let mut expected = expected;
         let mut ty = None;
@@ -3938,7 +3788,7 @@ impl BodyChecker<'_> {
             for &local in &readonly {
                 self.mutable[local] = true;
             }
-            let body = self.check_consumed(&arm.body, expected)?;
+            let body = self.check_expr(&arm.body, expected)?;
             if body.ty != Type::NEVER {
                 match ty {
                     None => {
@@ -3996,11 +3846,6 @@ impl BodyChecker<'_> {
         }
         let mut patterns = self.check_arm_patterns([pattern], scrutinee.ty, mode)?;
         let (pattern, visible) = patterns.pop().expect("one pattern was checked");
-        let scrutinee = if mode.is_none() && self.binds_entity(&pattern) {
-            self.consume(scrutinee, value.span)?
-        } else {
-            scrutinee
-        };
         let scope = std::mem::replace(&mut self.local_ids, visible);
         let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
         self.local_ids = scope;
@@ -4079,11 +3924,11 @@ impl BodyChecker<'_> {
                         return Err(self.mismatch(span, self.locals[local].ty, ty));
                     }
                     self.local_ids.insert(binding.identity.clone(), local);
-                    Pattern::Binding(local)
+                    Pattern::Binding(local, span)
                 } else {
                     let local = self.declare_binding(&binding.identity, ty, mode);
                     shared.insert(name, local);
-                    Pattern::Binding(local)
+                    Pattern::Binding(local, span)
                 }
             }
             ResolvedPatternKind::Tuple(elements) => {
@@ -4225,19 +4070,6 @@ impl BodyChecker<'_> {
                             ));
                         }
                     }
-                }
-                if mode.is_none()
-                    && self.types.has_drop(ty)
-                    && checked.iter().any(|(_, field)| self.binds_entity(field))
-                {
-                    return Err(self.error(
-                        CheckDiagnosticKind::CannotMove,
-                        span,
-                        format!(
-                            "`{}` implements `Drop`, so no part of it can be moved out; match it with `&`",
-                            self.types.name(ty)
-                        ),
-                    ));
                 }
                 Pattern::Variant {
                     variant,
@@ -4763,18 +4595,17 @@ impl BodyChecker<'_> {
             let expected = self.instantiated(parameter, bindings)?;
             let (checked_operand, operand, is_receiver) = match (value, borrow) {
                 (Argument::Written(value), None) => {
-                    let argument = self.check_consumed(value, expected)?;
+                    let argument = self.check_expr(value, expected)?;
                     self.fit(value.span, parameter, expected, argument.ty, bindings)?;
                     checked.push(argument);
                     continue;
                 }
                 // A method that takes `self` takes the receiver.
-                (Argument::Receiver(receiver, value), None) => {
-                    let receiver = match receiver {
+                (Argument::Receiver(receiver, _), None) => {
+                    checked.push(match receiver {
                         Operand::Place((place, _)) => self.place_value(place),
                         Operand::Value(value) => value,
-                    };
-                    checked.push(self.consume(receiver, value.span)?);
+                    });
                     continue;
                 }
                 // The receiver of `&self` and `&mut self` is borrowed as is.

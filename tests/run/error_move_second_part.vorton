@@ -1,0 +1,10 @@
+struct Pair {
+    left: List<Int>,
+    right: List<Int>,
+}
+
+fn main() {
+    let pair = Pair { left: [1], right: [2] }
+    let left = pair.left
+    let right = pair.right
+}
