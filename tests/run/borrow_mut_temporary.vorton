@@ -1,0 +1,11 @@
+fn make() -> List<Int> {
+    [1, 2, 3]
+}
+
+fn main() {
+    let old = replace(&mut make(), [2])
+    print(old.len())
+    make().push(4)
+    print(make().len())
+    swap(&mut make(), &mut make())
+}

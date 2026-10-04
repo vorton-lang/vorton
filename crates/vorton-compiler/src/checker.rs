@@ -3053,16 +3053,8 @@ impl BodyChecker<'_> {
             } else {
                 return Err(unknown(self));
             };
-        if mutates {
-            let Receiver::Place(place) = &receiver_value else {
-                return Err(self.error(
-                    CheckDiagnosticKind::NotAssignable,
-                    receiver.span,
-                    format!(
-                        "`{name}` changes its receiver, which must be a variable or a part of one"
-                    ),
-                ));
-            };
+        // A temporary can always be changed.
+        if mutates && let Receiver::Place(place) = &receiver_value {
             if !self.mutable[place.local] {
                 return Err(self.error(
                     CheckDiagnosticKind::NotAssignable,
@@ -4495,7 +4487,7 @@ impl BodyChecker<'_> {
         let mut checked = Vec::new();
         for (value, (parameter, borrow)) in values.into_iter().zip(parameters) {
             let expected = self.instantiated(parameter, bindings)?;
-            let (checked_operand, operand, is_receiver) = match (value, borrow) {
+            let (checked_operand, operand) = match (value, borrow) {
                 (Argument::Written(value), None) => {
                     let argument = self.check_expr(value, expected)?;
                     self.fit(value.span, parameter, expected, argument.ty, bindings)?;
@@ -4508,7 +4500,7 @@ impl BodyChecker<'_> {
                     continue;
                 }
                 // The receiver of `&self` and `&mut self` is borrowed as is.
-                (Argument::Receiver(receiver, value), Some(_)) => (receiver, value, true),
+                (Argument::Receiver(receiver, value), Some(_)) => (receiver, value),
                 (Argument::Written(value), Some(kind)) => {
                     let spelled = match kind {
                         BorrowKind::Shared => "&",
@@ -4534,11 +4526,7 @@ impl BodyChecker<'_> {
                             format!("this parameter borrows with `{spelled}`"),
                         ));
                     }
-                    (
-                        self.check_operand(operand, expected)?,
-                        operand.as_ref(),
-                        false,
-                    )
+                    (self.check_operand(operand, expected)?, operand.as_ref())
                 }
             };
             let kind = borrow.expect("only borrowed arguments get here");
@@ -4554,16 +4542,8 @@ impl BodyChecker<'_> {
                     self.check_borrow(&place, kind, operand.span)?;
                     BorrowTarget::Place(place)
                 }
-                Operand::Value(value) => {
-                    if is_receiver && kind == BorrowKind::Mutable {
-                        return Err(self.error(
-                            CheckDiagnosticKind::NotAssignable,
-                            operand.span,
-                            "a method with `&mut self` changes its receiver, which must be a variable or a part of one".to_owned(),
-                        ));
-                    }
-                    BorrowTarget::Value(value)
-                }
+                // A temporary can always be borrowed with `&mut`.
+                Operand::Value(value) => BorrowTarget::Value(value),
             };
             checked.push(Expr {
                 ty,
@@ -4636,18 +4616,6 @@ impl BodyChecker<'_> {
             vec![(ty, Some(BorrowKind::Mutable)), (ty, second_parameter)],
             &mut [],
         )?;
-        // Only places can be changed.
-        for (argument, value) in arguments.iter().zip([operand.as_ref(), second]) {
-            if let ExprKind::Borrow(_, target) = &argument.kind
-                && let BorrowTarget::Value(_) = target.as_ref()
-            {
-                return Err(self.error(
-                    CheckDiagnosticKind::NotAssignable,
-                    value.span,
-                    "this must be a variable or a part of one".to_owned(),
-                ));
-            }
-        }
         let result = match intrinsic {
             Intrinsic::Replace => ty,
             _ => Type::UNIT,
