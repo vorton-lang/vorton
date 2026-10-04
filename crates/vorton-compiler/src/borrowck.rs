@@ -541,7 +541,7 @@ fn check_borrows(
     }
     // The loans each reference local may carry, and what the temporaries are
     // known to hold.
-    let mut values = Values::default();
+    let mut values = Values::new(body);
     let starts = forward(
         graph,
         Flow {
@@ -728,14 +728,84 @@ enum Key {
 
 /// The expressions known in a function, numbered once each, with the
 /// locals each one reads.
-#[derive(Default)]
 struct Values {
+    /// The temporaries whose value may tell whether two places are the same
+    /// element: those that index a place, and those such a temporary is
+    /// computed from. Only what these hold is worth knowing.
+    wanted: BTreeSet<Local>,
     numbers: BTreeMap<Fact, usize>,
     facts: Vec<Fact>,
     reads: Vec<BTreeSet<Local>>,
 }
 
 impl Values {
+    fn new(body: &Body) -> Self {
+        let mut wanted = BTreeSet::new();
+        // The temporaries each temporary is computed from.
+        let mut sources: BTreeMap<Local, Vec<Local>> = BTreeMap::new();
+        let mut places = Vec::new();
+        for data in &body.blocks {
+            for statement in &data.statements {
+                match &statement.kind {
+                    StatementKind::Assign(destination, value) => {
+                        places.push(destination.clone());
+                        places.extend(rvalue_places(value));
+                        if destination.projections.is_empty() {
+                            let read =
+                                value
+                                    .operands()
+                                    .into_iter()
+                                    .filter_map(|operand| match operand {
+                                        Operand::Copy(place) if place.projections.is_empty() => {
+                                            Some(place.local)
+                                        }
+                                        _ => None,
+                                    });
+                            sources.entry(destination.local).or_default().extend(read);
+                        }
+                    }
+                    StatementKind::Bind(_, value) => places.extend(rvalue_places(value)),
+                    StatementKind::Unpack(taken) => {
+                        places.extend(taken.iter().map(|(_, place)| place.clone()));
+                    }
+                    StatementKind::Release(_)
+                    | StatementKind::Keep(_)
+                    | StatementKind::Distinct { .. } => {}
+                }
+            }
+            match &data.terminator.kind {
+                TerminatorKind::Branch { condition, .. } => {
+                    places.extend(operand_places(condition));
+                }
+                TerminatorKind::TailCall { arguments, .. } => {
+                    places.extend(arguments.iter().flat_map(operand_places));
+                }
+                TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
+            }
+        }
+        for place in &places {
+            for projection in &place.projections {
+                if let Projection::Index(local) | Projection::Position(local) = projection {
+                    wanted.insert(*local);
+                }
+            }
+        }
+        let mut pending = wanted.iter().copied().collect::<Vec<_>>();
+        while let Some(local) = pending.pop() {
+            for &source in sources.get(&local).into_iter().flatten() {
+                if wanted.insert(source) {
+                    pending.push(source);
+                }
+            }
+        }
+        Self {
+            wanted,
+            numbers: BTreeMap::new(),
+            facts: Vec::new(),
+            reads: Vec::new(),
+        }
+    }
+
     fn number(&mut self, fact: Fact) -> usize {
         if let Some(&number) = self.numbers.get(&fact) {
             return number;
@@ -791,8 +861,6 @@ impl Values {
 #[derive(Clone, Default)]
 struct Copies {
     known: BTreeMap<Local, usize>,
-    /// May also name temporaries that hold another expression by now; those
-    /// are skipped.
     readers: BTreeMap<Local, BTreeSet<Local>>,
 }
 
@@ -808,25 +876,34 @@ impl Copies {
     }
 
     fn insert(&mut self, temporary: Local, number: usize, values: &Values) {
+        self.forget(temporary, values);
         for &read in &values.reads[number] {
             self.readers.entry(read).or_default().insert(temporary);
         }
         self.known.insert(temporary, number);
     }
 
+    fn forget(&mut self, temporary: Local, values: &Values) {
+        let Some(number) = self.known.remove(&temporary) else {
+            return;
+        };
+        for read in &values.reads[number] {
+            if let Some(readers) = self.readers.get_mut(read) {
+                readers.remove(&temporary);
+                if readers.is_empty() {
+                    self.readers.remove(read);
+                }
+            }
+        }
+    }
+
     /// Forgets what each temporary in `changed` holds, and every expression
     /// that reads a local in `changed`.
     fn change(&mut self, changed: &BTreeSet<Local>, values: &Values) {
-        for local in changed {
-            self.known.remove(local);
-            for reader in self.readers.remove(local).into_iter().flatten() {
-                if self
-                    .known
-                    .get(&reader)
-                    .is_some_and(|&number| values.reads[number].contains(local))
-                {
-                    self.known.remove(&reader);
-                }
+        for &local in changed {
+            self.forget(local, values);
+            for reader in self.readers.remove(&local).into_iter().flatten() {
+                self.forget(reader, values);
             }
         }
     }
@@ -835,9 +912,13 @@ impl Copies {
     fn join(&mut self, other: &Self) {
         self.known
             .retain(|temporary, number| other.known.get(temporary) == Some(number));
+        let known = &self.known;
+        self.readers.retain(|_, readers| {
+            readers.retain(|reader| known.contains_key(reader));
+            !readers.is_empty()
+        });
     }
 }
-
 /// Updates what the temporaries are known to hold after `statement`. It
 /// forgets every expression that reads a local the statement may change:
 /// one it writes, takes or ends, and one it may change through a reference
@@ -905,6 +986,7 @@ fn learn(
     copies.change(&changed, values);
     if let StatementKind::Assign(destination, value) = statement
         && destination.projections.is_empty()
+        && values.wanted.contains(&destination.local)
         && body.locals[destination.local].temporary
         && body.locals[destination.local].reference.is_none()
     {
