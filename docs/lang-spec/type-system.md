@@ -268,7 +268,7 @@ fn chase(level: &mut Region, e: Handle<Enemy>) {
 - `xs.clone()` 复制整个容器，要求元素实现 `Clone`。
 - 借出遍历 `for e in &xs` 与 `for e in &mut xs` 在 0.1 中只对 `List`（逐个元素）与 `Map`（逐个值）成立；`Set` 只能 `for e in &s`，逐个拷贝元素，元素不能原地修改。按值遍历 `for e in xs` 拿走容器：`List` 与 `Set` 逐个产出元素，`Map` 逐个产出 `(键, 值)`。
 
-`Map` 按插入顺序保存条目，遍历与 `keys()` 都按这个顺序；替换已有键的值不改变它的位置，删除后再插入的键排在最后。键的类型必须是能用 `==` 比较的值类型：`Int`、`Str`、`Bool`，以及只由它们（和 `Unit`）组成的 tuple、struct 与 enum；`Float` 不能作键。`Set` 同样按插入顺序保存元素，元素类型的要求与 `Map` 的键相同。
+`Map` 按插入顺序保存条目，遍历与 `keys()` 都按这个顺序；替换已有键的值不改变它的位置，删除后再插入的键排在最后。键的类型必须是能用 `==` 比较的值类型：`Int`、`Str`、`Bool`，以及只由它们（和 `Unit`）组成的 tuple、struct 与 enum；`Float` 不能作键，手写了 `PartialEq` 的类型也不能（它没有结构化的 `Hash`）。`Set` 同样按插入顺序保存元素，元素类型的要求与 `Map` 的键相同。
 
 0.1 的容器方法如下，键与插入的值按值传入：
 

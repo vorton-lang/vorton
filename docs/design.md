@@ -38,7 +38,7 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 
 ### 当前支持范围
 
-类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`Str` 的[方法](lang-spec/type-system.md#字符串)、`List`、`Map` 与 `Set` 及其[规范列出的方法](lang-spec/type-system.md#容器)、任意类型的 `clone`、下标读写、`for` 遍历 range、列表、Map 与 Set（拿走，或用 `&`／`&mut` 借出）、`match`、`if let` 与解构（含穷尽性检查，可按值或借出）、结构化 `==` 与 `<` `>` `<=` `>=`、`Range<Int>` 值、函数与泛型函数、非泛型类型的固有方法与关联函数、trait 声明、非泛型 struct 与 enum 的 `impl Trait for Type`（core trait 中只能实现 `Display`）、经 bound 或具体类型调用 trait 方法（含 supertrait 的方法）、`print` 与插值经 `Display` 显示、`let`/`let mut`、`mut` 按值参数、借出的参数、绑定与返回、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`、`replace`、`swap`。其他构造都报告 `Unsupported`。
+类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`Str` 的[方法](lang-spec/type-system.md#字符串)、`List`、`Map` 与 `Set` 及其[规范列出的方法](lang-spec/type-system.md#容器)、任意类型的 `clone`、下标读写、`for` 遍历 range、列表、Map 与 Set（拿走，或用 `&`／`&mut` 借出）、`match`、`if let` 与解构（含穷尽性检查，可按值或借出）、结构化 `==` 与 `<` `>` `<=` `>=`、`Range<Int>` 值、函数与泛型函数、非泛型类型的固有方法与关联函数、trait 声明、非泛型 struct 与 enum 的 `impl Trait for Type`（core trait 中可以实现 `Display`、`PartialEq`、`Eq`、`PartialOrd`、`Ord`）、经 bound 或具体类型调用 trait 方法（含 supertrait 的方法；比较 trait 的方法只能调用手写的，其余用运算符）、`print`、插值与内建类型的 `to_str()` 经 `Display` 显示、比较运算符经比较 trait 分派、`let`/`let mut`、`mut` 按值参数、借出的参数、绑定与返回、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`、`replace`、`swap`。其他构造都报告 `Unsupported`。
 
 `Str` 是不可变的值，用引用计数实现 O(1) 拷贝。`Map` 由运行时里一个通用的按插入顺序的哈希表实现：条目按插入顺序存放，删除留下空位，空位多于条目时整体压实；开放寻址的索引按键找到条目。每个具体的 `Map<K, V>` 只生成键的哈希、判等与释放、复制；`Set<T>` 是值为 `Unit` 的 Map。`List`、`Map` 与含有它们的聚合值是实体：
 
@@ -54,6 +54,8 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 泛型函数只检查一次：类型参数在类型表中是独立的类型，没有 `Copy` bound 的按实体对待。调用处从左到右用实参的类型确定类型实参，仍未确定的再用调用的期望类型。检查之后，实例化阶段从非泛型函数出发，为调用到达的每组类型实参复制一份函数体并代入实参；代入后成为值类型的移交改为读取，因为检查器已保证被移走的位置不再使用。规范对多态递归的限制保证实例只有有限个。代码生成只看到实例。
 
 Trait 方法的调用在检查时就确定到 impl：具体类型直接调用其 impl 的函数；类型参数上的调用记为“该 trait 的第几个方法”，实例化时按类型实参换成对应 impl 的函数。检查器在每个调用处核对类型实参满足 bound，所以实例化时 impl 一定存在；内建类型的 `Display` 没有 impl，`to_str` 实例化为字符串插值。
+
+比较运算符不经过方法调用：`==` 与 `<` 等对每个具体类型生成一个比较函数，有手写 impl 的类型由它调用手写的 `eq` 或 `partial_cmp`，其余逐字段比较。类型表记录每个类型手写的比较 impl，结构化比较也因此在字段处调用手写的比较。
 
 ## Runtime
 

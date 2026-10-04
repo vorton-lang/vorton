@@ -1,0 +1,96 @@
+// A version compares by major and minor only; the label is ignored.
+struct Version {
+    major: Int,
+    minor: Int,
+    label: Str,
+}
+
+impl PartialEq for Version {
+    fn eq(&self, other: &Version) -> Bool {
+        self.major == other.major && self.minor == other.minor
+    }
+}
+
+impl Eq for Version {}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Version) -> Option<Ordering> {
+        if self.major != other.major {
+            if self.major < other.major {
+                Option::Some(Ordering::Less)
+            } else {
+                Option::Some(Ordering::Greater)
+            }
+        } else if self.minor < other.minor {
+            Option::Some(Ordering::Less)
+        } else if self.minor > other.minor {
+            Option::Some(Ordering::Greater)
+        } else {
+            Option::Some(Ordering::Equal)
+        }
+    }
+}
+
+struct Release {
+    version: Version,
+    notes: Int,
+}
+
+enum Level {
+    Low,
+    High(Int),
+}
+
+fn same<T: PartialEq>(a: &T, b: &T) -> Bool {
+    a == b
+}
+
+fn largest<T: PartialOrd + Copy>(xs: &List<T>) -> T {
+    let mut best = xs[0]
+    for x in &xs {
+        if x > best {
+            best = x
+        }
+    }
+    best
+}
+
+fn count_equal<T: Eq>(xs: &List<T>, target: &T) -> Int {
+    let mut n = 0
+    for x in &xs {
+        if x == target {
+            n += 1
+        }
+    }
+    n
+}
+
+fn pairs_equal<T: PartialEq>(a: &(T, Int), b: &(T, Int)) -> Bool {
+    a == b
+}
+
+fn main() {
+    let a = Version { major: 1, minor: 2, label: "first" }
+    let b = Version { major: 1, minor: 2, label: "second" }
+    let c = Version { major: 1, minor: 3, label: "third" }
+    print(a == b)
+    print(a != c)
+    print(a < c)
+    print(c >= b)
+    print(same(&a, &b))
+    print(same(&3, &4))
+    print(same(&"x", &"x"))
+    let r1 = Release { version: a, notes: 5 }
+    let r2 = Release { version: b, notes: 5 }
+    print(r1 == r2)
+    print(same(&r1, &r2))
+    print(largest(&[3, 9, 4]))
+    print(largest(&[Level::High(2), Level::Low, Level::High(7)]) == Level::High(7))
+    let versions = [Version { major: 2, minor: 0, label: "a" }, Version { major: 2, minor: 0, label: "b" }, c]
+    print(count_equal(&versions, &Version { major: 2, minor: 0, label: "z" }))
+    print(count_equal(&[1, 2, 1], &1))
+    print(pairs_equal(&("p", 1), &("p", 1)))
+    print([Version { major: 1, minor: 0, label: "" }].contains(Version { major: 1, minor: 0, label: "other" }))
+    print(1.to_str())
+    print("${true.to_str()}!")
+}

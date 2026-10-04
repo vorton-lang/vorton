@@ -38,12 +38,15 @@ pub(crate) fn emit(program: &Program) -> String {
 
     let mut output = String::from(RUNTIME);
     output.push('\n');
-    output.push_str(&type_definitions(&program.types));
+    let (definitions, helper_bodies) = type_definitions(program);
+    output.push_str(&definitions);
     output.push_str(&literals.declarations);
     for (index, function) in program.functions.iter().enumerate() {
         writeln!(output, "{};", prototype(&program.types, index, function)).unwrap();
     }
     output.push('\n');
+    // Helpers of types with hand-written comparisons call the functions.
+    output.push_str(&helper_bodies);
     output.push_str(&bodies);
     writeln!(
         output,
@@ -55,9 +58,10 @@ pub(crate) fn emit(program: &Program) -> String {
 }
 
 /// C definitions for every tuple, struct, enum and list type, then the
-/// prototypes and bodies of their helpers: release, retain, equality,
-/// clone, and the list operations.
-fn type_definitions(types: &Types) -> String {
+/// prototypes of their helpers: release, retain, equality, clone, and the
+/// list operations; and separately the bodies of the helpers.
+fn type_definitions(program: &Program) -> (String, String) {
+    let types = &program.types;
     let mut definitions = String::new();
     let mut done = vec![false; types.len()];
     for ty in types.all() {
@@ -67,10 +71,10 @@ fn type_definitions(types: &Types) -> String {
     let mut bodies = String::new();
     for ty in types.all() {
         if is_aggregate(types, ty) {
-            helpers(types, ty, &mut prototypes, &mut bodies);
+            helpers(program, ty, &mut prototypes, &mut bodies);
         }
     }
-    definitions + &prototypes + &bodies
+    (definitions + &prototypes, bodies)
 }
 
 fn define(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
@@ -144,7 +148,9 @@ fn item_type(types: &Types, element: Type) -> String {
     }
 }
 
-fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String) {
+fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut String) {
+    let types = &program.types;
+    let written = types.comparisons.get(&ty);
     let name = c_type(types, ty);
     let n = ty.index();
     let mut function = |signature: String, body: String| {
@@ -231,7 +237,13 @@ fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String
         "    return v;\n".to_owned()
     };
     function(format!("{name} vt_clone_T{n}({name} v)"), clone_body);
-    if types.has_equality(ty) {
+    if let Some(eq) = written.and_then(|written| written.eq) {
+        let user = function_name(eq, &program.functions[eq]);
+        function(
+            format!("bool vt_eq_T{n}({name} a, {name} b)"),
+            format!("    return {user}(&a, &b);\n"),
+        );
+    } else if types.has_equality(ty) {
         let mut body = String::new();
         if types.is_enum(ty) {
             body.push_str("    if (a.tag != b.tag) return false;\n");
@@ -267,7 +279,20 @@ fn helpers(types: &Types, ty: Type, prototypes: &mut String, bodies: &mut String
         body.push_str("    return true;\n");
         function(format!("bool vt_eq_T{n}({name} a, {name} b)"), body);
     }
-    if types.has_order(ty) {
+    if let Some(partial_cmp) = written.and_then(|written| written.partial_cmp) {
+        // `Option<Ordering>` to -1, 0 or 1, and 2 for `None`; the variants
+        // of `Ordering` are `Less`, `Equal` and `Greater`.
+        let user = function_name(partial_cmp, &program.functions[partial_cmp]);
+        let result = program.functions[partial_cmp].result;
+        let (some, none) = option_variants(types, result);
+        function(
+            format!("int vt_cmp_T{n}({name} a, {name} b)"),
+            format!(
+                "    {} r = {user}(&a, &b);\n    if (r.tag == {none}) return 2;\n    return (int)r.u.v{some}.f0.tag - 1;\n",
+                c_type(types, result)
+            ),
+        );
+    } else if types.has_order(ty) {
         // Fields in declaration order; an enum compares variants first.
         let mut body = String::from("    int c = 0;\n");
         if types.is_enum(ty) {

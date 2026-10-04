@@ -1,0 +1,7 @@
+struct M {
+    m: Map<Int, Int>,
+}
+
+impl Eq for M {}
+
+fn main() {}

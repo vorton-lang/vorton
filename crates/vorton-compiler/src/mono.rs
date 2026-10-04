@@ -108,6 +108,15 @@ where
         .function(&mut function)?;
         functions.push(function);
     }
+    // Hand-written comparisons are methods of non-generic types.
+    for written in types.comparisons.values_mut() {
+        for function in [&mut written.eq, &mut written.partial_cmp, &mut written.cmp]
+            .into_iter()
+            .flatten()
+        {
+            *function = instances.index[&(*function, Vec::new())];
+        }
+    }
     let main = instances.index[&(main, Vec::new())];
     Ok((functions, main))
 }

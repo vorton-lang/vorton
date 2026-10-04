@@ -1,0 +1,13 @@
+struct V {
+    n: Int,
+}
+
+impl PartialEq for V {
+    fn eq(&self, other: &V) -> Bool {
+        self.n == other.n
+    }
+}
+
+fn main() {
+    let m: Map<V, Int> = Map::new()
+}

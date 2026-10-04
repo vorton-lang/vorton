@@ -1,0 +1,7 @@
+fn count<T: Eq>(xs: &List<T>, x: &T) -> Int {
+    0
+}
+
+fn main() {
+    print(count(&[1.5], &1.5))
+}

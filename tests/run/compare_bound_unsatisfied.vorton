@@ -1,0 +1,12 @@
+struct M {
+    m: Map<Int, Int>,
+}
+
+fn same<T: PartialEq>(a: &T, b: &T) -> Bool {
+    a == b
+}
+
+fn main() {
+    let x = M { m: Map::new() }
+    print(same(&x, &x))
+}

@@ -337,7 +337,7 @@ enum Phase { Start(Float), End(Float) }
 
 `Reading` 先比较 `major`，相等时才比较 `sample`；若后者含 NaN，部分序立即得到 `Option::None`。`Phase` 的 `Start` 排在 `End` 之前。两种类型都获得结构化 `PartialEq`／`PartialOrd`，不获得 `Eq`／`Ord`。
 
-每种能力分别要求全部字段具有对应 trait；有 `PartialEq` 或 `PartialOrd` 不会自动产生 `Eq` 或 `Ord`。提供关系按依赖不动点扩展到嵌套与递归类型。`Hash` 的基础实现包括 `Int`、`Str` 与 `Bool`，不包括 `Float` 或 `Unit`。这些实现是编译器定义的封闭语义，不对应源码 attribute；其他 trait 需要显式 impl。
+每种能力分别要求全部字段具有对应 trait；有 `PartialEq` 或 `PartialOrd` 不会自动产生 `Eq` 或 `Ord`。结构实现必须与同一类型手写的比较一致，编译器无法保证这一点，所以手写了 `PartialEq` 的类型不获得结构化的 `Eq`、`PartialOrd`、`Ord` 与 `Hash`，手写了 `PartialOrd` 的类型不获得结构化的 `Ord`；需要时一并手写。提供关系按依赖不动点扩展到嵌套与递归类型。`Hash` 的基础实现包括 `Int`、`Str` 与 `Bool`，不包括 `Float` 或 `Unit`。这些实现是编译器定义的封闭语义，不对应源码 attribute；其他 trait 需要显式 impl。
 
 ## 限制
 

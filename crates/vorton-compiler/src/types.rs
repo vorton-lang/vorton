@@ -72,6 +72,27 @@ pub(crate) struct Field {
     pub(crate) ty: Type,
 }
 
+/// The comparison traits, which the compiler implements field by field for
+/// a type without a hand-written impl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Comparison {
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+}
+
+/// The hand-written comparison impls of a type: the function of each
+/// method, which instantiation renumbers to its instance.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ComparisonImpls {
+    pub(crate) eq: Option<usize>,
+    /// `impl Eq`, which has no method.
+    pub(crate) total_eq: bool,
+    pub(crate) partial_cmp: Option<usize>,
+    pub(crate) cmp: Option<usize>,
+}
+
 pub(crate) struct Types {
     kinds: Vec<TypeKind>,
     /// Whether each type mentions a type parameter.
@@ -79,6 +100,7 @@ pub(crate) struct Types {
     lookup: HashMap<TypeKind, Type>,
     pub(crate) nominals: Vec<NominalInfo>,
     shapes: HashMap<Type, Vec<Variant>>,
+    pub(crate) comparisons: HashMap<Type, ComparisonImpls>,
 }
 
 impl Types {
@@ -89,6 +111,7 @@ impl Types {
             lookup: HashMap::new(),
             nominals: Vec::new(),
             shapes: HashMap::new(),
+            comparisons: HashMap::new(),
         };
         for kind in [
             TypeKind::Int,
@@ -285,58 +308,65 @@ impl Types {
         }
     }
 
-    /// Whether `==` applies to `ty`: built-in values, and lists and
-    /// aggregates of them.
+    /// Whether `==` applies to a type without type parameters.
     pub(crate) fn has_equality(&self, ty: Type) -> bool {
-        self.has_equality_in(ty, &mut Vec::new())
+        self.compares(ty, Comparison::PartialEq, &|_| false)
+    }
+
+    /// Whether `<`, `>`, `<=` and `>=` apply to a type without type
+    /// parameters.
+    pub(crate) fn has_order(&self, ty: Type) -> bool {
+        self.compares(ty, Comparison::PartialOrd, &|_| false)
+    }
+
+    /// Whether `ty` implements `comparison`: by a hand-written impl, or by
+    /// the compiler when all its parts do. The compiler's impl of a trait is
+    /// absent when the type has a hand-written impl that the trait must
+    /// agree with: `PartialEq` for all four, and `PartialOrd` for `Ord`.
+    /// `param` tells whether the type parameter at an index has the trait.
+    pub(crate) fn compares(
+        &self,
+        ty: Type,
+        comparison: Comparison,
+        param: &dyn Fn(usize) -> bool,
+    ) -> bool {
+        self.compares_in(ty, comparison, param, &mut Vec::new())
     }
 
     /// `pending` holds the types whose answer is being worked out further up;
     /// meeting one again, through a list, assumes the answer is yes, which is
     /// the greatest fixed point the spec asks for recursive types.
-    fn has_equality_in(&self, ty: Type, pending: &mut Vec<Type>) -> bool {
-        match self.kind(ty) {
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
-                true
-            }
-            TypeKind::Never
-            | TypeKind::Map(..)
-            | TypeKind::Set(_)
-            | TypeKind::Range
-            | TypeKind::Param { .. } => false,
-            TypeKind::List(element) => self.has_equality_in(*element, pending),
-            TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
-                if pending.contains(&ty) {
-                    return true;
-                }
-                pending.push(ty);
-                let result = self
-                    .components(ty)
-                    .into_iter()
-                    .all(|component| self.has_equality_in(component, pending));
-                pending.pop();
-                result
+    fn compares_in(
+        &self,
+        ty: Type,
+        comparison: Comparison,
+        param: &dyn Fn(usize) -> bool,
+        pending: &mut Vec<Type>,
+    ) -> bool {
+        if let Some(written) = self.comparisons.get(&ty) {
+            let (own, overriding) = match comparison {
+                Comparison::PartialEq => (written.eq.is_some(), false),
+                Comparison::Eq => (written.total_eq, written.eq.is_some()),
+                Comparison::PartialOrd => (written.partial_cmp.is_some(), written.eq.is_some()),
+                Comparison::Ord => (
+                    written.cmp.is_some(),
+                    written.eq.is_some() || written.partial_cmp.is_some(),
+                ),
+            };
+            if own || overriding {
+                return own;
             }
         }
-    }
-
-    /// Whether `<`, `>`, `<=` and `>=` apply to `ty`: built-in scalars, and
-    /// tuples, structs and enums of them, compared field by field.
-    pub(crate) fn has_order(&self, ty: Type) -> bool {
-        self.has_order_in(ty, &mut Vec::new())
-    }
-
-    fn has_order_in(&self, ty: Type, pending: &mut Vec<Type>) -> bool {
+        let ordered = matches!(comparison, Comparison::PartialOrd | Comparison::Ord);
+        let total = matches!(comparison, Comparison::Eq | Comparison::Ord);
         match self.kind(ty) {
-            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
-                true
+            TypeKind::Int | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => true,
+            TypeKind::Float => !total,
+            TypeKind::Param { index, .. } => param(*index),
+            TypeKind::Never | TypeKind::Map(..) | TypeKind::Set(_) | TypeKind::Range => false,
+            TypeKind::List(element) => {
+                !ordered && self.compares_in(*element, comparison, param, pending)
             }
-            TypeKind::Never
-            | TypeKind::List(_)
-            | TypeKind::Map(..)
-            | TypeKind::Set(_)
-            | TypeKind::Range
-            | TypeKind::Param { .. } => false,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
                 if pending.contains(&ty) {
                     return true;
@@ -345,7 +375,7 @@ impl Types {
                 let result = self
                     .components(ty)
                     .into_iter()
-                    .all(|component| self.has_order_in(component, pending));
+                    .all(|component| self.compares_in(component, comparison, param, pending));
                 pending.pop();
                 result
             }
@@ -353,8 +383,16 @@ impl Types {
     }
 
     /// Whether `ty` can be a map key: a value compared with `==` that has
-    /// no `Float` in it.
+    /// no `Float` in it and no hand-written `PartialEq`, so its structural
+    /// hash agrees with its equality.
     pub(crate) fn is_key(&self, ty: Type) -> bool {
+        if self
+            .comparisons
+            .get(&ty)
+            .is_some_and(|written| written.eq.is_some())
+        {
+            return false;
+        }
         match self.kind(ty) {
             TypeKind::Int | TypeKind::Bool | TypeKind::Str => true,
             // A `Unit` part adds nothing to a key, but `Unit` alone is no key.

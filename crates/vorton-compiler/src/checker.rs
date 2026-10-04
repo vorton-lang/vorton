@@ -40,7 +40,7 @@ use crate::project::{
     ResolvedTypeArgument, ResolvedTypeKind, ResolvedVariant, ResolvedVariantFields, SourceRef,
 };
 use crate::resolver::owner_key_from_entity;
-pub(crate) use crate::types::{Field, NominalInfo, Type, TypeKind, Types, Variant};
+pub(crate) use crate::types::{Comparison, Field, NominalInfo, Type, TypeKind, Types, Variant};
 
 /// One deterministic failure from checking a resolved project.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +500,8 @@ struct Traits<'a> {
     display: usize,
     copy: usize,
     clone: usize,
+    /// `PartialEq`, `Eq`, `PartialOrd` and `Ord`.
+    comparisons: [usize; 4],
 }
 
 impl Traits<'_> {
@@ -514,6 +516,31 @@ impl Traits<'_> {
 
     fn method_name(&self, trait_index: usize, method: usize) -> &str {
         &self.declarations[trait_index].methods[method].identity.name
+    }
+
+    /// The comparison that `trait_index` is, if it is one.
+    fn comparison(&self, trait_index: usize) -> Option<Comparison> {
+        let position = self
+            .comparisons
+            .iter()
+            .position(|&comparison| comparison == trait_index)?;
+        Some(
+            [
+                Comparison::PartialEq,
+                Comparison::Eq,
+                Comparison::PartialOrd,
+                Comparison::Ord,
+            ][position],
+        )
+    }
+
+    /// Whether the checker supports impls of and bounds on `trait_index`.
+    fn supported(&self, trait_index: usize) -> bool {
+        let declaration = &self.declarations[trait_index];
+        !declaration.associated_types
+            && (!declaration.core
+                || trait_index == self.display
+                || self.comparison(trait_index).is_some())
     }
 }
 
@@ -754,6 +781,20 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         &mut types,
         &mut functions_found,
     )?;
+    for implementation in &found_impls {
+        let Some(comparison) = traits.comparison(implementation.trait_index) else {
+            continue;
+        };
+        let written = types.comparisons.entry(implementation.owner).or_default();
+        let method = implementation.methods.first().copied();
+        match comparison {
+            Comparison::PartialEq => written.eq = method,
+            Comparison::Eq => written.total_eq = true,
+            Comparison::PartialOrd => written.partial_cmp = method,
+            Comparison::Ord => written.cmp = method,
+        }
+    }
+    check_keys(&mut types, &nominals)?;
 
     let mut signatures = BTreeMap::new();
     for (index, found) in functions_found.iter().enumerate() {
@@ -958,6 +999,12 @@ fn collect_traits<'a>(
         display: by_identity[&roles.display.declaration],
         copy: by_identity[&roles.copy],
         clone: by_identity[&roles.clone.declaration],
+        comparisons: [
+            by_identity[&roles.partial_eq.declaration],
+            by_identity[&roles.eq],
+            by_identity[&roles.partial_ord.declaration],
+            by_identity[&roles.ord.declaration],
+        ],
         declarations,
         by_identity,
         signatures,
@@ -1053,7 +1100,7 @@ fn collect_trait_impls<'a>(
         if declaration.associated_types {
             return Err(unsupported(Some(origin.clone()), "associated types"));
         }
-        if declaration.core && trait_index != traits.display {
+        if !traits.supported(trait_index) {
             return Err(unsupported(
                 Some(origin.clone()),
                 &format!("impls of `{}`", declaration.name),
@@ -1205,6 +1252,45 @@ fn check_trait_impls(
     Ok(impls)
 }
 
+/// Rejects map keys and set elements with a hand-written `PartialEq` in the
+/// fields of the declarations instantiated before the impls were known.
+fn check_keys(types: &mut Types, nominals: &Nominals) -> Result<(), CheckDiagnostic> {
+    fn bad_key(types: &Types, ty: Type) -> Option<Type> {
+        match types.kind(ty) {
+            &TypeKind::Map(key, _) | &TypeKind::Set(key) if !types.is_key(key) => Some(key),
+            TypeKind::Map(key, value) => bad_key(types, *key).or_else(|| bad_key(types, *value)),
+            TypeKind::List(element) | TypeKind::Set(element) => bad_key(types, *element),
+            TypeKind::Tuple(elements) => elements.iter().find_map(|&ty| bad_key(types, ty)),
+            _ => None,
+        }
+    }
+    for (declaration, info) in nominals.declarations.iter().enumerate() {
+        if !info.type_parameters.is_empty() {
+            continue;
+        }
+        let ty = types.intern(TypeKind::Nominal {
+            declaration,
+            arguments: Vec::new(),
+        });
+        let fields = types
+            .variants(ty)
+            .iter()
+            .flat_map(|variant| variant.fields.iter().map(|field| field.ty))
+            .collect::<Vec<_>>();
+        if let Some(key) = fields.into_iter().find_map(|field| bad_key(types, field)) {
+            return Err(CheckDiagnostic {
+                kind: CheckDiagnosticKind::TypeMismatch,
+                primary: Some(info.origin.clone()),
+                message: format!(
+                    "`{}` cannot be a map key or set element; it has a hand-written `PartialEq`",
+                    types.name(key)
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// `signature` with its type parameters replaced by `arguments`.
 fn substitute_signature(
     types: &mut Types,
@@ -1265,6 +1351,11 @@ fn implements(
         _ => {
             impls.contains_key(&(trait_index, ty))
                 || (trait_index == traits.display && is_printable(ty))
+                || traits.comparison(trait_index).is_some_and(|comparison| {
+                    types.compares(ty, comparison, &|index| {
+                        type_parameters[index].traits.contains(&trait_index)
+                    })
+                })
         }
     }
 }
@@ -1495,13 +1586,10 @@ fn check_signature(
             } else if trait_index == Some(traits.clone) {
                 bounds.clone = true;
             } else if let Some(trait_index) = trait_index {
-                let declaration = &traits.declarations[trait_index];
-                if declaration.associated_types
-                    || (declaration.core && trait_index != traits.display)
-                {
+                if !traits.supported(trait_index) {
                     return Err(unsupported(
                         Some(at(origin, bound.span)),
-                        &format!("bounds on `{}`", declaration.name),
+                        &format!("bounds on `{}`", traits.declarations[trait_index].name),
                     ));
                 }
                 traits.closure(trait_index, &mut bounds.traits);
@@ -1667,7 +1755,7 @@ fn resolve_type(
                         kind: CheckDiagnosticKind::TypeMismatch,
                         primary: Some(at(origin, ty.span)),
                         message: format!(
-                            "`{}` cannot be a map key or set element; those are values compared with `==`, without `Float`",
+                            "`{}` cannot be a map key or set element; those are values without `Float` whose `==` the compiler implements",
                             types.name(*key)
                         ),
                     });
@@ -3713,7 +3801,7 @@ impl BodyChecker<'_> {
                 format!("`{}` does not implement `Display`", self.types.name(ty)),
             ));
         }
-        let (callee, signature) = self.trait_callee(ty, display, 0)?;
+        let (callee, signature) = self.trait_callee(ty, display, 0, span)?;
         let (result, kind) = self.finish_call(
             span,
             callee,
@@ -4737,9 +4825,9 @@ impl BodyChecker<'_> {
                 matches!(ty, Type::INT | Type::FLOAT).then_some(ty)
             }
             Op::Equal | Op::NotEqual => self.has_equality(ty).then_some(Type::BOOL),
-            Op::Less | Op::Greater | Op::LessEqual | Op::GreaterEqual => {
-                self.types.has_order(ty).then_some(Type::BOOL)
-            }
+            Op::Less | Op::Greater | Op::LessEqual | Op::GreaterEqual => self
+                .compares(ty, Comparison::PartialOrd)
+                .then_some(Type::BOOL),
             Op::LogicAnd | Op::LogicOr => (ty == Type::BOOL).then_some(Type::BOOL),
             Op::RangeExclusive | Op::RangeInclusive => {
                 if ty != Type::INT {
@@ -4773,7 +4861,16 @@ impl BodyChecker<'_> {
     }
 
     fn has_equality(&self, ty: Type) -> bool {
-        self.types.has_equality(ty)
+        self.compares(ty, Comparison::PartialEq)
+    }
+
+    /// Whether `ty` implements `comparison`, a type parameter through its
+    /// bounds.
+    fn compares(&self, ty: Type, comparison: Comparison) -> bool {
+        let trait_index = self.traits.comparisons[comparison as usize];
+        self.types.compares(ty, comparison, &|index| {
+            self.type_parameters[index].traits.contains(&trait_index)
+        })
     }
 
     fn check_call(
@@ -4984,12 +5081,19 @@ impl BodyChecker<'_> {
                 .iter()
                 .copied()
                 .collect(),
-            _ => self
-                .trait_impls
-                .keys()
-                .filter(|(_, target)| *target == ty)
-                .map(|(trait_index, _)| *trait_index)
-                .collect(),
+            _ => {
+                let mut found = self
+                    .trait_impls
+                    .keys()
+                    .filter(|(_, target)| *target == ty)
+                    .map(|(trait_index, _)| *trait_index)
+                    .collect::<Vec<_>>();
+                // Built-in types implement `Display` without an impl.
+                if is_printable(ty) {
+                    found.push(traits.display);
+                }
+                found
+            }
         };
         let found = candidates
             .into_iter()
@@ -5017,7 +5121,7 @@ impl BodyChecker<'_> {
                 ));
             }
         };
-        self.trait_callee(ty, trait_index, method).map(Some)
+        self.trait_callee(ty, trait_index, method, span).map(Some)
     }
 
     /// The callee and signature of `method` of `trait_index` for a receiver
@@ -5028,11 +5132,21 @@ impl BodyChecker<'_> {
         ty: Type,
         trait_index: usize,
         method: usize,
+        span: Span,
     ) -> Result<(Callee, Signature), CheckDiagnostic> {
         if let Some(methods) = self.trait_impls.get(&(trait_index, ty)) {
             let function = methods[method];
             let signature = self.signatures[&self.identities[function]].clone();
             return Ok((Callee::Function(function), signature));
+        }
+        // Instantiation finds an impl for a type argument, or the built-in
+        // `Display` of a built-in type; compiler-made comparisons have no
+        // method to call.
+        if self.traits.comparison(trait_index).is_some() {
+            return Err(self.unsupported(
+                span,
+                "comparison methods of types without a hand-written impl; use the operators",
+            ));
         }
         let signature = substitute_signature(
             self.types,
