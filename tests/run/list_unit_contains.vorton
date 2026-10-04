@@ -1,0 +1,6 @@
+fn main() {
+    let xs = [(), ()]
+    print(xs.contains(()))
+    let empty: List<Unit> = []
+    print(empty.contains(()))
+}

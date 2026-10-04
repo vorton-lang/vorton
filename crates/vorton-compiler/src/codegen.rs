@@ -1995,6 +1995,10 @@ impl FunctionEmitter<'_> {
                     owned: true,
                 }
             }
+            // Every element of a `List<Unit>` equals the argument.
+            Builtin::Contains if !self.types.has_storage(values[0].1) => {
+                self.store(Type::BOOL, format!("({code}.len > 0)"), false)
+            }
             Builtin::Contains => self.store(
                 Type::BOOL,
                 format!("vt_contains_T{n}({code}, {})", values[0].0.code()),
