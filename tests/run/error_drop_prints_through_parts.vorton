@@ -1,0 +1,19 @@
+// Ordering a tuple orders its elements, which runs a hand-written
+// `partial_cmp`; a `drop` cannot reach the console through it.
+struct Score { n: Int }
+impl PartialEq for Score {
+    fn eq(&self, other: &Self) -> Bool { self.n == other.n }
+}
+impl PartialOrd for Score {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        print("order-console")
+        Option::Some(Ordering::Equal)
+    }
+}
+struct D { score: Score }
+impl Drop for D {
+    fn drop(&mut self) {
+        assert(!((self.score, 1) < (self.score, 1)), "order")
+    }
+}
+fn main() { let d = D { score: Score { n: 1 } } }

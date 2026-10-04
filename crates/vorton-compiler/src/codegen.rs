@@ -14,6 +14,7 @@ mod body;
 use std::fmt::Write as _;
 
 use crate::checker::{Function, Program, Type, TypeKind, Types};
+use crate::types::{Glue, Operation};
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
 const GENERIC: &str = "generic functions are instantiated before code generation";
@@ -142,6 +143,8 @@ fn item_type(types: &Types, element: Type) -> String {
     }
 }
 
+/// The helpers of a tuple, struct or enum type. Comparing and cloning call
+/// the hand-written impl or work through the parts as [`Types::glue`] says.
 fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut String) {
     let types = &program.types;
     let written = types.written.get(&ty);
@@ -221,7 +224,7 @@ fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut St
             function(format!("void vt_retain_T{n}({name} v)"), body);
         }
     }
-    let clone_body = if let Some(clone) = written.and_then(|written| written.clone) {
+    let clone_body = if let Glue::Written(clone) = types.glue(ty, Operation::Clone) {
         let user = function_name(clone, &program.functions[clone]);
         format!("    return {user}(&v);\n")
     } else if types.is_entity(ty) {
@@ -240,7 +243,7 @@ fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut St
         "    return v;\n".to_owned()
     };
     function(format!("{name} vt_clone_T{n}({name} v)"), clone_body);
-    if let Some(eq) = written.and_then(|written| written.eq) {
+    if let Glue::Written(eq) = types.glue(ty, Operation::Equal) {
         let user = function_name(eq, &program.functions[eq]);
         function(
             format!("bool vt_eq_T{n}({name} a, {name} b)"),
@@ -282,7 +285,7 @@ fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut St
         body.push_str("    return true;\n");
         function(format!("bool vt_eq_T{n}({name} a, {name} b)"), body);
     }
-    if let Some(partial_cmp) = written.and_then(|written| written.partial_cmp) {
+    if let Glue::Written(partial_cmp) = types.glue(ty, Operation::Order) {
         // `Option<Ordering>` to -1, 0 or 1, and 2 for `None`; the variants
         // of `Ordering` are `Less`, `Equal` and `Greater`.
         let user = function_name(partial_cmp, &program.functions[partial_cmp]);

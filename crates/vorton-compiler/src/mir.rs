@@ -7,6 +7,10 @@
 //! local. Branches of `if`, `match`, `&&`, `||`, guards and loops are edges,
 //! so an analysis that follows the edges covers every construct alike.
 //!
+//! Every step that can run code the program wrote is a `Call` of a function
+//! or a `Glue` operation; the only exception is the `drop` of a value that
+//! a step releases, which the spec keeps free of effects and capabilities.
+//!
 //! The IR is not in SSA form: locals are storage that statements write and
 //! borrows point into, which is what move and borrow checking are about.
 //! Code generation follows the same blocks, so the order the checks see is
@@ -16,7 +20,7 @@ use std::collections::BTreeSet;
 
 use crate::ast::{BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::checker::{Builtin, Callee, Intrinsic};
-use crate::types::{Type, TypeKind, Types};
+use crate::types::{Operation, Type, TypeKind, Types};
 
 pub(crate) type Local = usize;
 pub(crate) type BlockId = usize;
@@ -193,9 +197,19 @@ pub(crate) enum Rvalue {
         arguments: Vec<Operand>,
         borrow: Option<BorrowKind>,
     },
-    /// A built-in method. A receiver that the method changes, or an entity
-    /// it clones, is a reference local; one it reads only values of is the
-    /// place itself.
+    /// A comparison, clone or search that the compiler carries out for
+    /// values of `ty`, by hand-written impls or through the parts of the
+    /// values, as [`Types::glue`] describes. `operator` is the comparison
+    /// operator of `Equal` and `Order`.
+    Glue {
+        operation: Operation,
+        operator: Option<BinaryOperator>,
+        ty: Type,
+        operands: Vec<Operand>,
+    },
+    /// A built-in method. A receiver that the method changes is a reference
+    /// local; one it reads only values of is the place itself. It runs no
+    /// code the program wrote, other than the `drop` of what it releases.
     Builtin {
         builtin: Builtin,
         receiver: Place,
@@ -233,7 +247,8 @@ impl Rvalue {
             | Self::Builtin {
                 arguments: operands,
                 ..
-            } => operands.iter().collect(),
+            }
+            | Self::Glue { operands, .. } => operands.iter().collect(),
             Self::Construct { fields, .. } => fields.iter().map(|(_, operand)| operand).collect(),
             Self::Range { start, end, .. } => vec![start, end],
             Self::Ref(..)

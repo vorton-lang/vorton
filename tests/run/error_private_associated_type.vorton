@@ -1,0 +1,10 @@
+// An associated type of a public trait is part of its interface, so it
+// cannot name a private type.
+mod secret {
+    struct Hidden { n: Int }
+    pub trait Open {
+        type Out = Hidden
+        fn open(&self) -> Int
+    }
+}
+fn main() {}

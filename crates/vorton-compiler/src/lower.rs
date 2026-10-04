@@ -20,7 +20,7 @@ use crate::mir::{
     BlockId, Body, Constant, Local, LocalDecl, Operand, Place, Projection, RefKind, Rvalue,
     Statement, StatementKind, Terminator, TerminatorKind, element_type,
 };
-use crate::types::{Type, TypeKind, Types};
+use crate::types::{Operation, Type, TypeKind, Types};
 
 pub(crate) fn lower(function: &Function, types: &Types) -> Body {
     let mut locals = function
@@ -909,7 +909,8 @@ impl Builder<'_> {
                         | BinaryOperator::RangeExclusive
                         | BinaryOperator::RangeInclusive
                 );
-                let (left, right) = if compares && self.types.is_entity(left.ty) {
+                let ty = left.ty;
+                let (left, right) = if compares && self.types.is_entity(ty) {
                     // Comparisons borrow entity operands.
                     let left = self.borrowed_operand(left)?;
                     (left, self.borrowed_operand(right)?)
@@ -917,6 +918,27 @@ impl Builder<'_> {
                     let left = self.operand(left)?;
                     (left, self.operand(right)?)
                 };
+                // Comparing values that have parts may run hand-written impls.
+                if compares
+                    && matches!(
+                        self.types.kind(ty),
+                        TypeKind::Tuple(_)
+                            | TypeKind::Nominal { .. }
+                            | TypeKind::List(_)
+                            | TypeKind::Param { .. }
+                    )
+                {
+                    let operation = match operator {
+                        BinaryOperator::Equal | BinaryOperator::NotEqual => Operation::Equal,
+                        _ => Operation::Order,
+                    };
+                    return Some(Rvalue::Glue {
+                        operation,
+                        operator: Some(*operator),
+                        ty,
+                        operands: vec![left, right],
+                    });
+                }
                 Rvalue::Binary(*operator, left, right)
             }
             ExprKind::Interpolate(parts) => Rvalue::Interpolate(self.operands(parts)?),
@@ -1225,7 +1247,23 @@ impl Builder<'_> {
                 place
             }
         };
-        let arguments = self.operands(arguments)?;
+        let mut arguments = self.operands(arguments)?;
+        // Cloning, and searching a list, clone or compare the parts of
+        // values, which may run hand-written impls.
+        let operation = match (builtin, self.types.kind(receiver_ty)) {
+            (Builtin::Clone, _) => Some(Operation::Clone),
+            (Builtin::Contains, TypeKind::List(_)) => Some(Operation::Contains),
+            _ => None,
+        };
+        if let Some(operation) = operation {
+            arguments.insert(0, Operand::Copy(receiver));
+            return Some(Rvalue::Glue {
+                operation,
+                operator: None,
+                ty: receiver_ty,
+                operands: arguments,
+            });
+        }
         Some(Rvalue::Builtin {
             builtin,
             receiver,

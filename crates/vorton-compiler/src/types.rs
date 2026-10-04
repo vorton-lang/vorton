@@ -56,6 +56,29 @@ pub(crate) enum TypeKind {
     },
 }
 
+/// An operation on values that the compiler carries out for every type that
+/// supports it: by the type's hand-written impl, or else by carrying out an
+/// operation on the type's parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Operation {
+    /// `==` and `!=`, by `PartialEq::eq`.
+    Equal,
+    /// `<`, `>`, `<=` and `>=`, by `PartialOrd::partial_cmp`.
+    Order,
+    Clone,
+    /// `List::contains`, which compares each element with `==`.
+    Contains,
+}
+
+/// How the compiler carries out an operation on a value of one type.
+pub(crate) enum Glue {
+    /// It calls this hand-written function.
+    Written(usize),
+    /// It carries out these operations on parts of the value; none when the
+    /// compiler handles the type directly, as for `Int` or `Str`.
+    Parts(Vec<(Type, Operation)>),
+}
+
 /// What [`Types::search`] does with one type.
 enum Search {
     Found,
@@ -447,6 +470,55 @@ impl Types {
                     | TypeKind::Param { .. } => Search::Found,
                 }
             })
+    }
+
+    /// How the compiler carries out `operation` on a value of `ty`. This is
+    /// the one description of which hand-written impls an operation runs:
+    /// the helpers of code generation follow it, and so does every analysis
+    /// of what a program calls.
+    pub(crate) fn glue(&self, ty: Type, operation: Operation) -> Glue {
+        let written = self.written.get(&ty).and_then(|written| match operation {
+            Operation::Equal => written.eq,
+            Operation::Order => written.partial_cmp,
+            Operation::Clone => written.clone,
+            Operation::Contains => None,
+        });
+        if let Some(function) = written {
+            return Glue::Written(function);
+        }
+        Glue::Parts(match (operation, self.kind(ty)) {
+            (Operation::Contains, TypeKind::List(element)) => vec![(*element, Operation::Equal)],
+            (Operation::Contains, _) => Vec::new(),
+            (_, TypeKind::Tuple(_) | TypeKind::Nominal { .. }) => self
+                .components(ty)
+                .into_iter()
+                .map(|component| (component, operation))
+                .collect(),
+            (Operation::Equal | Operation::Clone, TypeKind::List(element))
+            | (Operation::Clone, TypeKind::Set(element)) => vec![(*element, operation)],
+            (Operation::Clone, TypeKind::Map(key, value)) => {
+                vec![(*key, Operation::Clone), (*value, Operation::Clone)]
+            }
+            _ => Vec::new(),
+        })
+    }
+
+    /// The hand-written functions that `operation` on a value of `ty` may
+    /// run, directly or through the parts of the value.
+    pub(crate) fn glue_functions(&self, ty: Type, operation: Operation) -> Vec<usize> {
+        let mut functions = Vec::new();
+        let mut seen = HashSet::new();
+        let mut pending = vec![(ty, operation)];
+        while let Some(step) = pending.pop() {
+            if !seen.insert(step) {
+                continue;
+            }
+            match self.glue(step.0, step.1) {
+                Glue::Written(function) => functions.push(function),
+                Glue::Parts(parts) => pending.extend(parts),
+            }
+        }
+        functions
     }
 
     /// Whether `step` finds something among the types it reaches from `ty`.

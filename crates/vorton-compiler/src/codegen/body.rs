@@ -33,7 +33,7 @@ use crate::mir::{
     BlockId, Body, Constant, Local, Operand, Place, Projection, Rvalue, StatementKind,
     TerminatorKind,
 };
-use crate::types::{Type, TypeKind, Types};
+use crate::types::{Operation, Type, TypeKind, Types};
 
 /// The C definition of the function at `index`.
 pub(super) fn function(
@@ -577,6 +577,10 @@ impl<'a> Emitter<'a> {
                 let code = self.place(place)?;
                 Some(if self.types.needs_release(ty) {
                     debug_assert!(!self.types.is_entity(ty), "entities are moved");
+                    debug_assert!(
+                        self.types.glue_functions(ty, Operation::Clone).is_empty(),
+                        "copying a value runs no code the program wrote"
+                    );
                     clone_code(self.types, ty, &code)
                 } else {
                     code
@@ -728,6 +732,12 @@ impl<'a> Emitter<'a> {
                 receiver,
                 arguments,
             } => self.builtin(*builtin, receiver, arguments, ty),
+            Rvalue::Glue {
+                operation,
+                operator,
+                ty: operand_ty,
+                operands,
+            } => self.glue(*operation, *operator, *operand_ty, operands),
             Rvalue::Intrinsic {
                 intrinsic,
                 arguments,
@@ -739,31 +749,79 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn binary(&mut self, operator: BinaryOperator, left: &Operand, right: &Operand) -> String {
+    /// An operation that the helpers of `ty` carry out, which follow
+    /// [`Types::glue`].
+    fn glue(
+        &mut self,
+        operation: Operation,
+        operator: Option<BinaryOperator>,
+        ty: Type,
+        operands: &[Operand],
+    ) -> Option<String> {
         use BinaryOperator as Op;
-        let operand_ty = self.operand_type(left);
-        let (left, right) = (self.read(left), self.read(right));
-        let (Some(a), Some(b)) = (left, right) else {
-            // Two `Unit` values are equal.
-            let equal = matches!(operator, Op::Equal | Op::LessEqual | Op::GreaterEqual);
-            return equal.to_string();
-        };
-        let ordered = matches!(
-            self.types.kind(operand_ty),
-            TypeKind::Tuple(_) | TypeKind::Nominal { .. }
-        );
-        match (operator, operand_ty) {
-            (Op::Less | Op::Greater | Op::LessEqual | Op::GreaterEqual, _) if ordered => {
-                let compare = compare_code(self.types, operand_ty, &a, &b);
-                match operator {
+        let types = self.types;
+        let values = operands
+            .iter()
+            .map(|operand| self.read(operand))
+            .collect::<Vec<_>>();
+        match operation {
+            Operation::Equal => {
+                let operator = operator.expect("`==` or `!=`");
+                let (Some(a), Some(b)) = (&values[0], &values[1]) else {
+                    return Some((operator == Op::Equal).to_string());
+                };
+                let equal = equal_code(types, ty, a, b);
+                Some(if operator == Op::Equal {
+                    equal
+                } else {
+                    format!("(!{equal})")
+                })
+            }
+            Operation::Order => {
+                let (Some(a), Some(b)) = (&values[0], &values[1]) else {
+                    return Some(true.to_string());
+                };
+                let compare = compare_code(types, ty, a, b);
+                Some(match operator.expect("an ordering operator") {
                     Op::Less => format!("({compare} == -1)"),
                     Op::Greater => format!("({compare} == 1)"),
                     // -1 or 0.
                     Op::LessEqual => format!("((unsigned)({compare} + 1) <= 1u)"),
                     // 0 or 1.
                     _ => format!("((unsigned)({compare}) <= 1u)"),
-                }
+                })
             }
+            Operation::Clone => values[0].as_ref().map(|code| clone_code(types, ty, code)),
+            Operation::Contains => {
+                let list = values[0].as_ref().expect("a list has storage");
+                // Every element of a `List<Unit>` equals the argument.
+                Some(match &values[1] {
+                    None => format!("({list}.len > 0)"),
+                    Some(value) => format!("vt_contains_T{}({list}, {value})", ty.index()),
+                })
+            }
+        }
+    }
+
+    /// An operation on values that the compiler carries out directly:
+    /// comparisons of values without parts, and arithmetic.
+    fn binary(&mut self, operator: BinaryOperator, left: &Operand, right: &Operand) -> String {
+        use BinaryOperator as Op;
+        let operand_ty = self.operand_type(left);
+        debug_assert!(
+            !matches!(
+                self.types.kind(operand_ty),
+                TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_)
+            ),
+            "values with parts are compared by `Glue`"
+        );
+        let (left, right) = (self.read(left), self.read(right));
+        let (Some(a), Some(b)) = (left, right) else {
+            // Two `Unit` values are equal.
+            let equal = matches!(operator, Op::Equal | Op::LessEqual | Op::GreaterEqual);
+            return equal.to_string();
+        };
+        match (operator, operand_ty) {
             (Op::Add, Type::INT) => format!("vt_int_add({a}, {b})"),
             (Op::Subtract, Type::INT) => format!("vt_int_sub({a}, {b})"),
             (Op::Multiply, Type::INT) => format!("vt_int_mul({a}, {b})"),
@@ -992,11 +1050,9 @@ impl<'a> Emitter<'a> {
     ) -> Option<String> {
         let types = self.types;
         let receiver_ty = self.body.place_type(types, receiver);
-        let code = self.place(receiver);
-        if builtin == Builtin::Clone {
-            return code.map(|code| clone_code(types, receiver_ty, &code));
-        }
-        let code = code.expect("containers and strings have storage");
+        let code = self
+            .place(receiver)
+            .expect("containers and strings have storage");
         match (types.kind(receiver_ty), builtin) {
             (TypeKind::Str, Builtin::Str(method)) => {
                 Some(self.str_builtin(method, &code, arguments, ty))
@@ -1073,11 +1129,6 @@ impl<'a> Emitter<'a> {
                 self.line("}");
                 Some(result)
             }
-            // Every element of a `List<Unit>` equals the argument.
-            Builtin::Contains => Some(match self.read(&arguments[0]) {
-                None => format!("({code}.len > 0)"),
-                Some(value) => format!("vt_contains_T{n}({code}, {value})"),
-            }),
             Builtin::Get => {
                 let index = self.read(&arguments[0]).expect("an index is an `Int`");
                 let field = clone_code(types, element, &format!("{code}.items[{index}]"));

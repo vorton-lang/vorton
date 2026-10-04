@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::exhaustive;
-use crate::mir::{Body, Operand as MirOperand, Rvalue, StatementKind};
+use crate::mir::{Body, Rvalue, StatementKind};
 use crate::project::{
     CoreRoles, EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
     ResolvedConstructEntry, ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedField,
@@ -605,9 +605,6 @@ struct FoundFunction<'a> {
     origin: OriginRef,
     /// The type a method belongs to.
     owner: Option<Type>,
-    /// Whether code outside its module can call it, so its signature is a
-    /// public interface.
-    public: bool,
 }
 
 /// The inherent methods and associated functions of each struct or enum
@@ -714,7 +711,6 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                         function,
                         origin: declaration.origin.clone(),
                         owner: None,
-                        public: declaration.public,
                     });
                 }
                 ResolvedDeclarationKind::InherentImpl(implementation) => {
@@ -817,15 +813,12 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                     message: format!("`{}` already has a method `{name}`", types.name(owner)),
                 });
             }
-            // A method of a private type cannot be reached from outside,
-            // whatever its own visibility.
             functions_found.push(FoundFunction {
                 name: format!("{}_{name}", types.name(owner)),
                 identity: member.identity.clone(),
                 function,
                 origin: member_origin,
                 owner: Some(owner),
-                public: member.public && nominals.declarations[declaration].public,
             });
         }
     }
@@ -866,7 +859,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         });
     }
     check_keys(&mut types, &nominals)?;
-    check_interfaces(&functions_found, &nominals, &traits, &traits_found)?;
+    check_interfaces(project, &nominals, &traits)?;
 
     let mut signatures = BTreeMap::new();
     for (index, found) in functions_found.iter().enumerate() {
@@ -1064,108 +1057,59 @@ fn check_drops(
 }
 
 /// The steps of `body` that print, and the functions it calls, with their
-/// spans: named calls, and the hand-written `eq`, `partial_cmp` and `clone`
-/// that comparing, ordering, finding or cloning a value runs.
+/// spans: named calls, and the hand-written impls that a `Glue` operation
+/// runs. Every IR step is listed, so a new kind of step must say what it
+/// calls.
 fn console_uses(body: &Body, types: &Types) -> Vec<(Span, Option<usize>)> {
     let mut uses = Vec::new();
     for block in &body.blocks {
         for statement in &block.statements {
-            let StatementKind::Assign(_, value) = &statement.kind else {
-                continue;
-            };
             let span = statement.span;
-            let (ty, operation) = match value {
+            let value = match &statement.kind {
+                StatementKind::Assign(_, value) => value,
+                // A release may run a `drop`, which is checked on its own.
+                StatementKind::Release(_) => continue,
+            };
+            match value {
                 Rvalue::Intrinsic {
                     intrinsic: Intrinsic::Print,
                     ..
-                } => {
-                    uses.push((span, None));
-                    continue;
-                }
+                } => uses.push((span, None)),
                 Rvalue::Call {
                     callee: Callee::Function(callee),
                     ..
-                } => {
-                    uses.push((span, Some(*callee)));
-                    continue;
-                }
-                Rvalue::Binary(operator, MirOperand::Copy(place) | MirOperand::Move(place), _) => {
-                    let operation = match operator {
-                        BinaryOperator::Equal | BinaryOperator::NotEqual => Operation::Equal,
-                        BinaryOperator::Less
-                        | BinaryOperator::Greater
-                        | BinaryOperator::LessEqual
-                        | BinaryOperator::GreaterEqual => Operation::Order,
-                        _ => continue,
-                    };
-                    (body.place_type(types, place), operation)
-                }
-                Rvalue::Builtin {
-                    builtin: Builtin::Clone,
-                    receiver,
+                } => uses.push((span, Some(*callee))),
+                Rvalue::Call {
+                    callee: Callee::Trait { .. },
                     ..
-                } => (body.place_type(types, receiver), Operation::Clone),
-                // `contains` compares the elements of a list with `==`.
-                Rvalue::Builtin {
-                    builtin: Builtin::Contains,
-                    receiver,
-                    ..
-                } => match types.kind(body.place_type(types, receiver)) {
-                    TypeKind::List(element) => (*element, Operation::Equal),
-                    _ => continue,
-                },
-                _ => continue,
-            };
-            for callee in written_runs(types, ty, operation) {
-                uses.push((span, Some(callee)));
+                } => unreachable!("instantiation resolves trait methods"),
+                Rvalue::Glue { operation, ty, .. } => {
+                    for callee in types.glue_functions(*ty, *operation) {
+                        uses.push((span, Some(callee)));
+                    }
+                }
+                // These run no code the program wrote, other than the `drop`
+                // of what they release.
+                Rvalue::Intrinsic { .. }
+                | Rvalue::Builtin { .. }
+                | Rvalue::Use(_)
+                | Rvalue::Ref(..)
+                | Rvalue::Unary(..)
+                | Rvalue::Binary(..)
+                | Rvalue::Tuple(_)
+                | Rvalue::Construct { .. }
+                | Rvalue::List(_)
+                | Rvalue::EmptyMap
+                | Rvalue::Range { .. }
+                | Rvalue::Interpolate(_)
+                | Rvalue::Discriminant(_)
+                | Rvalue::Len(_)
+                | Rvalue::Occupied { .. }
+                | Rvalue::Take { .. } => {}
             }
         }
     }
     uses
-}
-
-/// An operation on values that the compiler implements by calling the
-/// hand-written impls of the values' types.
-#[derive(Clone, Copy)]
-enum Operation {
-    /// `==` and `!=`: `PartialEq::eq`.
-    Equal,
-    /// `<`, `>`, `<=` and `>=`: `PartialOrd::partial_cmp`.
-    Order,
-    Clone,
-}
-
-/// The hand-written functions that `operation` on a value of `ty` runs: the
-/// type's own impl of it if there is one, and otherwise those of the parts
-/// that the compiler's impl works through.
-fn written_runs(types: &Types, ty: Type, operation: Operation) -> Vec<usize> {
-    let mut found = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut pending = vec![ty];
-    while let Some(ty) = pending.pop() {
-        if !seen.insert(ty) {
-            continue;
-        }
-        let own = types.written.get(&ty).and_then(|written| match operation {
-            Operation::Equal => written.eq,
-            Operation::Order => written.partial_cmp,
-            Operation::Clone => written.clone,
-        });
-        if let Some(function) = own {
-            found.push(function);
-            continue;
-        }
-        match (operation, types.kind(ty)) {
-            (_, TypeKind::Tuple(_) | TypeKind::Nominal { .. }) => {
-                pending.extend(types.components(ty));
-            }
-            (Operation::Equal | Operation::Clone, TypeKind::List(element))
-            | (Operation::Clone, TypeKind::Set(element)) => pending.push(*element),
-            (Operation::Clone, TypeKind::Map(key, value)) => pending.extend([*key, *value]),
-            _ => {}
-        }
-    }
-    found
 }
 
 /// Collects the trait declarations. `Self` in their method signatures is
@@ -1397,14 +1341,12 @@ fn collect_trait_impls<'a>(
                 });
             };
             methods[position] = Some(functions.len());
-            // The trait's declaration is the interface of its methods.
             functions.push(FoundFunction {
                 name: format!("{}_{name}", types.name(owner)),
                 identity: member.identity.clone(),
                 function,
                 origin: member_origin,
                 owner: Some(owner),
-                public: false,
             });
         }
         let methods = methods
@@ -1800,30 +1742,32 @@ fn contains_by_value(types: &Types, ty: Type, target: Type, seen: &mut BTreeSet<
     })
 }
 
-/// Rejects a private type or trait in a public interface: the signature of
-/// a public function, of a public method of a public type, or of a method
-/// of a public trait; a supertrait of a public trait; a public field of a
-/// public struct; and a field of a variant of a public enum. Code outside the module could otherwise hold
-/// or name what it cannot see.
+/// Rejects a private type or trait in a public interface: the signature and
+/// bounds of a public function, of a public method of a public type, or of
+/// a method of a public trait; an associated type of a public trait or of a
+/// public type; a supertrait of a public trait; a public field of a public
+/// struct; and a field of a variant of a public enum. Code outside the
+/// module could otherwise hold or name what it cannot see.
+///
+/// Every kind of declaration and member is matched by name, and signatures
+/// are taken apart field by field, so supporting a new one means deciding
+/// here which of its types are its interface.
 fn check_interfaces(
-    functions: &[FoundFunction],
+    project: &ResolvedProject,
     nominals: &Nominals,
     traits: &Traits,
-    traits_found: &[(EntityId, &crate::project::ResolvedDeclaration, bool)],
 ) -> Result<(), CheckDiagnostic> {
     let private = |ty: &ResolvedType| private_in(ty, nominals, traits);
-    let error = |origin: &OriginRef, (span, name): (Span, String), place: &str| CheckDiagnostic {
-        kind: CheckDiagnosticKind::PrivateInInterface,
-        primary: Some(at(origin, span)),
-        message: format!("`{name}` is private, so it cannot appear in {place}"),
-    };
-    let signature_private = |type_parameters: &[crate::project::ResolvedTypeParameter],
-                             parameters: &[crate::project::ResolvedParameter],
-                             return_type: &Option<ResolvedType>| {
-        type_parameters
+    let bounds = |parameters: &[crate::project::ResolvedTypeParameter]| {
+        parameters
             .iter()
             .flat_map(|parameter| &parameter.bounds)
             .find_map(|bound| private_named(bound, nominals, traits))
+    };
+    let signature = |type_parameters: &[crate::project::ResolvedTypeParameter],
+                     parameters: &[crate::project::ResolvedParameter],
+                     return_type: &Option<ResolvedType>| {
+        bounds(type_parameters)
             .or_else(|| {
                 parameters
                     .iter()
@@ -1832,77 +1776,162 @@ fn check_interfaces(
             })
             .or_else(|| return_type.as_ref().and_then(private))
     };
-    for function in functions.iter().filter(|function| function.public) {
-        let signature = function.function;
-        if let Some(found) = signature_private(
-            &signature.type_parameters,
-            &signature.parameters,
-            &signature.return_type,
-        ) {
-            let place = format!("the public signature of `{}`", function.identity.name);
-            return Err(error(&function.origin, found, &place));
+    // Effect parameters and effect annotations are rejected as unsupported
+    // when the signature is checked.
+    let function = |function: &ResolvedFunction| {
+        let ResolvedFunction {
+            type_parameters,
+            effect_parameters: _,
+            parameters,
+            return_borrow: _,
+            return_type,
+            effects: _,
+            body: _,
+        } = function;
+        signature(type_parameters, parameters, return_type)
+    };
+    let method = |method: &crate::project::ResolvedFunctionSignature| {
+        let crate::project::ResolvedFunctionSignature {
+            identity: _,
+            type_parameters,
+            effect_parameters: _,
+            parameters,
+            return_borrow: _,
+            return_type,
+            effects: _,
+        } = method;
+        signature(type_parameters, parameters, return_type)
+    };
+    let check = |origin: &OriginRef, found: Option<(Span, String)>, place: &str| match found {
+        Some((span, name)) => Err(CheckDiagnostic {
+            kind: CheckDiagnosticKind::PrivateInInterface,
+            primary: Some(at(origin, span)),
+            message: format!("`{name}` is private, so it cannot appear in {place}"),
+        }),
+        None => Ok(()),
+    };
+    for (module, resolved) in &project.modules {
+        let Some(body) = &resolved.body else {
+            continue;
+        };
+        if module.source_library() == Some(project.core) {
+            continue;
         }
-    }
-    for declaration in nominals
-        .declarations
-        .iter()
-        .filter(|declaration| declaration.public)
-    {
-        let found = match &declaration.shape {
-            Shape::Struct(fields) => fields
-                .iter()
-                .filter(|field| field.public)
-                .find_map(|field| private(&field.ty)),
-            Shape::Enum(variants) => variants.iter().find_map(|variant| match &variant.fields {
-                ResolvedVariantFields::Unit => None,
-                ResolvedVariantFields::Positional(fields) => fields.iter().find_map(private),
-                ResolvedVariantFields::Named(fields) => {
-                    fields.iter().find_map(|field| private(&field.ty))
+        for declaration in &body.declarations {
+            let origin = &declaration.origin;
+            let name = declaration
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.name.as_str());
+            match &declaration.kind {
+                ResolvedDeclarationKind::Function(declared) => {
+                    if declaration.public {
+                        let place = format!("the public signature of `{name}`");
+                        check(origin, function(declared), &place)?;
+                    }
                 }
-            }),
-        };
-        if let Some(found) = found {
-            let place = format!("the public fields of `{}`", declaration.name);
-            return Err(error(&declaration.origin, found, &place));
-        }
-    }
-    for (identity, declaration, core) in traits_found {
-        let ResolvedDeclarationKind::Trait {
-            members,
-            supertraits,
-            ..
-        } = &declaration.kind
-        else {
-            continue;
-        };
-        if *core || !declaration.public {
-            continue;
-        }
-        // Implementing the trait means implementing its supertraits too.
-        if let Some(found) = supertraits
-            .iter()
-            .find_map(|supertrait| private_named(supertrait, nominals, traits))
-        {
-            let place = format!("the supertraits of the public trait `{}`", identity.name);
-            return Err(error(&declaration.origin, found, &place));
-        }
-        for member in members {
-            let ResolvedTraitMemberKind::Method(signature) = &member.kind else {
-                continue;
-            };
-            if let Some(found) = signature_private(
-                &signature.type_parameters,
-                &signature.parameters,
-                &signature.return_type,
-            ) {
-                let place = format!("the public trait `{}`", identity.name);
-                return Err(error(&declaration.origin, found, &place));
+                ResolvedDeclarationKind::Struct {
+                    type_parameters,
+                    fields,
+                } => {
+                    if declaration.public {
+                        let found = bounds(type_parameters).or_else(|| {
+                            fields
+                                .iter()
+                                .filter(|field| field.public)
+                                .find_map(|field| private(&field.ty))
+                        });
+                        check(origin, found, &format!("the public fields of `{name}`"))?;
+                    }
+                }
+                ResolvedDeclarationKind::Enum {
+                    type_parameters,
+                    variants,
+                } => {
+                    if declaration.public {
+                        let found = bounds(type_parameters).or_else(|| {
+                            variants.iter().find_map(|variant| match &variant.fields {
+                                ResolvedVariantFields::Unit => None,
+                                ResolvedVariantFields::Positional(fields) => {
+                                    fields.iter().find_map(private)
+                                }
+                                ResolvedVariantFields::Named(fields) => {
+                                    fields.iter().find_map(|field| private(&field.ty))
+                                }
+                            })
+                        });
+                        check(origin, found, &format!("the variants of `{name}`"))?;
+                    }
+                }
+                ResolvedDeclarationKind::Trait {
+                    type_parameters,
+                    supertraits,
+                    members,
+                } => {
+                    if !declaration.public {
+                        continue;
+                    }
+                    let place = format!("the public trait `{name}`");
+                    // Implementing the trait means implementing its
+                    // supertraits too.
+                    let found = bounds(type_parameters).or_else(|| {
+                        supertraits
+                            .iter()
+                            .find_map(|supertrait| private_named(supertrait, nominals, traits))
+                    });
+                    check(origin, found, &place)?;
+                    for member in members {
+                        let found = match &member.kind {
+                            ResolvedTraitMemberKind::Method(declared) => method(declared),
+                            ResolvedTraitMemberKind::AssociatedType { bounds, default } => bounds
+                                .iter()
+                                .find_map(|bound| private_named(bound, nominals, traits))
+                                .or_else(|| default.as_ref().and_then(private)),
+                        };
+                        check(origin, found, &place)?;
+                    }
+                }
+                ResolvedDeclarationKind::InherentImpl(implementation) => {
+                    // A method of a private type cannot be reached from
+                    // outside, whatever its own visibility.
+                    let owner_public = match &implementation.target.reference {
+                        ResolvedReference::Exact { target, .. } => nominals
+                            .by_identity
+                            .get(target)
+                            .is_some_and(|&index| nominals.declarations[index].public),
+                        ResolvedReference::Selection { .. } => false,
+                    };
+                    if !owner_public {
+                        continue;
+                    }
+                    for member in implementation.members.iter().filter(|member| member.public) {
+                        let member_origin = match &member.identity.site {
+                            EntitySite::Source(site) => site,
+                            _ => origin,
+                        };
+                        let found = match &member.kind {
+                            ResolvedImplMemberKind::Function(declared) => function(declared),
+                            ResolvedImplMemberKind::AssociatedType(ty) => private(ty),
+                        };
+                        let place = format!("the public `{}`", member.identity.name);
+                        check(member_origin, found, &place)?;
+                    }
+                }
+                // The interface of a trait impl is the trait's.
+                ResolvedDeclarationKind::TraitImpl { .. } | ResolvedDeclarationKind::Module(_) => {}
+                // The checker rejects these as unsupported before this
+                // check runs.
+                ResolvedDeclarationKind::Effect { .. }
+                | ResolvedDeclarationKind::EffectAlias { .. }
+                | ResolvedDeclarationKind::ExternFunction(_)
+                | ResolvedDeclarationKind::ExternType { .. }
+                | ResolvedDeclarationKind::TypeAlias { .. }
+                | ResolvedDeclarationKind::Const { .. } => {}
             }
         }
     }
     Ok(())
 }
-
 /// The span and name of the first private type or trait that `ty` names.
 fn private_in(ty: &ResolvedType, nominals: &Nominals, traits: &Traits) -> Option<(Span, String)> {
     match &ty.kind {
