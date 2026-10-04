@@ -63,31 +63,15 @@ impl Graph {
         let successors = (0..count)
             .map(|block| body.successors(block))
             .collect::<Vec<_>>();
-        let mut visited = vec![false; count];
-        let mut postorder = Vec::new();
-        // An explicit stack, so deep nesting cannot overflow.
-        let mut stack = vec![(0, 0)];
-        visited[0] = true;
-        while let Some((block, next)) = stack.pop() {
-            if let Some(&successor) = successors[block].get(next) {
-                stack.push((block, next + 1));
-                if !visited[successor] {
-                    visited[successor] = true;
-                    stack.push((successor, 0));
-                }
-            } else {
-                postorder.push(block);
-            }
-        }
+        let order = body.reverse_postorder();
         let mut predecessors = vec![Vec::new(); count];
-        for &block in &postorder {
+        for &block in order.iter().rev() {
             for &successor in &successors[block] {
                 predecessors[successor].push(block);
             }
         }
-        postorder.reverse();
         Self {
-            order: postorder,
+            order,
             predecessors,
             successors,
         }
@@ -193,7 +177,7 @@ fn move_statement(
                     state.insert(moved_place(body, place));
                 }
             }
-            if !defines_pointer(body, destination, value)
+            if !body.defines_pointer(destination, value)
                 && !is_whole(body, destination)
                 && let Some(errors) = errors
             {
@@ -315,8 +299,9 @@ fn check_borrows(body: &Body, graph: &Graph, errors: &mut Vec<Error>) {
     let mut loan_at = std::collections::BTreeMap::new();
     for (block, data) in body.blocks.iter().enumerate() {
         for (index, statement) in data.statements.iter().enumerate() {
-            if let StatementKind::Assign(destination, Rvalue::Ref(kind, place)) = &statement.kind
-                && defines_pointer(body, destination, &Rvalue::Ref(*kind, place.clone()))
+            if let StatementKind::Assign(destination, value @ Rvalue::Ref(kind, place)) =
+                &statement.kind
+                && body.defines_pointer(destination, value)
             {
                 loan_at.insert((block, index), loans.len());
                 loans.push(Loan {
@@ -413,7 +398,7 @@ fn carry(
     carried: &mut [BTreeSet<usize>],
 ) {
     match statement {
-        StatementKind::Assign(destination, value) if defines_pointer(body, destination, value) => {
+        StatementKind::Assign(destination, value) if body.defines_pointer(destination, value) => {
             let mut loans = BTreeSet::new();
             match value {
                 Rvalue::Ref(_, place) => {
@@ -440,21 +425,6 @@ fn carry(
         StatementKind::Release(local) => carried[*local].clear(),
         StatementKind::Assign(..) => {}
     }
-}
-
-/// Whether the assignment makes the reference local `destination` point
-/// somewhere, rather than write where it points.
-fn defines_pointer(body: &Body, destination: &Place, value: &Rvalue) -> bool {
-    destination.projections.is_empty()
-        && body.locals[destination.local].reference.is_some()
-        && matches!(
-            value,
-            Rvalue::Ref(..)
-                | Rvalue::Call {
-                    borrow: Some(_),
-                    ..
-                }
-        )
 }
 
 /// The reference locals live at the end of each block.
@@ -524,7 +494,7 @@ fn reference_uses(body: &Body, statement: &StatementKind) -> (Vec<usize>, Option
                 )
                 .filter(|&local| is_reference(local))
                 .collect::<Vec<_>>();
-            if defines_pointer(body, destination, value) {
+            if body.defines_pointer(destination, value) {
                 (uses, Some(destination.local))
             } else {
                 if is_reference(destination.local) {
@@ -610,7 +580,7 @@ fn accesses(
                         RefKind::Mutable => Access::Borrow,
                     },
                 ),
-                Rvalue::Discriminant(_) | Rvalue::Len(_) => {}
+                Rvalue::Discriminant(_) | Rvalue::Len(_) | Rvalue::Occupied { .. } => {}
                 _ => {
                     for operand in rvalue_operands(value) {
                         match operand {
@@ -621,7 +591,7 @@ fn accesses(
                     }
                 }
             }
-            if !defines_pointer(body, destination, value) {
+            if !body.defines_pointer(destination, value) {
                 access(destination, Access::Write);
             }
             // A `&mut` argument or receiver takes effect when the call runs.
@@ -846,6 +816,7 @@ fn rvalue_operands(value: &Rvalue) -> Vec<&Operand> {
         | Rvalue::EmptyMap
         | Rvalue::Discriminant(_)
         | Rvalue::Len(_)
+        | Rvalue::Occupied { .. }
         | Rvalue::Take { .. } => Vec::new(),
     }
 }
@@ -865,6 +836,14 @@ fn rvalue_places(value: &Rvalue) -> Vec<Place> {
         Rvalue::Builtin { receiver, .. } => {
             places.push(receiver.clone());
             places.extend(index_locals(receiver));
+        }
+        Rvalue::Occupied {
+            container,
+            position,
+        } => {
+            places.push(container.clone());
+            places.extend(index_locals(container));
+            places.push(Place::local(*position));
         }
         Rvalue::Take {
             container,

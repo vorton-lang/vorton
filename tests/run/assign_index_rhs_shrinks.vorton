@@ -1,0 +1,12 @@
+// An assignment evaluates the indices of its target, then its value, and
+// checks that the element exists when it writes: the value may change the
+// list, and writing past its end panics.
+fn reset(xs: &mut List<Int>) -> Int {
+    xs = []
+    9
+}
+
+fn main() {
+    let mut xs = [1]
+    xs[0] = reset(&mut xs)
+}

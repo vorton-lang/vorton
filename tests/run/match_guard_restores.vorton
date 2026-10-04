@@ -1,0 +1,24 @@
+// A guard that rejects an arm gives back what the arm's bindings took, so
+// the next arm sees the subject whole.
+enum Bag {
+    Items(List<Int>),
+    Empty,
+}
+
+fn make() -> Bag {
+    Bag::Items([1, 2, 3])
+}
+
+fn main() {
+    match make() {
+        Bag::Items(list) if list.len() > 5 => print("long")
+        Bag::Items(list) => print(list.len())
+        Bag::Empty => print(0)
+    }
+    let pair = (["a"], ["b", "c"])
+    match pair {
+        (first, second) if first.len() > 1 => print("first")
+        (first, second) if second.len() > 1 => print("second ${second[1]}")
+        _ => print("none")
+    }
+}

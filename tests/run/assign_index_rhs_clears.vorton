@@ -1,0 +1,9 @@
+// The value of an assignment clears the list whose element it replaces, so
+// the element is gone when the value is written.
+fn main() {
+    let mut xs = ["${1}"]
+    xs[0] = {
+        xs.clear()
+        "${2}"
+    }
+}

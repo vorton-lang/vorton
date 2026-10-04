@@ -9,15 +9,12 @@
 //!
 //! The IR is not in SSA form: locals are storage that statements write and
 //! borrows point into, which is what move and borrow checking are about.
-
-#![expect(
-    dead_code,
-    reason = "code generation from the IR will read the values that move and borrow checking do not"
-)]
+//! Code generation follows the same blocks, so the order the checks see is
+//! the order the program runs in.
 
 use crate::ast::{BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::checker::{Builtin, Callee, Intrinsic};
-use crate::types::Type;
+use crate::types::{Type, TypeKind, Types};
 
 pub(crate) type Local = usize;
 pub(crate) type BlockId = usize;
@@ -55,7 +52,8 @@ pub(crate) struct Statement {
 
 pub(crate) enum StatementKind {
     /// Evaluates the right side and stores it in the place, releasing what
-    /// an owning place held before.
+    /// an owning place held before. Storing the value of a key in a map
+    /// adds the key if it is absent.
     Assign(Place, Rvalue),
     /// The local's scope ends: what it owns is released, and it holds
     /// nothing afterwards.
@@ -113,10 +111,13 @@ pub(crate) enum Projection {
     /// A list element or map value at the index or key that the local
     /// holds.
     Index(Local),
-    /// A list element at a constant index.
+    /// A list element, or the value of a map's `Int` key, at a constant
+    /// index.
     ConstantIndex(i64),
     /// The element of a list, or the value of a map or the element of a set,
-    /// at a position in iteration order that the local holds.
+    /// at a position that the local holds. A map or set keeps its entries in
+    /// insertion order, and the positions of removed entries stay until it
+    /// grows; [`Rvalue::Occupied`] tells them apart.
     Position(Local),
 }
 
@@ -174,8 +175,15 @@ pub(crate) enum Rvalue {
     Interpolate(Vec<Operand>),
     /// The variant an enum value holds.
     Discriminant(Place),
-    /// The number of elements of a container.
+    /// The number of positions of a container: a list's elements, or the
+    /// entries of a map or set, removed ones included.
     Len(Place),
+    /// Whether the position that a local holds is an entry of a map or set
+    /// that has not been removed.
+    Occupied {
+        container: Place,
+        position: Local,
+    },
     /// A call. One that returns a borrow is stored in a reference local,
     /// which then points where the result points.
     Call {
@@ -224,5 +232,70 @@ impl Body {
             } => vec![*then, *otherwise],
             TerminatorKind::Return | TerminatorKind::Unreachable => Vec::new(),
         }
+    }
+
+    /// The reachable blocks in reverse postorder.
+    pub(crate) fn reverse_postorder(&self) -> Vec<BlockId> {
+        let mut visited = vec![false; self.blocks.len()];
+        let mut postorder = Vec::new();
+        // An explicit stack, so deep nesting cannot overflow.
+        let mut stack = vec![(0, 0)];
+        visited[0] = true;
+        while let Some((block, next)) = stack.pop() {
+            if let Some(&successor) = self.successors(block).get(next) {
+                stack.push((block, next + 1));
+                if !visited[successor] {
+                    visited[successor] = true;
+                    stack.push((successor, 0));
+                }
+            } else {
+                postorder.push(block);
+            }
+        }
+        postorder.reverse();
+        postorder
+    }
+
+    /// Whether assigning `value` to `destination` makes a reference local
+    /// point somewhere, rather than write where it points.
+    pub(crate) fn defines_pointer(&self, destination: &Place, value: &Rvalue) -> bool {
+        destination.projections.is_empty()
+            && self.locals[destination.local].reference.is_some()
+            && matches!(
+                value,
+                Rvalue::Ref(..)
+                    | Rvalue::Call {
+                        borrow: Some(_),
+                        ..
+                    }
+            )
+    }
+
+    /// The type of the value at `place`.
+    pub(crate) fn place_type(&self, types: &Types, place: &Place) -> Type {
+        let mut ty = self.locals[place.local].ty;
+        for projection in &place.projections {
+            ty = match projection {
+                Projection::Field(index) => match types.kind(ty) {
+                    TypeKind::Range => [Type::INT, Type::INT, Type::BOOL][*index],
+                    _ => types.components(ty)[*index],
+                },
+                Projection::VariantField { variant, field } => {
+                    types.variants(ty)[*variant].fields[*field].ty
+                }
+                Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_) => {
+                    element_type(types, ty)
+                }
+            };
+        }
+        ty
+    }
+}
+
+/// The type of the elements of a list or set, or of the values of a map.
+pub(crate) fn element_type(types: &Types, container: Type) -> Type {
+    match types.kind(container) {
+        TypeKind::List(element) | TypeKind::Set(element) | TypeKind::Map(_, element) => *element,
+        _ => unreachable!("only containers have elements"),
     }
 }

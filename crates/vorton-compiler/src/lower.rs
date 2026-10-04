@@ -13,12 +13,12 @@
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span};
 use crate::checker::{
-    Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, Pattern,
-    Projection as TypedProjection, Receiver, Statement as TypedStatement,
+    Arm, Block, BorrowTarget, Builtin, DisjointCheck, Expr, ExprKind, ForSource, Function,
+    Intrinsic, Pattern, Projection as TypedProjection, Receiver, Statement as TypedStatement,
 };
 use crate::mir::{
     BlockId, Body, Constant, Local, LocalDecl, Operand, Place, Projection, RefKind, Rvalue,
-    Statement, StatementKind, Terminator, TerminatorKind,
+    Statement, StatementKind, Terminator, TerminatorKind, element_type,
 };
 use crate::types::{Type, TypeKind, Types};
 
@@ -684,7 +684,8 @@ impl Builder<'_> {
     }
 
     /// The head of a loop over the positions of the container at `place`,
-    /// whose length is read at every test.
+    /// whose length is read at every test. The positions of removed entries
+    /// of a map or set are skipped.
     #[allow(clippy::too_many_arguments)]
     fn index_loop(
         &mut self,
@@ -696,6 +697,11 @@ impl Builder<'_> {
         exit: BlockId,
         span: Span,
     ) {
+        let gaps = matches!(
+            self.types.kind(self.place_type(&container)),
+            TypeKind::Map(..) | TypeKind::Set(_)
+        );
+        let entry = if gaps { self.body.new_block() } else { start };
         self.assign(
             Place::local(position),
             Rvalue::Use(Operand::Constant(Constant::Int(0))),
@@ -703,7 +709,7 @@ impl Builder<'_> {
         );
         self.enter(head, span);
         let length = self.temporary(Type::INT);
-        self.assign(Place::local(length), Rvalue::Len(container), span);
+        self.assign(Place::local(length), Rvalue::Len(container.clone()), span);
         let test = self.temporary(Type::BOOL);
         self.assign(
             Place::local(test),
@@ -717,11 +723,31 @@ impl Builder<'_> {
         self.terminate(
             TerminatorKind::Branch {
                 condition: Operand::Copy(Place::local(test)),
-                then: start,
+                then: entry,
                 otherwise: exit,
             },
             span,
         );
+        if gaps {
+            self.current = entry;
+            let occupied = self.temporary(Type::BOOL);
+            self.assign(
+                Place::local(occupied),
+                Rvalue::Occupied {
+                    container,
+                    position,
+                },
+                span,
+            );
+            self.terminate(
+                TerminatorKind::Branch {
+                    condition: Operand::Copy(Place::local(occupied)),
+                    then: start,
+                    otherwise: latch,
+                },
+                span,
+            );
+        }
         self.current = latch;
         self.step(position, head);
     }
@@ -820,10 +846,11 @@ impl Builder<'_> {
             ExprKind::Call {
                 callee,
                 arguments,
+                checks,
                 borrow,
                 ..
             } => {
-                let arguments = self.arguments(arguments)?;
+                let arguments = self.arguments(arguments, checks, span)?;
                 Rvalue::Call {
                     callee: *callee,
                     arguments,
@@ -833,9 +860,9 @@ impl Builder<'_> {
             ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
-                ..
+                checks,
             } => {
-                let arguments = self.arguments(arguments)?;
+                let arguments = self.arguments(arguments, checks, span)?;
                 Rvalue::Intrinsic {
                     intrinsic: *intrinsic,
                     arguments,
@@ -1022,14 +1049,27 @@ impl Builder<'_> {
     }
 
     /// The arguments of a call: a borrowed one is a reference temporary
-    /// made before the later arguments are evaluated.
-    fn arguments(&mut self, arguments: &[Expr]) -> Option<Vec<Operand>> {
+    /// made before the later arguments are evaluated. Then the program
+    /// panics if the two borrowed places of a check in `checks` are the
+    /// same element.
+    fn arguments(
+        &mut self,
+        arguments: &[Expr],
+        checks: &[DisjointCheck],
+        span: Span,
+    ) -> Option<Vec<Operand>> {
         let mut operands = Vec::new();
+        let mut places = Vec::new();
         for argument in arguments {
+            let mut borrowed = None;
             operands.push(match &argument.kind {
                 ExprKind::Borrow(kind, target) => {
                     let place = match target.as_ref() {
-                        BorrowTarget::Place(place) => self.typed_place(place)?,
+                        BorrowTarget::Place(place) => {
+                            let place = self.typed_place(place)?;
+                            borrowed = Some(place.clone());
+                            place
+                        }
                         BorrowTarget::Value(value) => {
                             let temporary = self.temporary(value.ty);
                             if !self.expr_into(Some(Place::local(temporary)), value) {
@@ -1052,8 +1092,73 @@ impl Builder<'_> {
                 }
                 _ => self.operand(argument)?,
             });
+            places.push(borrowed);
+        }
+        for check in checks {
+            if let (Some(first), Some(second)) = (&places[check.first], &places[check.second]) {
+                self.disjoint(first, second, span);
+            }
         }
         Some(operands)
+    }
+
+    /// Panics if the places `first` and `second`, which differ only in
+    /// indices, are the same element: if every index of one equals the
+    /// index at the same step of the other.
+    fn disjoint(&mut self, first: &Place, second: &Place, span: Span) {
+        let mut pairs = Vec::new();
+        for (left, right) in first.projections.iter().zip(&second.projections) {
+            pairs.push(match (left, right) {
+                (Projection::ConstantIndex(left), Projection::ConstantIndex(right)) => {
+                    if left != right {
+                        return;
+                    }
+                    continue;
+                }
+                (Projection::Index(left), Projection::Index(right)) => (
+                    Operand::Copy(Place::local(*left)),
+                    Operand::Copy(Place::local(*right)),
+                ),
+                (Projection::Index(index), Projection::ConstantIndex(constant))
+                | (Projection::ConstantIndex(constant), Projection::Index(index)) => (
+                    Operand::Copy(Place::local(*index)),
+                    Operand::Constant(Constant::Int(*constant)),
+                ),
+                _ => continue,
+            });
+        }
+        let distinct = self.body.new_block();
+        for (left, right) in pairs {
+            let same = self.temporary(Type::BOOL);
+            self.assign(
+                Place::local(same),
+                Rvalue::Binary(BinaryOperator::Equal, left, right),
+                span,
+            );
+            let next = self.body.new_block();
+            self.terminate(
+                TerminatorKind::Branch {
+                    condition: Operand::Copy(Place::local(same)),
+                    then: next,
+                    otherwise: distinct,
+                },
+                span,
+            );
+            self.current = next;
+        }
+        let sink = self.new_local(Type::NEVER, None);
+        self.assign(
+            Place::local(sink),
+            Rvalue::Intrinsic {
+                intrinsic: Intrinsic::Panic,
+                arguments: vec![Operand::Constant(Constant::Str(
+                    "the same element is borrowed twice".to_owned(),
+                ))],
+            },
+            span,
+        );
+        self.unreachable(span);
+        self.current = distinct;
     }
 
     fn builtin(
@@ -1175,22 +1280,7 @@ impl Builder<'_> {
 
     /// The type of the value at `place`.
     fn place_type(&self, place: &Place) -> Type {
-        let mut ty = self.body.locals[place.local].ty;
-        for projection in &place.projections {
-            ty = match projection {
-                Projection::Field(index) => match self.types.kind(ty) {
-                    TypeKind::Range => [Type::INT, Type::INT, Type::BOOL][*index],
-                    _ => self.types.components(ty)[*index],
-                },
-                Projection::VariantField { variant, field } => {
-                    self.types.variants(ty)[*variant].fields[*field].ty
-                }
-                Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_) => {
-                    element_type(self.types, ty)
-                }
-            };
-        }
-        ty
+        self.body.place_type(self.types, place)
     }
 
     fn if_into(
@@ -1597,13 +1687,6 @@ fn for_borrow_kind(binding: &Pattern, builder: &Builder) -> BorrowKind {
         .into_iter()
         .find_map(|local| builder.body.locals[local].reference)
         .unwrap_or(BorrowKind::Shared)
-}
-
-fn element_type(types: &Types, container: Type) -> Type {
-    match types.kind(container) {
-        TypeKind::List(element) | TypeKind::Set(element) | TypeKind::Map(_, element) => *element,
-        _ => unreachable!("only containers have elements"),
-    }
 }
 
 fn compound_operator(operator: AssignmentOperator) -> BinaryOperator {

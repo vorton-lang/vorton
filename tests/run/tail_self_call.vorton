@@ -1,0 +1,40 @@
+// A function that calls itself in tail position does not grow the stack,
+// even with a string to release after each call.
+fn down(n: Int, s: Str) -> Int {
+    if n == 0 { s.len() }
+    else { down(n - 1, "${n}") }
+}
+
+fn countdown(n: Int) {
+    if n > 0 {
+        countdown(n - 1)
+    }
+}
+
+fn sum(xs: &List<Int>, i: Int, total: Int) -> Int {
+    if i == xs.len() {
+        return total
+    }
+    sum(&xs, i + 1, total + xs[i])
+}
+
+fn spin(n: Int, names: List<Str>) -> Never {
+    if n == 0 {
+        panic("done after ${names.len()}")
+    }
+    spin(n - 1, names)
+}
+
+fn main() {
+    print(down(1000000, "x"))
+    countdown(1000000)
+    print("counted")
+    let mut xs: List<Int> = []
+    let mut i = 0
+    while i < 1000000 {
+        xs.push(1)
+        i += 1
+    }
+    print(sum(&xs, 0, 0))
+    spin(1000000, ["a", "b"])
+}

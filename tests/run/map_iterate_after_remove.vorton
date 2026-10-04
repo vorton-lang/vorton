@@ -1,0 +1,27 @@
+// Loops over a map or set skip the entries that were removed, whether they
+// borrow the container or take it.
+fn main() {
+    let mut m: Map<Str, Int> = Map::new()
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    m.remove("a")
+    m.remove("c")
+    m["d"] = 4
+    let kept = &m["d"]
+    for value in &m {
+        print(value)
+    }
+    print(kept)
+    let mut s: Set<Int> = Set::new()
+    s.insert(1)
+    s.insert(2)
+    s.insert(3)
+    s.remove(2)
+    for x in s {
+        print(x)
+    }
+    for (key, value) in m {
+        print("${key}=${value}")
+    }
+}

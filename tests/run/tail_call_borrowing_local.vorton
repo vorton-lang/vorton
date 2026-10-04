@@ -1,0 +1,13 @@
+// A call of the function itself that borrows one of its locals still runs
+// as a call: the local must live until the call returns.
+fn walk(n: Int, xs: &List<Int>) -> Int {
+    if n == 0 {
+        return xs[0]
+    }
+    let local = [n]
+    walk(n - 1, &local)
+}
+
+fn main() {
+    print(walk(3, &[100]))
+}

@@ -1,0 +1,16 @@
+// The element exists when the value is written, after the value changed
+// the list, so the write succeeds.
+fn main() {
+    let mut xs: List<Str> = []
+    let mut i = 0
+    while i < 3 {
+        xs.push("${i}")
+        i += 1
+    }
+    let at = 2
+    xs[at] = {
+        xs.push("late")
+        "${xs.len()}"
+    }
+    print("${xs[2]} ${xs[3]}")
+}
