@@ -1,0 +1,13 @@
+// Exhaustiveness checks a column of wildcards once, not once per value.
+fn main() {
+    let v = (true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true)
+    match v {
+        _ => print(1)
+    }
+    let (a, b, c) = (true, false, true)
+    match (a, b, c) {
+        (true, _, _) => print(2)
+        (false, true, _) => print(3)
+        (false, false, _) => print(4)
+    }
+}

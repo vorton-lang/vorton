@@ -4,6 +4,8 @@
 //! are split by constructor. `Int`, `Float`, `Str` and structs are open:
 //! only a wildcard or a binding covers them.
 
+use std::collections::BTreeSet;
+
 use crate::checker::Pattern;
 use crate::types::{Type, TypeKind, Types};
 
@@ -26,8 +28,18 @@ fn useful(types: &Types, rows: Vec<Vec<Pattern>>, tys: &[Type]) -> Option<Vec<St
     for row in rows {
         expand(row, &mut expanded);
     }
-    match constructors(types, first) {
-        Some(count) => (0..count).find_map(|constructor| {
+    let count = constructors(types, first);
+    let present = expanded
+        .iter()
+        .filter_map(|row| head_constructor(&row[0]))
+        .collect::<BTreeSet<_>>();
+    // When the first column names every constructor, each one is checked
+    // with the rows that match it. Otherwise only the rows with a wildcard
+    // there can cover a missing constructor, and the column is done.
+    if let Some(count) = count
+        && present.len() == count
+    {
+        return (0..count).find_map(|constructor| {
             let fields = field_types(types, first, constructor);
             let arity = fields.len();
             let specialized = expanded
@@ -42,19 +54,36 @@ fn useful(types: &Types, rows: Vec<Vec<Pattern>>, tys: &[Type]) -> Option<Vec<St
                 result.extend_from_slice(remaining);
                 result
             })
-        }),
-        None => {
-            let default = expanded
-                .into_iter()
-                .filter(|row| is_wild(&row[0]))
-                .map(|row| row[1..].to_vec())
-                .collect();
-            useful(types, default, rest).map(|witness| {
-                let mut result = vec!["_".to_owned()];
-                result.extend(witness);
-                result
-            })
-        }
+        });
+    }
+    let default = expanded
+        .into_iter()
+        .filter(|row| is_wild(&row[0]))
+        .map(|row| row[1..].to_vec())
+        .collect();
+    useful(types, default, rest).map(|witness| {
+        let missing =
+            count.and_then(|count| (0..count).find(|constructor| !present.contains(constructor)));
+        let head = match missing {
+            Some(constructor) => {
+                let arity = field_types(types, first, constructor).len();
+                describe(types, first, constructor, &vec!["_".to_owned(); arity])
+            }
+            None => "_".to_owned(),
+        };
+        let mut result = vec![head];
+        result.extend(witness);
+        result
+    })
+}
+
+/// The constructor a pattern of a closed type names, if it names one.
+fn head_constructor(pattern: &Pattern) -> Option<usize> {
+    match pattern {
+        Pattern::Bool(value) => Some(usize::from(*value)),
+        Pattern::Tuple(_) => Some(0),
+        Pattern::Variant { variant, .. } => Some(*variant),
+        _ => None,
     }
 }
 
