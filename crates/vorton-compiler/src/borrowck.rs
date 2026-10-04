@@ -540,35 +540,56 @@ fn check_borrows(
     for &block in &graph.order {
         let mut carried = carried_starts[block].clone();
         carried.retain(|reference, _| live.starts[block].contains(reference));
-        // The references live after each statement, from the block's end
-        // backwards.
+        // The references that each statement is the last to use, or that it
+        // makes point somewhere no later step looks: they are dead after it.
         let statements = &body.blocks[block].statements;
-        let mut live_after = vec![BTreeSet::new(); statements.len()];
+        let mut dying = vec![Vec::new(); statements.len()];
         let mut references = live.ends[block].clone();
         terminator_uses(body, &body.blocks[block].terminator.kind, &mut references);
         references.retain(is_reference);
         for (index, statement) in statements.iter().enumerate().rev() {
-            live_after[index] = references.clone();
             let (uses, defines) = local_uses(body, &statement.kind);
+            dying[index] = uses
+                .iter()
+                .chain(&defines)
+                .copied()
+                .filter(|local| is_reference(local) && !references.contains(local))
+                .collect();
             for defined in defines {
                 references.remove(&defined);
             }
             references.extend(uses.into_iter().filter(is_reference));
         }
+        let mut in_force = InForce::new(&loans, &carried);
         for (index, statement) in statements.iter().enumerate() {
             let own = loan_at.get(&(block, index)).copied();
             check_statement(
                 body,
                 types,
-                &loans,
+                &in_force,
                 &carried,
-                &live_after[index],
                 own,
                 &statement.kind,
                 statement.span,
                 errors,
             );
+            // Only `Bind` and `Release` change what a reference carries.
+            let changed = match &statement.kind {
+                StatementKind::Bind(reference, _) | StatementKind::Release(reference) => {
+                    Some(*reference)
+                }
+                StatementKind::Assign(..) | StatementKind::Unpack(_) => None,
+            };
+            if let Some(reference) = changed {
+                in_force.forget(carried.get(&reference));
+            }
             carry(body, &statement.kind, own, &active, &mut carried);
+            if let Some(reference) = changed {
+                in_force.add(carried.get(&reference));
+            }
+            for reference in &dying[index] {
+                in_force.forget(carried.remove(reference).as_ref());
+            }
         }
         if let TerminatorKind::Return = body.blocks[block].terminator.kind
             && body.locals[body.result].reference.is_some()
@@ -720,36 +741,102 @@ fn local_uses(body: &Body, statement: &StatementKind) -> (Vec<Local>, Vec<Local>
     }
 }
 
+/// The loans in force while a block is checked: those that some reference
+/// carries that the statement being checked uses or a later step uses.
+/// They are kept by the local of their place, so an access looks only at
+/// the loans of the local it touches; `&mut` loans apart, as only they
+/// conflict with borrowing with `&`.
+struct InForce<'a> {
+    loans: &'a [Loan],
+    /// How many references carry each loan in force.
+    carriers: BTreeMap<usize, usize>,
+    mutable: BTreeMap<Local, BTreeSet<usize>>,
+    other: BTreeMap<Local, BTreeSet<usize>>,
+}
+
+impl<'a> InForce<'a> {
+    fn new(loans: &'a [Loan], carried: &Carried) -> Self {
+        let mut in_force = Self {
+            loans,
+            carriers: BTreeMap::new(),
+            mutable: BTreeMap::new(),
+            other: BTreeMap::new(),
+        };
+        for carried in carried.values() {
+            in_force.add(Some(carried));
+        }
+        in_force
+    }
+
+    fn by_kind(&mut self, loan: usize) -> &mut BTreeSet<usize> {
+        let loan = &self.loans[loan];
+        let index = match loan.kind {
+            RefKind::Mutable => &mut self.mutable,
+            RefKind::Shared | RefKind::MutableArgument => &mut self.other,
+        };
+        index.entry(loan.place.local).or_default()
+    }
+
+    /// Adds the loans a reference carries.
+    fn add(&mut self, carried: Option<&BTreeSet<usize>>) {
+        for &loan in carried.into_iter().flatten() {
+            let count = self.carriers.entry(loan).or_default();
+            *count += 1;
+            if *count == 1 {
+                self.by_kind(loan).insert(loan);
+            }
+        }
+    }
+
+    /// Removes the loans a reference carried.
+    fn forget(&mut self, carried: Option<&BTreeSet<usize>>) {
+        for &loan in carried.into_iter().flatten() {
+            let count = self.carriers.get_mut(&loan).expect("the loan is in force");
+            *count -= 1;
+            if *count == 0 {
+                self.carriers.remove(&loan);
+                self.by_kind(loan).remove(&loan);
+            }
+        }
+    }
+
+    /// A loan in force, other than `exempt` ones, that `access` conflicts
+    /// with.
+    fn conflict(&self, access: &Made) -> Option<usize> {
+        let local = access.place.local;
+        let mutable = self.mutable.get(&local).into_iter().flatten();
+        let other = match access.kind {
+            Access::ReadValue => return None,
+            Access::Share | Access::Reserve => None,
+            Access::Borrow | Access::Write | Access::Move | Access::Release => {
+                self.other.get(&local)
+            }
+        };
+        mutable
+            .chain(other.into_iter().flatten())
+            .copied()
+            .find(|loan| {
+                !access.exempt.contains(loan)
+                    && conflicts(&self.loans[*loan], &access.place, access.kind)
+            })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_statement(
     body: &Body,
     types: &Types,
-    loans: &[Loan],
+    in_force: &InForce,
     carried: &Carried,
-    live_after: &BTreeSet<usize>,
     own: Option<usize>,
     statement: &StatementKind,
     span: Span,
     errors: &mut Vec<Error>,
 ) {
-    let (uses, _) = local_uses(body, statement);
-    // The loans that hold while the statement runs: those of the references
-    // used later and of those it uses itself.
-    let mut live = BTreeSet::new();
-    for reference in live_after.iter().chain(&uses) {
-        live.extend(carried_by(carried, *reference));
-    }
-    let accesses = accesses(body, types, loans, carried, statement, own);
-    for access in accesses {
-        for &loan_index in &live {
-            if access.exempt.contains(&loan_index) {
-                continue;
-            }
-            let loan = &loans[loan_index];
-            if conflicts(loan, &access.place, access.kind) {
-                errors.push(conflict_error(body, &access.place, access.kind, span));
-                return;
-            }
+    for access in accesses(body, types, in_force.loans, carried, statement, own) {
+        if in_force.conflict(&access).is_some() {
+            errors.push(conflict_error(body, &access.place, access.kind, span));
+            return;
         }
     }
 }
