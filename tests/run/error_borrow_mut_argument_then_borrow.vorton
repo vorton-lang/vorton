@@ -1,0 +1,5 @@
+fn h(x: &mut Int, y: &Int) {}
+fn main() {
+    let mut x = 1
+    h(&mut x, &x)
+}
