@@ -35,8 +35,8 @@ use crate::project::{
 };
 use crate::resolver::owner_key_from_entity;
 use crate::typed::{
-    Arm, Block, BorrowTarget, Builtin, Callee, DisjointCheck, Expr, ExprKind, ForSource, Function,
-    Impls, Intrinsic, Local, Pattern, Place, Program, Projection, Receiver, Statement, StrMethod,
+    Arm, Block, BorrowTarget, Builtin, Callee, Expr, ExprKind, ForSource, Function, Impls,
+    Intrinsic, Local, Pattern, Place, Program, Projection, Receiver, Statement, StrMethod,
 };
 pub(crate) use crate::types::{
     Comparison, Field, InstantiationError, NominalInfo, Type, TypeKind, Types, Variant,
@@ -1797,10 +1797,8 @@ fn unsupported(primary: Option<OriginRef>, what: &str) -> CheckDiagnostic {
     }
 }
 
-/// A place, its type, and its path: field indices from the local, with
-/// `None` for any list element, to compare the borrowed arguments of one
-/// call.
-type PlaceAccess = (Place, Type, Vec<Option<usize>>);
+/// A place and its type.
+type PlaceAccess = (Place, Type);
 
 /// A checked operand of a borrow, a method call or a loop.
 enum Operand {
@@ -1812,7 +1810,7 @@ enum Operand {
 impl Operand {
     fn ty(&self) -> Type {
         match self {
-            Self::Place((_, ty, _)) => *ty,
+            Self::Place((_, ty)) => *ty,
             Self::Value(value) => value.ty,
         }
     }
@@ -2276,7 +2274,7 @@ impl BodyChecker<'_> {
             }
             _ => None,
         };
-        if let Some((kind, (place, ty, _), operand_span)) = borrowed {
+        if let Some((kind, (place, ty), operand_span)) = borrowed {
             if let Some(mutable) = mutable {
                 return Err(self.error(
                     CheckDiagnosticKind::NotAssignable,
@@ -2392,7 +2390,7 @@ impl BodyChecker<'_> {
                     ));
                 }
                 match self.check_operand(operand, None)? {
-                    Operand::Place((place, ty, _)) => (place, ty, operand.span),
+                    Operand::Place((place, ty)) => (place, ty, operand.span),
                     Operand::Value(_) => {
                         return Err(self.error(
                             CheckDiagnosticKind::BorrowOutlives,
@@ -2404,7 +2402,7 @@ impl BodyChecker<'_> {
                 }
             }
             _ => match self.check_operand(value, None)? {
-                Operand::Place((place, ty, _))
+                Operand::Place((place, ty))
                     if place.call.is_some() && place.projections.is_empty() =>
                 {
                     (place, ty, value.span)
@@ -2479,7 +2477,7 @@ impl BodyChecker<'_> {
                 operand,
             } => {
                 let kind = *kind;
-                let Operand::Place((place, ty, _)) = self.check_operand(operand, None)? else {
+                let Operand::Place((place, ty)) = self.check_operand(operand, None)? else {
                     return Err(self.unsupported(operand.span, "borrowing loops over temporaries"));
                 };
                 // A borrowed map yields its values, and a set copies its
@@ -2605,7 +2603,6 @@ impl BodyChecker<'_> {
                         projections: Vec::new(),
                     },
                     self.locals[local].ty,
-                    Vec::new(),
                 )))
             }
             ResolvedExprKind::Call { callee, .. } => {
@@ -2620,7 +2617,7 @@ impl BodyChecker<'_> {
             ResolvedExprKind::Field { receiver, field } => {
                 let base = self.check_operand(receiver, None)?;
                 let (index, ty) = self.named_field(base.ty(), &field.name, field.origin.span)?;
-                Ok(self.project(base, Projection::Field(index), Some(index), ty, span))
+                Ok(self.project(base, Projection::Field(index), ty, span))
             }
             ResolvedExprKind::TupleField {
                 receiver,
@@ -2629,18 +2626,12 @@ impl BodyChecker<'_> {
             } => {
                 let base = self.check_operand(receiver, None)?;
                 let (index, ty) = self.tuple_element(base.ty(), index, origin.span)?;
-                Ok(self.project(base, Projection::Field(index), Some(index), ty, span))
+                Ok(self.project(base, Projection::Field(index), ty, span))
             }
             ResolvedExprKind::Index { receiver, index } => {
                 let base = self.check_operand(receiver, None)?;
                 let (element, index) = self.check_subscript(base.ty(), receiver.span, index)?;
-                Ok(self.project(
-                    base,
-                    Projection::Index(Box::new(index)),
-                    None,
-                    element,
-                    span,
-                ))
+                Ok(self.project(base, Projection::Index(Box::new(index)), element, span))
             }
             _ => Ok(Operand::Value(self.check_expr(expression, expected)?)),
         }
@@ -2665,26 +2656,17 @@ impl BodyChecker<'_> {
                 projections: Vec::new(),
             },
             ty,
-            Vec::new(),
         ))
     }
 
-    /// A part of type `ty` of `base`: a part of a place is a place, `step`
-    /// extending its loop path; a part of a value is read from it.
-    fn project(
-        &self,
-        base: Operand,
-        projection: Projection,
-        step: Option<usize>,
-        ty: Type,
-        span: Span,
-    ) -> Operand {
+    /// A part of type `ty` of `base`: a part of a place is a place; a part
+    /// of a value is read from it.
+    fn project(&self, base: Operand, projection: Projection, ty: Type, span: Span) -> Operand {
         match base {
-            Operand::Place((mut place, _, mut path)) => {
+            Operand::Place((mut place, _)) => {
                 place.projections.push(projection);
                 place.span = span;
-                path.push(step);
-                Operand::Place((place, ty, path))
+                Operand::Place((place, ty))
             }
             Operand::Value(base) => {
                 let base = Box::new(base);
@@ -3147,7 +3129,7 @@ impl BodyChecker<'_> {
             return self.call_method(span, callee, &signature, operand, receiver, arguments);
         }
         let receiver_value = match operand {
-            Operand::Place((place, _, _)) => Receiver::Place(place),
+            Operand::Place((place, _)) => Receiver::Place(place),
             Operand::Value(value) => Receiver::Value(Box::new(value)),
         };
         let unknown = |checker: &Self| {
@@ -3327,7 +3309,7 @@ impl BodyChecker<'_> {
         let ty = operand.ty();
         if is_printable(ty) {
             return Ok(match operand {
-                Operand::Place((place, _, _)) => self.place_value(place),
+                Operand::Place((place, _)) => self.place_value(place),
                 Operand::Value(value) => value,
             });
         }
@@ -3888,7 +3870,7 @@ impl BodyChecker<'_> {
         };
         let kind = *kind;
         let (target, ty) = match self.check_operand(operand, None)? {
-            Operand::Place((place, ty, _)) => {
+            Operand::Place((place, ty)) => {
                 self.check_borrow(&place, kind, operand.span)?;
                 (BorrowTarget::Place(place), ty)
             }
@@ -4477,7 +4459,7 @@ impl BodyChecker<'_> {
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let borrow = signature.result_borrow;
         let mut bindings = vec![None; signature.type_parameters.len()];
-        let (arguments, checks) =
+        let arguments =
             self.check_arguments(arguments, signature.parameters.clone(), &mut bindings)?;
         if borrow.is_some()
             && arguments.iter().any(|argument| {
@@ -4544,7 +4526,6 @@ impl BodyChecker<'_> {
                 callee,
                 type_arguments,
                 arguments,
-                checks,
                 borrow,
             },
         ))
@@ -4778,9 +4759,8 @@ impl BodyChecker<'_> {
         self.substitute(ty, &arguments).map(Some)
     }
 
-    /// Checks call arguments in order. Two borrows of one place that differ
-    /// only in list indices are checked at run time; other conflicts between
-    /// borrows are checked on the IR. The parameter types of a generic
+    /// Checks call arguments in order. Whether borrows of them conflict is
+    /// checked on the IR. The parameter types of a generic
     /// callee mention its type parameters, which each argument binds in
     /// `bindings` as far as it can.
     fn check_arguments(
@@ -4788,13 +4768,9 @@ impl BodyChecker<'_> {
         values: Vec<Argument>,
         parameters: Vec<(Type, Option<BorrowKind>)>,
         bindings: &mut [Option<Type>],
-    ) -> Result<(Vec<Expr>, Vec<DisjointCheck>), CheckDiagnostic> {
+    ) -> Result<Vec<Expr>, CheckDiagnostic> {
         let mut checked = Vec::new();
-        let mut borrows: Vec<ArgumentBorrow> = Vec::new();
-        let mut checks = Vec::new();
-        for (position, (value, (parameter, borrow))) in
-            values.into_iter().zip(parameters).enumerate()
-        {
+        for (value, (parameter, borrow)) in values.into_iter().zip(parameters) {
             let expected = self.instantiated(parameter, bindings)?;
             let (checked_operand, operand, is_receiver) = match (value, borrow) {
                 (Argument::Written(value), None) => {
@@ -4806,7 +4782,7 @@ impl BodyChecker<'_> {
                 // A method that takes `self` takes the receiver.
                 (Argument::Receiver(receiver, value), None) => {
                     let receiver = match receiver {
-                        Operand::Place((place, _, _)) => self.place_value(place),
+                        Operand::Place((place, _)) => self.place_value(place),
                         Operand::Value(value) => value,
                     };
                     checked.push(self.consume(receiver, value.span)?);
@@ -4855,47 +4831,8 @@ impl BodyChecker<'_> {
                 bindings,
             )?;
             let target = match checked_operand {
-                Operand::Place((place, _, path)) => {
+                Operand::Place((place, _)) => {
                     self.check_borrow(&place, kind, operand.span)?;
-                    let keys = index_keys(operand);
-                    for earlier in &borrows {
-                        if earlier.local != place.local
-                            || (kind == BorrowKind::Shared && earlier.kind == BorrowKind::Shared)
-                        {
-                            continue;
-                        }
-                        match overlap(&earlier.path, &path) {
-                            Overlap::Disjoint => {}
-                            Overlap::IfIndicesEqual(positions)
-                                if !positions.iter().all(|&at| {
-                                    earlier.keys.get(at).cloned().flatten().is_some()
-                                        && earlier.keys.get(at) == keys.get(at)
-                                }) =>
-                            {
-                                checks.push(DisjointCheck {
-                                    first: earlier.position,
-                                    second: position,
-                                });
-                            }
-                            Overlap::IfIndicesEqual(_) | Overlap::Certain => {
-                                return Err(self.error(
-                                    CheckDiagnosticKind::BorrowConflict,
-                                    operand.span,
-                                    format!(
-                                        "`{}` is borrowed twice in one call, at least once with `&mut`",
-                                        self.locals[place.local].name
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-                    borrows.push(ArgumentBorrow {
-                        position,
-                        local: place.local,
-                        path,
-                        kind,
-                        keys,
-                    });
                     BorrowTarget::Place(place)
                 }
                 Operand::Value(value) => {
@@ -4915,7 +4852,7 @@ impl BodyChecker<'_> {
                 kind: ExprKind::Borrow(kind, Box::new(target)),
             });
         }
-        Ok((checked, checks))
+        Ok(checked)
     }
 
     /// Checks that an argument of type `actual` fits `parameter`: it must be
@@ -4972,7 +4909,7 @@ impl BodyChecker<'_> {
             Intrinsic::Swap => Some(BorrowKind::Mutable),
             _ => None,
         };
-        let (arguments, checks) = self.check_arguments(
+        let arguments = self.check_arguments(
             vec![
                 Argument::Receiver(first_operand, operand),
                 Argument::Written(second),
@@ -5001,7 +4938,6 @@ impl BodyChecker<'_> {
             ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
-                checks,
             },
         ))
     }
@@ -5052,7 +4988,6 @@ impl BodyChecker<'_> {
             ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
-                checks: Vec::new(),
             },
         ))
     }
@@ -5064,16 +4999,6 @@ impl BodyChecker<'_> {
 enum Argument<'r> {
     Written(&'r ResolvedExpr),
     Receiver(Operand, &'r ResolvedExpr),
-}
-
-/// A borrowed call argument: its position, the place it borrows, and the
-/// `index_keys` of the place.
-struct ArgumentBorrow {
-    position: usize,
-    local: usize,
-    path: Vec<Option<usize>>,
-    kind: BorrowKind,
-    keys: Vec<Option<String>>,
 }
 
 /// The name of a called function, for the local that holds its borrowed
@@ -5127,57 +5052,5 @@ fn integer_literal(expression: &ResolvedExpr) -> Option<&str> {
         ResolvedExprKind::Integer(text) => Some(text),
         ResolvedExprKind::Parenthesized(inner) => integer_literal(inner),
         _ => None,
-    }
-}
-
-enum Overlap {
-    Disjoint,
-    Certain,
-    /// The places overlap exactly when the list indices at these path
-    /// positions are equal.
-    IfIndicesEqual(Vec<usize>),
-}
-
-/// Compares two paths from the same local.
-fn overlap(left: &[Option<usize>], right: &[Option<usize>]) -> Overlap {
-    let mut positions = Vec::new();
-    for (position, (left, right)) in left.iter().zip(right).enumerate() {
-        match (left, right) {
-            (Some(left), Some(right)) if left != right => return Overlap::Disjoint,
-            (None, None) => positions.push(position),
-            _ => {}
-        }
-    }
-    if positions.is_empty() {
-        Overlap::Certain
-    } else {
-        Overlap::IfIndicesEqual(positions)
-    }
-}
-
-/// For each projection of a place expression, from its root: a key that
-/// names the index when it is a literal or a plain variable, so two equal
-/// keys denote the same element.
-fn index_keys(expression: &ResolvedExpr) -> Vec<Option<String>> {
-    match &expression.kind {
-        ResolvedExprKind::Parenthesized(inner) => index_keys(inner),
-        ResolvedExprKind::Field { receiver, .. }
-        | ResolvedExprKind::TupleField { receiver, .. } => {
-            let mut keys = index_keys(receiver);
-            keys.push(None);
-            keys
-        }
-        ResolvedExprKind::Index { receiver, index } => {
-            let mut keys = index_keys(receiver);
-            keys.push(match &index.kind {
-                ResolvedExprKind::Integer(text) => Some(format!("integer {text}")),
-                ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => {
-                    Some(format!("{target:?}"))
-                }
-                _ => None,
-            });
-            keys
-        }
-        _ => Vec::new(),
     }
 }

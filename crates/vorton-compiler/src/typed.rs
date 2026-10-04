@@ -211,16 +211,12 @@ pub(crate) enum ExprKind {
         /// the callee with the instance and leaves this empty.
         type_arguments: Vec<Type>,
         arguments: Vec<Expr>,
-        /// Pairs of borrowed arguments whose places must differ at run time.
-        checks: Vec<DisjointCheck>,
         /// A call that returns a borrow names the place it points at.
         borrow: Option<BorrowKind>,
     },
     Intrinsic {
         intrinsic: Intrinsic,
         arguments: Vec<Expr>,
-        /// For `swap`, places that must differ at run time.
-        checks: Vec<DisjointCheck>,
     },
     Unary {
         operator: UnaryOperator,
@@ -302,14 +298,6 @@ pub(crate) enum Callee {
 pub(crate) enum BorrowTarget {
     Place(Place),
     Value(Expr),
-}
-
-/// Two borrowed arguments of one call whose places have the same shape and
-/// differ only in list indices; they must not name the same element.
-#[derive(Clone)]
-pub(crate) struct DisjointCheck {
-    pub(crate) first: usize,
-    pub(crate) second: usize,
 }
 
 #[derive(Clone)]

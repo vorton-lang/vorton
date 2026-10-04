@@ -1,0 +1,16 @@
+// Two arguments borrow `xs[i]`, but an argument between them changes `i`, so
+// they are different elements and need no check.
+fn bump(x: &mut Int) -> Int {
+    x += 1
+    0
+}
+fn pick(a: &mut Int, b: Int, c: &mut Int) {
+    a = 10
+    c = 20
+}
+fn main() {
+    let mut xs = [1, 2]
+    let mut i = 0
+    pick(&mut xs[i], bump(&mut i), &mut xs[i])
+    print("${xs[0]} ${xs[1]}")
+}

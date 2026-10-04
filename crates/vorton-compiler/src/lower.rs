@@ -17,8 +17,8 @@ use crate::mir::{
     Statement, StatementKind, Terminator, TerminatorKind, element_type,
 };
 use crate::typed::{
-    Arm, Block, BorrowTarget, Builtin, DisjointCheck, Expr, ExprKind, ForSource, Function,
-    Intrinsic, Pattern, Projection as TypedProjection, Receiver, Statement as TypedStatement,
+    Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, Intrinsic, Pattern,
+    Projection as TypedProjection, Receiver, Statement as TypedStatement,
 };
 use crate::types::{Operation, Type, TypeKind, Types};
 
@@ -51,6 +51,7 @@ pub(crate) fn lower(function: &Function, types: &Types) -> Body {
         current: 0,
         scopes: Vec::new(),
         loops: Vec::new(),
+        index_copies: None,
     };
     builder.current = builder.body.new_block();
     builder.scopes.push(Scope {
@@ -121,6 +122,19 @@ struct Builder<'a> {
     current: BlockId,
     scopes: Vec<Scope>,
     loops: Vec<LoopTargets>,
+    /// While the arguments of a call are lowered, the temporaries that hold
+    /// variables used as indices in them.
+    index_copies: Option<Vec<IndexCopy>>,
+}
+
+/// A temporary that holds the value of a variable used as an index, made
+/// at a point in a block.
+struct IndexCopy {
+    variable: Local,
+    temporary: Local,
+    block: BlockId,
+    /// The statements of `block` before this point.
+    after: usize,
 }
 
 impl Builder<'_> {
@@ -892,10 +906,9 @@ impl Builder<'_> {
                 callee,
                 type_arguments,
                 arguments,
-                checks,
                 borrow,
             } => {
-                let arguments = self.arguments(arguments, checks, span)?;
+                let arguments = self.arguments(arguments, span)?;
                 Rvalue::Call {
                     callee: *callee,
                     type_arguments: type_arguments.clone(),
@@ -906,9 +919,8 @@ impl Builder<'_> {
             ExprKind::Intrinsic {
                 intrinsic,
                 arguments,
-                checks,
             } => {
-                let arguments = self.arguments(arguments, checks, span)?;
+                let arguments = self.arguments(arguments, span)?;
                 Rvalue::Intrinsic {
                     intrinsic: *intrinsic,
                     arguments,
@@ -1117,15 +1129,18 @@ impl Builder<'_> {
     }
 
     /// The arguments of a call: a borrowed one is a reference temporary
-    /// made before the later arguments are evaluated. Then the program
-    /// panics if the two borrowed places of a check in `checks` are the
+    /// made before the later arguments are evaluated. Then, for each two
+    /// borrowed places at least one of which is borrowed with `&mut` and
+    /// which differ only in indices, the program panics if they are the
     /// same element.
-    fn arguments(
-        &mut self,
-        arguments: &[Expr],
-        checks: &[DisjointCheck],
-        span: Span,
-    ) -> Option<Vec<Operand>> {
+    fn arguments(&mut self, arguments: &[Expr], span: Span) -> Option<Vec<Operand>> {
+        let outer = self.index_copies.replace(Vec::new());
+        let operands = self.arguments_in(arguments, span);
+        self.index_copies = outer;
+        operands
+    }
+
+    fn arguments_in(&mut self, arguments: &[Expr], span: Span) -> Option<Vec<Operand>> {
         let mut operands = Vec::new();
         let mut places = Vec::new();
         for argument in arguments {
@@ -1135,7 +1150,7 @@ impl Builder<'_> {
                     let place = match target.as_ref() {
                         BorrowTarget::Place(place) => {
                             let place = self.typed_place(place)?;
-                            borrowed = Some(place.clone());
+                            borrowed = Some((place.clone(), *kind == BorrowKind::Mutable));
                             place
                         }
                         BorrowTarget::Value(value) => {
@@ -1162,9 +1177,12 @@ impl Builder<'_> {
             });
             places.push(borrowed);
         }
-        for check in checks {
-            if let (Some(first), Some(second)) = (&places[check.first], &places[check.second]) {
-                self.disjoint(first, second, span);
+        let places = places.into_iter().flatten().collect::<Vec<_>>();
+        for (position, (first, first_mutable)) in places.iter().enumerate() {
+            for (second, second_mutable) in &places[position + 1..] {
+                if (*first_mutable || *second_mutable) && first.differs_only_in_indices(second) {
+                    self.disjoint(first, second, span);
+                }
             }
         }
         Some(operands)
@@ -1361,11 +1379,47 @@ impl Builder<'_> {
         if let ExprKind::Int(value) = index.kind {
             return Some(Projection::ConstantIndex(value));
         }
+        if let ExprKind::Local(variable) = index.kind
+            && let Some(temporary) = self.same_index(variable)
+        {
+            return Some(Projection::Index(temporary));
+        }
         let temporary = self.temporary(index.ty);
         if !self.expr_into(Some(Place::local(temporary)), index) {
             return None;
         }
+        if let ExprKind::Local(variable) = index.kind
+            && let Some(copies) = &mut self.index_copies
+        {
+            copies.push(IndexCopy {
+                variable,
+                temporary,
+                block: self.current,
+                after: self.body.blocks[self.current].statements.len(),
+            });
+        }
         Some(Projection::Index(temporary))
+    }
+
+    /// In the arguments of the call being lowered, a temporary that already
+    /// holds the value of the variable `variable`, which nothing has changed
+    /// since. Two places indexed by the same variable then name the same
+    /// element, which borrow checking sees.
+    fn same_index(&self, variable: Local) -> Option<Local> {
+        let copy = self
+            .index_copies
+            .as_ref()?
+            .iter()
+            .rev()
+            .find(|copy| copy.variable == variable)?;
+        if copy.block != self.current {
+            return None;
+        }
+        let statements = &self.body.blocks[self.current].statements[copy.after..];
+        statements
+            .iter()
+            .all(|statement| !changes(&statement.kind, variable))
+            .then_some(copy.temporary)
     }
 
     /// The type of the value at `place`.
@@ -1749,6 +1803,25 @@ impl Builder<'_> {
             }
             _ => {}
         }
+    }
+}
+
+/// Whether `statement` may change the value of the variable `variable`:
+/// it writes or moves it, borrows it with `&mut`, or ends it.
+fn changes(statement: &StatementKind, variable: Local) -> bool {
+    let moves = |value: &Rvalue| {
+        value
+            .operands()
+            .iter()
+            .any(|operand| matches!(operand, Operand::Move(place) if place.local == variable))
+    };
+    match statement {
+        StatementKind::Assign(destination, value) => destination.local == variable || moves(value),
+        StatementKind::Bind(_, Rvalue::Ref(kind, place)) => {
+            place.local == variable && *kind != RefKind::Shared
+        }
+        StatementKind::Bind(_, value) => moves(value),
+        StatementKind::Release(local) => *local == variable,
     }
 }
 

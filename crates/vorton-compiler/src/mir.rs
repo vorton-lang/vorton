@@ -134,6 +134,33 @@ impl Place {
         place.projections.push(projection);
         place
     }
+
+    /// Whether the two places have the same shape and differ only in indices
+    /// that are not both constants, so only comparing the indices at run
+    /// time tells whether they are the same element. Lowering emits that
+    /// comparison for such places borrowed by one call, and borrow checking
+    /// lets them be borrowed together because of it.
+    pub(crate) fn differs_only_in_indices(&self, other: &Self) -> bool {
+        let is_index = |projection: &Projection| {
+            matches!(
+                projection,
+                Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_)
+            )
+        };
+        let steps = || self.projections.iter().zip(&other.projections);
+        self.local == other.local
+            && self.projections.len() == other.projections.len()
+            && steps().any(|(left, right)| left != right)
+            && steps().all(|(left, right)| {
+                left == right
+                    || (is_index(left)
+                        && is_index(right)
+                        && !matches!(
+                            (left, right),
+                            (Projection::ConstantIndex(_), Projection::ConstantIndex(_))
+                        ))
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

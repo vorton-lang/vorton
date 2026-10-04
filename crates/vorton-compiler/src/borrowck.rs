@@ -667,7 +667,7 @@ fn accesses(
                 siblings
                     .iter()
                     .copied()
-                    .filter(|&sibling| differs_in_indices(&loans[sibling].place, &loan.place)),
+                    .filter(|&sibling| loans[sibling].place.differs_only_in_indices(&loan.place)),
             );
             made.push(Made {
                 place: loan.place.clone(),
@@ -686,39 +686,6 @@ fn own_loans(loans: &[Loan], carried: &[BTreeSet<usize>], reference: usize) -> V
         .copied()
         .filter(|&loan| loans[loan].reference == reference)
         .collect()
-}
-
-/// Whether two places of one local have the same shape and differ only in
-/// list indices that are not both constants.
-fn differs_in_indices(left: &Place, right: &Place) -> bool {
-    left.local == right.local
-        && left.projections.len() == right.projections.len()
-        && left
-            .projections
-            .iter()
-            .zip(&right.projections)
-            .any(|(left, right)| left != right)
-        && left
-            .projections
-            .iter()
-            .zip(&right.projections)
-            .all(|(left, right)| {
-                left == right || (is_index(left) && is_index(right) && !both_constant(left, right))
-            })
-}
-
-fn is_index(projection: &Projection) -> bool {
-    matches!(
-        projection,
-        Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_)
-    )
-}
-
-fn both_constant(left: &Projection, right: &Projection) -> bool {
-    matches!(
-        (left, right),
-        (Projection::ConstantIndex(_), Projection::ConstantIndex(_))
-    )
 }
 
 /// Whether an access of `kind` to `place` conflicts with `loan`.
