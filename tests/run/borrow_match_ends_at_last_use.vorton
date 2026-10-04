@@ -1,0 +1,12 @@
+fn main() {
+    let mut xs = Option::Some([1])
+    match &xs {
+        Option::Some(ys) => {
+            let n = ys.len()
+            xs = Option::None
+            print(n)
+        }
+        Option::None => ()
+    }
+    print(xs == Option::None)
+}
