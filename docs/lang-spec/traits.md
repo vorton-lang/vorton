@@ -327,7 +327,7 @@ fn show_twice<T: Show>(value: &T) -> Str {
 - **Eq**：所有字段都实现 `Eq` 时提供，并与同一结构化 `PartialEq` 一致。
 - **PartialOrd**：所有字段都实现 `PartialOrd` 时提供。Struct 按字段声明顺序做字典序比较；enum 先按 variant 声明顺序比较，相同 variant 才比较字段。首个非 `Ordering::Equal` 或 `Option::None` 的字段结果就是整体结果。
 - **Ord**：所有字段都实现 `Ord` 时提供，并与结构化相等和部分序一致。
-- **Hash**：只有当该类型走结构化 `Eq`、且所有字段都有 `Hash` 时提供。Struct 按字段顺序组合 hash；enum 先组合稳定的 variant 编号，再组合字段。手写了 `Eq` 的类型不会隐式获得结构化 `Hash`。
+- **Hash**：类型的相等是结构化的（没有手写 `PartialEq`）、且所有字段都有 `Hash` 时提供。Struct 按字段顺序组合 hash；enum 先组合稳定的 variant 编号，再组合字段。有结构化 `Hash` 的类型正是能作 `Map` 键与 `Set` 元素的类型。
 - **Debug**：所有字段都实现 `Debug` 时提供。
 - **Clone**：类型不实现 `Drop`、且所有字段都实现 `Clone` 时提供，逐字段复制。
 - **Copy**：所有字段都实现 `Copy` 时提供；这样的类型就是值类型。
@@ -339,7 +339,7 @@ enum Phase { Start(Float), End(Float) }
 
 `Reading` 先比较 `major`，相等时才比较 `sample`；若后者含 NaN，部分序立即得到 `Option::None`。`Phase` 的 `Start` 排在 `End` 之前。两种类型都获得结构化 `PartialEq`／`PartialOrd`，不获得 `Eq`／`Ord`。
 
-每种能力分别要求全部字段具有对应 trait；有 `PartialEq` 或 `PartialOrd` 不会自动产生 `Eq` 或 `Ord`。结构实现必须与同一类型手写的比较一致，编译器无法保证这一点，所以手写了 `PartialEq` 的类型不获得结构化的 `Eq`、`PartialOrd`、`Ord` 与 `Hash`，手写了 `PartialOrd` 的类型不获得结构化的 `Ord`；需要时一并手写。提供关系按依赖不动点扩展到嵌套与递归类型。`Hash` 的基础实现包括 `Int`、`Str` 与 `Bool`，不包括 `Float` 或 `Unit`。这些实现是编译器定义的封闭语义，不对应源码 attribute；其他 trait 需要显式 impl。
+每种能力分别要求全部字段具有对应 trait；有 `PartialEq` 或 `PartialOrd` 不会自动产生 `Eq` 或 `Ord`。结构实现必须与同一类型手写的比较一致，编译器无法保证这一点，所以手写了 `PartialEq` 的类型不获得结构化的 `Eq`、`PartialOrd`、`Ord` 与 `Hash`，手写了 `PartialOrd` 的类型不获得结构化的 `Ord`；需要时一并手写。提供关系按依赖不动点扩展到嵌套与递归类型。`Hash` 的基础实现包括 `Int`、`Str`、`Bool` 与 `Unit`，不包括 `Float`。这些实现是编译器定义的封闭语义，不对应源码 attribute；其他 trait 需要显式 impl。
 
 ## 限制
 
