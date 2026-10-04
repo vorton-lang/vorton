@@ -1,0 +1,13 @@
+// A value with a `drop` that the call takes as its argument does not wait
+// for the call, so the call is a tail call and the stack does not grow.
+struct Token { id: Int }
+impl Drop for Token {
+    fn drop(&mut self) { assert(self.id == 7, "only the last token is dropped") }
+}
+fn pass(n: Int, token: Token) -> Int {
+    if n == 0 { token.id }
+    else { pass(n - 1, token) }
+}
+fn main() {
+    print(pass(1000000, Token { id: 7 }))
+}

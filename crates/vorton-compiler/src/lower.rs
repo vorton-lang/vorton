@@ -73,67 +73,20 @@ pub(crate) fn lower(function: &Function, types: &Types) -> Body {
 /// something to release, so no branch of lowering forgets a scope.
 #[cfg(debug_assertions)]
 fn assert_released(body: &Body, types: &Types, name: &str) {
-    use std::collections::BTreeSet;
-    let owning = |local: Local| {
-        body.locals[local].reference.is_none() && types.needs_release(body.locals[local].ty)
-    };
-    // The locals that may hold something at the start of each block.
-    let mut starts: Vec<Option<BTreeSet<Local>>> = vec![None; body.blocks.len()];
-    starts[0] = Some(
-        body.parameters
-            .iter()
-            .copied()
-            .filter(|&l| owning(l))
-            .collect(),
-    );
-    let mut work = vec![0];
-    while let Some(block) = work.pop() {
-        let mut filled = starts[block]
-            .clone()
-            .expect("a block on the worklist was reached");
+    let starts = body.maybe_filled(types);
+    for block in body.reverse_postorder() {
+        if !matches!(body.blocks[block].terminator.kind, TerminatorKind::Return) {
+            continue;
+        }
+        let mut filled = starts[block].clone();
         for statement in &body.blocks[block].statements {
-            match &statement.kind {
-                StatementKind::Assign(destination, value) => {
-                    if let Rvalue::Use(Operand::Move(place)) = value
-                        && place.projections.is_empty()
-                    {
-                        filled.remove(&place.local);
-                    }
-                    if !body.defines_pointer(destination, value) && owning(destination.local) {
-                        filled.insert(destination.local);
-                    }
-                }
-                StatementKind::Release(local) => {
-                    filled.remove(local);
-                }
-            }
+            body.fill(types, &statement.kind, &mut filled);
         }
-        if let TerminatorKind::Return = body.blocks[block].terminator.kind {
-            let kept = filled
-                .iter()
-                .filter(|&&local| local != body.result)
-                .collect::<Vec<_>>();
-            assert!(
-                kept.is_empty(),
-                "`{name}` returns without releasing locals {kept:?}"
-            );
-        }
-        for successor in body.successors(block) {
-            let changed = match &mut starts[successor] {
-                Some(start) => {
-                    let before = start.len();
-                    start.extend(filled.iter().copied());
-                    start.len() != before
-                }
-                start @ None => {
-                    *start = Some(filled.clone());
-                    true
-                }
-            };
-            if changed {
-                work.push(successor);
-            }
-        }
+        filled.remove(&body.result);
+        assert!(
+            filled.is_empty(),
+            "`{name}` returns without releasing locals {filled:?}"
+        );
     }
 }
 

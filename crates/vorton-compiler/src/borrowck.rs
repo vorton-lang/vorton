@@ -177,7 +177,7 @@ fn move_statement(
                     check_filled(body, state, &place, span, errors);
                 }
             }
-            for operand in rvalue_operands(value) {
+            for operand in value.operands() {
                 if let Operand::Move(place) = operand {
                     state.insert(moved_place(body, place));
                 }
@@ -490,14 +490,10 @@ fn reference_uses(body: &Body, statement: &StatementKind) -> (Vec<usize>, Option
             let mut uses = rvalue_places(value)
                 .into_iter()
                 .map(|place| place.local)
-                .chain(
-                    rvalue_operands(value)
-                        .iter()
-                        .filter_map(|operand| match operand {
-                            Operand::Borrowed(local) => Some(*local),
-                            _ => None,
-                        }),
-                )
+                .chain(value.operands().iter().filter_map(|operand| match operand {
+                    Operand::Borrowed(local) => Some(*local),
+                    _ => None,
+                }))
                 .filter(|&local| is_reference(local))
                 .collect::<Vec<_>>();
             if body.defines_pointer(destination, value) {
@@ -590,7 +586,7 @@ fn accesses(
                 ),
                 Rvalue::Discriminant(_) | Rvalue::Len(_) | Rvalue::Occupied { .. } => {}
                 _ => {
-                    for operand in rvalue_operands(value) {
+                    for operand in value.operands() {
                         match operand {
                             Operand::Copy(place) => access(place, Access::ReadValue),
                             Operand::Move(place) => access(place, Access::Move),
@@ -804,41 +800,11 @@ fn check_returned(
 
 // Places in IR steps.
 
-fn rvalue_operands(value: &Rvalue) -> Vec<&Operand> {
-    match value {
-        Rvalue::Use(operand) | Rvalue::Unary(_, operand) => vec![operand],
-        Rvalue::Binary(_, left, right) => vec![left, right],
-        Rvalue::Tuple(operands)
-        | Rvalue::List(operands)
-        | Rvalue::Interpolate(operands)
-        | Rvalue::Call {
-            arguments: operands,
-            ..
-        }
-        | Rvalue::Intrinsic {
-            arguments: operands,
-            ..
-        }
-        | Rvalue::Builtin {
-            arguments: operands,
-            ..
-        } => operands.iter().collect(),
-        Rvalue::Construct { fields, .. } => fields.iter().map(|(_, operand)| operand).collect(),
-        Rvalue::Range { start, end, .. } => vec![start, end],
-        Rvalue::Ref(..)
-        | Rvalue::EmptyMap
-        | Rvalue::Discriminant(_)
-        | Rvalue::Len(_)
-        | Rvalue::Occupied { .. }
-        | Rvalue::Take { .. } => Vec::new(),
-    }
-}
-
 /// Every place an rvalue reads, takes or borrows, and the locals it reads
 /// through: index locals and borrowed references.
 fn rvalue_places(value: &Rvalue) -> Vec<Place> {
     let mut places = Vec::new();
-    for operand in rvalue_operands(value) {
+    for operand in value.operands() {
         places.extend(operand_places(operand));
     }
     match value {

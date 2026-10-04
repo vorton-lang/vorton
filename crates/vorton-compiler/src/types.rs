@@ -311,6 +311,28 @@ impl Types {
         }
     }
 
+    /// Whether releasing a value of `ty` can run a hand-written `drop`: the
+    /// type or a type stored in it, by value or in a container, has one.
+    pub(crate) fn runs_drop(&self, ty: Type) -> bool {
+        let mut seen = Vec::new();
+        let mut pending = vec![ty];
+        while let Some(ty) = pending.pop() {
+            if seen.contains(&ty) {
+                continue;
+            }
+            seen.push(ty);
+            if self.has_drop(ty) {
+                return true;
+            }
+            match self.kind(ty) {
+                TypeKind::List(element) | TypeKind::Set(element) => pending.push(*element),
+                TypeKind::Map(key, value) => pending.extend([*key, *value]),
+                _ => pending.extend(self.components(ty)),
+            }
+        }
+        false
+    }
+
     /// Whether `ty` has a hand-written `Drop`.
     pub(crate) fn has_drop(&self, ty: Type) -> bool {
         self.written

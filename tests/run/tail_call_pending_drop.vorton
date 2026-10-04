@@ -1,0 +1,12 @@
+// A call followed by the `drop` of a local is no tail call: the local is
+// released after the call returns, so the innermost call prints first.
+struct D { n: Int }
+impl Drop for D {
+    fn drop(&mut self) { assert(self.n != 2, "drop-two") }
+}
+fn down(n: Int) {
+    let d = D { n }
+    if n == 0 { print("base") }
+    else { down(n - 1) }
+}
+fn main() { down(3) }

@@ -12,6 +12,8 @@
 //! Code generation follows the same blocks, so the order the checks see is
 //! the order the program runs in.
 
+use std::collections::BTreeSet;
+
 use crate::ast::{BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::checker::{Builtin, Callee, Intrinsic};
 use crate::types::{Type, TypeKind, Types};
@@ -211,6 +213,39 @@ pub(crate) enum Rvalue {
     },
 }
 
+impl Rvalue {
+    /// The operands the rvalue reads or takes.
+    pub(crate) fn operands(&self) -> Vec<&Operand> {
+        match self {
+            Self::Use(operand) | Self::Unary(_, operand) => vec![operand],
+            Self::Binary(_, left, right) => vec![left, right],
+            Self::Tuple(operands)
+            | Self::List(operands)
+            | Self::Interpolate(operands)
+            | Self::Call {
+                arguments: operands,
+                ..
+            }
+            | Self::Intrinsic {
+                arguments: operands,
+                ..
+            }
+            | Self::Builtin {
+                arguments: operands,
+                ..
+            } => operands.iter().collect(),
+            Self::Construct { fields, .. } => fields.iter().map(|(_, operand)| operand).collect(),
+            Self::Range { start, end, .. } => vec![start, end],
+            Self::Ref(..)
+            | Self::EmptyMap
+            | Self::Discriminant(_)
+            | Self::Len(_)
+            | Self::Occupied { .. }
+            | Self::Take { .. } => Vec::new(),
+        }
+    }
+}
+
 impl Body {
     pub(crate) fn new_block(&mut self) -> BlockId {
         self.blocks.push(BasicBlock {
@@ -269,6 +304,77 @@ impl Body {
                         ..
                     }
             )
+    }
+
+    /// Whether `local` owns what it holds, which must be released.
+    pub(crate) fn owns(&self, types: &Types, local: Local) -> bool {
+        self.locals[local].reference.is_none() && types.needs_release(self.locals[local].ty)
+    }
+
+    /// The owning locals that may hold something at the start of each
+    /// reachable block.
+    pub(crate) fn maybe_filled(&self, types: &Types) -> Vec<BTreeSet<Local>> {
+        let mut starts: Vec<Option<BTreeSet<Local>>> = vec![None; self.blocks.len()];
+        starts[0] = Some(
+            self.parameters
+                .iter()
+                .copied()
+                .filter(|&local| self.owns(types, local))
+                .collect(),
+        );
+        let mut work = vec![0];
+        while let Some(block) = work.pop() {
+            let mut filled = starts[block].clone().unwrap_or_default();
+            for statement in &self.blocks[block].statements {
+                self.fill(types, &statement.kind, &mut filled);
+            }
+            for successor in self.successors(block) {
+                let changed = match &mut starts[successor] {
+                    Some(start) => {
+                        let before = start.len();
+                        start.extend(filled.iter().copied());
+                        start.len() != before
+                    }
+                    start @ None => {
+                        *start = Some(filled.clone());
+                        true
+                    }
+                };
+                if changed {
+                    work.push(successor);
+                }
+            }
+        }
+        starts.into_iter().map(Option::unwrap_or_default).collect()
+    }
+
+    /// Updates the owning locals that may hold something after `statement`:
+    /// a move out of a whole local empties it, `Release` empties it, and an
+    /// assignment fills it.
+    pub(crate) fn fill(
+        &self,
+        types: &Types,
+        statement: &StatementKind,
+        filled: &mut BTreeSet<Local>,
+    ) {
+        match statement {
+            StatementKind::Assign(destination, value) => {
+                for operand in value.operands() {
+                    if let Operand::Move(place) = operand
+                        && place.projections.is_empty()
+                    {
+                        filled.remove(&place.local);
+                    }
+                }
+                if !self.defines_pointer(destination, value) && self.owns(types, destination.local)
+                {
+                    filled.insert(destination.local);
+                }
+            }
+            StatementKind::Release(local) => {
+                filled.remove(local);
+            }
+        }
     }
 
     /// If `place` is the value of a key in a map, the key's projection and

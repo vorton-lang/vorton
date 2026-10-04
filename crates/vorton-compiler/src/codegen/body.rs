@@ -60,6 +60,7 @@ pub(super) fn function(
         index,
         body,
         definitions,
+        filled: body.maybe_filled(types),
         literals,
         declarations: String::new(),
         code: String::new(),
@@ -97,6 +98,9 @@ struct Emitter<'a> {
     body: &'a Body,
     /// What each reference local is made to point at: borrows and calls.
     definitions: Vec<Vec<&'a Rvalue>>,
+    /// The owning locals that may hold something at the start of each
+    /// block.
+    filled: Vec<BTreeSet<Local>>,
     literals: &'a mut Literals,
     /// The C variables, declared at the top of the function.
     declarations: String,
@@ -223,10 +227,10 @@ impl<'a> Emitter<'a> {
 
     // Calls of the function itself in tail position.
 
-    /// If statement `index` of `block` calls the function itself in tail
-    /// position, and the call can jump back to the start, its arguments and
-    /// the locals to release before the jump: those the path to the return
-    /// releases, or every local when the call does not return.
+    /// If statement `index` of `block` is a tail call of the function
+    /// itself, as the spec defines it, its arguments and the locals to
+    /// release before the jump: those the path to the return releases, or
+    /// every local when the call does not return.
     fn tail_call(&self, block: BlockId, index: usize) -> Option<(&'a [Operand], Vec<Local>)> {
         let body = self.body;
         let data = &body.blocks[block];
@@ -260,11 +264,22 @@ impl<'a> Emitter<'a> {
             }
             self.releases_to_return(block, index)?
         };
+        // A borrowed local or temporary must live until the call returns.
         let outside = arguments.iter().all(|argument| match argument {
             Operand::Borrowed(reference) => self.points_outside(*reference, &mut BTreeSet::new()),
             _ => true,
         });
-        outside.then_some((arguments.as_slice(), releases))
+        // A value whose `drop` runs after the call returns makes it no tail
+        // call; releasing anything else early is not observable.
+        let mut filled = self.filled[block].clone();
+        for statement in &data.statements[..=index] {
+            body.fill(self.types, &statement.kind, &mut filled);
+        }
+        filled.remove(&destination.local);
+        let drops = filled
+            .iter()
+            .any(|&local| self.types.runs_drop(body.locals[local].ty));
+        (outside && !drops).then_some((arguments.as_slice(), releases))
     }
 
     /// The locals released after statement `index` of `block` until the

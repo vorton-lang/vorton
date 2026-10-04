@@ -1,0 +1,14 @@
+// A local that only some paths move away may still hold its value at the
+// call, so its `drop` would run after the call: no tail call either.
+struct D { n: Int }
+impl Drop for D {
+    fn drop(&mut self) { assert(self.n != 2, "drop-two") }
+}
+fn keep(d: D) {}
+fn down(n: Int, give: Bool) {
+    let d = D { n }
+    if give { keep(d) }
+    if n == 0 { print("base") }
+    else { down(n - 1, give) }
+}
+fn main() { down(3, false) }
