@@ -299,7 +299,7 @@ fn parse_reachable_sources(
                 };
                 (SourceRef::File((*path).clone()), source.as_str())
             };
-            match crate::parse(source) {
+            match crate::parse_source(source) {
                 Ok(program) => {
                     parsed.insert(module, ParsedSource { origin, program });
                 }

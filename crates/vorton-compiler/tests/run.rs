@@ -143,6 +143,7 @@ fn describe(source: &str, error: &CompileError) -> String {
                 ProjectDiagnosticKind::Frontend(FrontendDiagnosticKind::UnexpectedToken {
                     ..
                 }) => "UnexpectedToken".to_owned(),
+                ProjectDiagnosticKind::Frontend(kind) => format!("{kind:?}"),
                 kind => {
                     let debug = format!("{kind:?}");
                     debug[..debug.find([' ', '(', '{']).unwrap_or(debug.len())].to_owned()

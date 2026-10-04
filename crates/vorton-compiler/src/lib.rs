@@ -3,6 +3,7 @@
 mod borrowck;
 mod checker;
 mod codegen;
+mod depth;
 mod exhaustive;
 mod lexer;
 mod lower;
@@ -40,8 +41,30 @@ pub const CORE_SOURCE: &str = include_str!("../../../core/root.vorton");
 /// first lexical error, or otherwise the first parser error; no partial AST is
 /// exposed.
 pub fn parse(source: &str) -> Result<Program, FrontendDiagnostic> {
+    on_large_stack(|| parse_source(source))
+}
+
+pub(crate) fn parse_source(source: &str) -> Result<Program, FrontendDiagnostic> {
     let tokens = lexer::lex(source)?;
     parser::parse(tokens, source.len())
+}
+
+/// The stack of the thread the compiler runs on. Every pass recurses as
+/// deep as the source nests, and the spec's nesting limit is what this stack
+/// must hold; the space is reserved, and only what is used is committed.
+const STACK_SIZE: usize = 1 << 30;
+
+/// Runs `work` on a thread with a stack of [`STACK_SIZE`], so the result does
+/// not depend on the caller's stack.
+fn on_large_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, work)
+            .expect("the compiler thread starts")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
 }
 
 /// Validates and resolves a platform-independent, in-memory Vorton library DAG
@@ -51,7 +74,7 @@ pub fn parse(source: &str) -> Result<Program, FrontendDiagnostic> {
 /// [`LibraryId`]. Every reachable non-core library must directly depend on the
 /// supplied core identity.
 pub fn resolve_project(sources: &ProjectSources) -> Result<ResolvedProject, ProjectDiagnostic> {
-    resolver::resolve_project(sources)
+    on_large_stack(|| resolver::resolve_project(sources))
 }
 
 /// Checks the declaration graph invariants needed before type and effect checking.
@@ -61,7 +84,7 @@ pub fn resolve_project(sources: &ProjectSources) -> Result<ResolvedProject, Proj
 /// that trait inheritance and effect-alias declaration graphs are acyclic. It
 /// does not check signatures or bodies, expand aliases, or produce typed HIR.
 pub fn prepare_project(project: ResolvedProject) -> Result<PreparedProject, ProjectDiagnostic> {
-    prepare::prepare_project(project)
+    on_large_stack(|| prepare::prepare_project(project))
 }
 
 /// One failure from [`compile_to_c`].
@@ -74,10 +97,12 @@ pub enum CompileError {
 /// Resolves and checks a project, then translates it into one self-contained
 /// C11 translation unit whose `main` runs the entry library's `fn main()`.
 pub fn compile_to_c(sources: &ProjectSources) -> Result<String, CompileError> {
-    let resolved = resolve_project(sources).map_err(CompileError::Project)?;
-    let prepared = prepare_project(resolved).map_err(CompileError::Project)?;
-    let program = checker::check(prepared.project()).map_err(CompileError::Check)?;
-    Ok(codegen::emit(&program))
+    on_large_stack(|| {
+        let resolved = resolver::resolve_project(sources).map_err(CompileError::Project)?;
+        let prepared = prepare::prepare_project(resolved).map_err(CompileError::Project)?;
+        let program = checker::check(prepared.project()).map_err(CompileError::Check)?;
+        Ok(codegen::emit(&program))
+    })
 }
 
 /// The library identity of the source passed to [`single_file_project`].

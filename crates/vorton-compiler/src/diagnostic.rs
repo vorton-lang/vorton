@@ -19,6 +19,8 @@ pub enum FrontendDiagnosticKind {
     /// An assignment target or `mut` operand is not a local name followed by
     /// field, tuple-field or index projections.
     ExpectedPlace,
+    /// The source nests deeper than the spec allows.
+    NestingTooDeep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,13 @@ impl FrontendDiagnostic {
         Self {
             span,
             kind: FrontendDiagnosticKind::Layout(kind),
+        }
+    }
+
+    pub(crate) const fn too_deep(span: Span) -> Self {
+        Self {
+            span,
+            kind: FrontendDiagnosticKind::NestingTooDeep,
         }
     }
 

@@ -12,14 +12,19 @@ pub(crate) fn parse(
         newlines: true,
         at_item_start: true,
         layout_error: None,
+        depth: 0,
     };
     let result = parser.parse_program(source_length);
-    match parser.layout_error.take() {
+    let program = match parser.layout_error.take() {
         None => result,
         Some(layout) => match result {
             Err(error) if error.span.start < layout.span.start => Err(error),
             _ => Err(layout),
         },
+    }?;
+    match crate::depth::too_deep(&program) {
+        None => Ok(program),
+        Some(span) => Err(FrontendDiagnostic::too_deep(span)),
     }
 }
 
@@ -33,6 +38,9 @@ struct Parser {
     at_item_start: bool,
     /// The first line break that continued an item it should have ended.
     layout_error: Option<FrontendDiagnostic>,
+    /// How many expressions, types, patterns and blocks enclose the current
+    /// token, which is at most the depth of the tree being built.
+    depth: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -48,6 +56,21 @@ enum ParameterContext {
 }
 
 impl Parser {
+    /// Parses one level of nesting with `parse`. Source that nests deeper
+    /// than the spec allows is rejected before the recursion grows further.
+    fn nested<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<T, FrontendDiagnostic>,
+    ) -> Result<T, FrontendDiagnostic> {
+        if self.depth >= crate::depth::MAX_NESTING {
+            return Err(FrontendDiagnostic::too_deep(self.current().span));
+        }
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
+    }
+
     fn parse_program(&mut self, source_length: usize) -> Result<Program, FrontendDiagnostic> {
         self.at_item_start = true;
         let requires = if self.at(Tag::Requires) {
@@ -862,6 +885,10 @@ impl Parser {
     }
 
     fn parse_type_expr(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
+        self.nested(Self::parse_type_level)
+    }
+
+    fn parse_type_level(&mut self) -> Result<TypeExpr, FrontendDiagnostic> {
         match self.current_tag() {
             Tag::LParen => self.parse_parenthesized_type(),
             Tag::Fn => self.parse_function_type(),
@@ -1154,6 +1181,10 @@ impl Parser {
     }
 
     fn parse_unary(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
+        self.nested(|parser| parser.parse_unary_level(allow_named))
+    }
+
+    fn parse_unary_level(&mut self, allow_named: bool) -> Result<Expr, FrontendDiagnostic> {
         if let Some(borrow) = self.parse_borrow() {
             let operand = self.parse_unary(allow_named)?;
             let span = Span::new(borrow.span.start, operand.span.end);
@@ -1627,6 +1658,10 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Result<Block, FrontendDiagnostic> {
+        self.nested(Self::parse_block_level)
+    }
+
+    fn parse_block_level(&mut self) -> Result<Block, FrontendDiagnostic> {
         let start = self.expect(Tag::LBrace)?.span.start;
         let saved = self.enter(true);
         let mut statements = Vec::new();
@@ -1825,6 +1860,10 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, FrontendDiagnostic> {
+        self.nested(Self::parse_pattern_level)
+    }
+
+    fn parse_pattern_level(&mut self) -> Result<Pattern, FrontendDiagnostic> {
         let token = self.current().clone();
         match token.kind {
             TokenKind::Ident(ref text)
