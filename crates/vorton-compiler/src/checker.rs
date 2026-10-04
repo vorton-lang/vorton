@@ -30,7 +30,7 @@ use crate::project::{
 };
 use crate::resolver::owner_key_from_entity;
 use crate::typed::{
-    Arm, Block, BorrowTarget, Builtin, Callee, Expr, ExprKind, ForSource, Function, Impls,
+    Arm, Block, BorrowTarget, Builtin, Callee, Expr, ExprKind, ForSource, Function, Impl, Impls,
     Intrinsic, ListMethod, Local, MapMethod, Pattern, Place, Program, Projection, Receiver,
     SetMethod, Statement, StrMethod,
 };
@@ -120,14 +120,38 @@ impl Traits<'_> {
         )
     }
 
-    /// Whether the checker supports impls of and bounds on `trait_index`.
+    /// The meaning the compiler gives `trait_index`, if it is a core trait
+    /// that has one.
+    fn role(&self, trait_index: usize) -> Option<CoreTrait> {
+        if let Some(comparison) = self.comparison(trait_index) {
+            return Some(CoreTrait::Comparison(comparison));
+        }
+        [
+            (self.display, CoreTrait::Display),
+            (self.copy, CoreTrait::Copy),
+            (self.clone, CoreTrait::Clone),
+            (self.drop, CoreTrait::Drop),
+        ]
+        .into_iter()
+        .find_map(|(index, role)| (index == trait_index).then_some(role))
+    }
+
+    /// Whether the checker supports impls of and bounds on `trait_index`:
+    /// of the core traits, only those the compiler gives a meaning.
     fn supported(&self, trait_index: usize) -> bool {
         let declaration = &self.declarations[trait_index];
-        !declaration.associated_types
-            && (!declaration.core
-                || [self.display, self.copy, self.clone, self.drop].contains(&trait_index)
-                || self.comparison(trait_index).is_some())
+        !declaration.associated_types && (!declaration.core || self.role(trait_index).is_some())
     }
+}
+
+/// A core trait that the compiler gives a meaning.
+#[derive(Clone, Copy)]
+enum CoreTrait {
+    Display,
+    Copy,
+    Clone,
+    Drop,
+    Comparison(Comparison),
 }
 
 enum Shape<'a> {
@@ -462,14 +486,14 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         let trait_index = implementation.trait_index;
         let written = types.written.entry(implementation.owner).or_default();
         let method = implementation.methods.first().copied();
-        match traits.comparison(trait_index) {
-            Some(Comparison::PartialEq) => written.eq = method,
-            Some(Comparison::Eq) => written.total_eq = true,
-            Some(Comparison::PartialOrd) => written.partial_cmp = method,
-            Some(Comparison::Ord) => written.cmp = method,
-            None if trait_index == traits.clone => written.clone = method,
-            None if trait_index == traits.drop => written.drop = method,
-            None => {}
+        match traits.role(trait_index) {
+            Some(CoreTrait::Comparison(Comparison::PartialEq)) => written.eq = method,
+            Some(CoreTrait::Comparison(Comparison::Eq)) => written.total_eq = true,
+            Some(CoreTrait::Comparison(Comparison::PartialOrd)) => written.partial_cmp = method,
+            Some(CoreTrait::Comparison(Comparison::Ord)) => written.cmp = method,
+            Some(CoreTrait::Clone) => written.clone = method,
+            Some(CoreTrait::Drop) => written.drop = method,
+            Some(CoreTrait::Display | CoreTrait::Copy) | None => {}
         }
     }
     // Value types are copied, which is their `Clone`.
@@ -596,7 +620,6 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         generic,
         main,
         impls: trait_impls,
-        display: traits.display,
     })
 }
 
@@ -872,9 +895,15 @@ fn check_trait_impls(
     types: &mut Types,
 ) -> Result<Impls, CheckDiagnostic> {
     let mut impls = Impls::new();
+    for ty in PRINTABLE {
+        impls.insert((traits.display, ty), Impl::Builtin);
+    }
     for implementation in found {
         let key = (implementation.trait_index, implementation.owner);
-        if impls.insert(key, implementation.methods.clone()).is_some() {
+        if impls
+            .insert(key, Impl::Written(implementation.methods.clone()))
+            .is_some()
+        {
             return Err(CheckDiagnostic {
                 kind: CheckDiagnosticKind::DuplicateImpl,
                 primary: Some(implementation.origin.clone()),
@@ -996,7 +1025,6 @@ fn implements(
         TypeKind::Param { index, .. } => param_implements(*index),
         _ => {
             impls.contains_key(&(trait_index, ty))
-                || (trait_index == traits.display && is_printable(ty))
                 || (trait_index == traits.copy && !types.is_entity(ty))
                 || (trait_index == traits.clone && types.clones(ty, &param_implements))
                 || traits
@@ -4128,7 +4156,7 @@ impl BodyChecker<'_> {
         method: usize,
         span: Span,
     ) -> Result<(Callee, Signature), CheckDiagnostic> {
-        if let Some(methods) = self.trait_impls.get(&(trait_index, ty)) {
+        if let Some(Impl::Written(methods)) = self.trait_impls.get(&(trait_index, ty)) {
             let function = methods[method];
             let signature = self.signatures[function].clone();
             return Ok((Callee::Function(function), signature));
@@ -4465,7 +4493,10 @@ fn callee_name(callee: &ResolvedExpr) -> String {
     }
 }
 
-/// Whether `ty` has a built-in text form and built-in ordering.
+/// The types with a built-in text form, which implement `Display` without
+/// an impl.
+const PRINTABLE: [Type; 4] = [Type::INT, Type::FLOAT, Type::BOOL, Type::STR];
+
 fn is_printable(ty: Type) -> bool {
-    matches!(ty, Type::INT | Type::FLOAT | Type::BOOL | Type::STR)
+    PRINTABLE.contains(&ty)
 }

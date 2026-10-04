@@ -121,7 +121,6 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
         generic,
         main,
         impls,
-        display,
     } = checked;
     let mut templates = Vec::new();
     for ((function, origin), generic) in functions.iter().zip(&origins).zip(generic) {
@@ -140,7 +139,7 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
             generic,
         });
     }
-    let mut program = mono::instantiate(types, &templates, main, &impls, display)?;
+    let mut program = mono::instantiate(types, &templates, main, &impls)?;
 
     capabilities::check_drops(&program, &origins)?;
     tail::mark(&mut program);

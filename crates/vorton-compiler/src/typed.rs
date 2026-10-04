@@ -26,14 +26,20 @@ pub(crate) struct Program {
     /// The entry library's `main`.
     pub(crate) main: usize,
     pub(crate) impls: Impls,
-    /// The core `Display` trait, which built-in types implement without an
-    /// impl.
-    pub(crate) display: usize,
 }
 
-/// The impl of each trait for each type: the function of each trait
-/// method, in the trait's order.
-pub(crate) type Impls = BTreeMap<(usize, Type), Vec<usize>>;
+/// How a type implements a trait.
+#[derive(Clone)]
+pub(crate) enum Impl {
+    /// By hand: the function of each trait method, in the trait's order.
+    Written(Vec<usize>),
+    /// By the compiler: `Display` of a built-in type, whose `to_str` is the
+    /// text that interpolation gives it.
+    Builtin,
+}
+
+/// The impl of each trait for each type that has one.
+pub(crate) type Impls = BTreeMap<(usize, Type), Impl>;
 #[derive(Clone)]
 pub(crate) struct Function {
     pub(crate) name: String,

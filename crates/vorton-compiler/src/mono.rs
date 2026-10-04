@@ -16,8 +16,8 @@
 //!
 //! A trait method called on a type parameter becomes a call of the method
 //! of the impl for the type argument. The checker has made sure that the
-//! impl exists; `Display` of a built-in type has none and becomes string
-//! interpolation of the value.
+//! impl exists; `Display` of a built-in type is the compiler's and becomes
+//! string interpolation of the value.
 //!
 //! [`TypeKind::Param`]: crate::types::TypeKind::Param
 
@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use crate::diagnostic::CheckDiagnostic;
 use crate::mir::{Body, Instance, Operand, Place, Program, Rvalue, StatementKind};
-use crate::typed::{Callee, Impls};
+use crate::typed::{Callee, Impl, Impls};
 use crate::types::{InstantiationError, Type, Types};
 
 /// A checked function before instantiation: its name and its IR.
@@ -43,7 +43,6 @@ pub(crate) fn instantiate(
     templates: &[Template],
     main: usize,
     impls: &Impls,
-    display: usize,
 ) -> Result<Program, CheckDiagnostic> {
     let mut instances = Instances::default();
     for (index, template) in templates.iter().enumerate() {
@@ -60,7 +59,6 @@ pub(crate) fn instantiate(
             arguments: &arguments,
             instances: &mut instances,
             impls,
-            display,
         }
         .body(&mut body)
         .map_err(|error| error.diagnostic(&types))?;
@@ -109,7 +107,6 @@ struct Instantiation<'a> {
     arguments: &'a [Type],
     instances: &'a mut Instances,
     impls: &'a Impls,
-    display: usize,
 }
 
 impl Instantiation<'_> {
@@ -157,15 +154,10 @@ impl Instantiation<'_> {
                         self_type,
                     } => {
                         let self_type = self.ty(self_type)?;
-                        let function = self
-                            .impls
-                            .get(&(trait_index, self_type))
-                            .map(|methods| methods[method]);
-                        assert!(
-                            function.is_some() || trait_index == self.display,
-                            "the checker found an impl for every bound"
-                        );
-                        function
+                        match &self.impls[&(trait_index, self_type)] {
+                            Impl::Written(methods) => Some(methods[method]),
+                            Impl::Builtin => None,
+                        }
                     }
                 };
                 match function {
