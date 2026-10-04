@@ -91,6 +91,8 @@ pub enum CheckDiagnosticKind {
     MissingMethod,
     /// Several traits give the receiver's type a method of the called name.
     AmbiguousMethod,
+    /// A private field, method or trait used outside its module.
+    InaccessibleMember,
     /// A recursive call passes type arguments that could grow without end.
     PolymorphicRecursion,
 }
@@ -477,6 +479,7 @@ struct TypeParameter {
 /// A trait declaration.
 struct TraitDeclaration<'a> {
     name: String,
+    visibility: Visibility,
     /// The direct supertraits, by index.
     supertraits: Vec<usize>,
     methods: Vec<&'a ResolvedTraitMember>,
@@ -555,6 +558,22 @@ struct NominalDeclaration<'a> {
     type_parameters: Vec<EntityId>,
     shape: Shape<'a>,
     origin: OriginRef,
+    /// The module that declares it, where its private fields are visible.
+    module: ModuleRef,
+}
+
+/// Where an item may be used: anywhere if it is public, otherwise in the
+/// module that declares it and the modules inside that one.
+#[derive(Clone)]
+struct Visibility {
+    public: bool,
+    module: ModuleRef,
+}
+
+impl Visibility {
+    fn admits(&self, module: &ModuleRef) -> bool {
+        self.public || *module == self.module || module.is_descendant_of(&self.module)
+    }
 }
 
 /// Struct and enum declarations, and the enum constructors by identity.
@@ -582,7 +601,7 @@ struct FoundFunction<'a> {
 
 /// The inherent methods and associated functions of each struct or enum
 /// declaration, by name.
-type Methods = BTreeMap<(usize, String), EntityId>;
+type Methods = BTreeMap<(usize, String), (EntityId, Visibility)>;
 
 pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnostic> {
     let mut functions_found = Vec::new();
@@ -646,6 +665,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                     type_parameters,
                     shape,
                     origin: declaration.origin.clone(),
+                    module: identity.module.clone(),
                 });
                 continue;
             }
@@ -750,8 +770,15 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 return Err(unsupported(Some(member_origin), "associated types"));
             };
             let name = member.identity.name.clone();
+            let visibility = Visibility {
+                public: member.public,
+                module: member.identity.module.clone(),
+            };
             if methods
-                .insert((declaration, name.clone()), member.identity.clone())
+                .insert(
+                    (declaration, name.clone()),
+                    (member.identity.clone(), visibility),
+                )
                 .is_some()
             {
                 return Err(CheckDiagnostic {
@@ -848,6 +875,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             trait_impls: &trait_impls,
             library: origin.library,
             source: origin.source.clone(),
+            module: found.identity.module.clone(),
             type_scope: signature.type_scope.clone(),
             type_parameters: signature.type_parameters.clone(),
             calls: Vec::new(),
@@ -994,6 +1022,10 @@ fn collect_traits<'a>(
         }
         declarations.push(TraitDeclaration {
             name: identity.name.clone(),
+            visibility: Visibility {
+                public: declaration.public,
+                module: identity.module.clone(),
+            },
             supertraits,
             methods,
             associated_types,
@@ -1863,6 +1895,9 @@ struct BodyChecker<'a> {
     trait_impls: &'a Impls,
     library: LibraryId,
     source: SourceRef,
+    /// The module of the function, which decides what private items it
+    /// may use.
+    module: ModuleRef,
     /// The types of the function's type parameters, by identity.
     type_scope: BTreeMap<EntityId, Type>,
     type_parameters: Vec<TypeParameter>,
@@ -2858,12 +2893,47 @@ impl BodyChecker<'_> {
             .enumerate()
             .find(|(_, field)| field.name == name)
         {
+            if let Some(visibility) = self.field_visibility(ty, position) {
+                self.require_visible(&visibility, span, || format!("the field `{name}`"))?;
+            }
             return Ok((position, field.ty));
         }
         Err(self.error(
             CheckDiagnosticKind::UnknownField,
             span,
             format!("`{}` has no field `{name}`", self.types.name(ty)),
+        ))
+    }
+
+    /// Who may use field `position` of the struct type `ty`.
+    fn field_visibility(&self, ty: Type, position: usize) -> Option<Visibility> {
+        let &TypeKind::Nominal { declaration, .. } = self.types.kind(ty) else {
+            return None;
+        };
+        let info = &self.nominals.declarations[declaration];
+        let Shape::Struct(fields) = info.shape else {
+            return None;
+        };
+        Some(Visibility {
+            public: fields[position].public,
+            module: info.module.clone(),
+        })
+    }
+
+    /// Rejects a use of an item that `visibility` does not admit here.
+    fn require_visible(
+        &self,
+        visibility: &Visibility,
+        span: Span,
+        item: impl FnOnce() -> String,
+    ) -> Result<(), CheckDiagnostic> {
+        if visibility.admits(&self.module) {
+            return Ok(());
+        }
+        Err(self.error(
+            CheckDiagnosticKind::InaccessibleMember,
+            span,
+            format!("{} is private to its module", item()),
         ))
     }
 
@@ -3112,8 +3182,9 @@ impl BodyChecker<'_> {
         let ty = operand.ty();
         let signatures = self.signatures;
         if let &TypeKind::Nominal { declaration, .. } = self.types.kind(ty)
-            && let Some(identity) = self.methods.get(&(declaration, name.to_owned()))
+            && let Some((identity, visibility)) = self.methods.get(&(declaration, name.to_owned()))
         {
+            self.require_visible(visibility, span, || format!("the method `{name}`"))?;
             let signature = &signatures[identity];
             if !signature.receiver {
                 let owner = self.types.name(ty);
@@ -3425,6 +3496,26 @@ impl BodyChecker<'_> {
             },
         };
         let is_struct = matches!(info.shape, Shape::Struct(_));
+        // Building a struct writes all its fields, so outside its module
+        // every field must be public.
+        if let Shape::Struct(fields) = info.shape
+            && let Some(field) = fields.iter().find(|field| {
+                !Visibility {
+                    public: field.public,
+                    module: info.module.clone(),
+                }
+                .admits(&self.module)
+            })
+        {
+            return Err(self.error(
+                CheckDiagnosticKind::InaccessibleMember,
+                span,
+                format!(
+                    "the field `{}` of `{}` is private to its module, so only that module can build a `{}`",
+                    field.identity.name, info.name, info.name
+                ),
+            ));
+        }
         let mut substitution = BTreeMap::new();
         if let Some(expected) = expected
             && let TypeKind::Nominal {
@@ -4398,13 +4489,18 @@ impl BodyChecker<'_> {
                 if let [member] = members.as_slice()
                     && let Some(&declaration) = self.nominals.by_identity.get(base) =>
             {
-                let Some(identity) = self.methods.get(&(declaration, member.name.clone())) else {
+                let Some((identity, visibility)) =
+                    self.methods.get(&(declaration, member.name.clone()))
+                else {
                     return Err(self.error(
                         CheckDiagnosticKind::UnknownMethod,
                         member.origin.span,
                         format!("`{}` has no function `{}`", base.name, member.name),
                     ));
                 };
+                self.require_visible(visibility, member.origin.span, || {
+                    format!("the function `{}::{}`", base.name, member.name)
+                })?;
                 &signatures[identity]
             }
             _ => return Err(self.unsupported(callee.span, "calls of computed functions")),
@@ -4552,7 +4648,7 @@ impl BodyChecker<'_> {
                 found
             }
         };
-        let found = candidates
+        let (found, hidden): (Vec<_>, Vec<_>) = candidates
             .into_iter()
             .filter_map(|trait_index| {
                 traits.declarations[trait_index]
@@ -4561,7 +4657,20 @@ impl BodyChecker<'_> {
                     .position(|method| method.identity.name == name)
                     .map(|method| (trait_index, method))
             })
-            .collect::<Vec<_>>();
+            .partition(|(trait_index, _)| {
+                traits.declarations[*trait_index]
+                    .visibility
+                    .admits(&self.module)
+            });
+        // A trait that is private to another module gives no methods here.
+        if found.is_empty()
+            && let Some((trait_index, _)) = hidden.first()
+        {
+            let declaration = &traits.declarations[*trait_index];
+            self.require_visible(&declaration.visibility, span, || {
+                format!("the trait `{}`", declaration.name)
+            })?;
+        }
         let (trait_index, method) = match found.as_slice() {
             [] => return Ok(None),
             [(trait_index, _)] if *trait_index == traits.drop => {

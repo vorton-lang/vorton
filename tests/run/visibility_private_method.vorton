@@ -1,0 +1,10 @@
+mod secret {
+    pub struct Box { pub value: Int }
+    impl Box {
+        fn hidden(&self) -> Int { self.value }
+    }
+}
+fn main() {
+    let b = secret::Box { value: 1 }
+    print(b.hidden())
+}

@@ -1,0 +1,9 @@
+mod secret {
+    pub struct Box { value: Int }
+    impl Box {
+        fn new() -> Box { Box { value: 1 } }
+    }
+}
+fn main() {
+    let b = secret::Box::new()
+}

@@ -1,0 +1,8 @@
+mod secret {
+    pub struct Box { value: Int }
+    pub fn make() -> Box { Box { value: 42 } }
+}
+fn main() {
+    let mut b = secret::make()
+    b.value = 1
+}

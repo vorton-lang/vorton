@@ -1,0 +1,17 @@
+mod secret {
+    pub struct Box { value: Int, pub label: Str }
+    impl Box {
+        pub fn new() -> Box { Box { value: 7, label: "box" } }
+        pub fn value(&self) -> Int { self.hidden() }
+        fn hidden(&self) -> Int { self.value }
+    }
+    pub mod inner {
+        pub fn peek(b: &super::Box) -> Int { b.value }
+    }
+}
+fn main() {
+    let b = secret::Box::new()
+    print(b.value())
+    print(b.label)
+    print(secret::inner::peek(&b))
+}
