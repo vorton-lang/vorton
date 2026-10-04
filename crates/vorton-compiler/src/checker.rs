@@ -22,11 +22,12 @@ use crate::exhaustive;
 use crate::project::{
     CoreRoles, EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
     ResolvedConstructEntry, ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedField,
-    ResolvedFunction, ResolvedImplMemberKind, ResolvedInterpolationPart, ResolvedMatchArm,
-    ResolvedNamedType, ResolvedPattern, ResolvedPatternFields, ResolvedPatternKind, ResolvedPlace,
-    ResolvedPlaceProjection, ResolvedProject, ResolvedReference, ResolvedStatement,
-    ResolvedStatementKind, ResolvedTraitMember, ResolvedTraitMemberKind, ResolvedType,
-    ResolvedTypeArgument, ResolvedTypeKind, ResolvedVariant, ResolvedVariantFields, SourceRef,
+    ResolvedFunction, ResolvedImpl, ResolvedImplMember, ResolvedImplMemberKind,
+    ResolvedInterpolationPart, ResolvedMatchArm, ResolvedNamedType, ResolvedPattern,
+    ResolvedPatternFields, ResolvedPatternKind, ResolvedPlace, ResolvedPlaceProjection,
+    ResolvedProject, ResolvedReference, ResolvedStatement, ResolvedStatementKind,
+    ResolvedTraitMember, ResolvedTraitMemberKind, ResolvedType, ResolvedTypeArgument,
+    ResolvedTypeKind, ResolvedVariant, ResolvedVariantFields, SourceRef,
 };
 use crate::resolver::owner_key_from_entity;
 use crate::typed::{
@@ -421,31 +422,8 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
 
     let mut methods = BTreeMap::new();
     for (implementation, origin) in impls {
-        if !implementation.type_parameters.is_empty() {
-            return Err(unsupported(Some(origin), "generic impls"));
-        }
-        let target = ResolvedType {
-            span: implementation.target.span,
-            kind: ResolvedTypeKind::Named(Box::new(implementation.target.clone())),
-        };
-        let owner = resolve_type(&mut types, &nominals, &target, &BTreeMap::new(), &origin)?;
-        let &TypeKind::Nominal { declaration, .. } = types.kind(owner) else {
-            return Err(unsupported(Some(origin), "methods of built-in types"));
-        };
-        if !nominals.declarations[declaration]
-            .type_parameters
-            .is_empty()
-        {
-            return Err(unsupported(Some(origin), "methods of generic types"));
-        }
-        for member in &implementation.members {
-            let member_origin = match &member.identity.site {
-                EntitySite::Source(site) => site.clone(),
-                _ => origin.clone(),
-            };
-            let ResolvedImplMemberKind::Function(function) = &member.kind else {
-                return Err(unsupported(Some(member_origin), "associated types"));
-            };
+        let (owner, declaration) = impl_owner(implementation, &origin, &nominals, &mut types)?;
+        for (member, function, member_origin) in impl_functions(implementation, &origin)? {
             let name = member.identity.name.clone();
             let visibility = Visibility {
                 public: member.public,
@@ -672,10 +650,7 @@ fn collect_traits<'a>(
                 let ResolvedTraitMemberKind::Method(signature) = &member.kind else {
                     unreachable!("only methods were kept")
                 };
-                let origin = match &member.identity.site {
-                    EntitySite::Source(site) => site.clone(),
-                    _ => declaration.origin.clone(),
-                };
+                let origin = site_or(&member.identity, &declaration.origin);
                 method_signatures.push(trait_method_signature(
                     signature, &scope, self_type, nominals, types, &origin,
                 )?);
@@ -764,13 +739,70 @@ struct FoundImpl {
     origin: OriginRef,
 }
 
+/// The type an impl is for, and its declaration: the checker supports impls
+/// without type parameters for structs and enums without them.
+fn impl_owner(
+    implementation: &ResolvedImpl,
+    origin: &OriginRef,
+    nominals: &Nominals,
+    types: &mut Types,
+) -> Result<(Type, usize), CheckDiagnostic> {
+    if !implementation.type_parameters.is_empty() {
+        return Err(unsupported(Some(origin.clone()), "generic impls"));
+    }
+    let target = ResolvedType {
+        span: implementation.target.span,
+        kind: ResolvedTypeKind::Named(Box::new(implementation.target.clone())),
+    };
+    let owner = resolve_type(types, nominals, &target, &BTreeMap::new(), origin)?;
+    let &TypeKind::Nominal { declaration, .. } = types.kind(owner) else {
+        return Err(unsupported(
+            Some(origin.clone()),
+            "impls for built-in types",
+        ));
+    };
+    if !nominals.declarations[declaration]
+        .type_parameters
+        .is_empty()
+    {
+        return Err(unsupported(Some(origin.clone()), "impls for generic types"));
+    }
+    Ok((owner, declaration))
+}
+
+/// The functions of an impl, with where each is declared; associated types
+/// are not supported yet.
+fn impl_functions<'a>(
+    implementation: &'a ResolvedImpl,
+    origin: &OriginRef,
+) -> Result<Vec<(&'a ResolvedImplMember, &'a ResolvedFunction, OriginRef)>, CheckDiagnostic> {
+    implementation
+        .members
+        .iter()
+        .map(|member| {
+            let member_origin = site_or(&member.identity, origin);
+            match &member.kind {
+                ResolvedImplMemberKind::Function(function) => Ok((member, function, member_origin)),
+                ResolvedImplMemberKind::AssociatedType(_) => {
+                    Err(unsupported(Some(member_origin), "associated types"))
+                }
+            }
+        })
+        .collect()
+}
+
+/// Where the entity `identity` is written, or `fallback` for one that the
+/// source does not spell out.
+fn site_or(identity: &EntityId, fallback: &OriginRef) -> OriginRef {
+    match &identity.site {
+        EntitySite::Source(site) => site.clone(),
+        _ => fallback.clone(),
+    }
+}
+
 /// Collects the trait impls and adds their methods to `functions`.
 fn collect_trait_impls<'a>(
-    found: &[(
-        &'a crate::project::ResolvedImpl,
-        &ResolvedNamedType,
-        OriginRef,
-    )],
+    found: &[(&'a ResolvedImpl, &ResolvedNamedType, OriginRef)],
     traits: &Traits,
     nominals: &Nominals,
     types: &mut Types,
@@ -793,9 +825,6 @@ fn collect_trait_impls<'a>(
                 message: "only the compiler implements `Copy`, for value types".to_owned(),
             });
         }
-        if !implementation.type_parameters.is_empty() {
-            return Err(unsupported(Some(origin.clone()), "generic impls"));
-        }
         if declaration.associated_types {
             return Err(unsupported(Some(origin.clone()), "associated types"));
         }
@@ -805,33 +834,9 @@ fn collect_trait_impls<'a>(
                 &format!("impls of `{}`", declaration.name),
             ));
         }
-        let target_type = ResolvedType {
-            span: implementation.target.span,
-            kind: ResolvedTypeKind::Named(Box::new(implementation.target.clone())),
-        };
-        let owner = resolve_type(types, nominals, &target_type, &BTreeMap::new(), origin)?;
-        let &TypeKind::Nominal {
-            declaration: nominal,
-            ..
-        } = types.kind(owner)
-        else {
-            return Err(unsupported(
-                Some(origin.clone()),
-                "impls for built-in types",
-            ));
-        };
-        if !nominals.declarations[nominal].type_parameters.is_empty() {
-            return Err(unsupported(Some(origin.clone()), "impls for generic types"));
-        }
+        let (owner, _) = impl_owner(implementation, origin, nominals, types)?;
         let mut methods = vec![None; declaration.methods.len()];
-        for member in &implementation.members {
-            let member_origin = match &member.identity.site {
-                EntitySite::Source(site) => site.clone(),
-                _ => origin.clone(),
-            };
-            let ResolvedImplMemberKind::Function(function) = &member.kind else {
-                return Err(unsupported(Some(member_origin), "associated types"));
-            };
+        for (member, function, member_origin) in impl_functions(implementation, origin)? {
             let name = &member.identity.name;
             let Some(position) = declaration
                 .methods
