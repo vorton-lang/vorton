@@ -182,7 +182,7 @@ fn describe(types: &Types, ty: Type, constructor: usize, arguments: &[String]) -
             let name = format!("{}::{}", types.nominals[*declaration].name, variant.name);
             if variant.fields.is_empty() {
                 name
-            } else if variant.fields[0].name.parse::<usize>().is_ok() {
+            } else if variant.positional {
                 format!("{name}({})", arguments.join(", "))
             } else {
                 let fields = variant

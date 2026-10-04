@@ -504,9 +504,9 @@ impl Builder<'_> {
                 );
                 (Element::Take(taken), *element, span)
             }
-            ForSource::Borrowed(place) => {
+            ForSource::Borrowed(place, kind) => {
                 let span = place.span;
-                let kind = for_borrow_kind(binding, self);
+                let kind = *kind;
                 let Some(target) = self.typed_place(place) else {
                     return false;
                 };
@@ -1755,16 +1755,6 @@ fn ref_kind(kind: BorrowKind) -> RefKind {
         BorrowKind::Shared => RefKind::Shared,
         BorrowKind::Mutable => RefKind::Mutable,
     }
-}
-
-/// How a `for` loop borrows its container: as its bindings borrow the
-/// elements.
-fn for_borrow_kind(binding: &Pattern, builder: &Builder) -> BorrowKind {
-    binding
-        .bindings()
-        .into_iter()
-        .find_map(|local| builder.body.locals[local].reference)
-        .unwrap_or(BorrowKind::Shared)
 }
 
 fn compound_operator(operator: AssignmentOperator) -> BinaryOperator {

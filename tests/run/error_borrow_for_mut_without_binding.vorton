@@ -1,0 +1,10 @@
+// A loop over `&mut` borrows the list with `&mut` even when it binds no
+// name, so the list cannot be borrowed again inside it.
+fn main() {
+    let mut xs = [1, 2, 3]
+    for _ in &mut xs {
+        for x in &xs {
+            print(x)
+        }
+    }
+}

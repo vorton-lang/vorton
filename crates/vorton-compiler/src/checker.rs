@@ -1162,6 +1162,7 @@ fn template(
     let variants = match &info.shape {
         Shape::Struct(fields) => vec![Variant {
             name: info.name.clone(),
+            positional: false,
             fields: fields
                 .iter()
                 .map(|resolved| field(&resolved.ty, resolved.identity.name.clone()))
@@ -1184,6 +1185,7 @@ fn template(
                 };
                 Ok(Variant {
                     name: variant.identity.name.clone(),
+                    positional: matches!(variant.fields, ResolvedVariantFields::Positional(_)),
                     fields,
                 })
             })
@@ -2319,7 +2321,7 @@ impl BodyChecker<'_> {
                     }
                 };
                 self.check_borrow(&place, kind, operand.span)?;
-                (ForSource::Borrowed(place), element, Some(kind))
+                (ForSource::Borrowed(place, kind), element, Some(kind))
             }
             _ => {
                 let value = self.check_expr(iterable, None)?;
@@ -3760,7 +3762,9 @@ impl BodyChecker<'_> {
                         ),
                     ));
                 }
-                let field_types = self.types.variants(ty)[variant]
+                let shape = &self.types.variants(ty)[variant];
+                let positional = shape.positional;
+                let field_types = shape
                     .fields
                     .iter()
                     .map(|field| (field.name.clone(), field.ty))
@@ -3779,11 +3783,7 @@ impl BodyChecker<'_> {
                         ));
                     }
                     Some(ResolvedPatternFields::Positional(patterns)) => {
-                        if patterns.len() != field_types.len()
-                            || field_types
-                                .iter()
-                                .any(|(name, _)| name.parse::<usize>().is_err())
-                        {
+                        if patterns.len() != field_types.len() || !positional {
                             return Err(self.error(
                                 CheckDiagnosticKind::ArgumentCount,
                                 span,

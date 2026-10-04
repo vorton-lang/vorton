@@ -123,6 +123,9 @@ pub(crate) struct NominalInfo {
 #[derive(Clone)]
 pub(crate) struct Variant {
     pub(crate) name: String,
+    /// Whether the fields are written by position, as in `Some(x)`; their
+    /// names are then their indices.
+    pub(crate) positional: bool,
     pub(crate) fields: Vec<Field>,
 }
 

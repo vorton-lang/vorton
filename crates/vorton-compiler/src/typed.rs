@@ -102,11 +102,12 @@ pub(crate) enum ForSource {
     },
     /// Counts through a `Range<Int>` value.
     RangeValue(Expr),
-    /// Takes the list or map and yields its elements of type `element`: a
-    /// map's entries as `(key, value)` tuples.
+    /// Takes the list, set or map and yields its elements of type `element`:
+    /// a map's entries as `(key, value)` tuples.
     Taken { container: Expr, element: Type },
-    /// Borrows the elements of a list place without taking them.
-    Borrowed(Place),
+    /// Borrows the container at a place with `&` or `&mut`, and yields
+    /// borrows of its elements: a map's values.
+    Borrowed(Place, BorrowKind),
 }
 
 /// A local and a path of parts inside it.
