@@ -106,6 +106,8 @@ pub enum CheckDiagnosticKind {
     ConsoleInDrop,
     /// A recursive call passes type arguments that could grow without end.
     PolymorphicRecursion,
+    /// A bound that no type parameter can have, such as `Drop`.
+    InvalidBound,
 }
 
 #[derive(Clone)]
@@ -1583,7 +1585,16 @@ fn check_signature(
                 ResolvedReference::Selection { .. } => None,
             };
             if let Some(trait_index) = trait_index {
-                if !traits.supported(trait_index) || trait_index == traits.drop {
+                if trait_index == traits.drop {
+                    return Err(CheckDiagnostic {
+                        kind: CheckDiagnosticKind::InvalidBound,
+                        primary: Some(at(origin, bound.span)),
+                        message:
+                            "`Drop` cannot be a bound; `drop` runs only when a value is released"
+                                .to_owned(),
+                    });
+                }
+                if !traits.supported(trait_index) {
                     return Err(unsupported(
                         Some(at(origin, bound.span)),
                         &format!("bounds on `{}`", traits.declarations[trait_index].name),
@@ -2300,6 +2311,13 @@ impl BodyChecker<'_> {
         kind: BorrowKind,
     ) -> Result<Expr, CheckDiagnostic> {
         let (place, ty, span) = match &value.kind {
+            ResolvedExprKind::If { .. }
+            | ResolvedExprKind::Match { .. }
+            | ResolvedExprKind::Block(_) => {
+                return Err(
+                    self.unsupported(value.span, "borrowed results chosen by a branch or block")
+                );
+            }
             ResolvedExprKind::Borrow {
                 kind: (_, written),
                 operand,
@@ -2854,8 +2872,14 @@ impl BodyChecker<'_> {
                 let (ty, kind) = self.check_method(span, receiver, &method.name, arguments)?;
                 return Ok(self.call_place(Expr { ty, span, kind }, method.name.clone()));
             }
+            // The positions that take a borrow look for it before checking a
+            // value; anywhere else one is an error.
             ResolvedExprKind::Borrow { .. } => {
-                return Err(self.unsupported(span, "borrows outside `for` loops"));
+                return Err(self.error(
+                    CheckDiagnosticKind::TypeMismatch,
+                    span,
+                    "`&` and `&mut` go only in an argument to a borrowed parameter, the value of a `let`, the subject of a `for`, `match` or `if let`, or the result of a function that returns a borrow".to_owned(),
+                ));
             }
             _ => return Err(self.unsupported(span, "these expressions")),
         };

@@ -1,0 +1,8 @@
+fn pick(c: Bool, a: &List<Int>, b: &List<Int>) -> &List<Int> {
+    if c {
+        &a
+    } else {
+        &b
+    }
+}
+fn main() {}
