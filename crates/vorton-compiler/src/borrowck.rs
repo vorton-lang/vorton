@@ -24,14 +24,20 @@
 //! reference `r` to `xs` never overlap as places. The access through `r`
 //! uses `r`, which keeps `r`'s loans live, and it is the direct accesses to
 //! `xs` while they are live that conflict.
+//!
+//! What a local holds, and which loans a reference carries, matter only
+//! where a later step may depend on them. Both forward analyses keep, at the
+//! edges between blocks, only the locals that are live there, so the work
+//! follows the locals in use at each point rather than all the locals of
+//! the function.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::Span;
 use crate::checker::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::mir::{
-    BlockId, Body, Operand, Place, Projection, RefKind, Rvalue, StatementKind, TerminatorKind,
-    projection_type,
+    BlockId, Body, Local, Operand, Place, Projection, RefKind, Rvalue, StatementKind,
+    TerminatorKind, projection_type,
 };
 use crate::project::OriginRef;
 use crate::types::Types;
@@ -42,10 +48,11 @@ pub(crate) fn check(
     at: &dyn Fn(Span) -> OriginRef,
 ) -> Result<(), CheckDiagnostic> {
     let graph = Graph::new(body);
+    let live = liveness(body, &graph);
     let mut errors = Vec::new();
     check_move_sources(body, types, &mut errors);
-    check_moves(body, &graph, &mut errors);
-    check_borrows(body, types, &graph, &mut errors);
+    check_moves(body, &graph, &live, &mut errors);
+    check_borrows(body, types, &graph, &live, &mut errors);
     match errors.into_iter().min_by_key(|error| error.span.start) {
         Some(error) => Err(CheckDiagnostic {
             kind: error.kind,
@@ -207,27 +214,106 @@ fn immovable(body: &Body, types: &Types, from_call: &[bool], place: &Place) -> O
 
 // Moves.
 
-/// The places that may hold nothing.
-type Empty = BTreeSet<Place>;
+/// The places that may hold nothing: whole locals, and parts of the
+/// temporaries that lowering moves out one at a time. A step looks only at
+/// the locals it names.
+#[derive(Clone, PartialEq, Default)]
+struct Empty {
+    whole: BTreeSet<Local>,
+    /// Ordered by their local.
+    parts: BTreeSet<Place>,
+}
 
-fn check_moves(body: &Body, graph: &Graph, errors: &mut Vec<Error>) {
-    let entry = (0..body.locals.len())
-        .filter(|local| !body.parameters.contains(local))
-        .map(Place::local)
-        .collect::<Empty>();
+impl Empty {
+    fn is_whole(&self, local: Local) -> bool {
+        self.whole.contains(&local)
+    }
+
+    /// The empty parts of `local`.
+    fn parts_of(&self, local: Local) -> impl Iterator<Item = &Place> {
+        self.parts
+            .range(Place::local(local)..Place::local(local + 1))
+    }
+
+    /// Records that `place` may hold nothing.
+    fn insert(&mut self, place: Place) {
+        if place.projections.is_empty() {
+            self.whole.insert(place.local);
+            self.fill_parts(&place);
+        } else if !self.is_whole(place.local) {
+            self.parts.insert(place);
+        }
+    }
+
+    /// Records that `place` and everything inside it hold a value.
+    fn fill(&mut self, place: &Place) {
+        if place.projections.is_empty() {
+            self.whole.remove(&place.local);
+        }
+        self.fill_parts(place);
+    }
+
+    fn fill_parts(&mut self, place: &Place) {
+        let filled = self
+            .parts_of(place.local)
+            .filter(|part| is_prefix(place, part))
+            .cloned()
+            .collect::<Vec<_>>();
+        for part in filled {
+            self.parts.remove(&part);
+        }
+    }
+
+    /// Whether some part of `place`, or a place that contains it, may hold
+    /// nothing.
+    fn overlaps(&self, place: &Place) -> bool {
+        self.is_whole(place.local)
+            || self
+                .parts_of(place.local)
+                .any(|part| is_prefix(part, place) || is_prefix(place, part))
+    }
+
+    /// Whether a place that strictly contains `place` may hold nothing.
+    fn lacks_container(&self, place: &Place) -> bool {
+        self.is_whole(place.local)
+            || self.parts_of(place.local).any(|part| {
+                is_prefix(part, place) && part.projections.len() < place.projections.len()
+            })
+    }
+
+    fn join(&mut self, other: &Self) {
+        self.whole.extend(other.whole.iter().copied());
+        self.parts.extend(other.parts.iter().cloned());
+    }
+
+    /// Forgets the locals that are not in `live`.
+    fn retain(&mut self, live: &BTreeSet<Local>) {
+        self.whole.retain(|local| live.contains(local));
+        self.parts.retain(|part| live.contains(&part.local));
+    }
+}
+
+fn check_moves(body: &Body, graph: &Graph, live: &Liveness, errors: &mut Vec<Error>) {
+    let mut entry = Empty::default();
+    for local in (0..body.locals.len()).filter(|local| !body.parameters.contains(local)) {
+        entry.insert(Place::local(local));
+    }
     let starts = forward(
         graph,
         entry,
-        &Empty::new(),
-        |state, other| state.extend(other.iter().cloned()),
+        &Empty::default(),
+        Empty::join,
         |block, state| {
+            state.retain(&live.starts[block]);
             for statement in &body.blocks[block].statements {
                 move_statement(body, &statement.kind, statement.span, state, None);
             }
+            state.retain(&live.ends[block]);
         },
     );
     for &block in &graph.order {
         let mut state = starts[block].clone();
+        state.retain(&live.starts[block]);
         for statement in &body.blocks[block].statements {
             move_statement(
                 body,
@@ -263,7 +349,6 @@ fn move_statement(
         StatementKind::Assign(destination, value) => (destination.clone(), value),
         StatementKind::Bind(reference, value) => (Place::local(*reference), value),
         StatementKind::Release(local) => {
-            state.retain(|place| place.local != *local);
             state.insert(Place::local(*local));
             return;
         }
@@ -279,7 +364,7 @@ fn move_statement(
                 state.insert(moved_place(body, place));
             }
             for (local, _) in taken {
-                fill(state, &Place::local(*local));
+                state.fill(&Place::local(*local));
             }
             return;
         }
@@ -300,15 +385,11 @@ fn move_statement(
     {
         // Writing through a reference needs it to point somewhere,
         // and writing into a part needs the whole to be there.
-        let reference = body.locals[destination.local].reference.is_some();
-        let missing = state.iter().any(|empty| {
-            if reference {
-                *empty == Place::local(destination.local)
-            } else {
-                is_prefix(empty, destination)
-                    && empty.projections.len() < destination.projections.len()
-            }
-        });
+        let missing = if body.locals[destination.local].reference.is_some() {
+            state.is_whole(destination.local)
+        } else {
+            state.lacks_container(destination)
+        };
         if missing {
             let local = &body.locals[destination.local];
             errors.push(Error {
@@ -321,7 +402,7 @@ fn move_statement(
             });
         }
     }
-    fill(state, &written);
+    state.fill(&written);
 }
 
 /// What a move out of `place` leaves empty: the whole variable, or for a
@@ -339,15 +420,8 @@ fn is_whole(body: &Body, destination: &Place) -> bool {
     destination.projections.is_empty() && body.locals[destination.local].reference.is_none()
 }
 
-/// Records that `place` and everything inside it hold a value.
-fn fill(state: &mut Empty, place: &Place) {
-    state.retain(|empty| !is_prefix(place, empty));
-}
-
 fn check_filled(body: &Body, state: &Empty, place: &Place, span: Span, errors: &mut Vec<Error>) {
-    if state.iter().any(|empty| {
-        empty.local == place.local && (is_prefix(empty, place) || is_prefix(place, empty))
-    }) {
+    if state.overlaps(place) {
         let local = &body.locals[place.local];
         let message = if local.temporary {
             "this value is used after it may have been moved".to_owned()
@@ -404,10 +478,16 @@ enum Access {
     Release,
 }
 
-fn check_borrows(body: &Body, types: &Types, graph: &Graph, errors: &mut Vec<Error>) {
+fn check_borrows(
+    body: &Body,
+    types: &Types,
+    graph: &Graph,
+    live: &Liveness,
+    errors: &mut Vec<Error>,
+) {
     // Every loan, by the statement that makes it.
     let mut loans = Vec::new();
-    let mut loan_at = std::collections::BTreeMap::new();
+    let mut loan_at = BTreeMap::new();
     for (block, data) in body.blocks.iter().enumerate() {
         for (index, statement) in data.statements.iter().enumerate() {
             if let StatementKind::Bind(reference, Rvalue::Ref(kind, place)) = &statement.kind {
@@ -434,40 +514,46 @@ fn check_borrows(body: &Body, types: &Types, graph: &Graph, errors: &mut Vec<Err
             });
         }
     }
-    let count = body.locals.len();
     // The loans each reference local may carry.
     let carried_starts = forward(
         graph,
-        vec![BTreeSet::new(); count],
-        &vec![BTreeSet::new(); count],
-        |state: &mut Vec<BTreeSet<usize>>, other| {
-            for (mine, theirs) in state.iter_mut().zip(other) {
-                mine.extend(theirs.iter().copied());
+        Carried::new(),
+        &Carried::new(),
+        |state: &mut Carried, other| {
+            for (reference, theirs) in other {
+                state
+                    .entry(*reference)
+                    .or_default()
+                    .extend(theirs.iter().copied());
             }
         },
         |block, state| {
+            state.retain(|reference, _| live.starts[block].contains(reference));
             for (index, statement) in body.blocks[block].statements.iter().enumerate() {
                 let own = loan_at.get(&(block, index)).copied();
                 carry(body, &statement.kind, own, &active, state);
             }
+            state.retain(|reference, _| live.ends[block].contains(reference));
         },
     );
-    let live_ends = liveness(body, graph);
+    let is_reference = |local: &Local| body.locals[*local].reference.is_some();
     for &block in &graph.order {
         let mut carried = carried_starts[block].clone();
+        carried.retain(|reference, _| live.starts[block].contains(reference));
         // The references live after each statement, from the block's end
         // backwards.
         let statements = &body.blocks[block].statements;
         let mut live_after = vec![BTreeSet::new(); statements.len()];
-        let mut live = live_ends[block].clone();
-        terminator_uses(body, &body.blocks[block].terminator.kind, &mut live);
+        let mut references = live.ends[block].clone();
+        terminator_uses(body, &body.blocks[block].terminator.kind, &mut references);
+        references.retain(is_reference);
         for (index, statement) in statements.iter().enumerate().rev() {
-            live_after[index] = live.clone();
-            let (uses, defines) = reference_uses(body, &statement.kind);
-            if let Some(defined) = defines {
-                live.remove(&defined);
+            live_after[index] = references.clone();
+            let (uses, defines) = local_uses(body, &statement.kind);
+            for defined in defines {
+                references.remove(&defined);
             }
-            live.extend(uses);
+            references.extend(uses.into_iter().filter(is_reference));
         }
         for (index, statement) in statements.iter().enumerate() {
             let own = loan_at.get(&(block, index)).copied();
@@ -490,12 +576,21 @@ fn check_borrows(body: &Body, types: &Types, graph: &Graph, errors: &mut Vec<Err
             check_returned(
                 body,
                 &loans,
-                &carried[body.result],
+                &carried_by(&carried, body.result),
                 &body.blocks[block],
                 errors,
             );
         }
     }
+}
+
+/// The loans that each reference local may carry, for the references that
+/// carry any, so a step looks only at the references it names.
+type Carried = BTreeMap<Local, BTreeSet<usize>>;
+
+/// The loans that `reference` may carry.
+fn carried_by(carried: &Carried, reference: Local) -> BTreeSet<usize> {
+    carried.get(&reference).cloned().unwrap_or_default()
 }
 
 /// Updates the loans the reference locals carry after `statement`.
@@ -504,7 +599,7 @@ fn carry(
     statement: &StatementKind,
     own: Option<usize>,
     active: &[Option<usize>],
-    carried: &mut [BTreeSet<usize>],
+    carried: &mut Carried,
 ) {
     match statement {
         StatementKind::Bind(reference, value) => {
@@ -513,14 +608,14 @@ fn carry(
                 Rvalue::Ref(_, place) => {
                     loans.extend(own);
                     if body.locals[place.local].reference.is_some() {
-                        loans.extend(carried[place.local].iter().copied());
+                        loans.extend(carried_by(carried, place.local));
                     }
                 }
                 Rvalue::Call { arguments, .. } => {
                     for argument in arguments {
                         if let Operand::Borrowed(reference) = argument {
                             loans.extend(
-                                carried[*reference].iter().map(|&loan| {
+                                carried_by(carried, *reference).into_iter().map(|loan| {
                                     active.get(loan).copied().flatten().unwrap_or(loan)
                                 }),
                             );
@@ -529,18 +624,32 @@ fn carry(
                 }
                 _ => unreachable!("only borrows and calls make references point"),
             }
-            carried[*reference] = loans;
+            if loans.is_empty() {
+                carried.remove(reference);
+            } else {
+                carried.insert(*reference, loans);
+            }
         }
-        StatementKind::Release(local) => carried[*local].clear(),
+        StatementKind::Release(local) => {
+            carried.remove(local);
+        }
         StatementKind::Assign(..) | StatementKind::Unpack(_) => {}
     }
 }
 
-/// The reference locals live at the end of each block.
-fn liveness(body: &Body, graph: &Graph) -> Vec<BTreeSet<usize>> {
+// Liveness.
+
+/// The locals live at the start and at the end of each block: those whose
+/// content a later step may depend on before something replaces it.
+struct Liveness {
+    starts: Vec<BTreeSet<Local>>,
+    ends: Vec<BTreeSet<Local>>,
+}
+
+fn liveness(body: &Body, graph: &Graph) -> Liveness {
     let count = body.blocks.len();
+    let mut starts = vec![BTreeSet::new(); count];
     let mut ends = vec![BTreeSet::new(); count];
-    let mut starts = vec![BTreeSet::<usize>::new(); count];
     let mut changed = true;
     while changed {
         changed = false;
@@ -552,8 +661,8 @@ fn liveness(body: &Body, graph: &Graph) -> Vec<BTreeSet<usize>> {
             ends[block] = live.clone();
             terminator_uses(body, &body.blocks[block].terminator.kind, &mut live);
             for statement in body.blocks[block].statements.iter().rev() {
-                let (uses, defines) = reference_uses(body, &statement.kind);
-                if let Some(defined) = defines {
+                let (uses, defines) = local_uses(body, &statement.kind);
+                for defined in defines {
                     live.remove(&defined);
                 }
                 live.extend(uses);
@@ -564,70 +673,50 @@ fn liveness(body: &Body, graph: &Graph) -> Vec<BTreeSet<usize>> {
             }
         }
     }
-    ends
+    Liveness { starts, ends }
 }
 
-fn terminator_uses(body: &Body, terminator: &TerminatorKind, live: &mut BTreeSet<usize>) {
-    match terminator {
-        TerminatorKind::Branch { condition, .. } => {
-            for place in operand_places(condition) {
-                if body.locals[place.local].reference.is_some() {
-                    live.insert(place.local);
-                }
-            }
-        }
-        // A returned borrow lives on in the caller.
-        TerminatorKind::Return if body.locals[body.result].reference.is_some() => {
-            live.insert(body.result);
-        }
+/// Adds the locals a terminator uses to `live`. A borrow that the function
+/// returns lives on in the caller.
+fn terminator_uses(body: &Body, terminator: &TerminatorKind, live: &mut BTreeSet<Local>) {
+    let used = match terminator {
+        TerminatorKind::Branch { condition, .. } => operand_places(condition),
+        TerminatorKind::Return => vec![Place::local(body.result)],
         TerminatorKind::TailCall { arguments, .. } => {
-            for argument in arguments {
-                if let Operand::Borrowed(reference) = argument {
-                    live.insert(*reference);
-                }
-            }
+            arguments.iter().flat_map(operand_places).collect()
         }
-        TerminatorKind::Return | TerminatorKind::Goto(_) | TerminatorKind::Unreachable => {}
-    }
+        TerminatorKind::Goto(_) | TerminatorKind::Unreachable => Vec::new(),
+    };
+    live.extend(used.into_iter().map(|place| place.local));
 }
 
-/// The reference locals a statement uses, and the one it makes point
-/// somewhere or ends.
-fn reference_uses(body: &Body, statement: &StatementKind) -> (Vec<usize>, Option<usize>) {
-    let is_reference = |local: usize| body.locals[local].reference.is_some();
-    let value = match statement {
-        StatementKind::Assign(_, value) | StatementKind::Bind(_, value) => value,
-        StatementKind::Release(local) if is_reference(*local) => return (Vec::new(), Some(*local)),
-        StatementKind::Release(_) => return (Vec::new(), None),
-        StatementKind::Unpack(taken) => {
-            let uses = taken
-                .iter()
-                .flat_map(|(_, place)| operand_places(&Operand::Move(place.clone())))
-                .map(|place| place.local)
-                .filter(|&local| is_reference(local))
-                .collect();
-            return (uses, None);
-        }
-    };
-    let mut uses = rvalue_places(value)
-        .into_iter()
-        .map(|place| place.local)
-        .chain(value.operands().iter().filter_map(|operand| match operand {
-            Operand::Borrowed(local) => Some(*local),
-            _ => None,
-        }))
-        .filter(|&local| is_reference(local))
-        .collect::<Vec<_>>();
+/// The locals whose content `statement` depends on: those whose places it
+/// reads, takes or borrows, writes into a part of, or writes through; and
+/// those it gives new content regardless of what they held: filled whole,
+/// made to point somewhere, or released.
+fn local_uses(body: &Body, statement: &StatementKind) -> (Vec<Local>, Vec<Local>) {
+    let locals = |places: Vec<Place>| places.into_iter().map(|place| place.local);
     match statement {
-        StatementKind::Bind(reference, _) => (uses, Some(*reference)),
-        // Writing through a reference uses it.
-        StatementKind::Assign(destination, _) => {
-            if is_reference(destination.local) {
-                uses.push(destination.local);
-            }
-            (uses, None)
+        StatementKind::Release(local) => (Vec::new(), vec![*local]),
+        StatementKind::Unpack(taken) => (
+            taken
+                .iter()
+                .flat_map(|(_, place)| locals(operand_places(&Operand::Move(place.clone()))))
+                .collect(),
+            taken.iter().map(|(local, _)| *local).collect(),
+        ),
+        StatementKind::Bind(reference, value) => {
+            (locals(rvalue_places(value)).collect(), vec![*reference])
         }
-        StatementKind::Release(_) | StatementKind::Unpack(_) => unreachable!("handled above"),
+        StatementKind::Assign(destination, value) => {
+            let mut uses = locals(rvalue_places(value)).collect::<Vec<_>>();
+            if is_whole(body, destination) {
+                (uses, vec![destination.local])
+            } else {
+                uses.extend(locals(operand_places(&Operand::Move(destination.clone()))));
+                (uses, Vec::new())
+            }
+        }
     }
 }
 
@@ -636,19 +725,19 @@ fn check_statement(
     body: &Body,
     types: &Types,
     loans: &[Loan],
-    carried: &[BTreeSet<usize>],
+    carried: &Carried,
     live_after: &BTreeSet<usize>,
     own: Option<usize>,
     statement: &StatementKind,
     span: Span,
     errors: &mut Vec<Error>,
 ) {
-    let (uses, _) = reference_uses(body, statement);
+    let (uses, _) = local_uses(body, statement);
     // The loans that hold while the statement runs: those of the references
     // used later and of those it uses itself.
     let mut live = BTreeSet::new();
     for reference in live_after.iter().chain(&uses) {
-        live.extend(carried[*reference].iter().copied());
+        live.extend(carried_by(carried, *reference));
     }
     let accesses = accesses(body, types, loans, carried, statement, own);
     for access in accesses {
@@ -677,7 +766,7 @@ fn accesses(
     body: &Body,
     types: &Types,
     loans: &[Loan],
-    carried: &[BTreeSet<usize>],
+    carried: &Carried,
     statement: &StatementKind,
     own: Option<usize>,
 ) -> Vec<Made> {
@@ -790,7 +879,7 @@ fn accesses(
             // The loans it is made through, and those of the other
             // borrowed arguments that differ from it only in list
             // indices, which are compared at run time.
-            let mut exempt = carried[reference].clone();
+            let mut exempt = carried_by(carried, reference);
             exempt.extend(
                 siblings
                     .iter()
@@ -808,10 +897,9 @@ fn accesses(
 }
 
 /// The loans made for `reference` itself.
-fn own_loans(loans: &[Loan], carried: &[BTreeSet<usize>], reference: usize) -> Vec<usize> {
-    carried[reference]
-        .iter()
-        .copied()
+fn own_loans(loans: &[Loan], carried: &Carried, reference: usize) -> Vec<usize> {
+    carried_by(carried, reference)
+        .into_iter()
         .filter(|&loan| loans[loan].reference == reference)
         .collect()
 }

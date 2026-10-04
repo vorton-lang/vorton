@@ -7,6 +7,7 @@
 //! definition becomes a [`TerminatorKind::TailCall`], which code generation
 //! emits as a jump to the start of the function.
 
+use std::cell::OnceCell;
 use std::collections::BTreeSet;
 
 use crate::mir::{
@@ -48,8 +49,8 @@ struct TailCalls<'a> {
     /// What each reference local is made to point at: borrows and calls.
     definitions: Vec<Vec<&'a Rvalue>>,
     /// The owning locals that may hold something at the start of each
-    /// block.
-    filled: Vec<BTreeSet<Local>>,
+    /// block, found once a call of the function itself needs them.
+    filled: OnceCell<Vec<BTreeSet<Local>>>,
 }
 
 impl<'a> TailCalls<'a> {
@@ -67,7 +68,7 @@ impl<'a> TailCalls<'a> {
             index,
             body,
             definitions,
-            filled: body.maybe_filled(types),
+            filled: OnceCell::new(),
         }
     }
 
@@ -132,7 +133,8 @@ impl<'a> TailCalls<'a> {
         });
         // A value whose `drop` runs after the call returns makes it no tail
         // call; releasing anything else early is not observable.
-        let mut filled = self.filled[block].clone();
+        let starts = self.filled.get_or_init(|| body.maybe_filled(self.types));
+        let mut filled = starts[block].clone();
         for statement in &data.statements[..=index] {
             body.fill(self.types, &statement.kind, &mut filled);
         }
