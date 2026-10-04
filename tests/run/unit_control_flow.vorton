@@ -1,0 +1,35 @@
+fn f(u: Unit) {
+    print(u == ())
+}
+
+fn g() -> Int {
+    7
+}
+
+fn h(c: Bool) -> Unit {
+    if c {
+        g()
+    }
+}
+
+fn main() {
+    let a: Unit = {}
+    let b: Unit = if false { () }
+    let c: Unit = if true { g() } else { g() }
+    let d: Unit = match 3 {
+        1 => g()
+        _ => ()
+    }
+    let e: Unit = { g() }
+    print(a == b)
+    print(c == d)
+    print(e == ())
+    f(if true { () } else { () })
+    f(match true {
+        true => ()
+        false => ()
+    })
+    f(h(true))
+    let xs = [(), ()]
+    print(xs.len())
+}

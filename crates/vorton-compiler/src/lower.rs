@@ -60,9 +60,6 @@ pub(crate) fn lower(function: &Function, types: &Types) -> Body {
     });
     let span = function_span(&function.body);
     if builder.block_into(Some(Place::local(result)), &function.body) {
-        if function.result == Type::UNIT {
-            builder.unit_result(span);
-        }
         builder.return_(span);
     }
     #[cfg(debug_assertions)]
@@ -256,9 +253,16 @@ impl Builder<'_> {
         self.scopes.pop();
     }
 
-    fn unit_result(&mut self, span: Span) {
-        let result = Place::local(self.body.result);
-        self.assign(result, Rvalue::Use(Operand::Constant(Constant::Unit)), span);
+    /// Stores `Unit` in `destination`: the value of a block without a last
+    /// expression, or of a construct whose value is discarded.
+    fn unit_into(&mut self, destination: Option<Place>, span: Span) {
+        if let Some(destination) = destination {
+            self.assign(
+                destination,
+                Rvalue::Use(Operand::Constant(Constant::Unit)),
+                span,
+            );
+        }
     }
 
     fn return_(&mut self, span: Span) {
@@ -288,18 +292,12 @@ impl Builder<'_> {
             self.close(span);
         }
         let continues = match &block.tail {
-            Some(tail) if block.ty == Type::UNIT => {
-                self.open(false);
-                let continues = self.expr_into(None, tail);
-                if continues {
-                    self.close(tail.span);
-                } else {
-                    self.scopes.pop();
-                }
-                continues
+            Some(tail) => self.value_into(destination, tail, block.ty),
+            None if block.ty == Type::NEVER => false,
+            None => {
+                self.unit_into(destination, Span::new(0, 0));
+                true
             }
-            Some(tail) => self.expr_into(destination, tail),
-            None => block.ty != Type::NEVER,
         };
         if !continues || block.ty == Type::NEVER {
             self.scopes.pop();
@@ -375,18 +373,12 @@ impl Builder<'_> {
                 let result = Place::local(self.body.result);
                 let span = value.as_ref().map_or(Span::new(0, 0), |value| value.span);
                 match value {
-                    Some(value) if value.ty != Type::UNIT => {
+                    Some(value) => {
                         if !self.expr_into(Some(result), value) {
                             return false;
                         }
                     }
-                    Some(value) => {
-                        if !self.expr_into(None, value) {
-                            return false;
-                        }
-                        self.unit_result(span);
-                    }
-                    None => self.unit_result(span),
+                    None => self.unit_into(Some(result), span),
                 }
                 self.return_(span);
                 false
@@ -833,6 +825,25 @@ impl Builder<'_> {
     }
 
     // Expressions.
+
+    /// Lowers `expression` as the value of a construct of type `ty`: a
+    /// block, a branch or an arm. Where `ty` is `Unit` and the expression's
+    /// own type is another, its value is dropped as a statement's would be,
+    /// and the construct's value is `Unit`.
+    fn value_into(&mut self, destination: Option<Place>, expression: &Expr, ty: Type) -> bool {
+        if expression.ty == ty || expression.ty == Type::NEVER {
+            return self.expr_into(destination, expression);
+        }
+        debug_assert_eq!(ty, Type::UNIT, "only a `Unit` construct drops a value");
+        self.open(false);
+        if !self.expr_into(None, expression) {
+            self.scopes.pop();
+            return false;
+        }
+        self.close(expression.span);
+        self.unit_into(destination, expression.span);
+        true
+    }
 
     /// Lowers `expression` and stores its value in `destination`, or drops
     /// it. Returns whether control continues after it.
@@ -1450,7 +1461,6 @@ impl Builder<'_> {
             },
             span,
         );
-        let destination = destination.filter(|_| ty != Type::UNIT);
         self.current = then;
         let mut reaches = false;
         if self.block_into(destination.clone(), then_branch) {
@@ -1461,7 +1471,7 @@ impl Builder<'_> {
         let continues = match else_branch {
             Some(branch) => {
                 self.open(false);
-                let continues = self.expr_into(destination, branch);
+                let continues = self.value_into(destination, branch, ty);
                 if continues {
                     self.close(span);
                 } else {
@@ -1469,7 +1479,11 @@ impl Builder<'_> {
                 }
                 continues
             }
-            None => true,
+            // Without `else`, the `if` is `Unit`.
+            None => {
+                self.unit_into(destination, span);
+                true
+            }
         };
         if continues {
             self.goto(join, span);
@@ -1580,7 +1594,6 @@ impl Builder<'_> {
         let Some((base, subject_ty)) = self.subject(scrutinee) else {
             return false;
         };
-        let destination = destination.filter(|_| ty != Type::UNIT);
         let join = self.body.new_block();
         let mut reaches = false;
         for arm in arms {
@@ -1634,7 +1647,7 @@ impl Builder<'_> {
                 self.current = fail;
             }
             self.current = matched;
-            let continues = self.expr_into(destination.clone(), &arm.body);
+            let continues = self.value_into(destination.clone(), &arm.body, ty);
             if continues {
                 self.close(arm.body.span);
                 self.goto(join, span);
