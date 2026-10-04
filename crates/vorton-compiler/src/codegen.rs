@@ -14,8 +14,7 @@ mod body;
 use std::fmt::Write as _;
 
 use crate::mir::{Instance, LocalDecl, Program};
-use crate::types::{Glue, Operation};
-use crate::types::{Type, TypeKind, Types};
+use crate::types::{Glue, Operation, OptionEnum, OrderingEnum, Type, TypeKind, Types};
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
 const GENERIC: &str = "generic functions are instantiated before code generation";
@@ -287,16 +286,16 @@ fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut St
         function(format!("bool vt_eq_T{n}({name} a, {name} b)"), body);
     }
     if let Glue::Written(partial_cmp) = types.glue(ty, Operation::Order) {
-        // `Option<Ordering>` to -1, 0 or 1, and 2 for `None`; the variants
-        // of `Ordering` are `Less`, `Equal` and `Greater`.
+        // `Option<Ordering>` to -1, 0 or 1, and 2 for `None`.
         let user = function_name(partial_cmp, &program.functions[partial_cmp]);
         let body = &program.functions[partial_cmp].body;
         let result = body.locals[body.result].ty;
-        let (some, none) = option_variants(types, result);
+        let OptionEnum { some, none, .. } = types.core.option;
+        let OrderingEnum { less, equal } = types.core.ordering;
         function(
             format!("int vt_cmp_T{n}({name} a, {name} b)"),
             format!(
-                "    {} r = {user}(&a, &b);\n    if (r.tag == {none}) return 2;\n    return (int)r.u.v{some}.f0.tag - 1;\n",
+                "    {} r = {user}(&a, &b);\n    if (r.tag == {none}) return 2;\n    int o = (int)r.u.v{some}.f0.tag;\n    return o == {less} ? -1 : o == {equal} ? 0 : 1;\n",
                 c_type(types, result)
             ),
         );
@@ -793,21 +792,6 @@ fn escape_c(value: &str) -> String {
         }
     }
     escaped
-}
-
-/// The `Some` and `None` variant indices of an `Option` type: `Some` is the
-/// variant with one field.
-fn option_variants(types: &Types, ty: Type) -> (usize, usize) {
-    let variants = types.variants(ty);
-    let some = variants
-        .iter()
-        .position(|variant| variant.fields.len() == 1)
-        .expect("`Option` has `Some`");
-    let none = variants
-        .iter()
-        .position(|variant| variant.fields.is_empty())
-        .expect("`Option` has `None`");
-    (some, none)
 }
 
 fn int_literal(value: i64) -> String {

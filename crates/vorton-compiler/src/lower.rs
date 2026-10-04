@@ -23,7 +23,7 @@ use crate::mir::{
     Statement, StatementKind, Terminator, TerminatorKind, element_type,
 };
 use crate::typed::{
-    Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, Pattern,
+    Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, ListMethod, Pattern,
     Projection as TypedProjection, Receiver, Statement as TypedStatement,
 };
 use crate::types::{Operation, Type, TypeKind, Types};
@@ -933,16 +933,7 @@ impl Builder<'_> {
                 left,
                 right,
             } => {
-                let compares = !matches!(
-                    operator,
-                    BinaryOperator::Add
-                        | BinaryOperator::Subtract
-                        | BinaryOperator::Multiply
-                        | BinaryOperator::Divide
-                        | BinaryOperator::Remainder
-                        | BinaryOperator::RangeExclusive
-                        | BinaryOperator::RangeInclusive
-                );
+                let compares = operator.is_comparison();
                 let ty = left.ty;
                 let (left, right) = if compares && self.types.is_entity(ty) {
                     // Comparisons borrow entity operands.
@@ -953,15 +944,7 @@ impl Builder<'_> {
                     (left, self.operand(right)?)
                 };
                 // Comparing values that have parts may run hand-written impls.
-                if compares
-                    && matches!(
-                        self.types.kind(ty),
-                        TypeKind::Tuple(_)
-                            | TypeKind::Nominal { .. }
-                            | TypeKind::List(_)
-                            | TypeKind::Param { .. }
-                    )
-                {
+                if compares && self.types.compares_by_parts(ty) {
                     let operation = match operator {
                         BinaryOperator::Equal | BinaryOperator::NotEqual => Operation::Equal,
                         _ => Operation::Order,
@@ -1205,6 +1188,7 @@ impl Builder<'_> {
         }
         Some(operands)
     }
+
     fn builtin(
         &mut self,
         builtin: Builtin,
@@ -1222,14 +1206,12 @@ impl Builder<'_> {
         // are evaluated. The others read only values of a container, its
         // length, keys or value elements, which never conflicts, and a
         // `Str` receiver is a value read now.
-        let kind = match builtin {
-            Builtin::Push | Builtin::Pop | Builtin::Insert | Builtin::Remove | Builtin::Clear => {
-                Some((RefKind::MutableArgument, BorrowKind::Mutable))
-            }
-            Builtin::Clone if self.types.is_entity(receiver_ty) => {
-                Some((RefKind::Shared, BorrowKind::Shared))
-            }
-            _ => None,
+        let kind = if builtin.changes_receiver() {
+            Some((RefKind::MutableArgument, BorrowKind::Mutable))
+        } else if builtin == Builtin::Clone && self.types.is_entity(receiver_ty) {
+            Some((RefKind::Shared, BorrowKind::Shared))
+        } else {
+            None
         };
         let receiver = match kind {
             Some((ref_kind, borrow)) => {
@@ -1249,10 +1231,10 @@ impl Builder<'_> {
         let mut arguments = self.operands(arguments)?;
         // Cloning, and searching a list, clone or compare the parts of
         // values, which may run hand-written impls.
-        let operation = match (builtin, self.types.kind(receiver_ty)) {
-            (Builtin::Clone, _) => Some(Operation::Clone),
-            (Builtin::Contains, TypeKind::List(_)) => Some(Operation::Contains),
-            _ => None,
+        let operation = match builtin {
+            Builtin::Clone => Some(Operation::Clone),
+            Builtin::List(ListMethod::Contains) => Some(Operation::Contains),
+            Builtin::List(_) | Builtin::Map(_) | Builtin::Set(_) | Builtin::Str(_) => None,
         };
         if let Some(operation) = operation {
             // An entity is looked at where it is; a value is read.

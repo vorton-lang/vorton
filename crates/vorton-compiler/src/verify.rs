@@ -7,7 +7,7 @@
 //! would have rejected.
 
 use crate::mir::{Body, Operand, Place, Rvalue, StatementKind, TerminatorKind, projection_type};
-use crate::types::{Type, TypeKind, Types};
+use crate::types::{Type, Types};
 
 /// Panics if `body` breaks an invariant of the IR; `stage` names the pass
 /// that produced it.
@@ -139,15 +139,7 @@ fn rvalue(body: &Body, types: &Types, value: &Rvalue) -> Result<(), String> {
     match value {
         Rvalue::Binary(_, left, _) => {
             let ty = operand_type(body, types, left)?;
-            if matches!(
-                types.kind(ty),
-                TypeKind::Tuple(_)
-                    | TypeKind::Nominal { .. }
-                    | TypeKind::List(_)
-                    | TypeKind::Map(..)
-                    | TypeKind::Set(_)
-                    | TypeKind::Param { .. }
-            ) {
+            if types.compares_by_parts(ty) {
                 return Err(format!(
                     "`{}` is compared by a plain operator instead of `Glue`",
                     types.name(ty)

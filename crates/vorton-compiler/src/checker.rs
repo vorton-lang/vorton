@@ -31,9 +31,13 @@ use crate::project::{
 use crate::resolver::owner_key_from_entity;
 use crate::typed::{
     Arm, Block, BorrowTarget, Builtin, Callee, Expr, ExprKind, ForSource, Function, Impls,
-    Intrinsic, Local, Pattern, Place, Program, Projection, Receiver, Statement, StrMethod,
+    Intrinsic, ListMethod, Local, MapMethod, Pattern, Place, Program, Projection, Receiver,
+    SetMethod, Statement, StrMethod,
 };
-use crate::types::{Comparison, Field, NominalInfo, Type, TypeKind, Types, Variant};
+use crate::types::{
+    Comparison, CoreEnums, Field, NominalInfo, OptionEnum, OrderingEnum, Type, TypeKind, Types,
+    Variant,
+};
 
 #[derive(Clone)]
 struct Signature {
@@ -161,8 +165,6 @@ struct Nominals<'a> {
     declarations: Vec<NominalDeclaration<'a>>,
     by_identity: BTreeMap<EntityId, usize>,
     constructors: BTreeMap<EntityId, (usize, usize)>,
-    /// The core `Option` declaration and its `Some` and `None` variants.
-    option: Option<(usize, usize, usize)>,
     /// The types written as map keys and set elements.
     keys: RefCell<Keys>,
 }
@@ -242,7 +244,6 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         declarations: Vec::new(),
         by_identity: BTreeMap::new(),
         constructors: BTreeMap::new(),
-        option: None,
         keys: RefCell::default(),
     };
     for (module, resolved) in &project.modules {
@@ -367,16 +368,19 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         }
     }
 
-    let option = &project.core_roles.option;
-    if let (Some(&declaration), Some(&(_, some)), Some(&(_, none))) = (
-        nominals.by_identity.get(&option.declaration),
-        nominals.constructors.get(&option.some),
-        nominals.constructors.get(&option.none),
-    ) {
-        nominals.option = Some((declaration, some, none));
-    }
-
-    let mut types = Types::new();
+    let roles = &project.core_roles;
+    let variant = |identity: &EntityId| nominals.constructors[identity].1;
+    let mut types = Types::new(CoreEnums {
+        option: OptionEnum {
+            declaration: nominals.by_identity[&roles.option.declaration],
+            some: variant(&roles.option.some),
+            none: variant(&roles.option.none),
+        },
+        ordering: OrderingEnum {
+            less: variant(&roles.ordering.less),
+            equal: variant(&roles.ordering.equal),
+        },
+    });
     for declaration in &nominals.declarations {
         types.nominals.push(NominalInfo {
             name: declaration.name.clone(),
@@ -2790,10 +2794,8 @@ impl BodyChecker<'_> {
         ))
     }
 
-    fn option_type(&mut self, span: Span, element: Type) -> Result<Type, CheckDiagnostic> {
-        let Some((declaration, _, _)) = self.nominals.option else {
-            return Err(self.unsupported(span, "`Option` without the core declaration"));
-        };
+    fn option_type(&mut self, element: Type) -> Result<Type, CheckDiagnostic> {
+        let declaration = self.types.core.option.declaration;
         instantiate(self.types, self.nominals, declaration, vec![element])
     }
 
@@ -2839,111 +2841,89 @@ impl BodyChecker<'_> {
                 format!("`{}` has no method `{name}`", checker.types.name(ty)),
             )
         };
-        let (builtin, parameters, result, mutates): (Builtin, Vec<Type>, Type, bool) =
-            if name == "clone" && self.can_clone(ty) {
-                (Builtin::Clone, Vec::new(), ty, false)
-            } else if let TypeKind::List(element) = *self.types.kind(ty) {
-                match name {
-                    "push" => (Builtin::Push, vec![element], Type::UNIT, true),
-                    "pop" => (
-                        Builtin::Pop,
-                        Vec::new(),
-                        self.option_type(span, element)?,
-                        true,
-                    ),
-                    "len" => (Builtin::Len, Vec::new(), Type::INT, false),
-                    "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
-                    "insert" => (Builtin::Insert, vec![Type::INT, element], Type::UNIT, true),
-                    "remove" => (Builtin::Remove, vec![Type::INT], element, true),
-                    "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
-                    "contains" if !self.types.is_entity(element) && self.has_equality(element) => {
-                        (Builtin::Contains, vec![element], Type::BOOL, false)
-                    }
-                    "get" if !self.types.is_entity(element) => (
-                        Builtin::Get,
-                        vec![Type::INT],
-                        self.option_type(span, element)?,
-                        false,
-                    ),
-                    _ => return Err(unknown(self)),
+        let (builtin, parameters, result) = if name == "clone" && self.can_clone(ty) {
+            (Builtin::Clone, Vec::new(), ty)
+        } else if let TypeKind::List(element) = *self.types.kind(ty) {
+            use ListMethod as M;
+            let (method, parameters, result) = match name {
+                "push" => (M::Push, vec![element], Type::UNIT),
+                "pop" => (M::Pop, Vec::new(), self.option_type(element)?),
+                "len" => (M::Len, Vec::new(), Type::INT),
+                "is_empty" => (M::IsEmpty, Vec::new(), Type::BOOL),
+                "insert" => (M::Insert, vec![Type::INT, element], Type::UNIT),
+                "remove" => (M::Remove, vec![Type::INT], element),
+                "clear" => (M::Clear, Vec::new(), Type::UNIT),
+                "contains" if !self.types.is_entity(element) && self.has_equality(element) => {
+                    (M::Contains, vec![element], Type::BOOL)
                 }
-            } else if let TypeKind::Map(key, value) = *self.types.kind(ty) {
-                match name {
-                    "insert" => (
-                        Builtin::Insert,
-                        vec![key, value],
-                        self.option_type(span, value)?,
-                        true,
-                    ),
-                    "remove" => (
-                        Builtin::Remove,
-                        vec![key],
-                        self.option_type(span, value)?,
-                        true,
-                    ),
-                    "get" if !self.types.is_entity(value) => (
-                        Builtin::Get,
-                        vec![key],
-                        self.option_type(span, value)?,
-                        false,
-                    ),
-                    "contains_key" => (Builtin::ContainsKey, vec![key], Type::BOOL, false),
-                    "keys" => (
-                        Builtin::Keys,
-                        Vec::new(),
-                        self.types.intern(TypeKind::List(key)),
-                        false,
-                    ),
-                    "len" => (Builtin::Len, Vec::new(), Type::INT, false),
-                    "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
-                    "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
-                    _ => return Err(unknown(self)),
+                "get" if !self.types.is_entity(element) => {
+                    (M::Get, vec![Type::INT], self.option_type(element)?)
                 }
-            } else if ty == Type::STR {
-                use StrMethod as M;
-                let text = Type::STR;
-                let (method, parameters, result) = match name {
-                    "len" => (M::Len, Vec::new(), Type::INT),
-                    "is_empty" => (M::IsEmpty, Vec::new(), Type::BOOL),
-                    "contains" => (M::Contains, vec![text], Type::BOOL),
-                    "starts_with" => (M::StartsWith, vec![text], Type::BOOL),
-                    "ends_with" => (M::EndsWith, vec![text], Type::BOOL),
-                    "find" => (M::Find, vec![text], self.option_type(span, Type::INT)?),
-                    "slice" => (M::Slice, vec![Type::INT, Type::INT], text),
-                    "split" => (
-                        M::Split,
-                        vec![text],
-                        self.types.intern(TypeKind::List(text)),
-                    ),
-                    "trim" => (M::Trim, Vec::new(), text),
-                    "replace" => (M::Replace, vec![text, text], text),
-                    "repeat" => (M::Repeat, vec![Type::INT], text),
-                    "chars" => (
-                        M::Chars,
-                        Vec::new(),
-                        self.types.intern(TypeKind::List(text)),
-                    ),
-                    "to_upper" => (M::ToUpper, Vec::new(), text),
-                    "to_lower" => (M::ToLower, Vec::new(), text),
-                    "parse_int" => (M::ParseInt, Vec::new(), self.option_type(span, Type::INT)?),
-                    _ => return Err(unknown(self)),
-                };
-                (Builtin::Str(method), parameters, result, false)
-            } else if let TypeKind::Set(element) = *self.types.kind(ty) {
-                match name {
-                    "insert" => (Builtin::Insert, vec![element], Type::BOOL, true),
-                    "remove" => (Builtin::Remove, vec![element], Type::BOOL, true),
-                    "contains" => (Builtin::Contains, vec![element], Type::BOOL, false),
-                    "len" => (Builtin::Len, Vec::new(), Type::INT, false),
-                    "is_empty" => (Builtin::IsEmpty, Vec::new(), Type::BOOL, false),
-                    "clear" => (Builtin::Clear, Vec::new(), Type::UNIT, true),
-                    _ => return Err(unknown(self)),
-                }
-            } else {
-                return Err(unknown(self));
+                _ => return Err(unknown(self)),
             };
-        // A temporary can always be changed.
-        if mutates
+            (Builtin::List(method), parameters, result)
+        } else if let TypeKind::Map(key, value) = *self.types.kind(ty) {
+            use MapMethod as M;
+            let (method, parameters, result) = match name {
+                "insert" => (M::Insert, vec![key, value], self.option_type(value)?),
+                "remove" => (M::Remove, vec![key], self.option_type(value)?),
+                "get" if !self.types.is_entity(value) => {
+                    (M::Get, vec![key], self.option_type(value)?)
+                }
+                "contains_key" => (M::ContainsKey, vec![key], Type::BOOL),
+                "keys" => (M::Keys, Vec::new(), self.types.intern(TypeKind::List(key))),
+                "len" => (M::Len, Vec::new(), Type::INT),
+                "is_empty" => (M::IsEmpty, Vec::new(), Type::BOOL),
+                "clear" => (M::Clear, Vec::new(), Type::UNIT),
+                _ => return Err(unknown(self)),
+            };
+            (Builtin::Map(method), parameters, result)
+        } else if let TypeKind::Set(element) = *self.types.kind(ty) {
+            use SetMethod as M;
+            let (method, parameters, result) = match name {
+                "insert" => (M::Insert, vec![element], Type::BOOL),
+                "remove" => (M::Remove, vec![element], Type::BOOL),
+                "contains" => (M::Contains, vec![element], Type::BOOL),
+                "len" => (M::Len, Vec::new(), Type::INT),
+                "is_empty" => (M::IsEmpty, Vec::new(), Type::BOOL),
+                "clear" => (M::Clear, Vec::new(), Type::UNIT),
+                _ => return Err(unknown(self)),
+            };
+            (Builtin::Set(method), parameters, result)
+        } else if ty == Type::STR {
+            use StrMethod as M;
+            let text = Type::STR;
+            let (method, parameters, result) = match name {
+                "len" => (M::Len, Vec::new(), Type::INT),
+                "is_empty" => (M::IsEmpty, Vec::new(), Type::BOOL),
+                "contains" => (M::Contains, vec![text], Type::BOOL),
+                "starts_with" => (M::StartsWith, vec![text], Type::BOOL),
+                "ends_with" => (M::EndsWith, vec![text], Type::BOOL),
+                "find" => (M::Find, vec![text], self.option_type(Type::INT)?),
+                "slice" => (M::Slice, vec![Type::INT, Type::INT], text),
+                "split" => (
+                    M::Split,
+                    vec![text],
+                    self.types.intern(TypeKind::List(text)),
+                ),
+                "trim" => (M::Trim, Vec::new(), text),
+                "replace" => (M::Replace, vec![text, text], text),
+                "repeat" => (M::Repeat, vec![Type::INT], text),
+                "chars" => (
+                    M::Chars,
+                    Vec::new(),
+                    self.types.intern(TypeKind::List(text)),
+                ),
+                "to_upper" => (M::ToUpper, Vec::new(), text),
+                "to_lower" => (M::ToLower, Vec::new(), text),
+                "parse_int" => (M::ParseInt, Vec::new(), self.option_type(Type::INT)?),
+                _ => return Err(unknown(self)),
+            };
+            (Builtin::Str(method), parameters, result)
+        } else {
+            return Err(unknown(self));
+        }; // A temporary can always be changed.
+        if builtin.changes_receiver()
             && let Receiver::Place(place) = &receiver_value
             && !self.mutable[place.local]
         {

@@ -91,6 +91,27 @@ enum Search {
     Into(Vec<Type>),
 }
 
+/// The core enums whose values the compiler builds or reads: the index of
+/// each declaration in [`Types::nominals`] and of its variants.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CoreEnums {
+    pub(crate) option: OptionEnum,
+    pub(crate) ordering: OrderingEnum,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OptionEnum {
+    pub(crate) declaration: usize,
+    pub(crate) some: usize,
+    pub(crate) none: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OrderingEnum {
+    pub(crate) less: usize,
+    pub(crate) equal: usize,
+}
+
 pub(crate) struct NominalInfo {
     pub(crate) name: String,
     pub(crate) is_enum: bool,
@@ -151,6 +172,8 @@ impl WrittenImpls {
 }
 
 pub(crate) struct Types {
+    /// The core enums whose values the compiler builds or reads.
+    pub(crate) core: CoreEnums,
     kinds: Vec<TypeKind>,
     /// Whether each type mentions a type parameter.
     generic: Vec<bool>,
@@ -210,8 +233,9 @@ impl InstantiationError {
 }
 
 impl Types {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(core: CoreEnums) -> Self {
         let mut types = Self {
+            core,
             kinds: Vec::new(),
             generic: Vec::new(),
             lookup: HashMap::new(),
@@ -716,6 +740,27 @@ impl Types {
                 | TypeKind::Param { .. } => Search::Found,
             }
         })
+    }
+
+    /// Whether comparing values of `ty` goes part by part, which may run
+    /// hand-written impls and so is a `Glue` step of the IR. Values of the
+    /// other types are compared by the compiler directly.
+    pub(crate) fn compares_by_parts(&self, ty: Type) -> bool {
+        match self.kind(ty) {
+            TypeKind::Tuple(_)
+            | TypeKind::Nominal { .. }
+            | TypeKind::List(_)
+            | TypeKind::Map(..)
+            | TypeKind::Set(_)
+            | TypeKind::Param { .. } => true,
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::Str
+            | TypeKind::Unit
+            | TypeKind::Never
+            | TypeKind::Range => false,
+        }
     }
 
     /// How the compiler carries out `operation` on a value of `ty`. This is

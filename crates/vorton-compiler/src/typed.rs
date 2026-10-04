@@ -136,40 +136,83 @@ pub(crate) enum Receiver {
     Value(Box<Expr>),
 }
 
+/// A method the compiler provides; the spec lists their signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Builtin {
-    /// `List::push(&mut self, value)`.
-    Push,
-    /// `List::pop(&mut self) -> Option<T>`.
-    Pop,
-    /// `len(&self) -> Int` of a list or map.
-    Len,
-    /// `is_empty(&self) -> Bool` of a list or map.
-    IsEmpty,
-    /// `List::insert(&mut self, index, value)`, or
-    /// `Map::insert(&mut self, key, value) -> Option<V>`.
-    Insert,
-    /// `List::remove(&mut self, index) -> T`, or
-    /// `Map::remove(&mut self, key) -> Option<V>`.
-    Remove,
-    /// `clear(&mut self)` of a list or map.
-    Clear,
-    /// `List::contains(&self, value) -> Bool`.
-    Contains,
-    /// `List::get(&self, index) -> Option<T>` or
-    /// `Map::get(&self, key) -> Option<V>`, for a value element.
-    Get,
-    /// `Map::contains_key(&self, key) -> Bool`.
-    ContainsKey,
-    /// `Map::keys(&self) -> List<K>`.
-    Keys,
-    /// `clone(&self)` of any type.
-    Clone,
-    /// A method of `Str`.
+    List(ListMethod),
+    Map(MapMethod),
+    Set(SetMethod),
     Str(StrMethod),
+    /// `clone(&self)` of any type that can be cloned.
+    Clone,
 }
 
-/// The methods of `Str`; the spec lists their signatures.
+impl Builtin {
+    /// Whether the method changes its receiver, which it then borrows with
+    /// `&mut`.
+    pub(crate) const fn changes_receiver(self) -> bool {
+        match self {
+            Self::List(method) => match method {
+                ListMethod::Push
+                | ListMethod::Pop
+                | ListMethod::Insert
+                | ListMethod::Remove
+                | ListMethod::Clear => true,
+                ListMethod::Len | ListMethod::IsEmpty | ListMethod::Contains | ListMethod::Get => {
+                    false
+                }
+            },
+            Self::Map(method) => match method {
+                MapMethod::Insert | MapMethod::Remove | MapMethod::Clear => true,
+                MapMethod::Get
+                | MapMethod::ContainsKey
+                | MapMethod::Keys
+                | MapMethod::Len
+                | MapMethod::IsEmpty => false,
+            },
+            Self::Set(method) => match method {
+                SetMethod::Insert | SetMethod::Remove | SetMethod::Clear => true,
+                SetMethod::Contains | SetMethod::Len | SetMethod::IsEmpty => false,
+            },
+            Self::Str(_) | Self::Clone => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListMethod {
+    Push,
+    Pop,
+    Len,
+    IsEmpty,
+    Insert,
+    Remove,
+    Clear,
+    Contains,
+    Get,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MapMethod {
+    Insert,
+    Remove,
+    Get,
+    ContainsKey,
+    Keys,
+    Len,
+    IsEmpty,
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetMethod {
+    Insert,
+    Remove,
+    Contains,
+    Len,
+    IsEmpty,
+    Clear,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StrMethod {
     Len,

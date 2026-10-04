@@ -22,16 +22,16 @@ use std::fmt::Write as _;
 
 use super::{
     GENERIC, Literals, c_type, clone_code, compare_code, count_line, equal_code, field_code,
-    function_name, int_literal, item_type, local_name, map_key, map_value, option_variants,
-    prototype, zero, zero_value,
+    function_name, int_literal, item_type, local_name, map_key, map_value, prototype, zero,
+    zero_value,
 };
 use crate::ast::{BinaryOperator, UnaryOperator};
 use crate::mir::{
     BlockId, Body, Constant, Local, Operand, Place, Program, Projection, RANGE_FIELDS, Rvalue,
     StatementKind, TerminatorKind,
 };
-use crate::typed::{Builtin, Callee, Intrinsic, StrMethod};
-use crate::types::{Operation, Type, TypeKind, Types};
+use crate::typed::{Builtin, Callee, Intrinsic, ListMethod, MapMethod, SetMethod, StrMethod};
+use crate::types::{Operation, OptionEnum, Type, TypeKind, Types};
 
 /// The C definition of the function at `index`.
 pub(super) fn function(program: &Program, index: usize, literals: &mut Literals) -> String {
@@ -682,18 +682,8 @@ impl<'a> Emitter<'a> {
     fn binary(&mut self, operator: BinaryOperator, left: &Operand, right: &Operand) -> String {
         use BinaryOperator as Op;
         let operand_ty = self.operand_type(left);
-        debug_assert!(
-            !matches!(
-                self.types.kind(operand_ty),
-                TypeKind::Tuple(_) | TypeKind::Nominal { .. } | TypeKind::List(_)
-            ),
-            "values with parts are compared by `Glue`"
-        );
         let (left, right) = (self.read(left), self.read(right));
-        if matches!(
-            operator,
-            Op::Equal | Op::NotEqual | Op::Less | Op::Greater | Op::LessEqual | Op::GreaterEqual
-        ) {
+        if operator.is_comparison() {
             let pair = left.as_deref().zip(right.as_deref());
             return comparison(self.types, operator, operand_ty, pair);
         }
@@ -931,26 +921,25 @@ impl<'a> Emitter<'a> {
         let code = self
             .place(receiver)
             .expect("containers and strings have storage");
-        match (types.kind(receiver_ty), builtin) {
-            (TypeKind::Str, Builtin::Str(method)) => {
-                Some(self.str_builtin(method, &code, arguments, ty))
+        match (builtin, types.kind(receiver_ty)) {
+            (Builtin::Str(method), _) => Some(self.str_builtin(method, &code, arguments, ty)),
+            (Builtin::List(method), TypeKind::List(element)) => {
+                self.list_builtin(method, &code, receiver_ty, *element, arguments, ty)
             }
-            (TypeKind::List(element), _) => {
-                self.list_builtin(builtin, &code, receiver_ty, *element, arguments, ty)
+            (Builtin::Map(method), TypeKind::Map(key, value)) => {
+                self.map_builtin(method, &code, receiver_ty, (*key, *value), arguments, ty)
             }
-            (TypeKind::Map(key, value), _) => {
-                self.map_builtin(builtin, &code, receiver_ty, (*key, *value), arguments, ty)
+            (Builtin::Set(method), TypeKind::Set(element)) => {
+                self.set_builtin(method, &code, receiver_ty, *element, arguments)
             }
-            (TypeKind::Set(element), _) => {
-                self.set_builtin(builtin, &code, receiver_ty, *element, arguments)
-            }
-            _ => unreachable!("built-in methods belong to containers and strings"),
+            (Builtin::Clone, _) => unreachable!("lowering makes `clone` a `Glue` step"),
+            _ => unreachable!("a built-in method of another type"),
         }
     }
 
     fn list_builtin(
         &mut self,
-        builtin: Builtin,
+        method: ListMethod,
         code: &str,
         list: Type,
         element: Type,
@@ -961,25 +950,25 @@ impl<'a> Emitter<'a> {
         let n = list.index();
         let with =
             |value: Option<String>| value.map_or_else(String::new, |value| format!(", {value}"));
-        match builtin {
-            Builtin::Push => {
+        match method {
+            ListMethod::Push => {
                 let value = with(self.owned(&arguments[0]));
                 self.line(&format!("vt_push_T{n}(&{code}{value});"));
                 None
             }
-            Builtin::Insert => {
+            ListMethod::Insert => {
                 let index = self.read(&arguments[0]).expect("an index is an `Int`");
                 let value = with(self.owned(&arguments[1]));
                 self.line(&format!("vt_insert_T{n}(&{code}, {index}{value});"));
                 None
             }
-            Builtin::Clear => {
+            ListMethod::Clear => {
                 self.line(&format!("vt_clear_T{n}(&{code});"));
                 None
             }
-            Builtin::Len => Some(format!("{code}.len")),
-            Builtin::IsEmpty => Some(format!("({code}.len == 0)")),
-            Builtin::Remove => {
+            ListMethod::Len => Some(format!("{code}.len")),
+            ListMethod::IsEmpty => Some(format!("({code}.len == 0)")),
+            ListMethod::Remove => {
                 let index = self.read(&arguments[0]).expect("an index is an `Int`");
                 if types.has_storage(element) {
                     Some(format!("vt_remove_T{n}(&{code}, {index})"))
@@ -990,8 +979,8 @@ impl<'a> Emitter<'a> {
                     None
                 }
             }
-            Builtin::Pop => {
-                let (some, none) = option_variants(types, ty);
+            ListMethod::Pop => {
+                let OptionEnum { some, none, .. } = types.core.option;
                 let result = self.temporary(ty);
                 self.line(&format!("if ({code}.len == 0) {{"));
                 self.line(&format!("    {result}.tag = {none};"));
@@ -1007,19 +996,19 @@ impl<'a> Emitter<'a> {
                 self.line("}");
                 Some(result)
             }
-            Builtin::Get => {
+            ListMethod::Get => {
                 let index = self.read(&arguments[0]).expect("an index is an `Int`");
                 let field = clone_code(types, element, &format!("{code}.items[{index}]"));
                 let test = format!("{index} >= 0 && {index} < {code}.len");
                 Some(self.option(ty, element, &test, &[], &field))
             }
-            _ => unreachable!("not a list method"),
+            ListMethod::Contains => unreachable!("lowering makes `contains` a `Glue` step"),
         }
     }
 
     fn map_builtin(
         &mut self,
-        builtin: Builtin,
+        method: MapMethod,
         code: &str,
         map: Type,
         (key, value): (Type, Type),
@@ -1036,18 +1025,18 @@ impl<'a> Emitter<'a> {
                 Vec::new()
             }
         };
-        match builtin {
-            Builtin::Len => Some(format!("{code}.m.len")),
-            Builtin::IsEmpty => Some(format!("({code}.m.len == 0)")),
-            Builtin::Clear => {
+        match method {
+            MapMethod::Len => Some(format!("{code}.m.len")),
+            MapMethod::IsEmpty => Some(format!("({code}.m.len == 0)")),
+            MapMethod::Clear => {
                 self.line(&format!("vt_clear_T{n}(&{code});"));
                 None
             }
-            Builtin::ContainsKey => {
+            MapMethod::ContainsKey => {
                 let key = self.key(&arguments[0], key);
                 Some(format!("(vt_map_find(&{code}.m, {map_type}, &{key}) >= 0)"))
             }
-            Builtin::Get => {
+            MapMethod::Get => {
                 let key = self.key(&arguments[0], key);
                 let entry = self.temporary(Type::INT);
                 self.line(&format!(
@@ -1059,7 +1048,7 @@ impl<'a> Emitter<'a> {
             }
             // A present key keeps its stored copy, and the old value moves
             // out to the caller.
-            Builtin::Insert => {
+            MapMethod::Insert => {
                 let new_key = self.entry(&arguments[0], key);
                 let new_value = self.entry(&arguments[1], value);
                 let old = self.entry_temporary(value);
@@ -1068,7 +1057,7 @@ impl<'a> Emitter<'a> {
                 );
                 Some(self.option(ty, value, &test, &release(key, &new_key), &old))
             }
-            Builtin::Remove => {
+            MapMethod::Remove => {
                 let key_code = self.key(&arguments[0], key);
                 let old_key = self.entry_temporary(key);
                 let old = self.entry_temporary(value);
@@ -1077,7 +1066,7 @@ impl<'a> Emitter<'a> {
                 );
                 Some(self.option(ty, value, &test, &release(key, &old_key), &old))
             }
-            Builtin::Keys => {
+            MapMethod::Keys => {
                 let result = self.temporary(ty);
                 self.line(&format!("{result} = {};", zero_value(types, ty)));
                 let entry = self.temporary(Type::INT);
@@ -1093,7 +1082,6 @@ impl<'a> Emitter<'a> {
                 self.line("}");
                 Some(result)
             }
-            _ => unreachable!("not a map method"),
         }
     }
 
@@ -1101,7 +1089,7 @@ impl<'a> Emitter<'a> {
     /// moves its element into the set; the other methods only read it.
     fn set_builtin(
         &mut self,
-        builtin: Builtin,
+        method: SetMethod,
         code: &str,
         set: Type,
         element: Type,
@@ -1109,19 +1097,19 @@ impl<'a> Emitter<'a> {
     ) -> Option<String> {
         let types = self.types;
         let set_type = format!("vt_maptype_T{}()", set.index());
-        match builtin {
-            Builtin::Len => Some(format!("{code}.m.len")),
-            Builtin::IsEmpty => Some(format!("({code}.m.len == 0)")),
-            Builtin::Clear => {
+        match method {
+            SetMethod::Len => Some(format!("{code}.m.len")),
+            SetMethod::IsEmpty => Some(format!("({code}.m.len == 0)")),
+            SetMethod::Clear => {
                 self.line(&format!("vt_clear_T{}(&{code});", set.index()));
                 None
             }
-            Builtin::Contains => {
+            SetMethod::Contains => {
                 let key = self.key(&arguments[0], element);
                 Some(format!("(vt_map_find(&{code}.m, {set_type}, &{key}) >= 0)"))
             }
             // A present element keeps its stored copy.
-            Builtin::Insert => {
+            SetMethod::Insert => {
                 let key = self.entry(&arguments[0], element);
                 let unit = self.entry_temporary(Type::UNIT);
                 let old = self.entry_temporary(Type::UNIT);
@@ -1135,7 +1123,7 @@ impl<'a> Emitter<'a> {
                 }
                 Some(added)
             }
-            Builtin::Remove => {
+            SetMethod::Remove => {
                 let key = self.key(&arguments[0], element);
                 let old_key = self.entry_temporary(element);
                 let old = self.entry_temporary(Type::UNIT);
@@ -1149,7 +1137,6 @@ impl<'a> Emitter<'a> {
                 }
                 Some(removed)
             }
-            _ => unreachable!("not a set method"),
         }
     }
 
@@ -1182,7 +1169,7 @@ impl<'a> Emitter<'a> {
         then: &[String],
         field: &str,
     ) -> String {
-        let (some, none) = option_variants(self.types, ty);
+        let OptionEnum { some, none, .. } = self.types.core.option;
         let result = self.temporary(ty);
         self.line(&format!("if ({test}) {{"));
         for line in then {

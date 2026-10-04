@@ -621,6 +621,30 @@ pub enum BinaryOperator {
     Remainder,
 }
 
+impl BinaryOperator {
+    /// Whether the operator compares its operands: `==`, `!=`, `<`, `>`,
+    /// `<=` or `>=`.
+    pub(crate) const fn is_comparison(self) -> bool {
+        match self {
+            Self::Equal
+            | Self::NotEqual
+            | Self::Less
+            | Self::Greater
+            | Self::LessEqual
+            | Self::GreaterEqual => true,
+            Self::LogicOr
+            | Self::LogicAnd
+            | Self::RangeExclusive
+            | Self::RangeInclusive
+            | Self::Add
+            | Self::Subtract
+            | Self::Multiply
+            | Self::Divide
+            | Self::Remainder => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchArm {
     pub span: Span,
