@@ -140,7 +140,7 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
             generic: function.generic,
         });
     }
-    let mut program = mono::instantiate(types, &templates, main, &impls)?;
+    let mut program = mono::instantiate(types, templates, main, &impls)?;
     capabilities::check_drops(&program)?;
     tail::mark(&mut program);
     for instance in &program.functions {

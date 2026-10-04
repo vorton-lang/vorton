@@ -43,7 +43,7 @@ pub(crate) struct Template {
 /// them.
 pub(crate) fn instantiate(
     mut types: Types,
-    templates: &[Template],
+    mut templates: Vec<Template>,
     main: usize,
     impls: &Impls,
 ) -> Result<Program, CheckDiagnostic> {
@@ -55,8 +55,13 @@ pub(crate) fn instantiate(
     }
     let mut functions = Vec::new();
     while let Some((index, arguments)) = instances.list.get(functions.len()).cloned() {
-        let template = &templates[index];
-        let mut body = template.body.clone();
+        let template = &mut templates[index];
+        // A non-generic function has one instance, which takes its body.
+        let mut body = if template.generic {
+            template.body.clone()
+        } else {
+            std::mem::replace(&mut template.body, Body::empty())
+        };
         Instantiation {
             types: &mut types,
             arguments: &arguments,

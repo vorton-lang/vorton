@@ -502,6 +502,16 @@ pub(crate) struct Check {
 }
 
 impl Body {
+    /// A body with nothing in it, in place of one that has been taken.
+    pub(crate) fn empty() -> Self {
+        Self {
+            locals: Vec::new(),
+            parameters: Vec::new(),
+            result: 0,
+            blocks: Vec::new(),
+        }
+    }
+
     /// Puts each check before the statement it is for.
     pub(crate) fn insert_checks(&mut self, mut checks: Vec<Check>) {
         // From the last, so the positions of the others stay.
