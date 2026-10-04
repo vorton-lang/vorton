@@ -1,0 +1,10 @@
+// A key written in a trait method's signature is checked like any other,
+// even though the trait is read before the impls of the key's type.
+trait Lookup {
+    fn find(&self, table: &Map<V, Int>) -> Int
+}
+struct V { n: Int }
+impl PartialEq for V {
+    fn eq(&self, other: &V) -> Bool { self.n == other.n }
+}
+fn main() {}

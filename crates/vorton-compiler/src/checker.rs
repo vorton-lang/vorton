@@ -20,6 +20,7 @@
 //! checked on the IR of each function by [`crate::borrowck`], which follows
 //! every path of the control flow.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
@@ -235,6 +236,59 @@ struct Nominals<'a> {
     constructors: BTreeMap<EntityId, (usize, usize)>,
     /// The core `Option` declaration and its `Some` and `None` variants.
     option: Option<(usize, usize, usize)>,
+    /// The types written as map keys and set elements.
+    keys: RefCell<Keys>,
+}
+
+/// Whether a type can be a map key depends on its hand-written impls, so a
+/// key written before they are all known waits until they are; after that,
+/// a key is checked where it is written.
+#[derive(Default)]
+struct Keys {
+    ready: bool,
+    waiting: Vec<(Type, OriginRef)>,
+}
+
+impl Nominals<'_> {
+    /// Requires `key`, written at `origin`, to be a map key or set element.
+    fn require_key(
+        &self,
+        types: &Types,
+        key: Type,
+        origin: OriginRef,
+    ) -> Result<(), CheckDiagnostic> {
+        let mut keys = self.keys.borrow_mut();
+        if !keys.ready {
+            keys.waiting.push((key, origin));
+            return Ok(());
+        }
+        check_key(types, key, origin)
+    }
+
+    /// Checks the keys that waited, now that every hand-written impl is
+    /// known, and checks keys where they are written from now on.
+    fn check_keys(&self, types: &Types) -> Result<(), CheckDiagnostic> {
+        let mut keys = self.keys.borrow_mut();
+        keys.ready = true;
+        for (key, origin) in std::mem::take(&mut keys.waiting) {
+            check_key(types, key, origin)?;
+        }
+        Ok(())
+    }
+}
+
+fn check_key(types: &Types, key: Type, origin: OriginRef) -> Result<(), CheckDiagnostic> {
+    if types.is_key(key) {
+        return Ok(());
+    }
+    Err(CheckDiagnostic {
+        kind: CheckDiagnosticKind::TypeMismatch,
+        primary: Some(origin),
+        message: format!(
+            "`{}` cannot be a map key or set element; those are values without `Float` or a hand-written `PartialEq` or `Drop`",
+            types.name(key)
+        ),
+    })
 }
 
 /// A function or inherent method to check.
@@ -262,6 +316,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         by_identity: BTreeMap::new(),
         constructors: BTreeMap::new(),
         option: None,
+        keys: RefCell::default(),
     };
     for (module, resolved) in &project.modules {
         let Some(body) = &resolved.body else {
@@ -499,7 +554,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             ),
         });
     }
-    check_keys(&mut types, &nominals)?;
+    nominals.check_keys(&types)?;
     check_interfaces(project, &nominals, &traits)?;
 
     let mut signatures = BTreeMap::new();
@@ -953,45 +1008,6 @@ fn check_trait_impls(
         }
     }
     Ok(impls)
-}
-
-/// Rejects map keys and set elements with a hand-written `PartialEq` in the
-/// fields of the declarations instantiated before the impls were known.
-fn check_keys(types: &mut Types, nominals: &Nominals) -> Result<(), CheckDiagnostic> {
-    fn bad_key(types: &Types, ty: Type) -> Option<Type> {
-        match types.kind(ty) {
-            &TypeKind::Map(key, _) | &TypeKind::Set(key) if !types.is_key(key) => Some(key),
-            TypeKind::Map(key, value) => bad_key(types, *key).or_else(|| bad_key(types, *value)),
-            TypeKind::List(element) | TypeKind::Set(element) => bad_key(types, *element),
-            TypeKind::Tuple(elements) => elements.iter().find_map(|&ty| bad_key(types, ty)),
-            _ => None,
-        }
-    }
-    for (declaration, info) in nominals.declarations.iter().enumerate() {
-        if !info.type_parameters.is_empty() {
-            continue;
-        }
-        let ty = types.intern(TypeKind::Nominal {
-            declaration,
-            arguments: Vec::new(),
-        });
-        let fields = types
-            .variants(ty)
-            .iter()
-            .flat_map(|variant| variant.fields.iter().map(|field| field.ty))
-            .collect::<Vec<_>>();
-        if let Some(key) = fields.into_iter().find_map(|field| bad_key(types, field)) {
-            return Err(CheckDiagnostic {
-                kind: CheckDiagnosticKind::TypeMismatch,
-                primary: Some(info.origin.clone()),
-                message: format!(
-                    "`{}` cannot be a map key or set element; it has a hand-written `PartialEq`",
-                    types.name(key)
-                ),
-            });
-        }
-    }
-    Ok(())
 }
 
 /// `signature` with its type parameters replaced by `arguments`.
@@ -1732,16 +1748,7 @@ fn resolve_type(
                     ("Set", [_]) => TypeKind::Set(*key),
                     _ => return Err(unsupported(Some(at(origin, ty.span)), "this type")),
                 };
-                if !types.is_key(*key) {
-                    return Err(CheckDiagnostic {
-                        kind: CheckDiagnosticKind::TypeMismatch,
-                        primary: Some(at(origin, ty.span)),
-                        message: format!(
-                            "`{}` cannot be a map key or set element; those are values without `Float` whose `==` the compiler implements",
-                            types.name(*key)
-                        ),
-                    });
-                }
+                nominals.require_key(types, *key, at(origin, ty.span))?;
                 return Ok(types.intern(kind));
             }
             if target.kind == EntityKind::LanguageType && arguments.is_empty() {
