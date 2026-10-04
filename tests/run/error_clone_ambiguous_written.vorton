@@ -1,0 +1,19 @@
+trait Dup {
+    fn clone(&self) -> Int
+}
+struct S {
+    xs: List<Int>,
+}
+impl Clone for S {
+    fn clone(&self) -> S {
+        S { xs: [] }
+    }
+}
+impl Dup for S {
+    fn clone(&self) -> Int {
+        7
+    }
+}
+fn main() {
+    print(S { xs: [1] }.clone().xs.len())
+}

@@ -1,0 +1,15 @@
+trait Q {
+    fn eq(&self, other: &Self) -> Bool
+}
+struct S {
+    n: Int,
+}
+impl Q for S {
+    fn eq(&self, other: &Self) -> Bool {
+        true
+    }
+}
+fn main() {
+    let s = S { n: 1 }
+    print(s.eq(&S { n: 2 }))
+}

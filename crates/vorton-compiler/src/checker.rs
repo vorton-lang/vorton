@@ -2933,10 +2933,7 @@ impl BodyChecker<'_> {
             let callee = Callee::Function(signature.index);
             return self.call_method(span, callee, signature, operand, receiver, arguments);
         }
-        // The built-in `clone` comes before trait methods.
-        if !(name == "clone" && self.can_clone(ty))
-            && let Some((callee, signature)) = self.trait_method(ty, name, span)?
-        {
+        if let Some((callee, signature)) = self.trait_method(ty, name, span)? {
             return self.call_method(span, callee, &signature, operand, receiver, arguments);
         }
         let receiver_value = match operand {
@@ -4276,9 +4273,11 @@ impl BodyChecker<'_> {
         )
     }
 
-    /// Finds the trait method `name` of a receiver of type `ty`: a method of
-    /// the impls for a concrete type, or of the bounds of a type parameter.
-    /// Returns the callee and its signature for this receiver.
+    /// Finds the trait method `name` of a receiver of type `ty` among the
+    /// traits `ty` implements, by an impl or as the compiler provides them,
+    /// and among a type parameter's bounds. Returns the callee and its
+    /// signature for this receiver, or `None` when no trait has the method
+    /// or it is `Clone::clone`, which the built-in `clone` carries out.
     fn trait_method(
         &mut self,
         ty: Type,
@@ -4286,26 +4285,15 @@ impl BodyChecker<'_> {
         span: Span,
     ) -> Result<Option<(Callee, Signature)>, CheckDiagnostic> {
         let traits = self.traits;
-        let candidates: Vec<usize> = match self.types.kind(ty) {
-            TypeKind::Param { index, .. } => self.type_parameters[*index]
-                .traits
-                .iter()
-                .copied()
-                .collect(),
-            _ => {
-                let mut found = self
-                    .trait_impls
-                    .keys()
-                    .filter(|(_, target)| *target == ty)
-                    .map(|(trait_index, _)| *trait_index)
-                    .collect::<Vec<_>>();
-                // Built-in types implement `Display` without an impl.
-                if is_printable(ty) {
-                    found.push(traits.display);
-                }
-                found
-            }
-        };
+        let candidates = (0..traits.declarations.len())
+            .filter(|&trait_index| {
+                traits.declarations[trait_index]
+                    .methods
+                    .iter()
+                    .any(|method| method.identity.name == name)
+                    && self.implements(ty, trait_index)
+            })
+            .collect::<Vec<_>>();
         let (found, hidden): (Vec<_>, Vec<_>) = candidates
             .into_iter()
             .filter_map(|trait_index| {
@@ -4331,6 +4319,7 @@ impl BodyChecker<'_> {
         }
         let (trait_index, method) = match found.as_slice() {
             [] => return Ok(None),
+            [(trait_index, _)] if *trait_index == traits.clone => return Ok(None),
             [(trait_index, _)] if *trait_index == traits.drop => {
                 return Err(self.error(
                     CheckDiagnosticKind::UnknownMethod,
@@ -4376,7 +4365,7 @@ impl BodyChecker<'_> {
         if self.traits.comparison(trait_index).is_some() {
             return Err(self.unsupported(
                 span,
-                "comparison methods of types without a hand-written impl; use the operators",
+                "comparison methods of types without a hand-written impl (compare with the operators)",
             ));
         }
         let signature = substitute_signature(
