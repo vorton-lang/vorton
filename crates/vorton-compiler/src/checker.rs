@@ -39,7 +39,9 @@ use crate::typed::{
     Arm, Block, BorrowTarget, Builtin, Callee, DisjointCheck, Expr, ExprKind, ForSource, Function,
     Intrinsic, Local, Pattern, Place, Program, Projection, Receiver, Statement, StrMethod,
 };
-pub(crate) use crate::types::{Comparison, Field, NominalInfo, Type, TypeKind, Types, Variant};
+pub(crate) use crate::types::{
+    Comparison, Field, InstantiationError, NominalInfo, Type, TypeKind, Types, Variant,
+};
 
 /// One deterministic failure from checking a resolved project.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,9 +242,6 @@ struct Nominals<'a> {
     option: Option<(usize, usize, usize)>,
 }
 
-/// How deep generic instantiation may nest before it is reported.
-const INSTANTIATION_DEPTH: usize = 64;
-
 /// A function or inherent method to check.
 struct FoundFunction<'a> {
     identity: EntityId,
@@ -411,7 +410,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
     // even when no function mentions it.
     for (index, declaration) in nominals.declarations.iter().enumerate() {
         if declaration.type_parameters.is_empty() {
-            instantiate(&mut types, &nominals, index, Vec::new(), 0)?;
+            instantiate(&mut types, &nominals, index, Vec::new())?;
         }
     }
 
@@ -424,7 +423,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             span: implementation.target.span,
             kind: ResolvedTypeKind::Named(Box::new(implementation.target.clone())),
         };
-        let owner = resolve_type(&mut types, &nominals, &target, &BTreeMap::new(), &origin, 0)?;
+        let owner = resolve_type(&mut types, &nominals, &target, &BTreeMap::new(), &origin)?;
         let &TypeKind::Nominal { declaration, .. } = types.kind(owner) else {
             return Err(unsupported(Some(origin), "methods of built-in types"));
         };
@@ -614,9 +613,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         .collect::<Vec<_>>();
     let (functions, main, templates) = crate::mono::instantiate_functions(
         &mut types,
-        &mut |types, declaration, arguments| {
-            instantiate(types, &nominals, declaration, arguments, 0)
-        },
+        &mut |types, declaration, arguments| instantiate(types, &nominals, declaration, arguments),
         functions,
         &generic,
         main,
@@ -878,13 +875,13 @@ fn trait_method_signature(
     let mut parameters = Vec::new();
     for parameter in &signature.parameters {
         let ty = match &parameter.annotation {
-            Some(annotation) => resolve_type(types, nominals, annotation, scope, origin, 0)?,
+            Some(annotation) => resolve_type(types, nominals, annotation, scope, origin)?,
             None => self_type,
         };
         parameters.push((ty, parameter.borrow.map(|(_, kind)| kind)));
     }
     let result = match &signature.return_type {
-        Some(ty) => resolve_type(types, nominals, ty, scope, origin, 0)?,
+        Some(ty) => resolve_type(types, nominals, ty, scope, origin)?,
         None => Type::UNIT,
     };
     Ok(Signature {
@@ -952,7 +949,7 @@ fn collect_trait_impls<'a>(
             span: implementation.target.span,
             kind: ResolvedTypeKind::Named(Box::new(implementation.target.clone())),
         };
-        let owner = resolve_type(types, nominals, &target_type, &BTreeMap::new(), origin, 0)?;
+        let owner = resolve_type(types, nominals, &target_type, &BTreeMap::new(), origin)?;
         let &TypeKind::Nominal {
             declaration: nominal,
             ..
@@ -1140,14 +1137,16 @@ fn substitute_signature(
     signature: &Signature,
     arguments: &[Type],
 ) -> Result<Signature, CheckDiagnostic> {
-    let mut instantiate = |types: &mut Types, declaration, arguments| {
-        instantiate(types, nominals, declaration, arguments, 0)
+    let substitute = |types: &mut Types, ty| {
+        types
+            .substitute(ty, arguments)
+            .map_err(|error| instantiation_error(types, nominals, error))
     };
     let mut result = signature.clone();
     for (ty, _) in &mut result.parameters {
-        *ty = crate::mono::substitute(types, &mut instantiate, *ty, arguments)?;
+        *ty = substitute(types, *ty)?;
     }
-    result.result = crate::mono::substitute(types, &mut instantiate, result.result, arguments)?;
+    result.result = substitute(types, result.result)?;
     Ok(result)
 }
 
@@ -1300,37 +1299,53 @@ fn strongly_connected(edges: &[Vec<usize>]) -> Vec<usize> {
     state.component
 }
 
-/// Interns `declaration` applied to `arguments` and, the first time, computes
-/// the field types of its variants.
+/// `declaration` applied to `arguments`: an instance of its template, whose
+/// fields are worked out from the declaration the first time it is used.
 fn instantiate(
     types: &mut Types,
     nominals: &Nominals,
     declaration: usize,
     arguments: Vec<Type>,
-    depth: usize,
 ) -> Result<Type, CheckDiagnostic> {
+    template(types, nominals, declaration)?;
+    types
+        .instantiate(declaration, arguments)
+        .map_err(|error| instantiation_error(types, nominals, error))
+}
+
+/// The template of `declaration`: the declaration applied to its own type
+/// parameters, with the field types it declares. Every instance
+/// substitutes these, so the fields of an instance have one source.
+fn template(
+    types: &mut Types,
+    nominals: &Nominals,
+    declaration: usize,
+) -> Result<Type, CheckDiagnostic> {
+    if let Some(template) = types.template(declaration) {
+        return Ok(template);
+    }
     let info = &nominals.declarations[declaration];
-    let (ty, new) = types.intern_new(TypeKind::Nominal {
-        declaration,
-        arguments: arguments.clone(),
-    });
-    if !new {
-        return Ok(ty);
-    }
-    if depth > INSTANTIATION_DEPTH {
-        return Err(unsupported(
-            Some(info.origin.clone()),
-            "generic types nested this deeply",
-        ));
-    }
+    let parameters = info
+        .type_parameters
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            types.intern(TypeKind::Param {
+                index,
+                name: parameter.name.clone(),
+                copy: false,
+            })
+        })
+        .collect::<Vec<_>>();
+    let template = types.begin_template(declaration, parameters.clone());
     let substitution = info
         .type_parameters
         .iter()
         .cloned()
-        .zip(arguments)
+        .zip(parameters)
         .collect::<BTreeMap<_, _>>();
     let mut field = |ty: &ResolvedType, name: String| -> Result<Field, CheckDiagnostic> {
-        let ty = resolve_type(types, nominals, ty, &substitution, &info.origin, depth + 1)?;
+        let ty = resolve_type(types, nominals, ty, &substitution, &info.origin)?;
         if ty == Type::NEVER {
             return Err(unsupported(Some(info.origin.clone()), "`Never` fields"));
         }
@@ -1366,29 +1381,40 @@ fn instantiate(
             })
             .collect::<Result<_, CheckDiagnostic>>()?,
     };
-    types.set_variants(ty, variants);
-    // A type that contains itself by value has no finite size. It is
-    // rejected as soon as its fields are known, before anything walks them.
-    if contains_by_value(types, ty, ty, &mut BTreeSet::new()) {
-        return Err(CheckDiagnostic {
-            kind: CheckDiagnosticKind::RecursiveType,
-            primary: Some(info.origin.clone()),
-            message: format!(
-                "`{}` contains itself, so it has no finite size; keep the inner values in a `List` or a `Map`",
-                types.name(ty)
-            ),
-        });
+    types
+        .finish_template(declaration, variants)
+        .map_err(|error| instantiation_error(types, nominals, error))?;
+    Ok(template)
+}
+
+fn instantiation_error(
+    types: &Types,
+    nominals: &Nominals,
+    error: InstantiationError,
+) -> CheckDiagnostic {
+    match error {
+        InstantiationError::TooDeep { declaration } => unsupported(
+            Some(nominals.declarations[declaration].origin.clone()),
+            "generic types nested this deeply",
+        ),
+        // A type that contains itself by value has no finite size. It is
+        // rejected as soon as its fields are known, before anything walks
+        // them.
+        InstantiationError::ContainsItself(ty) => {
+            let TypeKind::Nominal { declaration, .. } = *types.kind(ty) else {
+                unreachable!("only structs and enums contain themselves")
+            };
+            CheckDiagnostic {
+                kind: CheckDiagnosticKind::RecursiveType,
+                primary: Some(nominals.declarations[declaration].origin.clone()),
+                message: format!(
+                    "`{}` contains itself, so it has no finite size; keep the inner values in a `List` or a `Map`",
+                    types.name(ty)
+                ),
+            }
+        }
     }
-    Ok(ty)
 }
-
-fn contains_by_value(types: &Types, ty: Type, target: Type, seen: &mut BTreeSet<Type>) -> bool {
-    types.components(ty).into_iter().any(|component| {
-        component == target
-            || (seen.insert(component) && contains_by_value(types, component, target, seen))
-    })
-}
-
 /// Rejects a private type or trait in a public interface: the signature and
 /// bounds of a public function, of a public method of a public type, or of
 /// a method of a public trait; an associated type of a public trait or of a
@@ -1701,7 +1727,7 @@ fn check_signature(
         // Only the `self` of a method has no written type.
         let ty = match (&parameter.annotation, self_type) {
             (Some(annotation), _) => {
-                resolve_type(types, nominals, annotation, &type_scope, origin, 0)?
+                resolve_type(types, nominals, annotation, &type_scope, origin)?
             }
             (None, Some(self_type)) => {
                 receiver = true;
@@ -1712,7 +1738,7 @@ fn check_signature(
         parameters.push((ty, parameter.borrow.map(|(_, kind)| kind)));
     }
     let result = match &function.return_type {
-        Some(ty) => resolve_type(types, nominals, ty, &type_scope, origin, 0)?,
+        Some(ty) => resolve_type(types, nominals, ty, &type_scope, origin)?,
         None => Type::UNIT,
     };
     let result_borrow = function.return_borrow.map(|(_, kind)| kind);
@@ -1741,16 +1767,15 @@ fn resolve_type(
     ty: &ResolvedType,
     substitution: &BTreeMap<EntityId, Type>,
     origin: &OriginRef,
-    depth: usize,
 ) -> Result<Type, CheckDiagnostic> {
     match &ty.kind {
         ResolvedTypeKind::Grouped(inner) => {
-            resolve_type(types, nominals, inner, substitution, origin, depth)
+            resolve_type(types, nominals, inner, substitution, origin)
         }
         ResolvedTypeKind::Tuple(elements) => {
             let elements = elements
                 .iter()
-                .map(|element| resolve_type(types, nominals, element, substitution, origin, depth))
+                .map(|element| resolve_type(types, nominals, element, substitution, origin))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(types.intern(TypeKind::Tuple(elements)))
         }
@@ -1773,7 +1798,7 @@ fn resolve_type(
                     span: ty.span,
                     kind: ResolvedTypeKind::Named(self_target.clone()),
                 };
-                return resolve_type(types, nominals, &self_type, substitution, origin, depth);
+                return resolve_type(types, nominals, &self_type, substitution, origin);
             }
             // `Self` in a trait stands for the implementing type, which
             // `substitution` gives under the trait's identity.
@@ -1795,7 +1820,6 @@ fn resolve_type(
                     argument,
                     substitution,
                     origin,
-                    depth,
                 )?);
             }
             if let Some(&ty) = substitution.get(target)
@@ -1869,7 +1893,7 @@ fn resolve_type(
                         ),
                     });
                 }
-                return instantiate(types, nominals, declaration, arguments, depth);
+                return instantiate(types, nominals, declaration, arguments);
             }
             Err(unsupported(Some(at(origin, ty.span)), "this type"))
         }
@@ -2070,7 +2094,7 @@ impl BodyChecker<'_> {
         substitution: &BTreeMap<EntityId, Type>,
     ) -> Result<Type, CheckDiagnostic> {
         let origin = self.at(ty.span);
-        resolve_type(self.types, self.nominals, ty, substitution, &origin, 0)
+        resolve_type(self.types, self.nominals, ty, substitution, &origin)
     }
 
     /// Checks that `actual` can stand where `expected` is required.
@@ -3207,7 +3231,7 @@ impl BodyChecker<'_> {
         let Some((declaration, _, _)) = self.nominals.option else {
             return Err(self.unsupported(span, "`Option` without the core declaration"));
         };
-        instantiate(self.types, self.nominals, declaration, vec![element], 0)
+        instantiate(self.types, self.nominals, declaration, vec![element])
     }
 
     /// Checks a method call: an inherent method of the receiver's type, or
@@ -3771,7 +3795,7 @@ impl BodyChecker<'_> {
             };
             type_arguments.push(argument);
         }
-        let ty = instantiate(self.types, nominals, declaration, type_arguments, 0)?;
+        let ty = instantiate(self.types, nominals, declaration, type_arguments)?;
         if base.is_some() && self.types.has_drop(ty) {
             return Err(self.error(
                 CheckDiagnosticKind::CannotMove,
@@ -4846,15 +4870,9 @@ impl BodyChecker<'_> {
         if arguments.is_empty() {
             return Ok(ty);
         }
-        let nominals = self.nominals;
-        crate::mono::substitute(
-            self.types,
-            &mut |types, declaration, arguments| {
-                instantiate(types, nominals, declaration, arguments, 0)
-            },
-            ty,
-            arguments,
-        )
+        self.types
+            .substitute(ty, arguments)
+            .map_err(|error| instantiation_error(self.types, self.nominals, error))
     }
 
     /// The type a parameter of a generic callee expects, once `bindings`

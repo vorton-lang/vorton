@@ -94,11 +94,13 @@ pub(crate) struct NominalInfo {
 }
 
 /// One way to build a nominal value. A struct has exactly one variant.
+#[derive(Clone)]
 pub(crate) struct Variant {
     pub(crate) name: String,
     pub(crate) fields: Vec<Field>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Field {
     pub(crate) name: String,
     pub(crate) ty: Type,
@@ -152,6 +154,26 @@ pub(crate) struct Types {
     shapes: HashMap<Type, Vec<Variant>>,
     /// The hand-written impls of core traits, by type.
     pub(crate) written: HashMap<Type, WrittenImpls>,
+    /// Each struct and enum declaration applied to its own type parameters,
+    /// whose fields every instance substitutes, and whether those fields
+    /// are known yet.
+    templates: HashMap<usize, (Type, bool)>,
+    /// Instances made while the fields of their template were still being
+    /// worked out, by declaration; they get their fields when it is done.
+    waiting: HashMap<usize, Vec<Type>>,
+}
+
+/// How deep the instances that instantiating one type needs may nest before
+/// it is reported: a type like `struct A<T> { next: List<A<List<T>>> }`
+/// needs ever more instances.
+pub(crate) const INSTANTIATION_DEPTH: usize = 64;
+
+/// Why a struct or enum declaration could not be instantiated.
+pub(crate) enum InstantiationError {
+    /// It needs instances nested deeper than [`INSTANTIATION_DEPTH`].
+    TooDeep { declaration: usize },
+    /// The instance contains itself by value, so it has no finite size.
+    ContainsItself(Type),
 }
 
 impl Types {
@@ -163,6 +185,8 @@ impl Types {
             nominals: Vec::new(),
             shapes: HashMap::new(),
             written: HashMap::new(),
+            templates: HashMap::new(),
+            waiting: HashMap::new(),
         };
         for kind in [
             TypeKind::Int,
@@ -313,6 +337,164 @@ impl Types {
             .join(", ")
     }
 
+    /// The template of a struct or enum declaration, once it is begun.
+    pub(crate) fn template(&self, declaration: usize) -> Option<Type> {
+        self.templates.get(&declaration).map(|&(ty, _)| ty)
+    }
+
+    /// Begins the template of `declaration`: the declaration applied to
+    /// `parameters`, its own type parameters. Its fields follow with
+    /// [`Types::finish_template`]; until then, instances wait for them.
+    pub(crate) fn begin_template(&mut self, declaration: usize, parameters: Vec<Type>) -> Type {
+        let ty = self.intern(TypeKind::Nominal {
+            declaration,
+            arguments: parameters,
+        });
+        self.templates.insert(declaration, (ty, false));
+        ty
+    }
+
+    /// Gives the template of `declaration` its variants, and then the
+    /// instances that waited for them their own.
+    pub(crate) fn finish_template(
+        &mut self,
+        declaration: usize,
+        variants: Vec<Variant>,
+    ) -> Result<(), InstantiationError> {
+        let (template, _) = self.templates[&declaration];
+        self.templates.insert(declaration, (template, true));
+        self.set_variants(template, variants);
+        if self.contains_by_value(template) {
+            return Err(InstantiationError::ContainsItself(template));
+        }
+        for instance in self.waiting.remove(&declaration).unwrap_or_default() {
+            self.fill(instance, 0)?;
+        }
+        Ok(())
+    }
+
+    /// `declaration`, whose template is begun, applied to `arguments`. The
+    /// fields of a new instance are those of the template with `arguments`
+    /// in place of its type parameters.
+    pub(crate) fn instantiate(
+        &mut self,
+        declaration: usize,
+        arguments: Vec<Type>,
+    ) -> Result<Type, InstantiationError> {
+        self.instantiate_at(declaration, arguments, 0)
+    }
+
+    /// `ty` with the type parameter at each index replaced by the argument
+    /// at that index.
+    pub(crate) fn substitute(
+        &mut self,
+        ty: Type,
+        arguments: &[Type],
+    ) -> Result<Type, InstantiationError> {
+        self.substitute_at(ty, arguments, 0)
+    }
+
+    fn instantiate_at(
+        &mut self,
+        declaration: usize,
+        arguments: Vec<Type>,
+        depth: usize,
+    ) -> Result<Type, InstantiationError> {
+        let (ty, new) = self.intern_new(TypeKind::Nominal {
+            declaration,
+            arguments,
+        });
+        if new {
+            if self.templates[&declaration].1 {
+                self.fill(ty, depth)?;
+            } else {
+                self.waiting.entry(declaration).or_default().push(ty);
+            }
+        }
+        Ok(ty)
+    }
+
+    /// Gives the instance `ty` the fields of its template, substituted.
+    fn fill(&mut self, ty: Type, depth: usize) -> Result<(), InstantiationError> {
+        let TypeKind::Nominal {
+            declaration,
+            arguments,
+        } = self.kind(ty).clone()
+        else {
+            unreachable!("only structs and enums are instantiated")
+        };
+        if depth > INSTANTIATION_DEPTH {
+            return Err(InstantiationError::TooDeep { declaration });
+        }
+        let (template, _) = self.templates[&declaration];
+        let mut variants = self.variants(template).to_vec();
+        for field in variants.iter_mut().flat_map(|variant| &mut variant.fields) {
+            field.ty = self.substitute_at(field.ty, &arguments, depth + 1)?;
+        }
+        self.set_variants(ty, variants);
+        if self.contains_by_value(ty) {
+            return Err(InstantiationError::ContainsItself(ty));
+        }
+        Ok(())
+    }
+
+    fn substitute_at(
+        &mut self,
+        ty: Type,
+        arguments: &[Type],
+        depth: usize,
+    ) -> Result<Type, InstantiationError> {
+        if !self.is_generic(ty) {
+            return Ok(ty);
+        }
+        let all = |types: &mut Self, parts: Vec<Type>| {
+            parts
+                .into_iter()
+                .map(|part| types.substitute_at(part, arguments, depth))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let kind = match self.kind(ty).clone() {
+            TypeKind::Param { index, .. } => return Ok(arguments[index]),
+            TypeKind::Nominal {
+                declaration,
+                arguments: parts,
+            } => {
+                let parts = all(self, parts)?;
+                return self.instantiate_at(declaration, parts, depth);
+            }
+            TypeKind::Tuple(parts) => TypeKind::Tuple(all(self, parts)?),
+            TypeKind::List(element) => TypeKind::List(all(self, vec![element])?[0]),
+            TypeKind::Set(element) => TypeKind::Set(all(self, vec![element])?[0]),
+            TypeKind::Map(key, value) => {
+                let parts = all(self, vec![key, value])?;
+                TypeKind::Map(parts[0], parts[1])
+            }
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::Str
+            | TypeKind::Unit
+            | TypeKind::Never
+            | TypeKind::Range => unreachable!("only types with parameters are substituted"),
+        };
+        Ok(self.intern(kind))
+    }
+
+    /// Whether `ty` contains itself through parts stored by value, so it
+    /// has no finite size.
+    fn contains_by_value(&self, ty: Type) -> bool {
+        let mut seen = HashSet::new();
+        let mut pending = self.components(ty);
+        while let Some(part) = pending.pop() {
+            if part == ty {
+                return true;
+            }
+            if seen.insert(part) {
+                pending.extend(self.components(part));
+            }
+        }
+        false
+    }
     /// Whether values of `ty` occupy storage. `Unit` and `Never` do not.
     pub(crate) fn has_storage(&self, ty: Type) -> bool {
         !matches!(self.kind(ty), TypeKind::Unit | TypeKind::Never)
