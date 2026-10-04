@@ -8,6 +8,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 /* With VT_CHECK_LEAKS defined, the runtime counts live heap blocks (strings
  * and list buffers), and a program that ends normally reports any block it
@@ -762,6 +766,15 @@ static void vt_print(const vt_str *value) {
 }
 
 /* Runs after the program's main returns normally. */
+/* Output is the bytes the program prints: on Windows, the standard streams
+ * would otherwise turn every "\n" into "\r\n". */
+static void vt_start(void) {
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+#endif
+}
+
 static void vt_finish(void) {
 #ifdef VT_CHECK_LEAKS
     if (vt_live_blocks != 0) {

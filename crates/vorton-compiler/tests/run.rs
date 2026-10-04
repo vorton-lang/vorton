@@ -94,8 +94,8 @@ fn run_one(compiler: &str, work: &Path, program: &Path) -> Result<(), String> {
     let output = Command::new(&executable)
         .output()
         .map_err(|error| format!("cannot run: {error}"))?;
-    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
-    let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     if let Some(expected) = &expected_stdout
         && stdout != *expected
     {
@@ -120,12 +120,12 @@ fn run_one(compiler: &str, work: &Path, program: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// An expectation file, whose line endings a checkout may have changed; the
+/// program's own output is compared byte for byte.
 fn read_expectation(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok().map(|text| normalize(&text))
-}
-
-fn normalize(text: &str) -> String {
-    text.replace("\r\n", "\n")
+    fs::read_to_string(path)
+        .ok()
+        .map(|text| text.replace("\r\n", "\n"))
 }
 
 /// Names a compile error by its diagnostic category and the line it points at.

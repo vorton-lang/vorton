@@ -29,6 +29,6 @@ fn build_keeps_files_next_to_the_output() {
 
     assert!(status.success());
     assert_eq!(kept.unwrap(), "user-owned C source\n");
-    let stdout = String::from_utf8_lossy(&output.unwrap().stdout).replace("\r\n", "\n");
+    let stdout = String::from_utf8_lossy(&output.unwrap().stdout).into_owned();
     assert_eq!(stdout, "ok\n");
 }

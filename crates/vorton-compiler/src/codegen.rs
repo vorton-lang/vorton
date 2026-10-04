@@ -42,7 +42,7 @@ pub(crate) fn emit(program: &Program) -> String {
     output.push_str(&bodies);
     writeln!(
         output,
-        "int main(void) {{\n    {}();\n    vt_finish();\n    return 0;\n}}",
+        "int main(void) {{\n    vt_start();\n    {}();\n    vt_finish();\n    return 0;\n}}",
         function_name(program.main, &program.functions[program.main])
     )
     .unwrap();
