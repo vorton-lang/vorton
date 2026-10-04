@@ -1,0 +1,12 @@
+enum E { A(List<Int>), B }
+fn main() {
+    let mut e = E::A([1])
+    let r = &e
+    match &r {
+        E::A(v) => {
+            e = E::B
+            print(v.len())
+        }
+        E::B => print(0)
+    }
+}

@@ -1,0 +1,7 @@
+fn main() {
+    let xs = [1]
+    print(xs == {
+        let ys = xs
+        [1]
+    })
+}

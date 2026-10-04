@@ -1076,7 +1076,7 @@ impl FunctionEmitter<'_> {
                     Value::Unit
                 } else if matches!(value, Value::Never) || block.ty == Type::NEVER {
                     Value::Never
-                } else if matches!(tail.kind, ExprKind::Borrow(_)) {
+                } else if matches!(tail.kind, ExprKind::Borrow(..)) {
                     // A returned borrow is a pointer that owns nothing.
                     value
                 } else {
@@ -1199,7 +1199,7 @@ impl FunctionEmitter<'_> {
     fn statement(&mut self, statement: &Statement) -> bool {
         match statement {
             Statement::Let { local, value } if self.function.locals[*local].borrow.is_some() => {
-                let ExprKind::Borrow(target) = &value.kind else {
+                let ExprKind::Borrow(_, target) = &value.kind else {
                     unreachable!("a borrowed binding is initialized by a borrow")
                 };
                 let BorrowTarget::Place(place) = target.as_ref() else {
@@ -1635,7 +1635,7 @@ impl FunctionEmitter<'_> {
                 borrow.is_some(),
             ),
             // Other borrows are lowered where they appear.
-            ExprKind::Borrow(target) => match target.as_ref() {
+            ExprKind::Borrow(_, target) => match target.as_ref() {
                 BorrowTarget::Place(place) => match self.place(place) {
                     Some((code, _, _)) => Value::Code {
                         code: format!("(&{code})"),
@@ -2348,7 +2348,7 @@ impl FunctionEmitter<'_> {
     /// storage.
     fn subject(&mut self, subject: &Expr) -> Option<Option<String>> {
         let value = match &subject.kind {
-            ExprKind::Borrow(target) => match target.as_ref() {
+            ExprKind::Borrow(_, target) => match target.as_ref() {
                 BorrowTarget::Place(place) => {
                     let (code, _, _) = self.place(place)?;
                     self.scopes.push(Vec::new());
@@ -2575,7 +2575,7 @@ impl FunctionEmitter<'_> {
             let ty = argument.ty;
             let mut place_indices = Vec::new();
             let operand = match &argument.kind {
-                ExprKind::Borrow(target) => match target.as_ref() {
+                ExprKind::Borrow(_, target) => match target.as_ref() {
                     BorrowTarget::Place(place) => {
                         let Some((code, _, evaluated)) = self.place(place) else {
                             return Value::Never;
@@ -2683,7 +2683,7 @@ impl FunctionEmitter<'_> {
     ) -> Value {
         fn place(argument: &Expr) -> &Place {
             match &argument.kind {
-                ExprKind::Borrow(target) => match target.as_ref() {
+                ExprKind::Borrow(_, target) => match target.as_ref() {
                     BorrowTarget::Place(place) => place,
                     BorrowTarget::Value(_) => unreachable!("the checker exchanges only places"),
                 },

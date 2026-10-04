@@ -1,0 +1,9 @@
+fn touch(a: &mut List<Int>, b: &mut List<Int>) {
+    a.push(1)
+    b.clear()
+}
+fn main() {
+    let mut xs = [1]
+    let t = &mut xs
+    touch(&mut t, &mut xs)
+}

@@ -14,17 +14,11 @@
 //! [`CheckDiagnosticKind::Unsupported`] instead of being treated as checked.
 //!
 //! Entities (lists and the aggregates that contain them) are moved, never
-//! copied. The checker tracks which locals may have been moved along every
-//! path and rejects a later use, a move out of a field or element, and a move
-//! of an outer local that a later loop iteration would see.
-//!
-//! Borrows appear as parameters, call arguments, `for` and `match` subjects,
-//! `let` values and function results. While a borrow lasts, the place it
-//! names cannot be changed, moved or, after `&mut`, borrowed again: a call
-//! argument lasts until the call ends, a loop or `match` subject until it
-//! ends, the arguments of a call that returns a borrow until the statement
-//! ends, and a `let` borrow until the last use of its bindings on some path,
-//! as in Rust.
+//! copied. The checker decides where values move and borrows begin, and
+//! rejects moves out of elements, borrows and `Drop` values. Which uses
+//! come after a move, and which accesses conflict with a live borrow, are
+//! checked on the IR of each function by [`crate::borrowck`], which follows
+//! every path of the control flow.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -187,6 +181,7 @@ pub(crate) enum ForSource {
 #[derive(Clone)]
 pub(crate) struct Place {
     pub(crate) local: usize,
+    pub(crate) span: Span,
     /// A call that returns a borrow, made first; the borrowed `local` then
     /// points at what it returns.
     pub(crate) call: Option<Box<Expr>>,
@@ -265,6 +260,7 @@ pub(crate) enum StrMethod {
 #[derive(Clone)]
 pub(crate) struct Expr {
     pub(crate) ty: Type,
+    pub(crate) span: Span,
     pub(crate) kind: ExprKind,
 }
 
@@ -353,7 +349,7 @@ pub(crate) enum ExprKind {
     /// `&x` or `&mut x` as a call argument, `match` subject, `let` value or
     /// returned result: a pointer to a place, or to a temporary that lives
     /// until the end of the enclosing statement.
-    Borrow(Box<BorrowTarget>),
+    Borrow(BorrowKind, Box<BorrowTarget>),
 }
 
 /// The function a call runs.
@@ -861,21 +857,12 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             loops: Vec::new(),
             result: signature.result,
             result_borrow: signature.result_borrow,
-            moved: BTreeSet::new(),
-            frozen: Vec::new(),
-            held: Vec::new(),
-            conflicts: 0,
             depth: 0,
-            from_parameters: Vec::new(),
         };
         let mut parameters = Vec::new();
         for (parameter, (ty, borrow)) in function.parameters.iter().zip(&signature.parameters) {
             parameters.push(match borrow {
-                Some(kind) => {
-                    let local = checker.declare_borrow(&parameter.binding.identity, *ty, *kind);
-                    checker.from_parameters[local] = true;
-                    local
-                }
+                Some(kind) => checker.declare_borrow(&parameter.binding.identity, *ty, *kind),
                 None => checker.declare(
                     &parameter.binding.identity,
                     *ty,
@@ -885,14 +872,18 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         }
         let body = checker.check_block(&function.body, Some(signature.result))?;
         calls.push(checker.calls);
-        functions.push(Function {
+        let function = Function {
             name: found.name.clone(),
             parameters,
             locals: checker.locals,
             result: signature.result,
             result_borrow: signature.result_borrow,
             body,
-        });
+        };
+        // Moves and borrows are checked on the IR, which follows every path.
+        let body = crate::lower::lower(&function, &types);
+        crate::borrowck::check(&body, &|span| at(origin, span))?;
+        functions.push(function);
     }
     check_recursion(&calls, &types)?;
     let main = functions_found
@@ -1831,22 +1822,9 @@ fn unsupported(primary: Option<OriginRef>, what: &str) -> CheckDiagnostic {
     }
 }
 
-struct LoopFrame {
-    breaks: bool,
-    /// The number of conflicts recorded when the loop starts.
-    entry_conflicts: usize,
-    /// The conflicts of the held borrows at each `break` and `continue`.
-    break_conflicts: Vec<Vec<Option<Conflict>>>,
-    continue_conflicts: Vec<Vec<Option<Conflict>>>,
-    /// The locals that may be moved when the loop starts.
-    entry_moved: BTreeSet<usize>,
-    /// Locals with a smaller index are declared outside the loop.
-    outer_locals: usize,
-    /// The moved locals at each `break`.
-    break_states: Vec<BTreeSet<usize>>,
-}
-
-/// A place, its type, and the path that loops freeze while reading it.
+/// A place, its type, and its path: field indices from the local, with
+/// `None` for any list element, to compare the borrowed arguments of one
+/// call.
 type PlaceAccess = (Place, Type, Vec<Option<usize>>);
 
 /// A checked operand of a borrow, a method call or a loop.
@@ -1867,49 +1845,6 @@ impl Operand {
 
 /// A checked arm pattern and the locals visible in its arm.
 type ArmPattern = (Pattern, BTreeMap<EntityId, usize>);
-
-/// A place that a running loop reads, so the loop body may not change it.
-#[derive(Clone)]
-struct Frozen {
-    local: usize,
-    /// Field indices from the local; `None` stands for any list element.
-    path: Vec<Option<usize>>,
-    /// Whether the borrow is `&mut`, which excludes even shared access.
-    exclusive: bool,
-}
-
-/// The borrow that `let` bindings hold until their last use. A conflicting
-/// access is recorded instead of rejected, and the next use of a binding
-/// after it is an error; so is a conflict in a loop that uses a binding,
-/// because the next iteration uses it after the conflict.
-struct HeldBorrow {
-    locals: Vec<usize>,
-    /// The names of the bindings, to find their uses in a loop.
-    names: Vec<EntityId>,
-    frozen: Vec<Frozen>,
-    /// The depth of the block that declares the bindings.
-    depth: usize,
-    /// How many loops enclose the declaration.
-    loops: usize,
-    /// The first conflict on some path to here.
-    conflict: Option<Conflict>,
-}
-
-#[derive(Clone)]
-struct Conflict {
-    span: Span,
-    message: String,
-    /// How many conflicts were recorded before this one.
-    order: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Access {
-    /// A shared borrow, or a read that is not a value copy.
-    Share,
-    /// An assignment, a move, a `&mut` borrow or a changing method.
-    Change,
-}
 
 /// The values given to a variant or struct, in source order.
 enum Arguments<'r> {
@@ -1936,20 +1871,12 @@ struct BodyChecker<'a> {
     locals: Vec<Local>,
     local_ids: BTreeMap<EntityId, usize>,
     mutable: Vec<bool>,
-    loops: Vec<LoopFrame>,
+    /// For each enclosing loop, whether a `break` leaves it.
+    loops: Vec<bool>,
     result: Type,
     result_borrow: Option<BorrowKind>,
-    /// Locals whose entity value may have been moved on some path to here.
-    moved: BTreeSet<usize>,
-    frozen: Vec<Frozen>,
-    held: Vec<HeldBorrow>,
-    /// How many conflicts with held borrows have been recorded.
-    conflicts: usize,
     /// How many blocks enclose the statement being checked.
     depth: usize,
-    /// For each local, whether it is a borrow that reaches only places of
-    /// the parameters passed by borrow, so the function may return it.
-    from_parameters: Vec<bool>,
 }
 
 impl BodyChecker<'_> {
@@ -2010,25 +1937,11 @@ impl BodyChecker<'_> {
         }
     }
 
-    /// Checks that `place` may be borrowed with `kind` now: `&mut` needs a
-    /// changeable place, and neither may conflict with a running borrow.
+    /// Checks that `place` may be borrowed with `kind`: `&mut` needs a
+    /// changeable place. Conflicts with other borrows are checked on the IR.
     fn check_borrow(
-        &mut self,
+        &self,
         place: &Place,
-        path: &[Option<usize>],
-        kind: BorrowKind,
-        span: Span,
-    ) -> Result<(), CheckDiagnostic> {
-        self.check_borrow_except(&[], place, path, kind, span)
-    }
-
-    /// Like [`Self::check_borrow`], ignoring the running borrows at the
-    /// positions `skip` of the borrow stack.
-    fn check_borrow_except(
-        &mut self,
-        skip: &[usize],
-        place: &Place,
-        path: &[Option<usize>],
         kind: BorrowKind,
         span: Span,
     ) -> Result<(), CheckDiagnostic> {
@@ -2041,13 +1954,8 @@ impl BodyChecker<'_> {
             };
             return Err(self.error(CheckDiagnosticKind::NotAssignable, span, message));
         }
-        let access = match kind {
-            BorrowKind::Shared => Access::Share,
-            BorrowKind::Mutable => Access::Change,
-        };
-        self.check_access_except(skip, place.local, path, access, span)
+        Ok(())
     }
-
     /// Declares a local that points at a borrowed place; through `&mut` the
     /// place can be changed.
     fn declare_borrow(&mut self, identity: &EntityId, ty: Type, kind: BorrowKind) -> usize {
@@ -2077,18 +1985,7 @@ impl BodyChecker<'_> {
         let index = self.locals.len();
         self.locals.push(Local { name, ty, borrow });
         self.mutable.push(mutable);
-        self.from_parameters.push(false);
         index
-    }
-
-    /// Records that the borrowed ones of `locals` reach what `root` reaches.
-    fn borrow_from(&mut self, locals: &[usize], root: Option<usize>) {
-        let reaches = root.is_some_and(|root| self.from_parameters[root]);
-        for &local in locals {
-            if self.locals[local].borrow.is_some() {
-                self.from_parameters[local] = reaches;
-            }
-        }
     }
 
     fn resolve_type(
@@ -2109,42 +2006,6 @@ impl BodyChecker<'_> {
         }
     }
 
-    /// Rejects a use of `local` after its value may have been moved, or
-    /// after a conflict with the borrow it holds.
-    fn use_local(&self, local: usize, span: Span) -> Result<(), CheckDiagnostic> {
-        if self.moved.contains(&local) {
-            return Err(self.error(
-                CheckDiagnosticKind::UseAfterMove,
-                span,
-                format!(
-                    "`{}` is used after its value may have been moved",
-                    self.locals[local].name
-                ),
-            ));
-        }
-        self.check_held_use(local)
-    }
-
-    /// Rejects a use of a `let` borrow binding after a conflict with its
-    /// borrow; the error points at the conflict.
-    fn check_held_use(&self, local: usize) -> Result<(), CheckDiagnostic> {
-        for held in &self.held {
-            if held.locals.contains(&local)
-                && let Some(conflict) = &held.conflict
-            {
-                return Err(self.error(
-                    CheckDiagnosticKind::BorrowConflict,
-                    conflict.span,
-                    format!(
-                        "{}, and `{}` is used later",
-                        conflict.message, self.locals[local].name
-                    ),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     /// Turns `expression` into a value that its consumer owns: an entity
     /// local is moved, and an entity inside a field or element is rejected.
     fn consume(&mut self, expression: Expr, span: Span) -> Result<Expr, CheckDiagnostic> {
@@ -2158,15 +2019,13 @@ impl BodyChecker<'_> {
             | ExprKind::Call {
                 borrow: Some(_), ..
             } => {
-                // Moving a part moves the whole variable.
                 let (local, fields) = self.movable_part(&expression, expression.ty, span)?;
-                let path = fields.iter().copied().map(Some).collect::<Vec<_>>();
-                self.check_not_frozen(local, &path, span)?;
-                self.moved.insert(local);
                 Ok(Expr {
                     ty: expression.ty,
+                    span,
                     kind: ExprKind::Move(Place {
                         local,
+                        span,
                         call: None,
                         projections: fields.into_iter().map(Projection::Field).collect(),
                     }),
@@ -2241,216 +2100,6 @@ impl BodyChecker<'_> {
         self.consume(checked, expression.span)
     }
 
-    /// Checks an access to `local` along `path` against the borrows of
-    /// overlapping places: any change conflicts with a borrow, and a shared
-    /// access conflicts with an exclusive one. Reading a value never
-    /// conflicts. A conflict with a running borrow is rejected; one with a
-    /// held borrow is recorded for its later uses.
-    fn check_access(
-        &mut self,
-        local: usize,
-        path: &[Option<usize>],
-        access: Access,
-        span: Span,
-    ) -> Result<(), CheckDiagnostic> {
-        self.check_access_except(&[], local, path, access, span)
-    }
-
-    /// Like [`Self::check_access`], ignoring the running borrows at the
-    /// positions `skip` of the borrow stack.
-    fn check_access_except(
-        &mut self,
-        skip: &[usize],
-        local: usize,
-        path: &[Option<usize>],
-        access: Access,
-        span: Span,
-    ) -> Result<(), CheckDiagnostic> {
-        let conflicts = |frozen: &Frozen| {
-            frozen.local == local
-                && (access == Access::Change || frozen.exclusive)
-                && frozen
-                    .path
-                    .iter()
-                    .zip(path)
-                    .all(|(left, right)| left.is_none() || right.is_none() || left == right)
-        };
-        let what = if access == Access::Change {
-            "change"
-        } else {
-            "be borrowed"
-        };
-        let name = &self.locals[local].name;
-        if self
-            .frozen
-            .iter()
-            .enumerate()
-            .any(|(position, frozen)| !skip.contains(&position) && conflicts(frozen))
-        {
-            return Err(self.error(
-                CheckDiagnosticKind::BorrowConflict,
-                span,
-                format!("`{name}` cannot {what} while it is borrowed"),
-            ));
-        }
-        let mut recorded = false;
-        for held in &mut self.held {
-            if held.conflict.is_none() && held.frozen.iter().any(conflicts) {
-                held.conflict = Some(Conflict {
-                    span,
-                    message: format!("`{name}` cannot {what} while it is borrowed"),
-                    order: self.conflicts,
-                });
-                recorded = true;
-            }
-        }
-        if recorded {
-            self.conflicts += 1;
-        }
-        Ok(())
-    }
-
-    fn check_not_frozen(
-        &mut self,
-        local: usize,
-        path: &[Option<usize>],
-        span: Span,
-    ) -> Result<(), CheckDiagnostic> {
-        self.check_access(local, path, Access::Change, span)
-    }
-
-    /// Ends the body of the innermost loop. `reaches_end` tells whether an
-    /// iteration can finish normally, and `head` is the state where the loop
-    /// may stop between iterations (`None` for `loop`). A conflict that
-    /// reaches the next iteration, with a borrow held from outside that each
-    /// iteration uses as `mentions` tells, is an error. Afterwards the held
-    /// borrows have the conflicts that reach the code after the loop.
-    fn end_loop_conflicts(
-        &mut self,
-        reaches_end: bool,
-        head: Option<Vec<Option<Conflict>>>,
-        mentions: impl Fn(&[EntityId]) -> bool,
-    ) -> Result<(), CheckDiagnostic> {
-        let loops = self.loops.len();
-        let frame = self.loops.last().expect("inside a loop");
-        let mut back = frame.continue_conflicts.clone();
-        if reaches_end {
-            back.push(self.held_conflicts());
-        }
-        let back = self.joined_conflicts(&back);
-        for (held, conflict) in self.held.iter().zip(&back) {
-            if held.loops < loops
-                && let Some(conflict) = conflict
-                && conflict.order >= frame.entry_conflicts
-                && mentions(&held.names)
-            {
-                return Err(self.error(
-                    CheckDiagnosticKind::BorrowConflict,
-                    conflict.span,
-                    format!(
-                        "{}, and `{}` is used in the next iteration",
-                        conflict.message, self.locals[held.locals[0]].name
-                    ),
-                ));
-            }
-        }
-        let mut exits = frame.break_conflicts.clone();
-        if let Some(head) = head {
-            exits.push(head);
-            exits.push(back);
-        }
-        if !exits.is_empty() {
-            let after = self.joined_conflicts(&exits);
-            self.set_held_conflicts(&after);
-        }
-        Ok(())
-    }
-
-    /// The conflicts of the held borrows, to check branches from the same
-    /// state.
-    fn held_conflicts(&self) -> Vec<Option<Conflict>> {
-        self.held.iter().map(|held| held.conflict.clone()).collect()
-    }
-
-    fn set_held_conflicts(&mut self, conflicts: &[Option<Conflict>]) {
-        for (held, conflict) in self.held.iter_mut().zip(conflicts) {
-            held.conflict = conflict.clone();
-        }
-    }
-
-    /// Where paths join, a held borrow has a conflict if it has one on some
-    /// path. A state taken inside a nested block may hold more borrows,
-    /// which have ended by now.
-    fn joined_conflicts(&self, states: &[Vec<Option<Conflict>>]) -> Vec<Option<Conflict>> {
-        (0..self.held.len())
-            .map(|position| states.iter().find_map(|state| state[position].clone()))
-            .collect()
-    }
-
-    /// Joins the conflicts at the ends of branches; a branch of type
-    /// `Never` does not reach the join.
-    fn join_branch_conflicts(&mut self, branches: &[(Type, Vec<Option<Conflict>>)]) {
-        let reaching = branches
-            .iter()
-            .filter(|(ty, _)| *ty != Type::NEVER)
-            .map(|(_, state)| state.clone())
-            .collect::<Vec<_>>();
-        let joined = if reaching.is_empty() {
-            let all = branches
-                .iter()
-                .map(|(_, state)| state.clone())
-                .collect::<Vec<_>>();
-            self.joined_conflicts(&all)
-        } else {
-            self.joined_conflicts(&reaching)
-        };
-        self.set_held_conflicts(&joined);
-    }
-    /// Ends one path through a loop body: an outer local that the next
-    /// iteration would see moved is an error.
-    fn check_loop_back(&self, span: Span) -> Result<(), CheckDiagnostic> {
-        let frame = self.loops.last().expect("inside a loop");
-        if let Some(&local) = self
-            .moved
-            .iter()
-            .find(|local| **local < frame.outer_locals && !frame.entry_moved.contains(local))
-        {
-            return Err(self.error(
-                CheckDiagnosticKind::UseAfterMove,
-                span,
-                format!(
-                    "`{}` is moved in one loop iteration and would be used in the next",
-                    self.locals[local].name
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    fn enter_loop(&mut self) {
-        self.loops.push(LoopFrame {
-            breaks: false,
-            entry_conflicts: self.conflicts,
-            break_conflicts: Vec::new(),
-            continue_conflicts: Vec::new(),
-            entry_moved: self.moved.clone(),
-            outer_locals: self.locals.len(),
-            break_states: Vec::new(),
-        });
-    }
-
-    /// Leaves a loop. After it, a local is moved if it was when the loop
-    /// started or at some `break`.
-    fn exit_loop(&mut self) -> LoopFrame {
-        let frame = self.loops.pop().expect("the loop frame was pushed");
-        let mut moved = frame.entry_moved.clone();
-        for state in &frame.break_states {
-            moved.extend(state.iter().copied());
-        }
-        self.moved = moved;
-        frame
-    }
-
     fn check_block(
         &mut self,
         block: &ResolvedBlock,
@@ -2461,11 +2110,9 @@ impl BodyChecker<'_> {
         let mut diverges = false;
         self.depth += 1;
         for statement in &block.statements {
-            let frozen_before = self.frozen.len();
             let (statement, statement_diverges) = self.check_statement(statement)?;
             diverges |= statement_diverges;
             statements.push(statement);
-            self.frozen.truncate(frozen_before);
         }
         let (tail, ty) = match &block.tail {
             Some(tail) => {
@@ -2491,8 +2138,6 @@ impl BodyChecker<'_> {
             let span = block.tail.as_ref().map_or(block.span, |tail| tail.span);
             self.require(span, expected, ty)?;
         }
-        let depth = self.depth;
-        self.held.retain(|held| held.depth != depth);
         self.depth -= 1;
         self.local_ids = scope;
         Ok(Block {
@@ -2515,15 +2160,12 @@ impl BodyChecker<'_> {
                 operator: (operator_span, operator),
                 value,
             } => {
-                let (place, ty) = self.check_place(target, true)?;
+                let (place, ty) = self.check_place(target)?;
                 let value = self.check_consumed(value, Some(ty))?;
                 self.require(span, ty, value.ty)?;
                 if *operator != AssignmentOperator::Assign && !matches!(ty, Type::INT | Type::FLOAT)
                 {
                     return Err(self.mismatch(*operator_span, Type::INT, ty));
-                }
-                if place.projections.is_empty() {
-                    self.moved.remove(&place.local);
                 }
                 let diverges = value.ty == Type::NEVER;
                 Ok((
@@ -2557,59 +2199,34 @@ impl BodyChecker<'_> {
                 Ok((Statement::Return(value), true))
             }
             ResolvedStatementKind::Break | ResolvedStatementKind::Continue => {
-                let is_break = matches!(statement.kind, ResolvedStatementKind::Break);
-                let conflicts = self.held_conflicts();
-                let Some(frame) = self.loops.last_mut() else {
+                let Some(breaks) = self.loops.last_mut() else {
                     return Err(self.error(
                         CheckDiagnosticKind::OutsideLoop,
                         span,
                         "`break` and `continue` must be inside a loop".to_owned(),
                     ));
                 };
-                if is_break {
-                    frame.breaks = true;
-                    frame.break_states.push(self.moved.clone());
-                    frame.break_conflicts.push(conflicts);
+                if matches!(statement.kind, ResolvedStatementKind::Break) {
+                    *breaks = true;
                     Ok((Statement::Break, true))
                 } else {
-                    frame.continue_conflicts.push(conflicts);
-                    self.check_loop_back(span)?;
                     Ok((Statement::Continue, true))
                 }
             }
             ResolvedStatementKind::While { condition, body } => {
-                self.enter_loop();
-                let checked = self.check_condition(condition);
-                let checked = checked.and_then(|checked| {
-                    let head = self.held_conflicts();
-                    let checked_body = self.check_block(body, Some(Type::UNIT))?;
-                    let reaches_end = checked_body.ty != Type::NEVER;
-                    if reaches_end {
-                        self.check_loop_back(span)?;
-                    }
-                    self.end_loop_conflicts(reaches_end, Some(head), |names| {
-                        statement_mentions(statement, names)
-                    })?;
-                    Ok((checked, checked_body))
+                self.loops.push(false);
+                let checked = self.check_condition(condition).and_then(|condition| {
+                    Ok((condition, self.check_block(body, Some(Type::UNIT))?))
                 });
-                self.exit_loop();
+                self.loops.pop();
                 let (condition, body) = checked?;
                 Ok((Statement::While { condition, body }, false))
             }
             ResolvedStatementKind::Loop(body) => {
-                self.enter_loop();
-                let body = self.check_block(body, Some(Type::UNIT)).and_then(|body| {
-                    let reaches_end = body.ty != Type::NEVER;
-                    if reaches_end {
-                        self.check_loop_back(span)?;
-                    }
-                    self.end_loop_conflicts(reaches_end, None, |names| {
-                        statement_mentions(statement, names)
-                    })?;
-                    Ok(body)
-                });
-                let frame = self.exit_loop();
-                Ok((Statement::Loop(body?), !frame.breaks))
+                self.loops.push(false);
+                let body = self.check_block(body, Some(Type::UNIT));
+                let breaks = self.loops.pop().expect("the loop was pushed");
+                Ok((Statement::Loop(body?), !breaks))
             }
             ResolvedStatementKind::IfLet {
                 pattern,
@@ -2654,7 +2271,6 @@ impl BodyChecker<'_> {
         };
         // `&place`, `&mut place`, or a call that returns a borrow, binds a
         // borrow. Any other call is checked here and used below.
-        let frozen_before = self.frozen.len();
         let mut checked = None;
         let borrowed = match &value.kind {
             ResolvedExprKind::Borrow {
@@ -2682,7 +2298,7 @@ impl BodyChecker<'_> {
             }
             _ => None,
         };
-        if let Some((kind, (place, ty, path), operand_span)) = borrowed {
+        if let Some((kind, (place, ty, _), operand_span)) = borrowed {
             if let Some(mutable) = mutable {
                 return Err(self.error(
                     CheckDiagnosticKind::NotAssignable,
@@ -2703,58 +2319,33 @@ impl BodyChecker<'_> {
             if let Some(expected) = expected {
                 self.require(operand_span, expected, ty)?;
             }
-            self.check_borrow(&place, &path, kind, operand_span)?;
-            let root = place.local;
-            let mut frozen = self.held_frozen(root, path, kind);
-            frozen.extend(self.take_frozen(frozen_before));
+            self.check_borrow(&place, kind, operand_span)?;
             let target = Expr {
                 ty,
-                kind: ExprKind::Borrow(Box::new(BorrowTarget::Place(place))),
+                span: operand_span,
+                kind: ExprKind::Borrow(kind, Box::new(BorrowTarget::Place(place))),
             };
-            let (statement, mut locals) = match pattern {
+            let statement = match pattern {
                 Some(pattern) => {
                     let pattern =
                         self.check_pattern(pattern, ty, Some(kind), &mut BTreeMap::new())?;
                     self.require_exhaustive(span, &pattern, ty)?;
-                    let locals = pattern.bindings();
-                    (
-                        Statement::LetPattern {
-                            pattern,
-                            value: target,
-                        },
-                        locals,
-                    )
+                    Statement::LetPattern {
+                        pattern,
+                        value: target,
+                    }
                 }
                 None => {
                     let [binding] = bindings.as_slice() else {
                         unreachable!("a let without a pattern binds one name")
                     };
                     let local = self.declare_borrow(&binding.identity, ty, kind);
-                    (
-                        Statement::Let {
-                            local,
-                            value: target,
-                        },
-                        vec![local],
-                    )
+                    Statement::Let {
+                        local,
+                        value: target,
+                    }
                 }
             };
-            locals.retain(|&local| self.locals[local].borrow.is_some());
-            self.borrow_from(&locals, Some(root));
-            if !locals.is_empty() {
-                let names = bindings
-                    .iter()
-                    .map(|binding| binding.identity.clone())
-                    .collect::<Vec<_>>();
-                self.held.push(HeldBorrow {
-                    locals,
-                    names,
-                    frozen,
-                    depth: self.depth,
-                    loops: self.loops.len(),
-                    conflict: None,
-                });
-            }
             return Ok((statement, false));
         }
         if let Some((annotation_span, _)) = annotation_borrow {
@@ -2799,14 +2390,15 @@ impl BodyChecker<'_> {
     }
 
     /// Checks a value returned by a function whose result is borrowed with
-    /// `kind`: `&place`, `&mut place`, or a call that returns a borrow, all
-    /// reaching only places of the parameters passed by borrow.
+    /// `kind`: `&place`, `&mut place`, or a call that returns a borrow. The
+    /// IR checks that it reaches only places of the parameters passed by
+    /// borrow.
     fn check_returned_borrow(
         &mut self,
         value: &ResolvedExpr,
         kind: BorrowKind,
     ) -> Result<Expr, CheckDiagnostic> {
-        let (place, ty, path, span) = match &value.kind {
+        let (place, ty, span) = match &value.kind {
             ResolvedExprKind::Parenthesized(inner) => {
                 return self.check_returned_borrow(inner, kind);
             }
@@ -2822,7 +2414,7 @@ impl BodyChecker<'_> {
                     ));
                 }
                 match self.check_operand(operand, None)? {
-                    Operand::Place((place, ty, path)) => (place, ty, path, operand.span),
+                    Operand::Place((place, ty, _)) => (place, ty, operand.span),
                     Operand::Value(_) => {
                         return Err(self.error(
                             CheckDiagnosticKind::BorrowOutlives,
@@ -2834,10 +2426,10 @@ impl BodyChecker<'_> {
                 }
             }
             _ => match self.check_operand(value, None)? {
-                Operand::Place((place, ty, path))
+                Operand::Place((place, ty, _))
                     if place.call.is_some() && place.projections.is_empty() =>
                 {
-                    (place, ty, path, value.span)
+                    (place, ty, value.span)
                 }
                 Operand::Value(checked) if checked.ty == Type::NEVER => return Ok(checked),
                 _ => {
@@ -2850,20 +2442,11 @@ impl BodyChecker<'_> {
             },
         };
         self.require(span, self.result, ty)?;
-        self.check_borrow(&place, &path, kind, span)?;
-        if !self.from_parameters[place.local] {
-            return Err(self.error(
-                CheckDiagnosticKind::BorrowOutlives,
-                span,
-                format!(
-                    "a returned borrow must come from a parameter passed by borrow; `{}` ends when the function returns",
-                    self.locals[place.local].name
-                ),
-            ));
-        }
+        self.check_borrow(&place, kind, span)?;
         Ok(Expr {
             ty,
-            kind: ExprKind::Borrow(Box::new(BorrowTarget::Place(place))),
+            span,
+            kind: ExprKind::Borrow(kind, Box::new(BorrowTarget::Place(place))),
         })
     }
 
@@ -2883,39 +2466,6 @@ impl BodyChecker<'_> {
         }
     }
 
-    /// What a new `let` borrow of `local` along `path` holds: that place, and
-    /// what the held borrow that `local` belongs to holds.
-    fn held_frozen(&self, local: usize, path: Vec<Option<usize>>, kind: BorrowKind) -> Vec<Frozen> {
-        let exclusive = kind == BorrowKind::Mutable;
-        let mut frozen = vec![Frozen {
-            local,
-            path,
-            exclusive,
-        }];
-        for held in self.held.iter().filter(|held| held.locals.contains(&local)) {
-            frozen.extend(held.frozen.iter().map(|inner| Frozen {
-                exclusive: inner.exclusive && exclusive,
-                ..inner.clone()
-            }));
-        }
-        frozen
-    }
-
-    /// Takes the running borrows from position `base` of the borrow stack,
-    /// which the calls in a `let` value made, so the `let` holds them.
-    fn take_frozen(&mut self, base: usize) -> Vec<Frozen> {
-        let mut frozen = Vec::new();
-        for taken in self.frozen.split_off(base) {
-            let kind = if taken.exclusive {
-                BorrowKind::Mutable
-            } else {
-                BorrowKind::Shared
-            };
-            frozen.extend(self.held_frozen(taken.local, taken.path, kind));
-        }
-        frozen
-    }
-
     fn check_for(
         &mut self,
         statement: &ResolvedStatement,
@@ -2924,7 +2474,7 @@ impl BodyChecker<'_> {
         body: &ResolvedBlock,
     ) -> Result<(Statement, bool), CheckDiagnostic> {
         let span = statement.span;
-        let (source, element, frozen, mode) = match &iterable.kind {
+        let (source, element, mode) = match &iterable.kind {
             ResolvedExprKind::Binary {
                 left,
                 operator:
@@ -2944,14 +2494,14 @@ impl BodyChecker<'_> {
                     end,
                     inclusive: *operator == BinaryOperator::RangeInclusive,
                 };
-                (source, Type::INT, None, None)
+                (source, Type::INT, None)
             }
             ResolvedExprKind::Borrow {
                 kind: (_, kind),
                 operand,
             } => {
                 let kind = *kind;
-                let Operand::Place((place, ty, path)) = self.check_operand(operand, None)? else {
+                let Operand::Place((place, ty, _)) = self.check_operand(operand, None)? else {
                     return Err(self.unsupported(operand.span, "borrowing loops over temporaries"));
                 };
                 // A borrowed map yields its values, and a set copies its
@@ -2975,18 +2525,8 @@ impl BodyChecker<'_> {
                         ));
                     }
                 };
-                self.check_borrow(&place, &path, kind, operand.span)?;
-                let frozen = Frozen {
-                    local: place.local,
-                    path,
-                    exclusive: kind == BorrowKind::Mutable,
-                };
-                (
-                    ForSource::Borrowed(place),
-                    element,
-                    Some(frozen),
-                    Some(kind),
-                )
+                self.check_borrow(&place, kind, operand.span)?;
+                (ForSource::Borrowed(place), element, Some(kind))
             }
             _ => {
                 let value = self.check_expr(iterable, None)?;
@@ -3006,7 +2546,7 @@ impl BodyChecker<'_> {
                     }
                 };
                 match element {
-                    None => (ForSource::RangeValue(value), Type::INT, None, None),
+                    None => (ForSource::RangeValue(value), Type::INT, None),
                     Some(element) => {
                         let value = self.consume(value, iterable.span)?;
                         (
@@ -3016,14 +2556,13 @@ impl BodyChecker<'_> {
                             },
                             element,
                             None,
-                            None,
                         )
                     }
                 }
             }
         };
         let scope = self.local_ids.clone();
-        self.enter_loop();
+        self.loops.push(false);
         let binding = match bindings {
             [single] => Ok(Pattern::Binding(self.declare_binding(
                 &single.identity,
@@ -3050,31 +2589,9 @@ impl BodyChecker<'_> {
                 )),
             },
         };
-        if let Ok(binding) = &binding {
-            self.borrow_from(&binding.bindings(), frozen.as_ref().map(|f| f.local));
-        }
-        let has_frozen = frozen.is_some();
-        if let Some(frozen) = frozen {
-            self.frozen.push(frozen);
-        }
-        let body = binding.and_then(|checked| {
-            let head = self.held_conflicts();
-            let checked_body = self.check_block(body, Some(Type::UNIT))?;
-            let reaches_end = checked_body.ty != Type::NEVER;
-            if reaches_end {
-                self.check_loop_back(span)?;
-            }
-            // A range or a taken list is evaluated once; a borrowed one is
-            // used by every iteration.
-            self.end_loop_conflicts(reaches_end, Some(head), |names| {
-                block_mentions(body, names) || (has_frozen && expr_mentions(iterable, names))
-            })?;
-            Ok((checked, checked_body))
-        });
-        if has_frozen {
-            self.frozen.pop();
-        }
-        self.exit_loop();
+        let body =
+            binding.and_then(|checked| Ok((checked, self.check_block(body, Some(Type::UNIT))?)));
+        self.loops.pop();
         self.local_ids = scope;
         let (binding, body) = body?;
         Ok((
@@ -3089,9 +2606,9 @@ impl BodyChecker<'_> {
 
     /// Checks an expression that may be borrowed or used as a receiver. A
     /// local followed by field, tuple-element and index accesses is a place,
-    /// returned with the path that loops freeze; so is a call that returns a
-    /// borrow, and the parts of such a place. Anything else is a value,
-    /// checked against `expected`.
+    /// returned with its path; so is a call that returns a borrow, and the
+    /// parts of such a place. Anything else is a value, checked against
+    /// `expected`.
     fn check_operand(
         &mut self,
         expression: &ResolvedExpr,
@@ -3102,10 +2619,10 @@ impl BodyChecker<'_> {
             ResolvedExprKind::Path(ResolvedReference::Exact { target, .. })
                 if let Some(&local) = self.local_ids.get(target) =>
             {
-                self.use_local(local, span)?;
                 Ok(Operand::Place((
                     Place {
                         local,
+                        span,
                         call: None,
                         projections: Vec::new(),
                     },
@@ -3125,7 +2642,7 @@ impl BodyChecker<'_> {
             ResolvedExprKind::Field { receiver, field } => {
                 let base = self.check_operand(receiver, None)?;
                 let (index, ty) = self.named_field(base.ty(), &field.name, field.origin.span)?;
-                Ok(self.project(base, Projection::Field(index), Some(index), ty))
+                Ok(self.project(base, Projection::Field(index), Some(index), ty, span))
             }
             ResolvedExprKind::TupleField {
                 receiver,
@@ -3134,12 +2651,18 @@ impl BodyChecker<'_> {
             } => {
                 let base = self.check_operand(receiver, None)?;
                 let (index, ty) = self.tuple_element(base.ty(), index, origin.span)?;
-                Ok(self.project(base, Projection::Field(index), Some(index), ty))
+                Ok(self.project(base, Projection::Field(index), Some(index), ty, span))
             }
             ResolvedExprKind::Index { receiver, index } => {
                 let base = self.check_operand(receiver, None)?;
                 let (element, index) = self.check_subscript(base.ty(), receiver.span, index)?;
-                Ok(self.project(base, Projection::Index(Box::new(index)), None, element))
+                Ok(self.project(
+                    base,
+                    Projection::Index(Box::new(index)),
+                    None,
+                    element,
+                    span,
+                ))
             }
             _ => Ok(Operand::Value(self.check_expr(expression, expected)?)),
         }
@@ -3156,10 +2679,10 @@ impl BodyChecker<'_> {
         };
         let ty = call.ty;
         let local = self.push_local(name, ty, kind == BorrowKind::Mutable, Some(kind));
-        self.from_parameters[local] = self.call_from_parameters(&call);
         Operand::Place((
             Place {
                 local,
+                span: call.span,
                 call: Some(Box::new(call)),
                 projections: Vec::new(),
             },
@@ -3176,10 +2699,12 @@ impl BodyChecker<'_> {
         projection: Projection,
         step: Option<usize>,
         ty: Type,
+        span: Span,
     ) -> Operand {
         match base {
             Operand::Place((mut place, _, mut path)) => {
                 place.projections.push(projection);
+                place.span = span;
                 path.push(step);
                 Operand::Place((place, ty, path))
             }
@@ -3189,17 +2714,19 @@ impl BodyChecker<'_> {
                     Projection::Field(index) => ExprKind::Field { base, index },
                     Projection::Index(index) => ExprKind::Index { base, index },
                 };
-                Operand::Value(Expr { ty, kind })
+                Operand::Value(Expr { ty, span, kind })
             }
         }
     }
 
     /// The value a place holds, as an expression that reads it.
     fn place_value(&self, place: Place) -> Expr {
+        let span = place.span;
         let mut value = match place.call {
             Some(call) => *call,
             None => Expr {
                 ty: self.locals[place.local].ty,
+                span,
                 kind: ExprKind::Local(place.local),
             },
         };
@@ -3208,10 +2735,12 @@ impl BodyChecker<'_> {
             value = match projection {
                 Projection::Field(index) => Expr {
                     ty: self.types.components(base.ty)[index],
+                    span,
                     kind: ExprKind::Field { base, index },
                 },
                 Projection::Index(index) => Expr {
                     ty: self.list_element_type(base.ty),
+                    span,
                     kind: ExprKind::Index { base, index },
                 },
             };
@@ -3250,13 +2779,8 @@ impl BodyChecker<'_> {
         Ok((element, checked))
     }
 
-    /// Checks an assignment target and returns it with its type. Assigning
-    /// a whole local is allowed after its value was moved.
-    fn check_place(
-        &mut self,
-        target: &ResolvedPlace,
-        reinitializes: bool,
-    ) -> Result<(Place, Type), CheckDiagnostic> {
+    /// Checks an assignment target and returns it with its type.
+    fn check_place(&mut self, target: &ResolvedPlace) -> Result<(Place, Type), CheckDiagnostic> {
         let local = match &target.root {
             ResolvedReference::Exact { target: entity, .. } => self.local_ids.get(entity).copied(),
             ResolvedReference::Selection { .. } => None,
@@ -3269,41 +2793,32 @@ impl BodyChecker<'_> {
                     .to_owned(),
             ));
         };
-        if !(reinitializes && target.projections.is_empty()) {
-            self.use_local(local, target.span)?;
-        }
-        // Assigning through a borrow binding uses it.
-        self.check_held_use(local)?;
         let mut ty = self.locals[local].ty;
         let mut projections = Vec::new();
-        let mut path = Vec::new();
         for projection in &target.projections {
             match projection {
                 ResolvedPlaceProjection::Field(selection) => {
                     let (index, field_ty) =
                         self.named_field(ty, &selection.name, selection.origin.span)?;
                     projections.push(Projection::Field(index));
-                    path.push(Some(index));
                     ty = field_ty;
                 }
                 ResolvedPlaceProjection::TupleField { index, origin } => {
                     let (index, field_ty) = self.tuple_element(ty, index, origin.span)?;
                     projections.push(Projection::Field(index));
-                    path.push(Some(index));
                     ty = field_ty;
                 }
                 ResolvedPlaceProjection::Index(index) => {
                     let (element, index) = self.check_subscript(ty, target.span, index)?;
                     projections.push(Projection::Index(Box::new(index)));
-                    path.push(None);
                     ty = element;
                 }
             }
         }
-        self.check_not_frozen(local, &path, target.span)?;
         Ok((
             Place {
                 local,
+                span: target.span,
                 call: None,
                 projections,
             },
@@ -3371,13 +2886,9 @@ impl BodyChecker<'_> {
         ))
     }
 
-    /// Checks a condition, which is read at once, so the borrows it makes
-    /// end with it.
     fn check_condition(&mut self, condition: &ResolvedExpr) -> Result<Expr, CheckDiagnostic> {
-        let frozen_before = self.frozen.len();
         let checked = self.check_expr(condition, Some(Type::BOOL))?;
         self.require(condition.span, Type::BOOL, checked.ty)?;
-        self.frozen.truncate(frozen_before);
         Ok(checked)
     }
 
@@ -3407,6 +2918,7 @@ impl BodyChecker<'_> {
                             if !value.is_empty() {
                                 checked.push(Expr {
                                     ty: Type::STR,
+                                    span,
                                     kind: ExprKind::Str(value.clone()),
                                 });
                             }
@@ -3423,7 +2935,6 @@ impl BodyChecker<'_> {
                     return Err(self.unsupported(span, "values other than local variables"));
                 };
                 if let Some(&local) = self.local_ids.get(target) {
-                    self.use_local(local, span)?;
                     (self.locals[local].ty, ExprKind::Local(local))
                 } else if let Some(&(declaration, variant)) = self.nominals.constructors.get(target)
                 {
@@ -3542,7 +3053,7 @@ impl BodyChecker<'_> {
             }
             _ => return Err(self.unsupported(span, "these expressions")),
         };
-        Ok(Expr { ty, kind })
+        Ok(Expr { ty, span, kind })
     }
 
     fn check_list(
@@ -3621,9 +3132,9 @@ impl BodyChecker<'_> {
         {
             return self.call_method(span, callee, &signature, operand, receiver, arguments);
         }
-        let (receiver_value, path) = match operand {
-            Operand::Place((place, _, path)) => (Receiver::Place(place), Some(path)),
-            Operand::Value(value) => (Receiver::Value(Box::new(value)), None),
+        let receiver_value = match operand {
+            Operand::Place((place, _, _)) => Receiver::Place(place),
+            Operand::Value(value) => Receiver::Value(Box::new(value)),
         };
         let unknown = |checker: &Self| {
             checker.error(
@@ -3761,8 +3272,6 @@ impl BodyChecker<'_> {
                     ),
                 ));
             }
-            let local = place.local;
-            self.check_not_frozen(local, path.as_deref().unwrap_or(&[]), receiver.span)?;
         }
         if arguments.len() != parameters.len() {
             return Err(self.error(
@@ -3775,15 +3284,6 @@ impl BodyChecker<'_> {
                 ),
             ));
         }
-        // The receiver is borrowed while the arguments are checked.
-        let frozen_before = self.frozen.len();
-        if let (Receiver::Place(place), Some(path)) = (&receiver_value, path) {
-            self.frozen.push(Frozen {
-                local: place.local,
-                path,
-                exclusive: mutates,
-            });
-        }
         let mut checked = Vec::new();
         for (argument, (parameter, consumed)) in arguments.iter().zip(parameters) {
             let value = if consumed {
@@ -3794,7 +3294,6 @@ impl BodyChecker<'_> {
             self.require(argument.span, parameter, value.ty)?;
             checked.push(value);
         }
-        self.frozen.truncate(frozen_before);
         Ok((
             result,
             ExprKind::Builtin {
@@ -3834,7 +3333,11 @@ impl BodyChecker<'_> {
             vec![Argument::Receiver(operand, expression)],
             None,
         )?;
-        Ok(Expr { ty: result, kind })
+        Ok(Expr {
+            ty: result,
+            span,
+            kind,
+        })
     }
 
     /// Calls a method with `signature` on the checked receiver `operand`.
@@ -4283,16 +3786,8 @@ impl BodyChecker<'_> {
         expected: Option<Type>,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let condition = self.check_condition(condition)?;
-        let before = self.moved.clone();
         let Some(else_branch) = else_branch else {
-            let conflicts = self.held_conflicts();
             let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
-            if then_branch.ty == Type::NEVER {
-                self.moved = before;
-                self.set_held_conflicts(&conflicts);
-            } else {
-                self.moved.extend(before);
-            }
             return Ok((
                 Type::UNIT,
                 ExprKind::If {
@@ -4302,23 +3797,10 @@ impl BodyChecker<'_> {
                 },
             ));
         };
-        let conflicts = self.held_conflicts();
         let then_branch = self.check_block(then_branch, expected)?;
-        let after_then = std::mem::replace(&mut self.moved, before);
-        let then_conflicts = self.held_conflicts();
-        self.set_held_conflicts(&conflicts);
         let expected = expected.or(Some(then_branch.ty).filter(|ty| *ty != Type::NEVER));
         let else_span = else_branch.span;
         let else_branch = self.check_consumed(else_branch, expected)?;
-        self.merge_moved([
-            (then_branch.ty, after_then),
-            (else_branch.ty, self.moved.clone()),
-        ]);
-        let else_conflicts = self.held_conflicts();
-        self.join_branch_conflicts(&[
-            (then_branch.ty, then_conflicts),
-            (else_branch.ty, else_conflicts),
-        ]);
         let ty = match (then_branch.ty, else_branch.ty) {
             (Type::NEVER, other) | (other, Type::NEVER) => other,
             _ if expected == Some(Type::UNIT) => Type::UNIT,
@@ -4335,20 +3817,6 @@ impl BodyChecker<'_> {
                 else_branch: Some(Box::new(else_branch)),
             },
         ))
-    }
-
-    /// Joins the moved locals of branches; a branch of type `Never` does not
-    /// reach the join.
-    fn merge_moved(&mut self, branches: impl IntoIterator<Item = (Type, BTreeSet<usize>)>) {
-        let mut reaching = None::<BTreeSet<usize>>;
-        let mut all = BTreeSet::new();
-        for (ty, moved) in branches {
-            all.extend(moved.iter().copied());
-            if ty != Type::NEVER {
-                reaching.get_or_insert_with(BTreeSet::new).extend(moved);
-            }
-        }
-        self.moved = reaching.unwrap_or(all);
     }
 
     /// Checks the patterns of `arms` against `ty`, binding with `mode`;
@@ -4372,45 +3840,39 @@ impl BodyChecker<'_> {
     }
 
     /// Checks the subject of a `match` or `if let`. A subject written `&e`
-    /// or `&mut e` is borrowed: it returns the borrow mode, and for a place
-    /// the borrow that the arms keep.
+    /// or `&mut e` is borrowed, and its borrow mode is returned.
     fn check_subject(
         &mut self,
         subject: &ResolvedExpr,
-    ) -> Result<(Expr, Option<BorrowKind>, Option<Frozen>), CheckDiagnostic> {
+    ) -> Result<(Expr, Option<BorrowKind>), CheckDiagnostic> {
         let ResolvedExprKind::Borrow {
             kind: (_, kind),
             operand,
         } = &subject.kind
         else {
-            return Ok((self.check_expr(subject, None)?, None, None));
+            return Ok((self.check_expr(subject, None)?, None));
         };
         let kind = *kind;
-        let (target, ty, frozen) = match self.check_operand(operand, None)? {
-            Operand::Place((place, ty, path)) => {
-                self.check_borrow(&place, &path, kind, operand.span)?;
-                let frozen = Frozen {
-                    local: place.local,
-                    path,
-                    exclusive: kind == BorrowKind::Mutable,
-                };
-                (BorrowTarget::Place(place), ty, Some(frozen))
+        let (target, ty) = match self.check_operand(operand, None)? {
+            Operand::Place((place, ty, _)) => {
+                self.check_borrow(&place, kind, operand.span)?;
+                (BorrowTarget::Place(place), ty)
             }
             Operand::Value(value) => {
                 if value.ty == Type::NEVER {
-                    return Ok((value, None, None));
+                    return Ok((value, None));
                 }
                 let ty = value.ty;
-                (BorrowTarget::Value(value), ty, None)
+                (BorrowTarget::Value(value), ty)
             }
         };
         Ok((
             Expr {
                 ty,
-                kind: ExprKind::Borrow(Box::new(target)),
+                span: subject.span,
+                kind: ExprKind::Borrow(kind, Box::new(target)),
             },
             Some(kind),
-            frozen,
         ))
     }
 
@@ -4429,15 +3891,12 @@ impl BodyChecker<'_> {
         expected: Option<Type>,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let scrutinee_span = scrutinee.span;
-        let (scrutinee, mode, frozen) = self.check_subject(scrutinee)?;
+        let (scrutinee, mode) = self.check_subject(scrutinee)?;
         if scrutinee.ty == Type::NEVER {
             return Ok((Type::NEVER, scrutinee.kind));
         }
         let patterns =
             self.check_arm_patterns(arms.iter().map(|arm| &arm.pattern), scrutinee.ty, mode)?;
-        for (pattern, _) in &patterns {
-            self.borrow_from(&pattern.bindings(), frozen.as_ref().map(|f| f.local));
-        }
         let scrutinee = if mode.is_none()
             && patterns
                 .iter()
@@ -4447,22 +3906,12 @@ impl BodyChecker<'_> {
         } else {
             scrutinee
         };
-        let has_frozen = frozen.is_some();
-        self.frozen.extend(frozen);
         let scope = self.local_ids.clone();
-        // Every arm starts from the moves and conflicts before the `match`
-        // and those of the guards before it, which may fail and fall through.
-        let mut before = self.moved.clone();
-        let mut conflicts = self.held_conflicts();
-        let mut arm_conflicts = Vec::new();
-        let mut ends = Vec::new();
         let mut expected = expected;
         let mut ty = None;
         let mut checked = Vec::new();
         for (arm, (pattern, visible)) in arms.iter().zip(patterns) {
             self.local_ids = visible;
-            self.moved = before.clone();
-            self.set_held_conflicts(&conflicts);
             // A guard only reads the bindings; they become `&mut` once it holds.
             let readonly = self.mutable_bindings(&pattern);
             for &local in &readonly {
@@ -4476,14 +3925,7 @@ impl BodyChecker<'_> {
             for &local in &readonly {
                 self.mutable[local] = true;
             }
-            conflicts = self.held_conflicts();
-            before.extend(self.moved.iter().copied());
-            // Each arm's value is stored when the arm ends.
-            let frozen_before = self.frozen.len();
             let body = self.check_consumed(&arm.body, expected)?;
-            self.frozen.truncate(frozen_before);
-            ends.push((body.ty, self.moved.clone()));
-            arm_conflicts.push((body.ty, self.held_conflicts()));
             if body.ty != Type::NEVER {
                 match ty {
                     None => {
@@ -4500,17 +3942,7 @@ impl BodyChecker<'_> {
                 body,
             });
         }
-        if has_frozen {
-            self.frozen.pop();
-        }
         self.local_ids = scope;
-        if ends.is_empty() {
-            self.moved = before;
-            self.set_held_conflicts(&conflicts);
-        } else {
-            self.merge_moved(ends);
-            self.join_branch_conflicts(&arm_conflicts);
-        }
         let unguarded = checked
             .iter()
             .filter(|arm| arm.guard.is_none())
@@ -4545,31 +3977,20 @@ impl BodyChecker<'_> {
         then_branch: &ResolvedBlock,
         else_branch: &Option<ResolvedBlock>,
     ) -> Result<Expr, CheckDiagnostic> {
-        let (scrutinee, mode, frozen) = self.check_subject(value)?;
+        let (scrutinee, mode) = self.check_subject(value)?;
         if scrutinee.ty == Type::NEVER {
             return Ok(scrutinee);
         }
         let mut patterns = self.check_arm_patterns([pattern], scrutinee.ty, mode)?;
         let (pattern, visible) = patterns.pop().expect("one pattern was checked");
-        self.borrow_from(&pattern.bindings(), frozen.as_ref().map(|f| f.local));
         let scrutinee = if mode.is_none() && self.binds_entity(&pattern) {
             self.consume(scrutinee, value.span)?
         } else {
             scrutinee
         };
-        let has_frozen = frozen.is_some();
-        self.frozen.extend(frozen);
         let scope = std::mem::replace(&mut self.local_ids, visible);
-        let before = self.moved.clone();
-        let conflicts = self.held_conflicts();
         let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
-        if has_frozen {
-            self.frozen.pop();
-        }
         self.local_ids = scope;
-        let after_then = std::mem::replace(&mut self.moved, before);
-        let then_conflicts = self.held_conflicts();
-        self.set_held_conflicts(&conflicts);
         let else_body = match else_branch {
             Some(block) => self.check_block(block, Some(Type::UNIT))?,
             None => Block {
@@ -4578,15 +3999,6 @@ impl BodyChecker<'_> {
                 ty: Type::UNIT,
             },
         };
-        self.merge_moved([
-            (then_branch.ty, after_then),
-            (else_body.ty, self.moved.clone()),
-        ]);
-        let else_conflicts = self.held_conflicts();
-        self.join_branch_conflicts(&[
-            (then_branch.ty, then_conflicts),
-            (else_body.ty, else_conflicts),
-        ]);
         let ty = if then_branch.ty == Type::NEVER && else_body.ty == Type::NEVER {
             Type::NEVER
         } else {
@@ -4597,11 +4009,13 @@ impl BodyChecker<'_> {
             guard: None,
             body: Expr {
                 ty: body.ty,
+                span: value.span,
                 kind: ExprKind::Block(body),
             },
         };
         Ok(Expr {
             ty,
+            span: value.span,
             kind: ExprKind::Match {
                 scrutinee: Box::new(scrutinee),
                 arms: vec![arm(pattern, then_branch), arm(Pattern::Wildcard, else_body)],
@@ -4864,14 +4278,7 @@ impl BodyChecker<'_> {
         use BinaryOperator as Op;
         let left = self.check_expr(left, None)?;
         let right_span = right.span;
-        // The right operand of `&&` and `||` may not run, so the state after
-        // it joins the state before it, as after an `if` without `else`.
-        let skipped = matches!(operator, Op::LogicAnd | Op::LogicOr).then(|| self.moved.clone());
         let right = self.check_expr(right, Some(left.ty))?;
-        if let Some(skipped) = skipped {
-            let ran = self.moved.clone();
-            self.merge_moved([(Type::BOOL, skipped), (right.ty, ran)]);
-        }
         if left.ty != right.ty {
             return Err(self.mismatch(right_span, left.ty, right.ty));
         }
@@ -5031,17 +4438,11 @@ impl BodyChecker<'_> {
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let borrow = signature.result_borrow;
         let mut bindings = vec![None; signature.type_parameters.len()];
-        // The borrowed arguments of a call that returns a borrow stay
-        // borrowed until the statement ends, or longer if a `let` binds it.
-        let frozen_before = self.frozen.len();
-        let checked = self.check_arguments(arguments, signature.parameters.clone(), &mut bindings);
-        if borrow.is_none() {
-            self.frozen.truncate(frozen_before);
-        }
-        let (arguments, checks) = checked?;
+        let (arguments, checks) =
+            self.check_arguments(arguments, signature.parameters.clone(), &mut bindings)?;
         if borrow.is_some()
             && arguments.iter().any(|argument| {
-                matches!(&argument.kind, ExprKind::Borrow(target)
+                matches!(&argument.kind, ExprKind::Borrow(_, target)
                     if matches!(target.as_ref(), BorrowTarget::Value(_)))
             })
         {
@@ -5375,26 +4776,11 @@ impl BodyChecker<'_> {
         self.substitute(ty, &arguments).map(Some)
     }
 
-    /// Whether every borrowed argument of `call` reaches only places of the
-    /// parameters passed by borrow.
-    fn call_from_parameters(&self, call: &Expr) -> bool {
-        let ExprKind::Call { arguments, .. } = &call.kind else {
-            unreachable!("only calls are passed here")
-        };
-        arguments.iter().all(|argument| match &argument.kind {
-            ExprKind::Borrow(target) => match target.as_ref() {
-                BorrowTarget::Place(place) => self.from_parameters[place.local],
-                BorrowTarget::Value(_) => false,
-            },
-            _ => true,
-        })
-    }
-
-    /// Checks call arguments in order. A borrowed argument stays borrowed
-    /// while the later ones are checked; two borrows of one place that
-    /// differ only in list indices are checked at run time. The parameter
-    /// types of a generic callee mention its type parameters, which each
-    /// argument binds in `bindings` as far as it can.
+    /// Checks call arguments in order. Two borrows of one place that differ
+    /// only in list indices are checked at run time; other conflicts between
+    /// borrows are checked on the IR. The parameter types of a generic
+    /// callee mention its type parameters, which each argument binds in
+    /// `bindings` as far as it can.
     fn check_arguments(
         &mut self,
         values: Vec<Argument>,
@@ -5403,9 +4789,6 @@ impl BodyChecker<'_> {
     ) -> Result<(Vec<Expr>, Vec<DisjointCheck>), CheckDiagnostic> {
         let mut checked = Vec::new();
         let mut borrows: Vec<ArgumentBorrow> = Vec::new();
-        // The positions on the borrow stack of this call's own borrowed
-        // arguments, which are compared with each other below.
-        let mut own = Vec::new();
         let mut checks = Vec::new();
         for (position, (value, (parameter, borrow))) in
             values.into_iter().zip(parameters).enumerate()
@@ -5471,7 +4854,7 @@ impl BodyChecker<'_> {
             )?;
             let target = match checked_operand {
                 Operand::Place((place, _, path)) => {
-                    self.check_borrow_except(&own, &place, &path, kind, operand.span)?;
+                    self.check_borrow(&place, kind, operand.span)?;
                     let keys = index_keys(operand);
                     for earlier in &borrows {
                         if earlier.local != place.local
@@ -5504,12 +4887,6 @@ impl BodyChecker<'_> {
                             }
                         }
                     }
-                    own.push(self.frozen.len());
-                    self.frozen.push(Frozen {
-                        local: place.local,
-                        path: path.clone(),
-                        exclusive: kind == BorrowKind::Mutable,
-                    });
                     borrows.push(ArgumentBorrow {
                         position,
                         local: place.local,
@@ -5532,7 +4909,8 @@ impl BodyChecker<'_> {
             };
             checked.push(Expr {
                 ty,
-                kind: ExprKind::Borrow(Box::new(target)),
+                span: operand.span,
+                kind: ExprKind::Borrow(kind, Box::new(target)),
             });
         }
         Ok((checked, checks))
@@ -5592,20 +4970,17 @@ impl BodyChecker<'_> {
             Intrinsic::Swap => Some(BorrowKind::Mutable),
             _ => None,
         };
-        let frozen_before = self.frozen.len();
-        let checked = self.check_arguments(
+        let (arguments, checks) = self.check_arguments(
             vec![
                 Argument::Receiver(first_operand, operand),
                 Argument::Written(second),
             ],
             vec![(ty, Some(BorrowKind::Mutable)), (ty, second_parameter)],
             &mut [],
-        );
-        self.frozen.truncate(frozen_before);
-        let (arguments, checks) = checked?;
+        )?;
         // Only places can be changed.
         for (argument, value) in arguments.iter().zip([operand.as_ref(), second]) {
-            if let ExprKind::Borrow(target) = &argument.kind
+            if let ExprKind::Borrow(_, target) = &argument.kind
                 && let BorrowTarget::Value(_) = target.as_ref()
             {
                 return Err(self.error(
@@ -5705,154 +5080,6 @@ fn callee_name(callee: &ResolvedExpr) -> String {
     match &callee.kind {
         ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => target.name.clone(),
         _ => "result".to_owned(),
-    }
-}
-
-fn block_mentions(block: &ResolvedBlock, names: &[EntityId]) -> bool {
-    block
-        .statements
-        .iter()
-        .any(|statement| statement_mentions(statement, names))
-        || block
-            .tail
-            .as_deref()
-            .is_some_and(|tail| expr_mentions(tail, names))
-}
-
-fn statement_mentions(statement: &ResolvedStatement, names: &[EntityId]) -> bool {
-    match &statement.kind {
-        ResolvedStatementKind::Let { value, .. } | ResolvedStatementKind::Expression(value) => {
-            expr_mentions(value, names)
-        }
-        ResolvedStatementKind::Return(value) => value
-            .as_ref()
-            .is_some_and(|value| expr_mentions(value, names)),
-        ResolvedStatementKind::Break | ResolvedStatementKind::Continue => false,
-        ResolvedStatementKind::Assignment { target, value, .. } => {
-            reference_mentions(&target.root, names)
-                || target.projections.iter().any(|projection| {
-                    matches!(projection, ResolvedPlaceProjection::Index(index)
-                        if expr_mentions(index, names))
-                })
-                || expr_mentions(value, names)
-        }
-        ResolvedStatementKind::IfLet {
-            value,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            expr_mentions(value, names)
-                || block_mentions(then_branch, names)
-                || else_branch
-                    .as_ref()
-                    .is_some_and(|block| block_mentions(block, names))
-        }
-        ResolvedStatementKind::While { condition, body } => {
-            expr_mentions(condition, names) || block_mentions(body, names)
-        }
-        ResolvedStatementKind::For { iterable, body, .. } => {
-            expr_mentions(iterable, names) || block_mentions(body, names)
-        }
-        ResolvedStatementKind::Loop(body) => block_mentions(body, names),
-    }
-}
-
-fn expr_mentions(expression: &ResolvedExpr, names: &[EntityId]) -> bool {
-    let any = |expressions: &[ResolvedExpr]| {
-        expressions
-            .iter()
-            .any(|expression| expr_mentions(expression, names))
-    };
-    let arms = |arms: &[ResolvedMatchArm]| {
-        arms.iter().any(|arm| {
-            arm.guard
-                .as_ref()
-                .is_some_and(|guard| expr_mentions(guard, names))
-                || expr_mentions(&arm.body, names)
-        })
-    };
-    match &expression.kind {
-        ResolvedExprKind::Integer(_)
-        | ResolvedExprKind::Float(_)
-        | ResolvedExprKind::String(_)
-        | ResolvedExprKind::RawString { .. }
-        | ResolvedExprKind::Boolean(_)
-        | ResolvedExprKind::Unit => false,
-        ResolvedExprKind::InterpolatedString(parts) => parts.iter().any(|part| {
-            matches!(part, ResolvedInterpolationPart::Expression(part)
-                if expr_mentions(part, names))
-        }),
-        ResolvedExprKind::Path(reference) => reference_mentions(reference, names),
-        ResolvedExprKind::NamedConstruct { entries, .. } => {
-            entries.iter().any(|entry| match entry {
-                ResolvedConstructEntry::Spread(value) => expr_mentions(value, names),
-                ResolvedConstructEntry::Field {
-                    value, shorthand, ..
-                } => {
-                    value
-                        .as_deref()
-                        .is_some_and(|value| expr_mentions(value, names))
-                        || shorthand
-                            .as_deref()
-                            .is_some_and(|reference| reference_mentions(reference, names))
-                }
-            })
-        }
-        ResolvedExprKind::List(elements) | ResolvedExprKind::Tuple(elements) => any(elements),
-        ResolvedExprKind::Parenthesized(inner)
-        | ResolvedExprKind::Unary { operand: inner, .. }
-        | ResolvedExprKind::Borrow { operand: inner, .. }
-        | ResolvedExprKind::Field {
-            receiver: inner, ..
-        }
-        | ResolvedExprKind::TupleField {
-            receiver: inner, ..
-        } => expr_mentions(inner, names),
-        ResolvedExprKind::Block(block) | ResolvedExprKind::Unsafe(block) => {
-            block_mentions(block, names)
-        }
-        ResolvedExprKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            expr_mentions(condition, names)
-                || block_mentions(then_branch, names)
-                || else_branch
-                    .as_deref()
-                    .is_some_and(|branch| expr_mentions(branch, names))
-        }
-        ResolvedExprKind::Match {
-            scrutinee: subject,
-            arms: cases,
-        }
-        | ResolvedExprKind::Catch {
-            expression: subject,
-            arms: cases,
-        } => expr_mentions(subject, names) || arms(cases),
-        // The checker rejects these; counting them as mentions is safe.
-        ResolvedExprKind::Handle { .. } | ResolvedExprKind::Closure(_) => true,
-        ResolvedExprKind::Binary { left, right, .. }
-        | ResolvedExprKind::Index {
-            receiver: left,
-            index: right,
-        } => expr_mentions(left, names) || expr_mentions(right, names),
-        ResolvedExprKind::Call { callee, arguments } => {
-            expr_mentions(callee, names) || any(arguments)
-        }
-        ResolvedExprKind::MethodCall {
-            receiver,
-            arguments,
-            ..
-        } => expr_mentions(receiver, names) || any(arguments),
-    }
-}
-
-fn reference_mentions(reference: &ResolvedReference, names: &[EntityId]) -> bool {
-    match reference {
-        ResolvedReference::Exact { target, .. } => names.contains(target),
-        ResolvedReference::Selection { base, .. } => names.contains(base),
     }
 }
 

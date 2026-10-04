@@ -1,9 +1,12 @@
 //! The Vorton compiler: frontend, project resolver, checker and C11 backend.
 
+mod borrowck;
 mod checker;
 mod codegen;
 mod exhaustive;
 mod lexer;
+mod lower;
+mod mir;
 mod mono;
 mod parser;
 mod prepare;

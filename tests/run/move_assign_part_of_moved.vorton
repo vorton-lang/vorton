@@ -1,0 +1,9 @@
+struct Bag { xs: List<Int>, s: Str }
+fn main() {
+    let mut b = Bag { xs: [1], s: "a" }
+    b.s = {
+        let c = b
+        "x"
+    }
+    print(b.xs.len())
+}

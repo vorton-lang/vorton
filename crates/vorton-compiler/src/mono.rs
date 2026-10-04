@@ -287,7 +287,7 @@ where
                         let [receiver] = std::mem::take(arguments)
                             .try_into()
                             .unwrap_or_else(|_| unreachable!("`to_str` takes `&self`"));
-                        let ExprKind::Borrow(target) = receiver.kind else {
+                        let ExprKind::Borrow(_, target) = receiver.kind else {
                             unreachable!("`to_str` borrows its receiver")
                         };
                         let value = match *target {
@@ -368,7 +368,7 @@ where
                 }
                 self.exprs(arguments, locals)?;
             }
-            ExprKind::Borrow(target) => match target.as_mut() {
+            ExprKind::Borrow(_, target) => match target.as_mut() {
                 BorrowTarget::Place(place) => self.place(place, locals)?,
                 BorrowTarget::Value(value) => self.expr(value, locals)?,
             },
@@ -378,10 +378,12 @@ where
 
     /// An expression that reads `place`.
     fn read(&self, place: Place, locals: &[Type]) -> Expr {
+        let span = place.span;
         let mut value = match place.call {
             Some(call) => *call,
             None => Expr {
                 ty: locals[place.local],
+                span,
                 kind: ExprKind::Local(place.local),
             },
         };
@@ -390,9 +392,11 @@ where
             value = match projection {
                 Projection::Field(index) => Expr {
                     ty: self.types.components(base.ty)[index],
+                    span,
                     kind: ExprKind::Field { base, index },
                 },
                 Projection::Index(index) => Expr {
+                    span,
                     ty: match self.types.kind(base.ty) {
                         TypeKind::List(element) | TypeKind::Map(_, element) => *element,
                         _ => unreachable!("only lists and maps are indexed"),

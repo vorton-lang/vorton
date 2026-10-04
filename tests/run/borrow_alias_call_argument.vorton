@@ -1,0 +1,9 @@
+fn use_after(a: &Int, xs: &mut List<Int>) {
+    xs = []
+    print(a)
+}
+fn main() {
+    let mut xs = [42]
+    let r = &xs[0]
+    use_after(&r, &mut xs)
+}
