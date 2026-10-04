@@ -890,14 +890,15 @@ impl Builder<'_> {
             ExprKind::Move(place) => Rvalue::Use(Operand::Move(self.typed_place(place)?)),
             ExprKind::Call {
                 callee,
+                type_arguments,
                 arguments,
                 checks,
                 borrow,
-                ..
             } => {
                 let arguments = self.arguments(arguments, checks, span)?;
                 Rvalue::Call {
                     callee: *callee,
+                    type_arguments: type_arguments.clone(),
                     arguments,
                     borrow: *borrow,
                 }

@@ -8,18 +8,33 @@
 //! valid, is the IR's business.
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
-use crate::mir::Body;
+use std::collections::BTreeMap;
+
+use crate::project::OriginRef;
 use crate::types::{Type, Types};
 
-/// A checked program ready for code generation.
+/// A checked program: every function with its types resolved, before it is
+/// lowered to the IR.
 pub(crate) struct Program {
     pub(crate) types: Types,
     pub(crate) functions: Vec<Function>,
-    /// The IR of each function.
-    pub(crate) bodies: Vec<Body>,
+    /// Where each function is declared.
+    pub(crate) origins: Vec<OriginRef>,
+    /// Whether each function has type parameters.
+    pub(crate) generic: Vec<bool>,
+    /// The entry library's `main`.
     pub(crate) main: usize,
+    pub(crate) impls: Impls,
+    /// The core `Display` trait, which built-in types implement without an
+    /// impl.
+    pub(crate) display: usize,
+    /// Where each struct and enum is declared.
+    pub(crate) nominal_origins: Vec<OriginRef>,
 }
 
+/// The impl of each trait for each type: the function of each trait
+/// method, in the trait's order.
+pub(crate) type Impls = BTreeMap<(usize, Type), Vec<usize>>;
 #[derive(Clone)]
 pub(crate) struct Function {
     pub(crate) name: String,

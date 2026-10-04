@@ -29,21 +29,17 @@ use super::{
 };
 use crate::ast::{BinaryOperator, UnaryOperator};
 use crate::mir::{
-    BlockId, Body, Constant, Local, Operand, Place, Projection, Rvalue, StatementKind,
+    BlockId, Body, Constant, Local, Operand, Place, Program, Projection, Rvalue, StatementKind,
     TerminatorKind,
 };
-use crate::typed::{Builtin, Callee, Function, Intrinsic, Program, StrMethod};
+use crate::typed::{Builtin, Callee, Intrinsic, StrMethod};
 use crate::types::{Operation, Type, TypeKind, Types};
 
 /// The C definition of the function at `index`.
-pub(super) fn function(
-    program: &Program,
-    index: usize,
-    function: &Function,
-    literals: &mut Literals,
-) -> String {
+pub(super) fn function(program: &Program, index: usize, literals: &mut Literals) -> String {
     let types = &program.types;
-    let body = &program.bodies[index];
+    let function = &program.functions[index];
+    let body = &function.body;
     let mut definitions = vec![Vec::new(); body.locals.len()];
     for block in &body.blocks {
         for statement in &block.statements {
@@ -716,6 +712,7 @@ impl<'a> Emitter<'a> {
                 callee,
                 arguments,
                 borrow,
+                ..
             } => {
                 let call = self.call(*callee, arguments);
                 if !types.has_storage(ty) {

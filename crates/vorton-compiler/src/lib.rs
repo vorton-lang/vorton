@@ -1,6 +1,7 @@
 //! The Vorton compiler: frontend, project resolver, checker and C11 backend.
 
 mod borrowck;
+mod capabilities;
 mod checker;
 mod codegen;
 mod depth;
@@ -101,9 +102,45 @@ pub fn compile_to_c(sources: &ProjectSources) -> Result<String, CompileError> {
     on_large_stack(|| {
         let resolved = resolver::resolve_project(sources).map_err(CompileError::Project)?;
         let prepared = prepare::prepare_project(resolved).map_err(CompileError::Project)?;
-        let program = checker::check(prepared.project()).map_err(CompileError::Check)?;
+        let checked = checker::check(prepared.project()).map_err(CompileError::Check)?;
+        let program = instantiate_checked(checked).map_err(CompileError::Check)?;
         Ok(codegen::emit(&program))
     })
+}
+
+/// The middle of the pipeline: lowers each checked function to the IR once,
+/// checks its moves and borrows, instantiates the generic functions, and
+/// checks what the instances may do.
+fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDiagnostic> {
+    let typed::Program {
+        types,
+        functions,
+        origins,
+        generic,
+        main,
+        impls,
+        display,
+        nominal_origins,
+    } = checked;
+    let mut templates = Vec::new();
+    for ((function, origin), generic) in functions.iter().zip(&origins).zip(generic) {
+        let body = lower::lower(function, &types);
+        borrowck::check(&body, &types, &|span| checker::at(origin, span))?;
+        templates.push(mono::Template {
+            name: function.name.clone(),
+            body,
+            generic,
+        });
+    }
+    let program = mono::instantiate(types, &templates, main, &impls, display, &|types, error| {
+        checker::instantiation_diagnostic(
+            types,
+            &|declaration| nominal_origins[declaration].clone(),
+            error,
+        )
+    })?;
+    capabilities::check_drops(&program, &origins)?;
+    Ok(program)
 }
 
 /// The library identity of the source passed to [`single_file_project`].

@@ -13,7 +13,7 @@ mod body;
 
 use std::fmt::Write as _;
 
-use crate::typed::{Function, Program};
+use crate::mir::{Instance, LocalDecl, Program};
 use crate::types::{Glue, Operation};
 use crate::types::{Type, TypeKind, Types};
 
@@ -24,8 +24,8 @@ const GENERIC: &str = "generic functions are instantiated before code generation
 pub(crate) fn emit(program: &Program) -> String {
     let mut literals = Literals::default();
     let mut bodies = String::new();
-    for (index, function) in program.functions.iter().enumerate() {
-        bodies.push_str(&body::function(program, index, function, &mut literals));
+    for index in 0..program.functions.len() {
+        bodies.push_str(&body::function(program, index, &mut literals));
     }
 
     let mut output = String::from(RUNTIME);
@@ -290,7 +290,8 @@ fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut St
         // `Option<Ordering>` to -1, 0 or 1, and 2 for `None`; the variants
         // of `Ordering` are `Less`, `Equal` and `Greater`.
         let user = function_name(partial_cmp, &program.functions[partial_cmp]);
-        let result = program.functions[partial_cmp].result;
+        let body = &program.functions[partial_cmp].body;
+        let result = body.locals[body.result].ty;
         let (some, none) = option_variants(types, result);
         function(
             format!("int vt_cmp_T{n}({name} a, {name} b)"),
@@ -668,21 +669,22 @@ fn count_line(ty: Type, action: &str, code: &str) -> String {
     }
 }
 
-fn function_name(index: usize, function: &Function) -> String {
+fn function_name(index: usize, function: &Instance) -> String {
     format!("vt_f{index}_{}", function.name)
 }
 
-fn prototype(types: &Types, index: usize, function: &Function) -> String {
-    let parameters = function
+fn prototype(types: &Types, index: usize, function: &Instance) -> String {
+    let body = &function.body;
+    let parameters = body
         .parameters
         .iter()
-        .filter(|&&local| types.has_storage(function.locals[local].ty))
+        .filter(|&&local| types.has_storage(body.locals[local].ty))
         .map(|&local| {
-            let local_info = &function.locals[local];
+            let declaration = &body.locals[local];
             format!(
                 "{} {}",
-                storage_type(types, local_info),
-                local_name(local, &local_info.name)
+                storage_type(types, declaration),
+                local_name(local, &declaration.name)
             )
         })
         .collect::<Vec<_>>();
@@ -691,26 +693,23 @@ fn prototype(types: &Types, index: usize, function: &Function) -> String {
     } else {
         parameters.join(", ")
     };
-    let result = if function.result_borrow.is_some() && types.has_storage(function.result) {
-        format!("{} *", c_type(types, function.result))
-    } else {
-        c_type(types, function.result)
-    };
+    // A borrowed result is a pointer to the place it names.
+    let result = storage_type(types, &body.locals[body.result]);
     format!(
         "static {result} {}({parameters})",
         function_name(index, function)
     )
 }
 
-/// The C type that stores a local: a pointer for a borrowed local.
-fn storage_type(types: &Types, local: &crate::typed::Local) -> String {
-    if local.borrow.is_some() {
+/// The C type that stores a local: a pointer for a reference local whose
+/// target has storage.
+fn storage_type(types: &Types, local: &LocalDecl) -> String {
+    if local.reference.is_some() && types.has_storage(local.ty) {
         format!("{} *", c_type(types, local.ty))
     } else {
         c_type(types, local.ty)
     }
 }
-
 fn c_type(types: &Types, ty: Type) -> String {
     match types.kind(ty) {
         TypeKind::Int => "int64_t".to_owned(),

@@ -21,9 +21,28 @@ use crate::ast::{BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::typed::{Builtin, Callee, Intrinsic};
 use crate::types::{Operation, Type, TypeKind, Types};
 
+/// A program ready for code generation: every function is an instance
+/// whose types are concrete.
+pub(crate) struct Program {
+    pub(crate) types: Types,
+    pub(crate) functions: Vec<Instance>,
+    pub(crate) main: usize,
+}
+
+/// A function with concrete types: a non-generic function, or a generic one
+/// at one list of type arguments.
+pub(crate) struct Instance {
+    /// The name of the function it instantiates.
+    pub(crate) name: String,
+    /// That function, by its index among the checked functions.
+    pub(crate) template: usize,
+    pub(crate) body: Body,
+}
+
 pub(crate) type Local = usize;
 pub(crate) type BlockId = usize;
 
+#[derive(Clone)]
 pub(crate) struct Body {
     /// The function's own locals first, with the indices the checker gave
     /// them, then the temporaries of lowering.
@@ -36,6 +55,7 @@ pub(crate) struct Body {
     pub(crate) blocks: Vec<BasicBlock>,
 }
 
+#[derive(Clone)]
 pub(crate) struct LocalDecl {
     pub(crate) name: String,
     pub(crate) ty: Type,
@@ -45,16 +65,19 @@ pub(crate) struct LocalDecl {
     pub(crate) temporary: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct BasicBlock {
     pub(crate) statements: Vec<Statement>,
     pub(crate) terminator: Terminator,
 }
 
+#[derive(Clone)]
 pub(crate) struct Statement {
     pub(crate) kind: StatementKind,
     pub(crate) span: Span,
 }
 
+#[derive(Clone)]
 pub(crate) enum StatementKind {
     /// Evaluates the right side and stores it in the place, releasing what
     /// an owning place held before. A place rooted at a reference local is
@@ -69,11 +92,13 @@ pub(crate) enum StatementKind {
     Release(Local),
 }
 
+#[derive(Clone)]
 pub(crate) struct Terminator {
     pub(crate) kind: TerminatorKind,
     pub(crate) span: Span,
 }
 
+#[derive(Clone)]
 pub(crate) enum TerminatorKind {
     Goto(BlockId),
     Branch {
@@ -164,6 +189,7 @@ pub(crate) enum RefKind {
     MutableArgument,
 }
 
+#[derive(Clone)]
 pub(crate) enum Rvalue {
     Use(Operand),
     /// A borrow of the place, which only a `Bind` holds.
@@ -202,6 +228,9 @@ pub(crate) enum Rvalue {
     /// value there.
     Call {
         callee: Callee,
+        /// The type arguments of a generic callee; instantiation makes the
+        /// callee an instance and leaves this empty.
+        type_arguments: Vec<Type>,
         arguments: Vec<Operand>,
         borrow: Option<BorrowKind>,
     },

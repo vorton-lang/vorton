@@ -24,7 +24,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::exhaustive;
-use crate::mir::{Body, Rvalue, StatementKind};
 use crate::project::{
     CoreRoles, EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
     ResolvedConstructEntry, ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedField,
@@ -37,7 +36,7 @@ use crate::project::{
 use crate::resolver::owner_key_from_entity;
 use crate::typed::{
     Arm, Block, BorrowTarget, Builtin, Callee, DisjointCheck, Expr, ExprKind, ForSource, Function,
-    Intrinsic, Local, Pattern, Place, Program, Projection, Receiver, Statement, StrMethod,
+    Impls, Intrinsic, Local, Pattern, Place, Program, Projection, Receiver, Statement, StrMethod,
 };
 pub(crate) use crate::types::{
     Comparison, Field, InstantiationError, NominalInfo, Type, TypeKind, Types, Variant,
@@ -199,10 +198,6 @@ impl Traits<'_> {
                 || self.comparison(trait_index).is_some())
     }
 }
-
-/// The impl of each trait for each type: the function of each trait
-/// method, in the trait's order.
-pub(crate) type Impls = BTreeMap<(usize, Type), Vec<usize>>;
 
 enum Shape<'a> {
     Struct(&'a [ResolvedField]),
@@ -573,18 +568,14 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         }
         let body = checker.check_block(&function.body, Some(signature.result))?;
         calls.push(checker.calls);
-        let function = Function {
+        functions.push(Function {
             name: found.name.clone(),
             parameters,
             locals: checker.locals,
             result: signature.result,
             result_borrow: signature.result_borrow,
             body,
-        };
-        // Moves and borrows are checked on the IR, which follows every path.
-        let body = crate::lower::lower(&function, &types);
-        crate::borrowck::check(&body, &types, &|span| at(origin, span))?;
-        functions.push(function);
+        });
     }
     check_recursion(&calls, &types)?;
     let main = functions_found
@@ -611,151 +602,24 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         .iter()
         .map(|found| !signatures[&found.identity].type_parameters.is_empty())
         .collect::<Vec<_>>();
-    let (functions, main, templates) = crate::mono::instantiate_functions(
-        &mut types,
-        &mut |types, declaration, arguments| instantiate(types, &nominals, declaration, arguments),
-        functions,
-        &generic,
-        main,
-        &trait_impls,
-        traits.display,
-    )?;
-    let bodies = functions
-        .iter()
-        .map(|function| crate::lower::lower(function, &types))
-        .collect::<Vec<_>>();
-    let origins = templates
-        .iter()
-        .map(|&template| functions_found[template].origin.clone())
-        .collect::<Vec<_>>();
-    check_drops(&bodies, &types, &origins)?;
     Ok(Program {
         types,
         functions,
-        bodies,
+        origins: functions_found
+            .iter()
+            .map(|found| found.origin.clone())
+            .collect(),
+        generic,
         main,
+        impls: trait_impls,
+        display: traits.display,
+        nominal_origins: nominals
+            .declarations
+            .iter()
+            .map(|declaration| declaration.origin.clone())
+            .collect(),
     })
 }
-
-/// Rejects a hand-written `drop` that can reach `print`: in 0.1 a `Drop`
-/// cannot use the console. It runs after instantiation, when every call,
-/// and every hand-written comparison or `clone` that an operation runs, is
-/// known.
-fn check_drops(
-    bodies: &[Body],
-    types: &Types,
-    origins: &[OriginRef],
-) -> Result<(), CheckDiagnostic> {
-    // What each function does that can reach the console, in order: a
-    // `print` (`None`), or a call of another function.
-    let uses = bodies
-        .iter()
-        .map(|body| console_uses(body, types))
-        .collect::<Vec<_>>();
-    let mut console = uses
-        .iter()
-        .map(|uses| uses.iter().any(|(_, callee)| callee.is_none()))
-        .collect::<Vec<_>>();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (function, uses) in uses.iter().enumerate() {
-            if !console[function]
-                && uses
-                    .iter()
-                    .any(|(_, callee)| callee.is_some_and(|callee| console[callee]))
-            {
-                console[function] = true;
-                changed = true;
-            }
-        }
-    }
-    let mut drops = types
-        .written
-        .iter()
-        .filter_map(|(ty, written)| written.drop.map(|drop| (drop, *ty)))
-        .collect::<Vec<_>>();
-    drops.sort_unstable();
-    for (drop, ty) in drops {
-        let Some(&(span, callee)) = uses[drop]
-            .iter()
-            .find(|(_, callee)| callee.is_none_or(|callee| console[callee]))
-        else {
-            continue;
-        };
-        let what = if callee.is_none() {
-            "prints"
-        } else {
-            "can print"
-        };
-        return Err(CheckDiagnostic {
-            kind: CheckDiagnosticKind::ConsoleInDrop,
-            primary: Some(at(&origins[drop], span)),
-            message: format!(
-                "this {what}, but the `drop` of `{}` cannot use the console in 0.1",
-                types.name(ty)
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// The steps of `body` that print, and the functions it calls, with their
-/// spans: named calls, and the hand-written impls that a `Glue` operation
-/// runs. Every IR step is listed, so a new kind of step must say what it
-/// calls.
-fn console_uses(body: &Body, types: &Types) -> Vec<(Span, Option<usize>)> {
-    let mut uses = Vec::new();
-    for block in &body.blocks {
-        for statement in &block.statements {
-            let span = statement.span;
-            let value = match &statement.kind {
-                StatementKind::Assign(_, value) | StatementKind::Bind(_, value) => value,
-                // A release may run a `drop`, which is checked on its own.
-                StatementKind::Release(_) => continue,
-            };
-            match value {
-                Rvalue::Intrinsic {
-                    intrinsic: Intrinsic::Print,
-                    ..
-                } => uses.push((span, None)),
-                Rvalue::Call {
-                    callee: Callee::Function(callee),
-                    ..
-                } => uses.push((span, Some(*callee))),
-                Rvalue::Call {
-                    callee: Callee::Trait { .. },
-                    ..
-                } => unreachable!("instantiation resolves trait methods"),
-                Rvalue::Glue { operation, ty, .. } => {
-                    for callee in types.glue_functions(*ty, *operation) {
-                        uses.push((span, Some(callee)));
-                    }
-                }
-                // These run no code the program wrote, other than the `drop`
-                // of what they release.
-                Rvalue::Intrinsic { .. }
-                | Rvalue::Builtin { .. }
-                | Rvalue::Use(_)
-                | Rvalue::Ref(..)
-                | Rvalue::Unary(..)
-                | Rvalue::Binary(..)
-                | Rvalue::Tuple(_)
-                | Rvalue::Construct { .. }
-                | Rvalue::List(_)
-                | Rvalue::EmptyMap
-                | Rvalue::Range { .. }
-                | Rvalue::Interpolate(_)
-                | Rvalue::Discriminant(_)
-                | Rvalue::Len(_)
-                | Rvalue::Occupied { .. }
-                | Rvalue::Take { .. } => {}
-            }
-        }
-    }
-    uses
-}
-
 /// Collects the trait declarations. `Self` in their method signatures is
 /// the type parameter at index 0.
 fn collect_traits<'a>(
@@ -1392,9 +1256,23 @@ fn instantiation_error(
     nominals: &Nominals,
     error: InstantiationError,
 ) -> CheckDiagnostic {
+    instantiation_diagnostic(
+        types,
+        &|declaration| nominals.declarations[declaration].origin.clone(),
+        error,
+    )
+}
+
+/// The diagnostic of a struct or enum that cannot be instantiated; `origin`
+/// gives where each declaration is.
+pub(crate) fn instantiation_diagnostic(
+    types: &Types,
+    origin: &dyn Fn(usize) -> OriginRef,
+    error: InstantiationError,
+) -> CheckDiagnostic {
     match error {
         InstantiationError::TooDeep { declaration } => unsupported(
-            Some(nominals.declarations[declaration].origin.clone()),
+            Some(origin(declaration)),
             "generic types nested this deeply",
         ),
         // A type that contains itself by value has no finite size. It is
@@ -1406,7 +1284,7 @@ fn instantiation_error(
             };
             CheckDiagnostic {
                 kind: CheckDiagnosticKind::RecursiveType,
-                primary: Some(nominals.declarations[declaration].origin.clone()),
+                primary: Some(origin(declaration)),
                 message: format!(
                     "`{}` contains itself, so it has no finite size; keep the inner values in a `List` or a `Map`",
                     types.name(ty)
@@ -1903,7 +1781,7 @@ fn resolve_type(
     }
 }
 
-fn at(origin: &OriginRef, span: Span) -> OriginRef {
+pub(crate) fn at(origin: &OriginRef, span: Span) -> OriginRef {
     OriginRef {
         library: origin.library,
         source: origin.source.clone(),
