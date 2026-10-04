@@ -125,8 +125,9 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
     } = checked;
     let mut templates = Vec::new();
     for ((function, origin), generic) in functions.iter().zip(&origins).zip(generic) {
-        let body = lower::lower(function, &types);
-        borrowck::check(&body, &types, &|span| checker::at(origin, span))?;
+        let mut body = lower::lower(function, &types);
+        let checks = borrowck::check(&body, &types, &|span| checker::at(origin, span))?;
+        body.insert_checks(checks);
         templates.push(mono::Template {
             name: function.name.clone(),
             body,

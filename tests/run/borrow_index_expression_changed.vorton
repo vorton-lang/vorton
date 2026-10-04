@@ -1,0 +1,14 @@
+fn both(a: &mut Int, b: Int, c: &mut Int) {
+    a = 7
+    c = 9
+}
+fn bump(x: &mut Int) -> Int {
+    x += 1
+    0
+}
+fn main() {
+    let mut xs = [1, 2, 3]
+    let mut i = 0
+    both(&mut xs[i + 1], bump(&mut i), &mut xs[i + 1])
+    print("${xs[1]} ${xs[2]}")
+}

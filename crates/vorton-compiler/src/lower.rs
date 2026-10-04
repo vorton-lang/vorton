@@ -22,7 +22,7 @@ use crate::mir::{
     Statement, StatementKind, Terminator, TerminatorKind, element_type,
 };
 use crate::typed::{
-    Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, Intrinsic, Pattern,
+    Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, Pattern,
     Projection as TypedProjection, Receiver, Statement as TypedStatement,
 };
 use crate::types::{Operation, Type, TypeKind, Types};
@@ -56,7 +56,7 @@ pub(crate) fn lower(function: &Function, types: &Types) -> Body {
         current: 0,
         scopes: Vec::new(),
         loops: Vec::new(),
-        index_copies: None,
+
         redirects: Vec::new(),
     };
     builder.current = builder.body.new_block();
@@ -125,23 +125,11 @@ struct Builder<'a> {
     current: BlockId,
     scopes: Vec<Scope>,
     loops: Vec<LoopTargets>,
-    /// While the arguments of a call are lowered, the temporaries that hold
-    /// variables used as indices in them.
-    index_copies: Option<Vec<IndexCopy>>,
+
     /// While a guard is lowered, the owned entity bindings of its arm, which
     /// take their parts only once the guard holds, and the parts of the
     /// subject that the guard reads in their place.
     redirects: Vec<(Local, Place)>,
-}
-
-/// A temporary that holds the value of a variable used as an index, made
-/// at a point in a block.
-struct IndexCopy {
-    variable: Local,
-    temporary: Local,
-    block: BlockId,
-    /// The statements of `block` before this point.
-    after: usize,
 }
 
 impl Builder<'_> {
@@ -932,7 +920,7 @@ impl Builder<'_> {
                 arguments,
                 borrow,
             } => {
-                let arguments = self.arguments(arguments, span)?;
+                let arguments = self.arguments(arguments)?;
                 Rvalue::Call {
                     callee: *callee,
                     type_arguments: type_arguments.clone(),
@@ -944,7 +932,7 @@ impl Builder<'_> {
                 intrinsic,
                 arguments,
             } => {
-                let arguments = self.arguments(arguments, span)?;
+                let arguments = self.arguments(arguments)?;
                 Rvalue::Intrinsic {
                     intrinsic: *intrinsic,
                     arguments,
@@ -1197,30 +1185,14 @@ impl Builder<'_> {
     }
 
     /// The arguments of a call: a borrowed one is a reference temporary
-    /// made before the later arguments are evaluated. Then, for each two
-    /// borrowed places at least one of which is borrowed with `&mut` and
-    /// which differ only in indices, the program panics if they are the
-    /// same element.
-    fn arguments(&mut self, arguments: &[Expr], span: Span) -> Option<Vec<Operand>> {
-        let outer = self.index_copies.replace(Vec::new());
-        let operands = self.arguments_in(arguments, span);
-        self.index_copies = outer;
-        operands
-    }
-
-    fn arguments_in(&mut self, arguments: &[Expr], span: Span) -> Option<Vec<Operand>> {
+    /// made before the later arguments are evaluated.
+    fn arguments(&mut self, arguments: &[Expr]) -> Option<Vec<Operand>> {
         let mut operands = Vec::new();
-        let mut places = Vec::new();
         for argument in arguments {
-            let mut borrowed = None;
             operands.push(match &argument.kind {
                 ExprKind::Borrow(kind, target) => {
                     let place = match target.as_ref() {
-                        BorrowTarget::Place(place) => {
-                            let place = self.typed_place(place)?;
-                            borrowed = Some((place.clone(), *kind == BorrowKind::Mutable));
-                            place
-                        }
+                        BorrowTarget::Place(place) => self.typed_place(place)?,
                         BorrowTarget::Value(value) => {
                             let temporary = self.temporary(value.ty);
                             if !self.expr_into(Some(Place::local(temporary)), value) {
@@ -1243,78 +1215,9 @@ impl Builder<'_> {
                 }
                 _ => self.operand(argument)?,
             });
-            places.push(borrowed);
-        }
-        let places = places.into_iter().flatten().collect::<Vec<_>>();
-        for (position, (first, first_mutable)) in places.iter().enumerate() {
-            for (second, second_mutable) in &places[position + 1..] {
-                if (*first_mutable || *second_mutable) && first.differs_only_in_indices(second) {
-                    self.disjoint(first, second, span);
-                }
-            }
         }
         Some(operands)
     }
-
-    /// Panics if the places `first` and `second`, which differ only in
-    /// indices, are the same element: if every index of one equals the
-    /// index at the same step of the other.
-    fn disjoint(&mut self, first: &Place, second: &Place, span: Span) {
-        let mut pairs = Vec::new();
-        for (left, right) in first.projections.iter().zip(&second.projections) {
-            pairs.push(match (left, right) {
-                (Projection::ConstantIndex(left), Projection::ConstantIndex(right)) => {
-                    if left != right {
-                        return;
-                    }
-                    continue;
-                }
-                (Projection::Index(left), Projection::Index(right)) => (
-                    Operand::Copy(Place::local(*left)),
-                    Operand::Copy(Place::local(*right)),
-                ),
-                (Projection::Index(index), Projection::ConstantIndex(constant))
-                | (Projection::ConstantIndex(constant), Projection::Index(index)) => (
-                    Operand::Copy(Place::local(*index)),
-                    Operand::Constant(Constant::Int(*constant)),
-                ),
-                _ => continue,
-            });
-        }
-        let distinct = self.body.new_block();
-        for (left, right) in pairs {
-            let same = self.temporary(Type::BOOL);
-            self.assign(
-                Place::local(same),
-                Rvalue::Binary(BinaryOperator::Equal, left, right),
-                span,
-            );
-            let next = self.body.new_block();
-            self.terminate(
-                TerminatorKind::Branch {
-                    condition: Operand::Copy(Place::local(same)),
-                    then: next,
-                    otherwise: distinct,
-                },
-                span,
-            );
-            self.current = next;
-        }
-        let sink = self.new_local(Type::NEVER, None);
-        self.assign(
-            Place::local(sink),
-            Rvalue::Intrinsic {
-                intrinsic: Intrinsic::Panic,
-                arguments: vec![Operand::Constant(Constant::Str(
-                    "the same element is borrowed twice".to_owned(),
-                ))],
-            },
-            span,
-        );
-        self.unreachable(span);
-        self.current = distinct;
-    }
-
     fn builtin(
         &mut self,
         builtin: Builtin,
@@ -1433,53 +1336,19 @@ impl Builder<'_> {
     }
 
     /// An index projection: a constant, or a temporary that holds the index
-    /// or key as it was when the place was evaluated.
+    /// or key as it was when the place was evaluated. The temporary belongs
+    /// to the enclosing block, so it keeps the value for as long as a borrow
+    /// of the place can last, and a run-time check can compare it.
     fn index(&mut self, index: &Expr) -> Option<Projection> {
         if let ExprKind::Int(value) = index.kind {
             return Some(Projection::ConstantIndex(value));
         }
-        let read = variable(index);
-        if let Some(variable) = read
-            && let Some(temporary) = self.same_index(variable)
-        {
-            return Some(Projection::Index(temporary));
-        }
-        let temporary = self.temporary(index.ty);
+        let temporary = self.new_local(index.ty, None);
+        self.declare(temporary);
         if !self.expr_into(Some(Place::local(temporary)), index) {
             return None;
         }
-        if let Some(variable) = read
-            && let Some(copies) = &mut self.index_copies
-        {
-            copies.push(IndexCopy {
-                variable,
-                temporary,
-                block: self.current,
-                after: self.body.blocks[self.current].statements.len(),
-            });
-        }
         Some(Projection::Index(temporary))
-    }
-
-    /// In the arguments of the call being lowered, a temporary that already
-    /// holds the value of the variable `variable`, which nothing has changed
-    /// since. Two places indexed by the same variable then name the same
-    /// element, which borrow checking sees.
-    fn same_index(&self, variable: Local) -> Option<Local> {
-        let copy = self
-            .index_copies
-            .as_ref()?
-            .iter()
-            .rev()
-            .find(|copy| copy.variable == variable)?;
-        if copy.block != self.current {
-            return None;
-        }
-        let statements = &self.body.blocks[self.current].statements[copy.after..];
-        statements
-            .iter()
-            .all(|statement| !changes(&statement.kind, variable))
-            .then_some(copy.temporary)
     }
 
     /// The place of `local`: the part of a match subject that a guard reads
@@ -1881,40 +1750,8 @@ impl Builder<'_> {
     }
 }
 
-/// Whether `statement` may change the value of the variable `variable`:
-/// it writes or moves it, borrows it with `&mut`, or ends it.
-fn changes(statement: &StatementKind, variable: Local) -> bool {
-    let moves = |value: &Rvalue| {
-        value
-            .operands()
-            .iter()
-            .any(|operand| matches!(operand, Operand::Move(place) if place.local == variable))
-    };
-    match statement {
-        StatementKind::Assign(destination, value) => destination.local == variable || moves(value),
-        StatementKind::Bind(_, Rvalue::Ref(kind, place)) => {
-            place.local == variable && *kind != RefKind::Shared
-        }
-        StatementKind::Bind(_, value) => moves(value),
-        StatementKind::Unpack(taken) => taken
-            .iter()
-            .any(|(local, place)| *local == variable || place.local == variable),
-        StatementKind::Release(local) => *local == variable,
-    }
-}
-
 fn is_place(expression: &Expr) -> bool {
     matches!(expression.kind, ExprKind::Place(_))
-}
-
-/// The local that `expression` reads whole, if it is a variable.
-fn variable(expression: &Expr) -> Option<Local> {
-    match &expression.kind {
-        ExprKind::Place(place) if place.call.is_none() && place.projections.is_empty() => {
-            Some(place.local)
-        }
-        _ => None,
-    }
 }
 
 fn ref_kind(kind: BorrowKind) -> RefKind {

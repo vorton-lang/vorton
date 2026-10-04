@@ -169,6 +169,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 StatementKind::Release(local) => self.release(*local),
+                StatementKind::Distinct { pairs, message } => self.distinct(pairs, message),
             }
         }
         match &data.terminator.kind {
@@ -206,6 +207,22 @@ impl<'a> Emitter<'a> {
                 releases,
             } => self.jump_to_start(arguments, releases),
         }
+    }
+
+    /// Panics with `message` if every pair of operands is equal.
+    fn distinct(&mut self, pairs: &[(Operand, Operand)], message: &str) {
+        let mut tests = Vec::new();
+        for (left, right) in pairs {
+            let ty = self.operand_type(left);
+            let (left, right) = (self.read(left), self.read(right));
+            let pair = left.as_deref().zip(right.as_deref());
+            tests.push(comparison(self.types, BinaryOperator::Equal, ty, pair));
+        }
+        let message = self.literals.add(message);
+        self.line(&format!(
+            "if ({}) {{ vt_panic_str({message}); }}",
+            tests.join(" && ")
+        ));
     }
 
     // Tail calls of the function itself.

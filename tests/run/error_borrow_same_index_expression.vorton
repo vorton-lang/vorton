@@ -1,0 +1,6 @@
+fn both(a: &mut Int, b: &mut Int) {}
+fn main() {
+    let mut xs = [1, 2, 3]
+    let i = 0
+    both(&mut xs[i + 1], &mut xs[i + 1])
+}

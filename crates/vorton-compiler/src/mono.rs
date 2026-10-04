@@ -128,7 +128,9 @@ impl Instantiation<'_> {
                     StatementKind::Assign(_, value) | StatementKind::Bind(_, value) => {
                         self.rvalue(value)?;
                     }
-                    StatementKind::Release(_) | StatementKind::Unpack(_) => {}
+                    StatementKind::Release(_)
+                    | StatementKind::Unpack(_)
+                    | StatementKind::Distinct { .. } => {}
                 }
             }
         }

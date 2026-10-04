@@ -1,0 +1,8 @@
+fn main() {
+    let mut xs = [1, 2]
+    let i = 0
+    let j = 0
+    let a = &mut xs[i]
+    xs[j] = 5
+    a = 10
+}

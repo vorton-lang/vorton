@@ -90,7 +90,7 @@ fn console_uses(body: &Body, types: &Types) -> Vec<(Span, Option<usize>)> {
                 StatementKind::Assign(_, value) | StatementKind::Bind(_, value) => value,
                 // A release may run a `drop`, which is checked on its own.
                 StatementKind::Release(_) => continue,
-                StatementKind::Unpack(_) => continue,
+                StatementKind::Unpack(_) | StatementKind::Distinct { .. } => continue,
             };
             match value {
                 Rvalue::Intrinsic {

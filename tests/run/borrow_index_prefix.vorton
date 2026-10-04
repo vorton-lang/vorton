@@ -1,0 +1,11 @@
+fn both(xs: &mut List<Int>, y: &mut Int) {
+    xs.clear()
+    y = 20
+}
+fn main() {
+    let mut xs = [[1], [2]]
+    let i = 0
+    let j = 1
+    both(&mut xs[i], &mut xs[j][0])
+    print(xs[1][0])
+}

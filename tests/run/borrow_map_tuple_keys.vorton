@@ -1,0 +1,13 @@
+fn both(a: &mut Int, b: &mut Int) {
+    a += 1
+    b += 2
+}
+fn main() {
+    let mut m: Map<(Int, Int), Int> = Map::new()
+    m[(1, 2)] = 10
+    m[(3, 4)] = 20
+    let a = (1, 2)
+    let b = (3, 4)
+    both(&mut m[a], &mut m[b])
+    print(m[a])
+}

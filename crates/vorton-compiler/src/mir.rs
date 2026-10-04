@@ -95,6 +95,15 @@ pub(crate) enum StatementKind {
     /// The local's scope ends: what it owns is released, and it holds
     /// nothing afterwards.
     Release(Local),
+    /// Panics with `message` if every pair of operands is equal: the indices
+    /// and keys of a borrowed place and of a place that a step is about to
+    /// reach, where only their values tell whether the two are the same.
+    /// Borrow checking puts it before that step. It is a cost the program
+    /// pays at run time, and the only one of its kind.
+    Distinct {
+        pairs: Vec<(Operand, Operand)>,
+        message: &'static str,
+    },
 }
 
 #[derive(Clone)]
@@ -146,33 +155,6 @@ impl Place {
         place.projections.push(projection);
         place
     }
-
-    /// Whether the two places have the same shape and differ only in indices
-    /// that are not both constants, so only comparing the indices at run
-    /// time tells whether they are the same element. Lowering emits that
-    /// comparison for such places borrowed by one call, and borrow checking
-    /// lets them be borrowed together because of it.
-    pub(crate) fn differs_only_in_indices(&self, other: &Self) -> bool {
-        let is_index = |projection: &Projection| {
-            matches!(
-                projection,
-                Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_)
-            )
-        };
-        let steps = || self.projections.iter().zip(&other.projections);
-        self.local == other.local
-            && self.projections.len() == other.projections.len()
-            && steps().any(|(left, right)| left != right)
-            && steps().all(|(left, right)| {
-                left == right
-                    || (is_index(left)
-                        && is_index(right)
-                        && !matches!(
-                            (left, right),
-                            (Projection::ConstantIndex(_), Projection::ConstantIndex(_))
-                        ))
-            })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -194,7 +176,7 @@ pub(crate) enum Projection {
     Position(Local),
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum Operand {
     /// Copies the value at the place.
     Copy(Place),
@@ -209,7 +191,7 @@ pub(crate) enum Operand {
     Constant(Constant),
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum Constant {
     Int(i64),
     Float(f64),
@@ -336,7 +318,37 @@ impl Rvalue {
     }
 }
 
+/// A run-time check that borrow checking asks for before statement `index`
+/// of `block`, as a [`StatementKind::Distinct`].
+#[derive(PartialEq)]
+pub(crate) struct Check {
+    pub(crate) block: BlockId,
+    pub(crate) index: usize,
+    pub(crate) pairs: Vec<(Operand, Operand)>,
+    pub(crate) message: &'static str,
+}
+
 impl Body {
+    /// Puts each check before the statement it is for.
+    pub(crate) fn insert_checks(&mut self, mut checks: Vec<Check>) {
+        // From the last, so the positions of the others stay.
+        checks.sort_by_key(|check| std::cmp::Reverse((check.block, check.index)));
+        for check in checks {
+            let statements = &mut self.blocks[check.block].statements;
+            let span = statements[check.index].span;
+            statements.insert(
+                check.index,
+                Statement {
+                    kind: StatementKind::Distinct {
+                        pairs: check.pairs,
+                        message: check.message,
+                    },
+                    span,
+                },
+            );
+        }
+    }
+
     pub(crate) fn new_block(&mut self) -> BlockId {
         self.blocks.push(BasicBlock {
             statements: Vec::new(),
@@ -442,6 +454,7 @@ impl Body {
                 filled.remove(local);
                 return;
             }
+            StatementKind::Distinct { .. } => return,
             // Only parts are taken, so the variables may still hold the rest.
             StatementKind::Unpack(moves) => {
                 for (local, _) in moves {

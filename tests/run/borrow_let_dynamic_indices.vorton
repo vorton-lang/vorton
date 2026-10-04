@@ -1,0 +1,10 @@
+fn main() {
+    let mut xs = [1, 2]
+    let i = 0
+    let j = 1
+    let a = &mut xs[i]
+    let b = &mut xs[j]
+    a = 10
+    b = 20
+    print("${xs[0]} ${xs[1]}")
+}

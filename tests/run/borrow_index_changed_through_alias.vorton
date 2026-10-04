@@ -1,0 +1,11 @@
+fn bump(x: &mut Int) -> Int {
+    x += 1
+    0
+}
+fn pick(a: &Int, b: Int, c: &Int) { print("${a} ${c}") }
+fn main() {
+    let xs = [10, 20]
+    let mut i = 0
+    let r = &mut i
+    pick(&xs[i], bump(&mut r), &xs[i])
+}

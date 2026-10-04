@@ -36,30 +36,34 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ast::Span;
 use crate::checker::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::mir::{
-    BlockId, Body, Local, Operand, Place, Projection, RefKind, Rvalue, StatementKind,
-    TerminatorKind, projection_type,
+    BlockId, Body, Check, Constant, Local, Operand, Place, Projection, RefKind, Rvalue,
+    StatementKind, TerminatorKind, projection_type,
 };
 use crate::project::OriginRef;
 use crate::types::Types;
 
+/// Checks the moves and borrows of `body`, and returns the run-time checks
+/// it needs where only the values of indices tell whether two places are
+/// the same.
 pub(crate) fn check(
     body: &Body,
     types: &Types,
     at: &dyn Fn(Span) -> OriginRef,
-) -> Result<(), CheckDiagnostic> {
+) -> Result<Vec<Check>, CheckDiagnostic> {
     let graph = Graph::new(body);
     let live = liveness(body, &graph);
     let mut errors = Vec::new();
+    let mut checks = Vec::new();
     check_move_sources(body, types, &mut errors);
     check_moves(body, &graph, &live, &mut errors);
-    check_borrows(body, types, &graph, &live, &mut errors);
+    check_borrows(body, types, &graph, &live, &mut errors, &mut checks);
     match errors.into_iter().min_by_key(|error| error.span.start) {
         Some(error) => Err(CheckDiagnostic {
             kind: error.kind,
             primary: Some(at(error.span)),
             message: error.message,
         }),
-        None => Ok(()),
+        None => Ok(checks),
     }
 }
 
@@ -160,7 +164,7 @@ fn check_move_sources(body: &Body, types: &Types, errors: &mut Vec<Error>) {
                     })
                     .collect(),
                 StatementKind::Unpack(taken) => taken.iter().map(|(_, place)| place).collect(),
-                StatementKind::Release(_) => Vec::new(),
+                StatementKind::Release(_) | StatementKind::Distinct { .. } => Vec::new(),
             };
             for place in moved {
                 if let Some(message) = immovable(body, types, &from_call, place) {
@@ -368,6 +372,16 @@ fn move_statement(
             }
             return;
         }
+        StatementKind::Distinct { pairs, .. } => {
+            if let Some(errors) = errors {
+                for (left, right) in pairs {
+                    for used in operand_places(left).iter().chain(&operand_places(right)) {
+                        check_filled(body, state, used, span, errors);
+                    }
+                }
+            }
+            return;
+        }
     };
     if let Some(errors) = errors.as_deref_mut() {
         for place in rvalue_places(value) {
@@ -484,6 +498,7 @@ fn check_borrows(
     graph: &Graph,
     live: &Liveness,
     errors: &mut Vec<Error>,
+    checks: &mut Vec<Check>,
 ) {
     // Every loan, by the statement that makes it.
     let mut loans = Vec::new();
@@ -514,31 +529,48 @@ fn check_borrows(
             });
         }
     }
-    // The loans each reference local may carry.
-    let carried_starts = forward(
+    // The loans each reference local may carry, and what the temporaries are
+    // known to hold.
+    let mut values = Values::default();
+    let starts = forward(
         graph,
-        Carried::new(),
-        &Carried::new(),
-        |state: &mut Carried, other| {
-            for (reference, theirs) in other {
-                state
-                    .entry(*reference)
-                    .or_default()
-                    .extend(theirs.iter().copied());
-            }
+        Flow {
+            reached: true,
+            ..Flow::default()
         },
+        &Flow::default(),
+        Flow::join,
         |block, state| {
-            state.retain(|reference, _| live.starts[block].contains(reference));
+            if !state.reached {
+                return;
+            }
+            state
+                .carried
+                .retain(|reference, _| live.starts[block].contains(reference));
             for (index, statement) in body.blocks[block].statements.iter().enumerate() {
                 let own = loan_at.get(&(block, index)).copied();
-                carry(body, &statement.kind, own, &active, state);
+                learn(
+                    body,
+                    &loans,
+                    &statement.kind,
+                    &state.carried,
+                    &mut state.copies,
+                    &mut values,
+                );
+                carry(body, &statement.kind, own, &active, &mut state.carried);
             }
-            state.retain(|reference, _| live.ends[block].contains(reference));
+            state
+                .carried
+                .retain(|reference, _| live.ends[block].contains(reference));
         },
     );
     let is_reference = |local: &Local| body.locals[*local].reference.is_some();
     for &block in &graph.order {
-        let mut carried = carried_starts[block].clone();
+        let Flow {
+            mut carried,
+            mut copies,
+            ..
+        } = starts[block].clone();
         carried.retain(|reference, _| live.starts[block].contains(reference));
         // The references that each statement is the last to use, or that it
         // makes point somewhere no later step looks: they are dead after it.
@@ -563,22 +595,46 @@ fn check_borrows(
         let mut in_force = InForce::new(&loans, &carried);
         for (index, statement) in statements.iter().enumerate() {
             let own = loan_at.get(&(block, index)).copied();
-            check_statement(
+            let made = accesses(body, types, &loans, &carried, &statement.kind, own);
+            match in_force.check(&made, &copies, &values) {
+                Ok(found) => {
+                    for (pairs, message) in found {
+                        let check = Check {
+                            block,
+                            index,
+                            pairs,
+                            message,
+                        };
+                        if !checks.contains(&check) {
+                            checks.push(check);
+                        }
+                    }
+                }
+                Err(access) => {
+                    errors.push(conflict_error(
+                        body,
+                        &access.place,
+                        access.kind,
+                        statement.span,
+                    ));
+                }
+            }
+            learn(
                 body,
-                types,
-                &in_force,
-                &carried,
-                own,
+                &loans,
                 &statement.kind,
-                statement.span,
-                errors,
+                &carried,
+                &mut copies,
+                &mut values,
             );
             // Only `Bind` and `Release` change what a reference carries.
             let changed = match &statement.kind {
                 StatementKind::Bind(reference, _) | StatementKind::Release(reference) => {
                     Some(*reference)
                 }
-                StatementKind::Assign(..) | StatementKind::Unpack(_) => None,
+                StatementKind::Assign(..)
+                | StatementKind::Unpack(_)
+                | StatementKind::Distinct { .. } => None,
             };
             if let Some(reference) = changed {
                 in_force.forget(carried.get(&reference));
@@ -608,6 +664,311 @@ fn check_borrows(
 /// The loans that each reference local may carry, for the references that
 /// carry any, so a step looks only at the references it names.
 type Carried = BTreeMap<Local, BTreeSet<usize>>;
+
+/// The state of the forward analysis of borrows at a point: the loans the
+/// references carry, and what the index locals are known to hold. A block
+/// that no edge has reached yet constrains nothing.
+#[derive(Clone, PartialEq, Default)]
+struct Flow {
+    reached: bool,
+    carried: Carried,
+    copies: Copies,
+}
+
+impl Flow {
+    /// The loans either side may carry; the copies both sides know.
+    fn join(&mut self, other: &Self) {
+        if !other.reached {
+            return;
+        }
+        if !self.reached {
+            *self = other.clone();
+            return;
+        }
+        for (reference, theirs) in &other.carried {
+            self.carried
+                .entry(*reference)
+                .or_default()
+                .extend(theirs.iter().copied());
+        }
+        self.copies
+            .retain(|local, fact| other.copies.get(local) == Some(fact));
+    }
+}
+
+/// An expression that a temporary is known to hold: over value places that
+/// have not changed since, constants, and operators. Operands are the
+/// numbers of other expressions in [`Values`], so equal expressions have one
+/// number, and two indices that hold the same number are equal: places
+/// written alike name the same element.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Fact {
+    Copy(Place),
+    Constant(Key),
+    Unary(u8, usize),
+    Binary(u8, usize, usize),
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    Int(i64),
+    Bool(bool),
+    Str(String),
+}
+
+/// The expressions known in a function, numbered once each, with the
+/// locals each one reads.
+#[derive(Default)]
+struct Values {
+    numbers: BTreeMap<Fact, usize>,
+    facts: Vec<Fact>,
+    reads: Vec<BTreeSet<Local>>,
+}
+
+impl Values {
+    fn number(&mut self, fact: Fact) -> usize {
+        if let Some(&number) = self.numbers.get(&fact) {
+            return number;
+        }
+        let reads = match &fact {
+            Fact::Copy(place) => BTreeSet::from([place.local]),
+            Fact::Constant(_) => BTreeSet::new(),
+            Fact::Unary(_, operand) => self.reads[*operand].clone(),
+            Fact::Binary(_, left, right) => self.reads[*left]
+                .union(&self.reads[*right])
+                .copied()
+                .collect(),
+        };
+        let number = self.facts.len();
+        self.facts.push(fact.clone());
+        self.reads.push(reads);
+        self.numbers.insert(fact, number);
+        number
+    }
+
+    /// The number of what `operand` is known to be: a temporary's
+    /// expression, a copy of a value place of a variable, or a constant.
+    fn operand(&mut self, body: &Body, operand: &Operand, copies: &Copies) -> Option<usize> {
+        let fact = match operand {
+            Operand::Copy(place) if body.locals[place.local].temporary => {
+                return if place.projections.is_empty() {
+                    copies.get(&place.local).copied()
+                } else {
+                    None
+                };
+            }
+            Operand::Copy(place)
+                if body.locals[place.local].reference.is_none()
+                    && place
+                        .projections
+                        .iter()
+                        .all(|projection| matches!(projection, Projection::Field(_))) =>
+            {
+                Fact::Copy(place.clone())
+            }
+            Operand::Constant(Constant::Int(value)) => Fact::Constant(Key::Int(*value)),
+            Operand::Constant(Constant::Bool(value)) => Fact::Constant(Key::Bool(*value)),
+            Operand::Constant(Constant::Str(value)) => Fact::Constant(Key::Str(value.clone())),
+            _ => return None,
+        };
+        Some(self.number(fact))
+    }
+}
+
+/// The number of the expression each temporary is known to hold.
+type Copies = BTreeMap<Local, usize>;
+
+/// Updates what the temporaries are known to hold after `statement`. It
+/// forgets every expression that reads a local the statement may change:
+/// one it writes, takes or ends, and one it may change through a reference
+/// that carries a `&mut` loan of it, by writing through the reference or by
+/// passing it to a call. Then it learns what the statement stores in a
+/// temporary, if that is an expression of known values.
+fn learn(
+    body: &Body,
+    loans: &[Loan],
+    statement: &StatementKind,
+    carried: &Carried,
+    copies: &mut Copies,
+    values: &mut Values,
+) {
+    let mut changed = BTreeSet::new();
+    let through = |reference: Local, changed: &mut BTreeSet<Local>| {
+        for &loan in carried.get(&reference).into_iter().flatten() {
+            if loans[loan].kind != RefKind::Shared {
+                changed.insert(loans[loan].place.local);
+            }
+        }
+    };
+    let value = match statement {
+        StatementKind::Assign(destination, value) => {
+            if body.locals[destination.local].reference.is_some() {
+                through(destination.local, &mut changed);
+            } else {
+                changed.insert(destination.local);
+            }
+            Some(value)
+        }
+        StatementKind::Bind(reference, value) => {
+            changed.insert(*reference);
+            Some(value)
+        }
+        StatementKind::Unpack(taken) => {
+            for (local, place) in taken {
+                changed.insert(*local);
+                changed.insert(place.local);
+            }
+            None
+        }
+        StatementKind::Release(local) => {
+            changed.insert(*local);
+            None
+        }
+        StatementKind::Distinct { .. } => None,
+    };
+    if let Some(value) = value {
+        for operand in value.operands() {
+            match operand {
+                Operand::Move(place) => {
+                    changed.insert(place.local);
+                }
+                Operand::Borrowed(reference) => through(*reference, &mut changed),
+                Operand::Copy(_) | Operand::Inspect(_) | Operand::Constant(_) => {}
+            }
+        }
+        if let Rvalue::Builtin { receiver, .. } = value
+            && body.locals[receiver.local].reference.is_some()
+        {
+            through(receiver.local, &mut changed);
+        }
+    }
+    if !changed.is_empty() {
+        copies.retain(|local, number| {
+            !changed.contains(local) && values.reads[*number].is_disjoint(&changed)
+        });
+    }
+    if let StatementKind::Assign(destination, value) = statement
+        && destination.projections.is_empty()
+        && body.locals[destination.local].temporary
+        && body.locals[destination.local].reference.is_none()
+    {
+        let number = match value {
+            Rvalue::Use(value) => values.operand(body, value, copies),
+            Rvalue::Unary(operator, value) => values
+                .operand(body, value, copies)
+                .map(|value| values.number(Fact::Unary(*operator as u8, value))),
+            Rvalue::Binary(operator, left, right) => {
+                let left = values.operand(body, left, copies);
+                let right = values.operand(body, right, copies);
+                left.zip(right)
+                    .map(|(left, right)| values.number(Fact::Binary(*operator as u8, left, right)))
+            }
+            _ => None,
+        };
+        if let Some(number) = number {
+            copies.insert(destination.local, number);
+        }
+    }
+}
+/// How two places relate.
+enum Overlap {
+    /// They never reach the same storage.
+    Disjoint,
+    /// One contains the other, whatever their indices hold.
+    Certain,
+    /// They are the same element if each pair of indices or keys is equal,
+    /// which only their values at run time tell.
+    IfEqual(Vec<(Operand, Operand)>),
+}
+
+/// What an index projection is known to be.
+#[derive(PartialEq)]
+enum IndexValue {
+    Constant(Key),
+    Known(usize),
+    Local(Local),
+}
+
+fn index_value(projection: &Projection, copies: &Copies, values: &Values) -> IndexValue {
+    match projection {
+        Projection::ConstantIndex(value) => IndexValue::Constant(Key::Int(*value)),
+        Projection::Index(local) | Projection::Position(local) => match copies.get(local) {
+            Some(&number) => match &values.facts[number] {
+                Fact::Constant(key) => IndexValue::Constant(key.clone()),
+                _ => IndexValue::Known(number),
+            },
+            None => IndexValue::Local(*local),
+        },
+        Projection::Field(_) | Projection::VariantField { .. } => {
+            unreachable!("not an index")
+        }
+    }
+}
+fn index_operand(projection: &Projection) -> Operand {
+    match projection {
+        Projection::ConstantIndex(value) => Operand::Constant(Constant::Int(*value)),
+        Projection::Index(local) | Projection::Position(local) => {
+            Operand::Copy(Place::local(*local))
+        }
+        Projection::Field(_) | Projection::VariantField { .. } => {
+            unreachable!("not an index")
+        }
+    }
+}
+
+/// How the places `left` and `right` relate, given what the index locals
+/// are known to hold. This is the one judgement of overlap: a step that
+/// reaches a place a live loan has lent is an error when they certainly
+/// overlap, and is preceded by a run-time check when only the values of
+/// their indices tell.
+fn overlap(left: &Place, right: &Place, copies: &Copies, values: &Values) -> Overlap {
+    if left.local != right.local {
+        return Overlap::Disjoint;
+    }
+    let is_index = |projection: &Projection| {
+        matches!(
+            projection,
+            Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_)
+        )
+    };
+    let mut pairs = Vec::new();
+    for (step, other) in left.projections.iter().zip(&right.projections) {
+        match (step, other) {
+            (Projection::Field(a), Projection::Field(b)) if a != b => return Overlap::Disjoint,
+            (
+                Projection::VariantField { variant, field },
+                Projection::VariantField {
+                    variant: other_variant,
+                    field: other_field,
+                },
+            ) if variant != other_variant || field != other_field => return Overlap::Disjoint,
+            _ if is_index(step) && is_index(other) => {
+                let (a, b) = (
+                    index_value(step, copies, values),
+                    index_value(other, copies, values),
+                );
+                if a == b {
+                    continue;
+                }
+                if let (IndexValue::Constant(_), IndexValue::Constant(_)) = (&a, &b) {
+                    return Overlap::Disjoint;
+                }
+                // A position and a key do not compare; take them as the same.
+                if matches!(step, Projection::Position(_))
+                    == matches!(other, Projection::Position(_))
+                {
+                    pairs.push((index_operand(step), index_operand(other)));
+                }
+            }
+            _ => {}
+        }
+    }
+    if pairs.is_empty() {
+        Overlap::Certain
+    } else {
+        Overlap::IfEqual(pairs)
+    }
+}
 
 /// The loans that `reference` may carry.
 fn carried_by(carried: &Carried, reference: Local) -> BTreeSet<usize> {
@@ -654,7 +1015,7 @@ fn carry(
         StatementKind::Release(local) => {
             carried.remove(local);
         }
-        StatementKind::Assign(..) | StatementKind::Unpack(_) => {}
+        StatementKind::Assign(..) | StatementKind::Unpack(_) | StatementKind::Distinct { .. } => {}
     }
 }
 
@@ -719,6 +1080,15 @@ fn local_uses(body: &Body, statement: &StatementKind) -> (Vec<Local>, Vec<Local>
     let locals = |places: Vec<Place>| places.into_iter().map(|place| place.local);
     match statement {
         StatementKind::Release(local) => (Vec::new(), vec![*local]),
+        StatementKind::Distinct { pairs, .. } => (
+            pairs
+                .iter()
+                .flat_map(|(left, right)| {
+                    locals(operand_places(left)).chain(locals(operand_places(right)))
+                })
+                .collect(),
+            Vec::new(),
+        ),
         StatementKind::Unpack(taken) => (
             taken
                 .iter()
@@ -800,44 +1170,47 @@ impl<'a> InForce<'a> {
         }
     }
 
-    /// A loan in force, other than `exempt` ones, that `access` conflicts
-    /// with.
-    fn conflict(&self, access: &Made) -> Option<usize> {
-        let local = access.place.local;
-        let mutable = self.mutable.get(&local).into_iter().flatten();
-        let other = match access.kind {
-            Access::ReadValue => return None,
-            Access::Share | Access::Reserve => None,
-            Access::Borrow | Access::Write | Access::Move | Access::Release => {
-                self.other.get(&local)
+    /// Checks the accesses a statement makes against the loans in force
+    /// whose kinds conflict with them, other than `exempt` ones. Returns the
+    /// first access that certainly overlaps such a loan, or else the
+    /// run-time checks the statement needs: for each loan that only the
+    /// values of indices tell apart, the pairs of indices that must not all
+    /// be equal, and the message to panic with.
+    #[allow(clippy::type_complexity)]
+    fn check<'m>(
+        &self,
+        made: &'m [Made],
+        copies: &Copies,
+        values: &Values,
+    ) -> Result<Vec<(Vec<(Operand, Operand)>, &'static str)>, &'m Made> {
+        let mut found = Vec::new();
+        for access in made {
+            let local = access.place.local;
+            let other = match access.kind {
+                Access::ReadValue => continue,
+                Access::Share | Access::Reserve => None,
+                Access::Borrow | Access::Write | Access::Move | Access::Release => {
+                    self.other.get(&local)
+                }
+            };
+            let message = match access.kind {
+                Access::Write => "a borrowed element is changed",
+                _ => "the same element is borrowed twice",
+            };
+            let candidates = self.mutable.get(&local).into_iter().flatten();
+            for &loan in candidates.chain(other.into_iter().flatten()) {
+                let lent = &self.loans[loan];
+                if access.exempt.contains(&loan) || !kinds_conflict(lent.kind, access.kind) {
+                    continue;
+                }
+                match overlap(&lent.place, &access.place, copies, values) {
+                    Overlap::Disjoint => {}
+                    Overlap::Certain => return Err(access),
+                    Overlap::IfEqual(pairs) => found.push((pairs, message)),
+                }
             }
-        };
-        mutable
-            .chain(other.into_iter().flatten())
-            .copied()
-            .find(|loan| {
-                !access.exempt.contains(loan)
-                    && conflicts(&self.loans[*loan], &access.place, access.kind)
-            })
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn check_statement(
-    body: &Body,
-    types: &Types,
-    in_force: &InForce,
-    carried: &Carried,
-    own: Option<usize>,
-    statement: &StatementKind,
-    span: Span,
-    errors: &mut Vec<Error>,
-) {
-    for access in accesses(body, types, in_force.loans, carried, statement, own) {
-        if in_force.conflict(&access).is_some() {
-            errors.push(conflict_error(body, &access.place, access.kind, span));
-            return;
         }
+        Ok(found)
     }
 }
 
@@ -879,6 +1252,8 @@ fn accesses(
             }
             return made;
         }
+        // Reads indices, which are values.
+        StatementKind::Distinct { .. } => return made,
         StatementKind::Assign(destination, value) => (Some(destination), value),
         StatementKind::Bind(_, value) => (None, value),
     };
@@ -953,30 +1328,17 @@ fn accesses(
         | Rvalue::Glue { .. }
         | Rvalue::Take { .. } => Vec::new(),
     };
-    let siblings = activated
-        .iter()
-        .flat_map(|&reference| own_loans(loans, carried, reference))
-        .collect::<Vec<_>>();
     for &reference in &activated {
         for loan_index in own_loans(loans, carried, reference) {
             let loan = &loans[loan_index];
             if loan.kind != RefKind::MutableArgument {
                 continue;
             }
-            // The loans it is made through, and those of the other
-            // borrowed arguments that differ from it only in list
-            // indices, which are compared at run time.
-            let mut exempt = carried_by(carried, reference);
-            exempt.extend(
-                siblings
-                    .iter()
-                    .copied()
-                    .filter(|&sibling| loans[sibling].place.differs_only_in_indices(&loan.place)),
-            );
+            // Not counting the loans it is made through.
             made.push(Made {
                 place: loan.place.clone(),
                 kind: Access::Borrow,
-                exempt,
+                exempt: carried_by(carried, reference),
             });
         }
     }
@@ -991,47 +1353,17 @@ fn own_loans(loans: &[Loan], carried: &Carried, reference: usize) -> Vec<usize> 
         .collect()
 }
 
-/// Whether an access of `kind` to `place` conflicts with `loan`.
-fn conflicts(loan: &Loan, place: &Place, kind: Access) -> bool {
-    if kind == Access::ReadValue {
-        return false;
-    }
-    if !overlap(&loan.place, place) {
-        return false;
-    }
-    match loan.kind {
-        RefKind::Shared | RefKind::MutableArgument => matches!(
-            kind,
+/// Whether an access of kind `access` conflicts with a loan of kind `loan`
+/// of a place it overlaps.
+fn kinds_conflict(loan: RefKind, access: Access) -> bool {
+    match (loan, access) {
+        (_, Access::ReadValue) => false,
+        (RefKind::Mutable, _) => true,
+        (RefKind::Shared | RefKind::MutableArgument, access) => matches!(
+            access,
             Access::Borrow | Access::Write | Access::Move | Access::Release
         ),
-        RefKind::Mutable => true,
     }
-}
-
-/// Whether two places may overlap: they are of one local, and along their
-/// common path no step tells them apart.
-fn overlap(left: &Place, right: &Place) -> bool {
-    if left.local != right.local {
-        return false;
-    }
-    for (left, right) in left.projections.iter().zip(&right.projections) {
-        let disjoint = match (left, right) {
-            (Projection::Field(a), Projection::Field(b)) => a != b,
-            (
-                Projection::VariantField { variant, field },
-                Projection::VariantField {
-                    variant: other_variant,
-                    field: other_field,
-                },
-            ) => variant != other_variant || field != other_field,
-            (Projection::ConstantIndex(a), Projection::ConstantIndex(b)) => a != b,
-            _ => false,
-        };
-        if disjoint {
-            return false;
-        }
-    }
-    true
 }
 
 fn conflict_error(body: &Body, place: &Place, kind: Access, span: Span) -> Error {
@@ -1090,7 +1422,9 @@ fn check_returned(
                 .find(|statement| match &statement.kind {
                     StatementKind::Assign(destination, _) => destination.local == body.result,
                     StatementKind::Bind(reference, _) => *reference == body.result,
-                    StatementKind::Release(_) | StatementKind::Unpack(_) => false,
+                    StatementKind::Release(_)
+                    | StatementKind::Unpack(_)
+                    | StatementKind::Distinct { .. } => false,
                 })
                 .map_or(block.terminator.span, |statement| statement.span);
             errors.push(Error {
