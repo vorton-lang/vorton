@@ -205,7 +205,10 @@ pub(crate) enum ExprKind {
     Bool(bool),
     Str(String),
     Unit,
-    Local(usize),
+    /// A place: a local, or a call that returns a borrow, and a part of
+    /// either reached through fields and indices. Where its value is used,
+    /// lowering moves an entity out of it or copies a value.
+    Place(Place),
     Call {
         callee: Callee,
         /// The type arguments of a generic function; instantiation replaces
@@ -245,7 +248,8 @@ pub(crate) enum ExprKind {
         base: Option<Box<Expr>>,
         fields: Vec<(usize, Expr)>,
     },
-    /// A struct field or tuple element, by declaration or position index.
+    /// A struct field or tuple element, by declaration or position index,
+    /// of a value that is not a place, such as the result of a call.
     Field {
         base: Box<Expr>,
         index: usize,
@@ -263,7 +267,8 @@ pub(crate) enum ExprKind {
         end: Box<Expr>,
         inclusive: bool,
     },
-    /// Reads a value element of a list, or the value of a key in a map.
+    /// An element of a list, or the value of a key in a map, that is not a
+    /// place, such as one of a list that a call returns.
     Index {
         base: Box<Expr>,
         index: Box<Expr>,

@@ -1818,6 +1818,18 @@ impl Operand {
             Self::Value(value) => value.ty,
         }
     }
+
+    /// The expression again: a place, or the value.
+    fn into_expr(self) -> Expr {
+        match self {
+            Self::Place((place, ty)) => Expr {
+                ty,
+                span: place.span,
+                kind: ExprKind::Place(place),
+            },
+            Self::Value(value) => value,
+        }
+    }
 }
 
 /// The values given to a variant or struct, in source order.
@@ -2481,138 +2493,61 @@ impl BodyChecker<'_> {
         ))
     }
 
-    /// Checks an expression that may be borrowed or used as a receiver. A
-    /// local followed by field, tuple-element and index accesses is a place,
-    /// returned with its path; so is a call that returns a borrow, and the
-    /// parts of such a place. Anything else is a value, checked against
-    /// `expected`.
+    /// Checks an expression and tells whether it is a place, for a position
+    /// that borrows it or uses it as a receiver.
     fn check_operand(
         &mut self,
         expression: &ResolvedExpr,
         expected: Option<Type>,
     ) -> Result<Operand, CheckDiagnostic> {
-        let span = expression.span;
-        match &expression.kind {
-            ResolvedExprKind::Path(ResolvedReference::Exact { target, .. })
-                if let Some(&local) = self.local_ids.get(target) =>
-            {
-                Ok(Operand::Place((
-                    Place {
-                        local,
-                        span,
-                        call: None,
-                        projections: Vec::new(),
-                    },
-                    self.locals[local].ty,
-                )))
-            }
-            ResolvedExprKind::Call { callee, .. } => {
-                let call = self.check_expr(expression, expected)?;
-                Ok(self.call_operand(call, callee_name(callee)))
-            }
-            ResolvedExprKind::MethodCall { method, .. } => {
-                let call = self.check_expr(expression, expected)?;
-                Ok(self.call_operand(call, method.name.clone()))
-            }
-            ResolvedExprKind::Field { receiver, field } => {
-                let base = self.check_operand(receiver, None)?;
-                let (index, ty) = self.named_field(base.ty(), &field.name, field.origin.span)?;
-                Ok(self.project(base, Projection::Field(index), ty, span))
-            }
-            ResolvedExprKind::TupleField {
-                receiver,
-                index,
-                origin,
-            } => {
-                let base = self.check_operand(receiver, None)?;
-                let (index, ty) = self.tuple_element(base.ty(), index, origin.span)?;
-                Ok(self.project(base, Projection::Field(index), ty, span))
-            }
-            ResolvedExprKind::Index { receiver, index } => {
-                let base = self.check_operand(receiver, None)?;
-                let (element, index) = self.check_subscript(base.ty(), receiver.span, index)?;
-                Ok(self.project(base, Projection::Index(Box::new(index)), element, span))
-            }
-            _ => Ok(Operand::Value(self.check_expr(expression, expected)?)),
-        }
+        let checked = self.check_expr(expression, expected)?;
+        Ok(match checked.kind {
+            ExprKind::Place(place) => Operand::Place((place, checked.ty)),
+            _ => Operand::Value(checked),
+        })
     }
 
     /// A call that returns a borrow is a place, reached through a local
     /// named after the function; any other call is a value.
-    fn call_operand(&mut self, call: Expr, name: String) -> Operand {
+    fn call_place(&mut self, call: Expr, name: String) -> Expr {
         let ExprKind::Call {
             borrow: Some(kind), ..
         } = call.kind
         else {
-            return Operand::Value(call);
+            return call;
         };
-        let ty = call.ty;
+        let (ty, span) = (call.ty, call.span);
         let local = self.push_local(name, ty, kind == BorrowKind::Mutable, Some(kind));
-        Operand::Place((
-            Place {
+        Expr {
+            ty,
+            span,
+            kind: ExprKind::Place(Place {
                 local,
-                span: call.span,
+                span,
                 call: Some(Box::new(call)),
                 projections: Vec::new(),
-            },
-            ty,
-        ))
+            }),
+        }
     }
 
     /// A part of type `ty` of `base`: a part of a place is a place; a part
-    /// of a value is read from it.
-    fn project(&self, base: Operand, projection: Projection, ty: Type, span: Span) -> Operand {
-        match base {
-            Operand::Place((mut place, _)) => {
+    /// of any other value is read from it.
+    fn project(&self, base: Expr, projection: Projection, ty: Type, span: Span) -> Expr {
+        let kind = match base.kind {
+            ExprKind::Place(mut place) => {
                 place.projections.push(projection);
                 place.span = span;
-                Operand::Place((place, ty))
+                ExprKind::Place(place)
             }
-            Operand::Value(base) => {
-                let base = Box::new(base);
-                let kind = match projection {
+            kind => {
+                let base = Box::new(Expr { kind, ..base });
+                match projection {
                     Projection::Field(index) => ExprKind::Field { base, index },
                     Projection::Index(index) => ExprKind::Index { base, index },
-                };
-                Operand::Value(Expr { ty, span, kind })
+                }
             }
-        }
-    }
-
-    /// The value a place holds, as an expression that reads it.
-    fn place_value(&self, place: Place) -> Expr {
-        let span = place.span;
-        let mut value = match place.call {
-            Some(call) => *call,
-            None => Expr {
-                ty: self.locals[place.local].ty,
-                span,
-                kind: ExprKind::Local(place.local),
-            },
         };
-        for projection in place.projections {
-            let base = Box::new(value);
-            value = match projection {
-                Projection::Field(index) => Expr {
-                    ty: self.types.components(base.ty)[index],
-                    span,
-                    kind: ExprKind::Field { base, index },
-                },
-                Projection::Index(index) => Expr {
-                    ty: self.list_element_type(base.ty),
-                    span,
-                    kind: ExprKind::Index { base, index },
-                },
-            };
-        }
-        value
-    }
-
-    fn list_element_type(&self, ty: Type) -> Type {
-        match self.types.kind(ty) {
-            TypeKind::List(element) | TypeKind::Map(_, element) => *element,
-            _ => unreachable!("only lists and maps are indexed"),
-        }
+        Expr { ty, span, kind }
     }
 
     /// Checks `container[index]`: an `Int` index into a list, or a key into
@@ -2811,7 +2746,13 @@ impl BodyChecker<'_> {
                     return Err(self.unsupported(span, "values other than local variables"));
                 };
                 if let Some(&local) = self.local_ids.get(target) {
-                    (self.locals[local].ty, ExprKind::Local(local))
+                    let place = Place {
+                        local,
+                        span,
+                        call: None,
+                        projections: Vec::new(),
+                    };
+                    (self.locals[local].ty, ExprKind::Place(place))
                 } else if let Some(&(declaration, variant)) = self.nominals.constructors.get(target)
                 {
                     self.check_variant(span, declaration, variant, None, expected)?
@@ -2840,7 +2781,8 @@ impl BodyChecker<'_> {
                 right,
             } => self.check_binary(*operator, left, right)?,
             ResolvedExprKind::Call { callee, arguments } => {
-                self.check_call(span, callee, arguments, expected)?
+                let (ty, kind) = self.check_call(span, callee, arguments, expected)?;
+                return Ok(self.call_place(Expr { ty, span, kind }, callee_name(callee)));
             }
             ResolvedExprKind::Tuple(elements) => self.check_tuple(elements, expected)?,
             ResolvedExprKind::NamedConstruct { target, entries } => {
@@ -2876,13 +2818,7 @@ impl BodyChecker<'_> {
             ResolvedExprKind::Field { receiver, field } => {
                 let base = self.check_expr(receiver, None)?;
                 let (index, ty) = self.named_field(base.ty, &field.name, field.origin.span)?;
-                (
-                    ty,
-                    ExprKind::Field {
-                        base: Box::new(base),
-                        index,
-                    },
-                )
+                return Ok(self.project(base, Projection::Field(index), ty, span));
             }
             ResolvedExprKind::TupleField {
                 receiver,
@@ -2891,31 +2827,22 @@ impl BodyChecker<'_> {
             } => {
                 let base = self.check_expr(receiver, None)?;
                 let (index, ty) = self.tuple_element(base.ty, index, origin.span)?;
-                (
-                    ty,
-                    ExprKind::Field {
-                        base: Box::new(base),
-                        index,
-                    },
-                )
+                return Ok(self.project(base, Projection::Field(index), ty, span));
             }
             ResolvedExprKind::List(elements) => self.check_list(span, elements, expected)?,
             ResolvedExprKind::Index { receiver, index } => {
                 let base = self.check_expr(receiver, None)?;
                 let (element, index) = self.check_subscript(base.ty, receiver.span, index)?;
-                (
-                    element,
-                    ExprKind::Index {
-                        base: Box::new(base),
-                        index: Box::new(index),
-                    },
-                )
+                return Ok(self.project(base, Projection::Index(Box::new(index)), element, span));
             }
             ResolvedExprKind::MethodCall {
                 receiver,
                 method,
                 arguments,
-            } => self.check_method(span, receiver, &method.name, arguments)?,
+            } => {
+                let (ty, kind) = self.check_method(span, receiver, &method.name, arguments)?;
+                return Ok(self.call_place(Expr { ty, span, kind }, method.name.clone()));
+            }
             ResolvedExprKind::Borrow { .. } => {
                 return Err(self.unsupported(span, "borrows outside `for` loops"));
             }
@@ -3171,10 +3098,7 @@ impl BodyChecker<'_> {
         let operand = self.check_operand(expression, None)?;
         let ty = operand.ty();
         if is_printable(ty) {
-            return Ok(match operand {
-                Operand::Place((place, _)) => self.place_value(place),
-                Operand::Value(value) => value,
-            });
+            return Ok(operand.into_expr());
         }
         let display = self.traits.display;
         if !self.implements(ty, display) {
@@ -4569,10 +4493,7 @@ impl BodyChecker<'_> {
                 }
                 // A method that takes `self` takes the receiver.
                 (Argument::Receiver(receiver, _), None) => {
-                    checked.push(match receiver {
-                        Operand::Place((place, _)) => self.place_value(place),
-                        Operand::Value(value) => value,
-                    });
+                    checked.push(receiver.into_expr());
                     continue;
                 }
                 // The receiver of `&self` and `&mut self` is borrowed as is.

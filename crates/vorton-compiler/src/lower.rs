@@ -889,17 +889,6 @@ impl Builder<'_> {
                 left,
                 right,
             } => return self.logic_into(destination, *operator, left, right, span),
-            // A call that returns a borrow makes a reference point where its
-            // result points; anywhere else its value is that of the place.
-            ExprKind::Call {
-                borrow: Some(_), ..
-            } if !destination
-                .as_ref()
-                .is_some_and(|place| self.is_reference(place)) =>
-            {
-                self.place(expression)
-                    .map(|place| Rvalue::Use(self.take(place, ty)))
-            }
             _ => self.rvalue(expression),
         };
         let Some(value) = value else {
@@ -933,7 +922,7 @@ impl Builder<'_> {
             ExprKind::Bool(value) => Rvalue::Use(Operand::Constant(Constant::Bool(*value))),
             ExprKind::Str(value) => Rvalue::Use(Operand::Constant(Constant::Str(value.clone()))),
             ExprKind::Unit => Rvalue::Use(Operand::Constant(Constant::Unit)),
-            ExprKind::Local(_) | ExprKind::Field { .. } | ExprKind::Index { .. } => {
+            ExprKind::Place(_) | ExprKind::Field { .. } | ExprKind::Index { .. } => {
                 let place = self.place(expression)?;
                 Rvalue::Use(self.take(place, ty))
             }
@@ -1397,11 +1386,11 @@ impl Builder<'_> {
         })
     }
 
-    /// Lowers a place expression: a local, fields and indices of it, or a
-    /// part of a value kept in a temporary.
+    /// The place that `expression` names, or a temporary that holds its
+    /// value, and the part of it that a field or index of a value reaches.
     fn place(&mut self, expression: &Expr) -> Option<Place> {
         match &expression.kind {
-            ExprKind::Local(local) => Some(self.local_place(*local)),
+            ExprKind::Place(place) => self.typed_place(place),
             ExprKind::Field { base, index } => {
                 let base = self.place(base)?;
                 Some(base.project(Projection::Field(*index)))
@@ -1410,15 +1399,6 @@ impl Builder<'_> {
                 let base = self.place(base)?;
                 let index = self.index(index)?;
                 Some(base.project(index))
-            }
-            ExprKind::Call {
-                borrow: Some(_), ..
-            } => {
-                let reference = self.reference(expression.ty, BorrowKind::Shared);
-                if !self.expr_into(Some(Place::local(reference)), expression) {
-                    return None;
-                }
-                Some(Place::local(reference))
             }
             _ => {
                 let temporary = self.temporary(expression.ty);
@@ -1458,7 +1438,8 @@ impl Builder<'_> {
         if let ExprKind::Int(value) = index.kind {
             return Some(Projection::ConstantIndex(value));
         }
-        if let ExprKind::Local(variable) = index.kind
+        let read = variable(index);
+        if let Some(variable) = read
             && let Some(temporary) = self.same_index(variable)
         {
             return Some(Projection::Index(temporary));
@@ -1467,7 +1448,7 @@ impl Builder<'_> {
         if !self.expr_into(Some(Place::local(temporary)), index) {
             return None;
         }
-        if let ExprKind::Local(variable) = index.kind
+        if let Some(variable) = read
             && let Some(copies) = &mut self.index_copies
         {
             copies.push(IndexCopy {
@@ -1922,16 +1903,17 @@ fn changes(statement: &StatementKind, variable: Local) -> bool {
     }
 }
 
-/// Whether `expression` names a place: a local and fields and indices of
-/// it, or the result of a call that returns a borrow.
 fn is_place(expression: &Expr) -> bool {
+    matches!(expression.kind, ExprKind::Place(_))
+}
+
+/// The local that `expression` reads whole, if it is a variable.
+fn variable(expression: &Expr) -> Option<Local> {
     match &expression.kind {
-        ExprKind::Local(_)
-        | ExprKind::Call {
-            borrow: Some(_), ..
-        } => true,
-        ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => is_place(base),
-        _ => false,
+        ExprKind::Place(place) if place.call.is_none() && place.projections.is_empty() => {
+            Some(place.local)
+        }
+        _ => None,
     }
 }
 
