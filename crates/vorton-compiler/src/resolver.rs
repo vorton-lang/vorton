@@ -4762,6 +4762,10 @@ impl BodyResolver<'_> {
     }
 
     fn lookup_value_binding(&self, name: &str) -> Option<EntityId> {
+        // `_` is a wildcard, never a name that can be read.
+        if name == "_" {
+            return None;
+        }
         self.value_scopes
             .iter()
             .rev()
@@ -4941,6 +4945,24 @@ impl BodyResolver<'_> {
                         .map(|annotation| self.resolve_type(annotation))
                         .transpose()?;
                     let value = self.resolve_expr(value)?;
+                    // `_` binds nothing: `let _ = e` matches `e` against a
+                    // wildcard.
+                    if name.text == "_" {
+                        return Ok(ResolvedStatement {
+                            span: statement.span,
+                            kind: ResolvedStatementKind::Let {
+                                bindings: Vec::new(),
+                                pattern: Some(ResolvedPattern {
+                                    span: name.span,
+                                    kind: ResolvedPatternKind::Wildcard,
+                                }),
+                                mutable: *mutable,
+                                annotation_borrow: borrow_of(annotation_borrow.as_ref()),
+                                annotation,
+                                value,
+                            },
+                        });
+                    }
                     let binding = self.make_value_binding(
                         name,
                         name.span,

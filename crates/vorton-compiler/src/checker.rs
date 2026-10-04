@@ -2252,10 +2252,21 @@ impl BodyChecker<'_> {
             ));
         }
         if let Some(pattern) = pattern {
+            if let Some(mutable) = mutable {
+                return Err(self.error(
+                    CheckDiagnosticKind::NotAssignable,
+                    *mutable,
+                    "a pattern binds nothing to change; `mut` goes on the names in it".to_owned(),
+                ));
+            }
+            let value_span = value.span;
             let value = match checked {
                 Some(value) => value,
-                None => self.check_expr(value, None)?,
+                None => self.check_expr(value, expected)?,
             };
+            if let Some(expected) = expected {
+                self.require(value_span, expected, value.ty)?;
+            }
             if value.ty == Type::NEVER {
                 return Ok((Statement::Expr(value), true));
             }

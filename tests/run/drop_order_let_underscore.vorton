@@ -1,0 +1,10 @@
+struct G { tag: Str }
+impl Drop for G {
+    fn drop(&mut self) {
+        assert(false, "dropped ${self.tag}")
+    }
+}
+fn main() {
+    let _ = G { tag: "temp" }
+    print("after")
+}

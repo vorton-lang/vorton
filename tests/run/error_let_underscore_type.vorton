@@ -1,0 +1,4 @@
+fn main() {
+    let _: Int = 5
+    let _: Str = 5
+}
