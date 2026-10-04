@@ -1,0 +1,9 @@
+trait V: Copy {}
+
+struct S {
+    xs: List<Int>,
+}
+
+impl V for S {}
+
+fn main() {}

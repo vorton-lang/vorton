@@ -1,0 +1,7 @@
+trait V: Copy {}
+
+fn f<T: V>(x: T) {}
+
+fn main() {
+    f([1])
+}

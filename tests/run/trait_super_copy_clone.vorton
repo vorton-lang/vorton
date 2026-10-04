@@ -1,0 +1,48 @@
+trait V: Copy {
+    fn n(&self) -> Int
+}
+
+trait W: Clone {
+    fn m(&self) -> Int
+}
+
+struct P {
+    n: Int,
+}
+
+impl V for P {
+    fn n(&self) -> Int { self.n }
+}
+
+impl W for P {
+    fn m(&self) -> Int { self.n * 10 }
+}
+
+struct Box {
+    xs: List<Int>,
+}
+
+impl W for Box {
+    fn m(&self) -> Int { self.xs.len() }
+}
+
+fn twice<T: V>(x: T) -> Int {
+    let y = x
+    x.n() + y.n()
+}
+
+fn copies<T: W>(x: &T) -> T {
+    x.clone()
+}
+
+fn pair<T: Copy>(x: T) -> (T, T) {
+    (x, x)
+}
+
+fn main() {
+    print(twice(P { n: 3 }))
+    print(copies(&P { n: 4 }).m())
+    let b = Box { xs: [1, 2] }
+    print(copies(&b).m())
+    print(pair(P { n: 5 }).1.n)
+}

@@ -126,9 +126,9 @@ struct Signature {
 #[derive(Clone)]
 struct TypeParameter {
     name: String,
-    copy: bool,
-    clone: bool,
-    /// The traits it is bound by, with their supertraits.
+    /// The traits it is bound by, with their supertraits. This is the one
+    /// record of what the parameter implements: `Copy` and `Clone` among
+    /// them, whether written or reached as supertraits.
     traits: BTreeSet<usize>,
 }
 
@@ -195,7 +195,7 @@ impl Traits<'_> {
         let declaration = &self.declarations[trait_index];
         !declaration.associated_types
             && (!declaration.core
-                || [self.display, self.clone, self.drop].contains(&trait_index)
+                || [self.display, self.copy, self.clone, self.drop].contains(&trait_index)
                 || self.comparison(trait_index).is_some())
     }
 }
@@ -1058,7 +1058,10 @@ fn signature_text(types: &Types, signature: &Signature) -> String {
 }
 
 /// Whether `ty` implements the trait: a type parameter through its bounds,
-/// another type through an impl or, for `Display`, as a built-in type.
+/// another type through an impl, or through what the compiler provides:
+/// `Copy` of a value type, `Clone` and the comparisons through the parts,
+/// and `Display` of a built-in type. Every check of a bound, a supertrait
+/// or a method that a trait gives asks here.
 fn implements(
     traits: &Traits,
     impls: &Impls,
@@ -1067,16 +1070,17 @@ fn implements(
     ty: Type,
     trait_index: usize,
 ) -> bool {
+    let param_implements = |index: usize| type_parameters[index].traits.contains(&trait_index);
     match types.kind(ty) {
-        TypeKind::Param { index, .. } => type_parameters[*index].traits.contains(&trait_index),
+        TypeKind::Param { index, .. } => param_implements(*index),
         _ => {
             impls.contains_key(&(trait_index, ty))
                 || (trait_index == traits.display && is_printable(ty))
-                || traits.comparison(trait_index).is_some_and(|comparison| {
-                    types.compares(ty, comparison, &|index| {
-                        type_parameters[index].traits.contains(&trait_index)
-                    })
-                })
+                || (trait_index == traits.copy && !types.is_entity(ty))
+                || (trait_index == traits.clone && types.clones(ty, &param_implements))
+                || traits
+                    .comparison(trait_index)
+                    .is_some_and(|comparison| types.compares(ty, comparison, &param_implements))
         }
     }
 }
@@ -1571,8 +1575,6 @@ fn check_signature(
     for (position, parameter) in function.type_parameters.iter().enumerate() {
         let mut bounds = TypeParameter {
             name: parameter.binding.identity.name.clone(),
-            copy: false,
-            clone: false,
             traits: BTreeSet::new(),
         };
         for bound in &parameter.bounds {
@@ -1580,12 +1582,7 @@ fn check_signature(
                 ResolvedReference::Exact { target, .. } => traits.by_identity.get(target).copied(),
                 ResolvedReference::Selection { .. } => None,
             };
-            if trait_index == Some(traits.copy) {
-                bounds.copy = true;
-                bounds.clone = true;
-            } else if trait_index == Some(traits.clone) {
-                bounds.clone = true;
-            } else if let Some(trait_index) = trait_index {
+            if let Some(trait_index) = trait_index {
                 if !traits.supported(trait_index) || trait_index == traits.drop {
                     return Err(unsupported(
                         Some(at(origin, bound.span)),
@@ -1600,7 +1597,7 @@ fn check_signature(
         let ty = types.intern(TypeKind::Param {
             index: position,
             name: bounds.name.clone(),
-            copy: bounds.copy,
+            copy: bounds.traits.contains(&traits.copy),
         });
         type_scope.insert(parameter.binding.identity.clone(), ty);
         type_parameters.push(bounds);
@@ -4491,17 +4488,11 @@ impl BodyChecker<'_> {
                     ),
                 ));
             };
-            let unsatisfied = if parameter.copy && self.types.is_entity(argument) {
-                Some("Copy")
-            } else if parameter.clone && !self.can_clone(argument) {
-                Some("Clone")
-            } else {
-                parameter
-                    .traits
-                    .iter()
-                    .find(|&&trait_index| !self.implements(argument, trait_index))
-                    .map(|&trait_index| self.traits.declarations[trait_index].name.as_str())
-            };
+            let unsatisfied = parameter
+                .traits
+                .iter()
+                .find(|&&trait_index| !self.implements(argument, trait_index))
+                .map(|&trait_index| self.traits.declarations[trait_index].name.as_str());
             if let Some(bound) = unsatisfied {
                 return Err(self.error(
                     CheckDiagnosticKind::UnsatisfiedBound,
@@ -4661,11 +4652,9 @@ impl BodyChecker<'_> {
         ))
     }
 
-    /// Whether `clone()` applies to `ty`: every type parameter it mentions
-    /// is bound by `Clone` or `Copy`.
+    /// Whether `clone()` applies to `ty`.
     fn can_clone(&self, ty: Type) -> bool {
-        self.types
-            .clones(ty, &|index| self.type_parameters[index].clone)
+        self.implements(ty, self.traits.clone)
     }
     /// Matches `pattern`, a type of a generic function's signature, against
     /// `actual`, binding the function's type parameters. Returns whether
