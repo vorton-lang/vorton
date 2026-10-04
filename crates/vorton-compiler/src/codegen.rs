@@ -13,8 +13,9 @@ mod body;
 
 use std::fmt::Write as _;
 
-use crate::checker::{Function, Program, Type, TypeKind, Types};
+use crate::typed::{Function, Program};
 use crate::types::{Glue, Operation};
+use crate::types::{Type, TypeKind, Types};
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
 const GENERIC: &str = "generic functions are instantiated before code generation";
@@ -702,7 +703,7 @@ fn prototype(types: &Types, index: usize, function: &Function) -> String {
 }
 
 /// The C type that stores a local: a pointer for a borrowed local.
-fn storage_type(types: &Types, local: &crate::checker::Local) -> String {
+fn storage_type(types: &Types, local: &crate::typed::Local) -> String {
     if local.borrow.is_some() {
         format!("{} *", c_type(types, local.ty))
     } else {

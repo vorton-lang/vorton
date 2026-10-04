@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{BinaryOperator, BorrowKind, Span, UnaryOperator};
-use crate::checker::{Builtin, Callee, Intrinsic};
+use crate::typed::{Builtin, Callee, Intrinsic};
 use crate::types::{Operation, Type, TypeKind, Types};
 
 pub(crate) type Local = usize;

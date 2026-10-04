@@ -20,9 +20,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::checker::{
-    Block, BorrowTarget, Callee, CheckDiagnostic, Expr, ExprKind, ForSource, Function, Impls,
-    Place, Projection, Receiver, Statement,
+use crate::checker::{CheckDiagnostic, Impls};
+use crate::typed::{
+    Block, BorrowTarget, Callee, Expr, ExprKind, ForSource, Function, Place, Projection, Receiver,
+    Statement,
 };
 use crate::types::{Type, TypeKind, Types};
 

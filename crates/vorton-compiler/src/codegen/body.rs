@@ -28,11 +28,11 @@ use super::{
     prototype, zero, zero_value,
 };
 use crate::ast::{BinaryOperator, UnaryOperator};
-use crate::checker::{Builtin, Callee, Function, Intrinsic, Program, StrMethod};
 use crate::mir::{
     BlockId, Body, Constant, Local, Operand, Place, Projection, Rvalue, StatementKind,
     TerminatorKind,
 };
+use crate::typed::{Builtin, Callee, Function, Intrinsic, Program, StrMethod};
 use crate::types::{Operation, Type, TypeKind, Types};
 
 /// The C definition of the function at `index`.

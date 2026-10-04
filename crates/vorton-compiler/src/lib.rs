@@ -13,6 +13,7 @@ mod parser;
 mod prepare;
 mod project;
 mod resolver;
+mod typed;
 mod types;
 
 pub mod ast;

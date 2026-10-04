@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::checker::Pattern;
+use crate::typed::Pattern;
 use crate::types::{Type, TypeKind, Types};
 
 /// Returns a value of type `ty`, written as a pattern, that none of

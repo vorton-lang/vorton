@@ -12,13 +12,13 @@
 //! leave.
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span};
-use crate::checker::{
-    Arm, Block, BorrowTarget, Builtin, DisjointCheck, Expr, ExprKind, ForSource, Function,
-    Intrinsic, Pattern, Projection as TypedProjection, Receiver, Statement as TypedStatement,
-};
 use crate::mir::{
     BlockId, Body, Constant, Local, LocalDecl, Operand, Place, Projection, RefKind, Rvalue,
     Statement, StatementKind, Terminator, TerminatorKind, element_type,
+};
+use crate::typed::{
+    Arm, Block, BorrowTarget, Builtin, DisjointCheck, Expr, ExprKind, ForSource, Function,
+    Intrinsic, Pattern, Projection as TypedProjection, Receiver, Statement as TypedStatement,
 };
 use crate::types::{Operation, Type, TypeKind, Types};
 
@@ -1305,7 +1305,7 @@ impl Builder<'_> {
     }
 
     /// Lowers a place of the checked program.
-    fn typed_place(&mut self, place: &crate::checker::Place) -> Option<Place> {
+    fn typed_place(&mut self, place: &crate::typed::Place) -> Option<Place> {
         if let Some(call) = &place.call {
             // The call's result points at the place; the checker's local for
             // it is a reference.
