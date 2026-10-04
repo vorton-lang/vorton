@@ -28,21 +28,28 @@ pub(crate) fn check_drops(program: &Program) -> Result<(), CheckDiagnostic> {
         .iter()
         .map(|body| console_uses(body, types))
         .collect::<Vec<_>>();
+    // A function reaches the console if it prints or calls one that does:
+    // from the functions that print, back along the calls.
+    let mut callers = vec![Vec::new(); uses.len()];
+    for (function, uses) in uses.iter().enumerate() {
+        for &(_, callee) in uses {
+            if let Some(callee) = callee {
+                callers[callee].push(function);
+            }
+        }
+    }
     let mut console = uses
         .iter()
         .map(|uses| uses.iter().any(|(_, callee)| callee.is_none()))
         .collect::<Vec<_>>();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (function, uses) in uses.iter().enumerate() {
-            if !console[function]
-                && uses
-                    .iter()
-                    .any(|(_, callee)| callee.is_some_and(|callee| console[callee]))
-            {
-                console[function] = true;
-                changed = true;
+    let mut pending = (0..uses.len())
+        .filter(|&function| console[function])
+        .collect::<Vec<_>>();
+    while let Some(function) = pending.pop() {
+        for &caller in &callers[function] {
+            if !console[caller] {
+                console[caller] = true;
+                pending.push(caller);
             }
         }
     }
