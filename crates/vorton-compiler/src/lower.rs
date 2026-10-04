@@ -27,7 +27,18 @@ use crate::typed::{
 };
 use crate::types::{Operation, Type, TypeKind, Types};
 
-pub(crate) fn lower(function: &Function, types: &Types) -> Body {
+/// A statement that changes a `let mut` variable of a value type after its
+/// declaration. The spec requires each such change to be read afterwards.
+pub(crate) struct Change {
+    pub(crate) block: BlockId,
+    pub(crate) statement: usize,
+    pub(crate) local: Local,
+    pub(crate) span: Span,
+}
+
+/// Lowers `function`, and lists the changes of its value variables that
+/// [`crate::unread`] checks.
+pub(crate) fn lower(function: &Function, types: &Types) -> (Body, Vec<Change>) {
     let mut locals = function
         .locals
         .iter()
@@ -58,6 +69,7 @@ pub(crate) fn lower(function: &Function, types: &Types) -> Body {
         loops: Vec::new(),
 
         redirects: Vec::new(),
+        changes: Vec::new(),
     };
     builder.current = builder.body.new_block();
     builder.scopes.push(Scope {
@@ -70,7 +82,7 @@ pub(crate) fn lower(function: &Function, types: &Types) -> Body {
     }
     #[cfg(debug_assertions)]
     assert_released(&builder.body, types, &function.name);
-    builder.body
+    (builder.body, builder.changes)
 }
 
 /// Checks that every path to a return releases each local that holds
@@ -130,6 +142,7 @@ struct Builder<'a> {
     /// take their parts only once the guard holds, and the parts of the
     /// subject that the guard reads in their place.
     redirects: Vec<(Local, Place)>,
+    changes: Vec<Change>,
 }
 
 impl Builder<'_> {
@@ -347,6 +360,7 @@ impl Builder<'_> {
                     return false;
                 };
                 let span = place.span;
+                let local = target.local;
                 match operator {
                     AssignmentOperator::Assign => {
                         self.assign(target, Rvalue::Use(value_operand), span);
@@ -369,6 +383,21 @@ impl Builder<'_> {
                             span,
                         );
                     }
+                }
+                // A change of a `let mut` variable of a value type, which is
+                // the last statement so far.
+                let declaration = &self.body.locals[local];
+                if declaration.reference.is_none()
+                    && !declaration.temporary
+                    && !self.body.parameters.contains(&local)
+                    && !self.types.is_entity(declaration.ty)
+                {
+                    self.changes.push(Change {
+                        block: self.current,
+                        statement: self.body.blocks[self.current].statements.len() - 1,
+                        local,
+                        span,
+                    });
                 }
                 true
             }

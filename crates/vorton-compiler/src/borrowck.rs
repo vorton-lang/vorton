@@ -1455,7 +1455,7 @@ fn check_returned(
 
 /// Every place an rvalue reads, takes or borrows, and the locals it reads
 /// through: index locals and borrowed references.
-fn rvalue_places(value: &Rvalue) -> Vec<Place> {
+pub(crate) fn rvalue_places(value: &Rvalue) -> Vec<Place> {
     let mut places = Vec::new();
     for operand in value.operands() {
         places.extend(operand_places(operand));
@@ -1501,7 +1501,7 @@ fn rvalue_places(value: &Rvalue) -> Vec<Place> {
     places
 }
 
-fn operand_places(operand: &Operand) -> Vec<Place> {
+pub(crate) fn operand_places(operand: &Operand) -> Vec<Place> {
     match operand {
         Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) => {
             let mut places = vec![place.clone()];

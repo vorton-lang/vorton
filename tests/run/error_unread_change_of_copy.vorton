@@ -1,0 +1,13 @@
+struct Pos {
+    x: Float,
+    y: Float,
+}
+struct Player {
+    pos: Pos,
+}
+fn main() {
+    let player = Player { pos: Pos { x: 0.0, y: 0.0 } }
+    let mut p = player.pos
+    p.x += 1.0
+    print(player.pos.x)
+}

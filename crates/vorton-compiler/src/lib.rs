@@ -17,6 +17,7 @@ mod resolver;
 mod tail;
 mod typed;
 mod types;
+mod unread;
 mod verify;
 
 pub mod ast;
@@ -126,8 +127,10 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
     } = checked;
     let mut templates = Vec::new();
     for ((function, origin), generic) in functions.iter().zip(&origins).zip(generic) {
-        let mut body = lower::lower(function, &types);
-        let checks = borrowck::check(&body, &types, &|span| checker::at(origin, span))?;
+        let (mut body, changes) = lower::lower(function, &types);
+        let at = |span| checker::at(origin, span);
+        let checks = borrowck::check(&body, &types, &at)?;
+        unread::check(&body, &changes, &at)?;
         body.insert_checks(checks);
         verify::verify(&body, &types, &function.name, "lowering");
         templates.push(mono::Template {

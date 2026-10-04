@@ -1,0 +1,7 @@
+fn main() {
+    let mut n = 1
+    if n > 0 {
+        n = 5
+    }
+    print(n)
+}

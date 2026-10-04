@@ -108,6 +108,9 @@ pub enum CheckDiagnosticKind {
     PolymorphicRecursion,
     /// A bound that no type parameter can have, such as `Drop`.
     InvalidBound,
+    /// A change of a `let mut` variable of a value type that is never read
+    /// afterwards.
+    UnreadChange,
 }
 
 #[derive(Clone)]
