@@ -176,6 +176,12 @@ static vt_str *vt_int_to_str(int64_t value) {
 /* Formats a binary64 value like ECMAScript Number::toString: the shortest
  * digit string that reads back as the same value, in positional notation for
  * decimal exponents from -6 to 20 and in exponent notation otherwise. */
+/* Whether `mantissa` times ten to `exponent` reads back as `value`. */
+static bool vt_float_reads_back(uint64_t mantissa, int exponent, double value) {
+    char text[40];
+    snprintf(text, sizeof text, "%llue%d", (unsigned long long)mantissa, exponent);
+    return strtod(text, NULL) == value;
+}
 static vt_str *vt_float_to_str(double value) {
     char out[64];
     size_t len = 0;
@@ -193,25 +199,40 @@ static vt_str *vt_float_to_str(double value) {
         memcpy(out + len, "Infinity", 8);
         return vt_str_from_bytes(out, len + 8);
     }
-    char scientific[40];
+    /* The fewest digits that read back as `value`: `mantissa` times ten to
+     * `exponent`. */
+    uint64_t mantissa = 0;
+    int exponent = 0;
     for (int precision = 1; precision <= 17; precision += 1) {
+        char scientific[40];
         snprintf(scientific, sizeof scientific, "%.*e", precision - 1, value);
-        if (strtod(scientific, NULL) == value) {
+        mantissa = 0;
+        char *cursor = scientific;
+        for (; *cursor != 'e'; cursor += 1) {
+            if (*cursor != '.') {
+                mantissa = mantissa * 10 + (uint64_t)(*cursor - '0');
+            }
+        }
+        exponent = atoi(cursor + 1) - (precision - 1);
+        if (vt_float_reads_back(mantissa, exponent, value)) {
+            break;
+        }
+        /* The nearest decimal with this many digits does not read back. At
+         * a power of two the values that do are not centred on `value`, so
+         * the next decimal on the other side may: it is the only other
+         * candidate with this many digits. */
+        uint64_t other = strtod(scientific, NULL) > value ? mantissa - 1 : mantissa + 1;
+        if (vt_float_reads_back(other, exponent, value)) {
+            mantissa = other;
             break;
         }
     }
-    char digits[20];
-    int count = 0;
-    char *cursor = scientific;
-    for (; *cursor != 'e'; cursor += 1) {
-        if (*cursor != '.') {
-            digits[count++] = *cursor;
-        }
-    }
+    char digits[24];
+    int count = snprintf(digits, sizeof digits, "%llu", (unsigned long long)mantissa);
+    int point = exponent + count;
     while (count > 1 && digits[count - 1] == '0') {
         count -= 1;
     }
-    int point = atoi(cursor + 1) + 1;
     if (count <= point && point <= 21) {
         memcpy(out + len, digits, (size_t)count);
         len += (size_t)count;
