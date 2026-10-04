@@ -13,13 +13,11 @@
 //! iteration empty. An argument that is not borrowed is passed as an owned
 //! value, which the callee releases like its other locals.
 //!
-//! A call of the function itself whose result the function returns, with
-//! nothing left to do but release its locals, jumps back to the start when
-//! its borrowed arguments point only behind the function's own borrowed
-//! parameters: the arguments become the new parameters once the locals are
-//! released, so the stack does not grow.
+//! A `TailCall` terminator, which [`crate::tail`] puts where the function
+//! calls itself in tail position, jumps back to the start: the arguments
+//! become the new parameters once the locals are released, so the stack
+//! does not grow.
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
@@ -40,21 +38,10 @@ pub(super) fn function(program: &Program, index: usize, literals: &mut Literals)
     let types = &program.types;
     let function = &program.functions[index];
     let body = &function.body;
-    let mut definitions = vec![Vec::new(); body.locals.len()];
-    for block in &body.blocks {
-        for statement in &block.statements {
-            if let StatementKind::Bind(reference, value) = &statement.kind {
-                definitions[*reference].push(value);
-            }
-        }
-    }
     let mut emitter = Emitter {
         program,
         types,
-        index,
         body,
-        definitions,
-        filled: body.maybe_filled(types),
         literals,
         declarations: String::new(),
         code: String::new(),
@@ -87,14 +74,7 @@ pub(super) fn function(program: &Program, index: usize, literals: &mut Literals)
 struct Emitter<'a> {
     program: &'a Program,
     types: &'a Types,
-    /// The function's own index, which a call of itself names.
-    index: usize,
     body: &'a Body,
-    /// What each reference local is made to point at: borrows and calls.
-    definitions: Vec<Vec<&'a Rvalue>>,
-    /// The owning locals that may hold something at the start of each
-    /// block.
-    filled: Vec<BTreeSet<Local>>,
     literals: &'a mut Literals,
     /// The C variables, declared at the top of the function.
     declarations: String,
@@ -176,11 +156,7 @@ impl<'a> Emitter<'a> {
         let body = self.body;
         writeln!(self.code, "bb{block}:;").unwrap();
         let data = &body.blocks[block];
-        for (index, statement) in data.statements.iter().enumerate() {
-            if let Some((arguments, releases)) = self.tail_call(block, index) {
-                self.jump_to_start(arguments, releases);
-                return;
-            }
+        for statement in &data.statements {
             match &statement.kind {
                 StatementKind::Assign(destination, value) => self.assign(destination, value),
                 StatementKind::Bind(reference, value) => self.bind(*reference, value),
@@ -217,121 +193,18 @@ impl<'a> Emitter<'a> {
                 }
             }
             TerminatorKind::Unreachable => self.line("vt_unreachable();"),
+            TerminatorKind::TailCall {
+                arguments,
+                releases,
+            } => self.jump_to_start(arguments, releases),
         }
     }
 
-    // Calls of the function itself in tail position.
-
-    /// If statement `index` of `block` is a tail call of the function
-    /// itself, as the spec defines it, its arguments and the locals to
-    /// release before the jump: those the path to the return releases, or
-    /// every local when the call does not return.
-    fn tail_call(&self, block: BlockId, index: usize) -> Option<(&'a [Operand], Vec<Local>)> {
-        let body = self.body;
-        let data = &body.blocks[block];
-        let (destination, value) = match &data.statements[index].kind {
-            StatementKind::Assign(destination, value) => (destination.clone(), value),
-            StatementKind::Bind(reference, value) => (Place::local(*reference), value),
-            StatementKind::Release(_) => return None,
-        };
-        let Rvalue::Call {
-            callee: Callee::Function(callee),
-            arguments,
-            ..
-        } = value
-        else {
-            return None;
-        };
-        if *callee != self.index {
-            return None;
-        }
-        let ty = body.place_type(self.types, &destination);
-        let releases = if ty == Type::NEVER {
-            if index + 1 != data.statements.len()
-                || !matches!(data.terminator.kind, TerminatorKind::Unreachable)
-            {
-                return None;
-            }
-            (0..body.locals.len()).rev().collect()
-        } else {
-            let result = destination == Place::local(body.result);
-            let unit = ty == Type::UNIT && body.locals[body.result].ty == Type::UNIT;
-            if !result && !unit {
-                return None;
-            }
-            self.releases_to_return(block, index)?
-        };
-        // A borrowed local or temporary must live until the call returns.
-        let outside = arguments.iter().all(|argument| match argument {
-            Operand::Borrowed(reference) => self.points_outside(*reference, &mut BTreeSet::new()),
-            _ => true,
-        });
-        // A value whose `drop` runs after the call returns makes it no tail
-        // call; releasing anything else early is not observable.
-        let mut filled = self.filled[block].clone();
-        for statement in &data.statements[..=index] {
-            body.fill(self.types, &statement.kind, &mut filled);
-        }
-        filled.remove(&destination.local);
-        let drops = filled
-            .iter()
-            .any(|&local| self.types.runs_drop(body.locals[local].ty));
-        (outside && !drops).then_some((arguments.as_slice(), releases))
-    }
-
-    /// The locals released after statement `index` of `block` until the
-    /// function returns, if the path there does nothing else.
-    fn releases_to_return(&self, block: BlockId, index: usize) -> Option<Vec<Local>> {
-        let body = self.body;
-        let mut releases = Vec::new();
-        let mut current = block;
-        let mut statements = &body.blocks[block].statements[index + 1..];
-        let mut seen = BTreeSet::from([block]);
-        loop {
-            for statement in statements {
-                match &statement.kind {
-                    StatementKind::Release(local) => releases.push(*local),
-                    StatementKind::Assign(
-                        place,
-                        Rvalue::Use(Operand::Constant(Constant::Unit)),
-                    ) if body.place_type(self.types, place) == Type::UNIT => {}
-                    StatementKind::Assign(..) | StatementKind::Bind(..) => return None,
-                }
-            }
-            match body.blocks[current].terminator.kind {
-                TerminatorKind::Return => return Some(releases),
-                TerminatorKind::Goto(next) if seen.insert(next) => {
-                    current = next;
-                    statements = &body.blocks[next].statements;
-                }
-                _ => return None,
-            }
-        }
-    }
-
-    /// Whether the reference local `reference` points only behind the
-    /// parameters passed by borrow, at places the caller owns.
-    fn points_outside(&self, reference: Local, seen: &mut BTreeSet<Local>) -> bool {
-        let body = self.body;
-        if body.parameters.contains(&reference) || !seen.insert(reference) {
-            return true;
-        }
-        self.definitions[reference].iter().all(|value| match value {
-            Rvalue::Ref(_, place) => {
-                body.locals[place.local].reference.is_some()
-                    && self.points_outside(place.local, seen)
-            }
-            Rvalue::Call { arguments, .. } => arguments.iter().all(|argument| match argument {
-                Operand::Borrowed(reference) => self.points_outside(*reference, seen),
-                _ => true,
-            }),
-            _ => false,
-        })
-    }
+    // Tail calls of the function itself.
 
     /// Makes `arguments` the new parameters after releasing `releases`, and
     /// jumps to the start of the function.
-    fn jump_to_start(&mut self, arguments: &[Operand], releases: Vec<Local>) {
+    fn jump_to_start(&mut self, arguments: &[Operand], releases: &[Local]) {
         let body = self.body;
         let mut values = Vec::new();
         for (argument, &parameter) in arguments.iter().zip(&body.parameters) {
@@ -346,7 +219,7 @@ impl<'a> Emitter<'a> {
                 values.push((self.variable(parameter), temporary));
             }
         }
-        for local in releases {
+        for &local in releases {
             self.release(local);
         }
         for (parameter, value) in values {

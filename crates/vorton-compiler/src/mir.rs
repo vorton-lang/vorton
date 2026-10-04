@@ -111,6 +111,13 @@ pub(crate) enum TerminatorKind {
     /// Control never gets here: after a call that returns `Never`, or the
     /// end of a `match` that covers every value.
     Unreachable,
+    /// A tail call of the function itself, as [`crate::tail`] finds them:
+    /// takes the arguments as owned values, releases `releases`, and starts
+    /// the function over with the arguments as its parameters.
+    TailCall {
+        arguments: Vec<Operand>,
+        releases: Vec<Local>,
+    },
 }
 
 /// A local and a path of parts inside it. A reference local stands for the
@@ -344,7 +351,10 @@ impl Body {
             TerminatorKind::Branch {
                 then, otherwise, ..
             } => vec![*then, *otherwise],
-            TerminatorKind::Return | TerminatorKind::Unreachable => Vec::new(),
+            // A tail call starts the function over, as a new run of it.
+            TerminatorKind::Return
+            | TerminatorKind::Unreachable
+            | TerminatorKind::TailCall { .. } => Vec::new(),
         }
     }
 

@@ -155,6 +155,9 @@ fn check_moves(body: &Body, graph: &Graph, errors: &mut Vec<Error>) {
         let used = match &terminator.kind {
             TerminatorKind::Branch { condition, .. } => operand_places(condition),
             TerminatorKind::Return => vec![Place::local(body.result)],
+            TerminatorKind::TailCall { arguments, .. } => {
+                arguments.iter().flat_map(operand_places).collect()
+            }
             TerminatorKind::Goto(_) | TerminatorKind::Unreachable => Vec::new(),
         };
         for place in used {
@@ -475,7 +478,14 @@ fn terminator_uses(body: &Body, terminator: &TerminatorKind, live: &mut BTreeSet
         TerminatorKind::Return if body.locals[body.result].reference.is_some() => {
             live.insert(body.result);
         }
-        _ => {}
+        TerminatorKind::TailCall { arguments, .. } => {
+            for argument in arguments {
+                if let Operand::Borrowed(reference) = argument {
+                    live.insert(*reference);
+                }
+            }
+        }
+        TerminatorKind::Return | TerminatorKind::Goto(_) | TerminatorKind::Unreachable => {}
     }
 }
 

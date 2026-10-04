@@ -14,6 +14,7 @@ mod parser;
 mod prepare;
 mod project;
 mod resolver;
+mod tail;
 mod typed;
 mod types;
 
@@ -109,8 +110,8 @@ pub fn compile_to_c(sources: &ProjectSources) -> Result<String, CompileError> {
 }
 
 /// The middle of the pipeline: lowers each checked function to the IR once,
-/// checks its moves and borrows, instantiates the generic functions, and
-/// checks what the instances may do.
+/// checks its moves and borrows, instantiates the generic functions, checks
+/// what the instances may do, and marks their tail calls.
 fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDiagnostic> {
     let typed::Program {
         types,
@@ -132,14 +133,16 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
             generic,
         });
     }
-    let program = mono::instantiate(types, &templates, main, &impls, display, &|types, error| {
-        checker::instantiation_diagnostic(
-            types,
-            &|declaration| nominal_origins[declaration].clone(),
-            error,
-        )
-    })?;
+    let mut program =
+        mono::instantiate(types, &templates, main, &impls, display, &|types, error| {
+            checker::instantiation_diagnostic(
+                types,
+                &|declaration| nominal_origins[declaration].clone(),
+                error,
+            )
+        })?;
     capabilities::check_drops(&program, &origins)?;
+    tail::mark(&mut program);
     Ok(program)
 }
 
