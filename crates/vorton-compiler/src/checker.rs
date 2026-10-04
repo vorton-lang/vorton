@@ -41,7 +41,6 @@ use crate::types::{
 
 #[derive(Clone)]
 struct Signature {
-    index: usize,
     /// Whether the first parameter is the `self` of a method.
     receiver: bool,
     /// The parameter and result types mention these as [`TypeKind::Param`].
@@ -489,10 +488,9 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
     nominals.check_keys(&types)?;
     check_interfaces(project, &nominals, &traits)?;
 
-    let mut signatures = BTreeMap::new();
-    for (index, found) in functions_found.iter().enumerate() {
+    let mut signatures = Vec::new();
+    for found in &functions_found {
         let signature = check_signature(
-            index,
             found.function,
             &found.origin,
             found.owner,
@@ -500,7 +498,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             &traits,
             &mut types,
         )?;
-        signatures.insert(found.identity.clone(), signature);
+        signatures.push(signature);
     }
     let trait_impls = check_trait_impls(
         &found_impls,
@@ -510,20 +508,20 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         &mut types,
     )?;
 
-    let identities = functions_found
+    let function_ids = functions_found
         .iter()
-        .map(|found| found.identity.clone())
-        .collect::<Vec<_>>();
+        .enumerate()
+        .map(|(index, found)| (found.identity.clone(), index))
+        .collect::<BTreeMap<_, _>>();
     let mut functions = Vec::new();
     let mut calls = Vec::new();
-    for found in &functions_found {
+    for (found, signature) in functions_found.iter().zip(&signatures) {
         let (function, origin) = (found.function, &found.origin);
-        let signature = &signatures[&found.identity];
         let mut checker = BodyChecker {
             types: &mut types,
             nominals: &nominals,
             signatures: &signatures,
-            identities: &identities,
+            function_ids: &function_ids,
             methods: &methods,
             traits: &traits,
             trait_impls: &trait_impls,
@@ -540,7 +538,6 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             loops: Vec::new(),
             result: signature.result,
             result_borrow: signature.result_borrow,
-            depth: 0,
         };
         let mut parameters = Vec::new();
         for (parameter, (ty, borrow)) in function.parameters.iter().zip(&signature.parameters) {
@@ -553,7 +550,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 ),
             });
         }
-        let body = checker.check_block(&function.body, Some(signature.result))?;
+        let body = checker.check_body(&function.body)?;
         calls.push(checker.calls);
         functions.push(Function {
             name: found.name.clone(),
@@ -573,7 +570,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 && found.identity.name == "main"
         })
         .filter(|&index| {
-            let signature = &signatures[&functions_found[index].identity];
+            let signature = &signatures[index];
             signature.type_parameters.is_empty()
                 && signature.parameters.is_empty()
                 && signature.result == Type::UNIT
@@ -585,9 +582,9 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 .to_owned(),
         })?;
 
-    let generic = functions_found
+    let generic = signatures
         .iter()
-        .map(|found| !signatures[&found.identity].type_parameters.is_empty())
+        .map(|signature| !signature.type_parameters.is_empty())
         .collect::<Vec<_>>();
     Ok(Program {
         types,
@@ -732,7 +729,6 @@ fn trait_method_signature(
         None => Type::UNIT,
     };
     Ok(Signature {
-        index: usize::MAX,
         receiver: true,
         type_parameters: Vec::new(),
         type_scope: BTreeMap::new(),
@@ -871,7 +867,7 @@ fn collect_trait_impls<'a>(
 fn check_trait_impls(
     found: &[FoundImpl],
     traits: &Traits,
-    signatures: &BTreeMap<EntityId, Signature>,
+    signatures: &[Signature],
     functions: &[FoundFunction],
     types: &mut Types,
 ) -> Result<Impls, CheckDiagnostic> {
@@ -899,7 +895,7 @@ fn check_trait_impls(
                 &traits.signatures[trait_index][position],
                 &[implementation.owner],
             )?;
-            let actual = &signatures[&functions[function].identity];
+            let actual = &signatures[function];
             if !actual.receiver
                 || !actual.type_parameters.is_empty()
                 || actual.parameters != expected.parameters
@@ -1438,7 +1434,6 @@ fn private_named(
 
 /// Checks the signature of a function, or of a method of `self_type`.
 fn check_signature(
-    index: usize,
     function: &ResolvedFunction,
     origin: &OriginRef,
     self_type: Option<Type>,
@@ -1534,7 +1529,6 @@ fn check_signature(
         ));
     }
     Ok(Signature {
-        index,
         receiver,
         type_parameters,
         type_scope,
@@ -1727,9 +1721,10 @@ enum Arguments<'r> {
 struct BodyChecker<'a> {
     types: &'a mut Types,
     nominals: &'a Nominals<'a>,
-    signatures: &'a BTreeMap<EntityId, Signature>,
-    /// The identity of each function, by index.
-    identities: &'a [EntityId],
+    /// The signature of each function, by index.
+    signatures: &'a [Signature],
+    /// The index of each function, by identity.
+    function_ids: &'a BTreeMap<EntityId, usize>,
     methods: &'a Methods,
     traits: &'a Traits<'a>,
     trait_impls: &'a Impls,
@@ -1756,8 +1751,6 @@ struct BodyChecker<'a> {
     loops: Vec<bool>,
     result: Type,
     result_borrow: Option<BorrowKind>,
-    /// How many blocks enclose the statement being checked.
-    depth: usize,
 }
 
 impl BodyChecker<'_> {
@@ -1927,14 +1920,29 @@ impl BodyChecker<'_> {
         }
     }
 
+    /// Checks the body of the function, whose tail is its result.
+    fn check_body(&mut self, body: &ResolvedBlock) -> Result<Block, CheckDiagnostic> {
+        self.check_block_returning(body, Some(self.result), self.result_borrow)
+    }
+
     fn check_block(
         &mut self,
         block: &ResolvedBlock,
         expected: Option<Type>,
     ) -> Result<Block, CheckDiagnostic> {
+        self.check_block_returning(block, expected, None)
+    }
+
+    /// Checks a block; `borrow` is how the tail is borrowed when it is the
+    /// borrowed result of the function.
+    fn check_block_returning(
+        &mut self,
+        block: &ResolvedBlock,
+        expected: Option<Type>,
+        borrow: Option<BorrowKind>,
+    ) -> Result<Block, CheckDiagnostic> {
         let mut statements = Vec::new();
         let mut diverges = false;
-        self.depth += 1;
         for statement in &block.statements {
             let (statement, statement_diverges) = self.check_statement(statement)?;
             diverges |= statement_diverges;
@@ -1943,10 +1951,9 @@ impl BodyChecker<'_> {
         let (tail, ty) = match &block.tail {
             Some(tail) => {
                 let discard = expected == Some(Type::UNIT);
-                // The tail of the function body is its result.
-                let tail = match self.result_borrow {
-                    Some(kind) if self.depth == 1 => self.check_returned_borrow(tail, kind)?,
-                    _ => self.check_expr(tail, expected)?,
+                let tail = match borrow {
+                    Some(kind) => self.check_returned_borrow(tail, kind)?,
+                    None => self.check_expr(tail, expected)?,
                 };
                 let ty = if tail.ty == Type::NEVER || diverges {
                     Type::NEVER
@@ -1964,7 +1971,6 @@ impl BodyChecker<'_> {
             let span = block.tail.as_ref().map_or(block.span, |tail| tail.span);
             self.require(span, expected, ty)?;
         }
-        self.depth -= 1;
         Ok(Block {
             statements,
             tail,
@@ -2147,8 +2153,7 @@ impl BodyChecker<'_> {
             let target = self.borrow(kind, Operand::Place((place, ty)), operand_span)?;
             let statement = match pattern {
                 Some(pattern) => {
-                    let pattern =
-                        self.check_pattern(pattern, ty, Some(kind), &mut BTreeMap::new())?;
+                    let pattern = self.check_pattern(pattern, ty, Some(kind))?;
                     self.require_exhaustive(span, &pattern, ty)?;
                     Statement::LetPattern {
                         pattern,
@@ -2194,7 +2199,7 @@ impl BodyChecker<'_> {
             if value.ty == Type::NEVER {
                 return Ok((Statement::Expr(value), true));
             }
-            let pattern = self.check_pattern(pattern, value.ty, None, &mut BTreeMap::new())?;
+            let pattern = self.check_pattern(pattern, value.ty, None)?;
             self.require_exhaustive(span, &pattern, value.ty)?;
             return Ok((Statement::LetPattern { pattern, value }, false));
         }
@@ -2849,7 +2854,8 @@ impl BodyChecker<'_> {
             && let Some((identity, visibility)) = self.methods.get(&(declaration, name.to_owned()))
         {
             self.require_visible(visibility, span, || format!("the method `{name}`"))?;
-            let signature = &signatures[identity];
+            let function = self.function_ids[identity];
+            let signature = &signatures[function];
             if !signature.receiver {
                 let owner = self.types.name(ty);
                 return Err(self.error(
@@ -2858,7 +2864,7 @@ impl BodyChecker<'_> {
                     format!("`{owner}::{name}` has no `self`; call it as `{owner}::{name}(...)`"),
                 ));
             }
-            let callee = Callee::Function(signature.index);
+            let callee = Callee::Function(function);
             return self.call_method(span, callee, signature, operand, receiver, arguments);
         }
         if let Some((callee, signature)) = self.trait_method(ty, name, span)? {
@@ -3452,8 +3458,7 @@ impl BodyChecker<'_> {
         let mut ty = None;
         let mut checked = Vec::new();
         for arm in arms {
-            let pattern =
-                self.check_pattern(&arm.pattern, scrutinee.ty, mode, &mut BTreeMap::new())?;
+            let pattern = self.check_pattern(&arm.pattern, scrutinee.ty, mode)?;
             // A guard only reads the bindings; they become `&mut` once it holds.
             let mut guarded = self.guarded.clone();
             guarded.extend(self.mutable_bindings(&pattern));
@@ -3519,7 +3524,7 @@ impl BodyChecker<'_> {
         if scrutinee.ty == Type::NEVER {
             return Ok(scrutinee);
         }
-        let pattern = self.check_pattern(pattern, scrutinee.ty, mode, &mut BTreeMap::new())?;
+        let pattern = self.check_pattern(pattern, scrutinee.ty, mode)?;
         let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
         let else_body = match else_branch {
             Some(block) => self.check_block(block, Some(Type::UNIT))?,
@@ -3554,14 +3559,12 @@ impl BodyChecker<'_> {
     }
 
     /// Checks `pattern` against a value of type `ty`, declaring its bindings
-    /// with `mode`. `shared` maps binding names to the locals of earlier
-    /// alternatives.
+    /// with `mode`.
     fn check_pattern(
         &mut self,
         pattern: &ResolvedPattern,
         ty: Type,
         mode: Option<BorrowKind>,
-        shared: &mut BTreeMap<String, usize>,
     ) -> Result<Pattern, CheckDiagnostic> {
         let span = pattern.span;
         let literal = |checker: &Self, literal_ty: Type| -> Result<(), CheckDiagnostic> {
@@ -3589,20 +3592,17 @@ impl BodyChecker<'_> {
                 literal(self, Type::BOOL)?;
                 Pattern::Bool(*value)
             }
-            ResolvedPatternKind::Binding(binding) => {
-                let name = binding.identity.name.clone();
-                if let Some(&local) = shared.get(&name) {
+            // The alternatives of an or-pattern bind each name once: name
+            // resolution gives all its occurrences one identity.
+            ResolvedPatternKind::Binding(binding) => match self.local_ids.get(&binding.identity) {
+                Some(&local) => {
                     if self.locals[local].ty != ty {
                         return Err(self.mismatch(span, self.locals[local].ty, ty));
                     }
-                    self.local_ids.insert(binding.identity.clone(), local);
-                    Pattern::Binding(local, span)
-                } else {
-                    let local = self.declare_binding(&binding.identity, ty, mode);
-                    shared.insert(name, local);
                     Pattern::Binding(local, span)
                 }
-            }
+                None => Pattern::Binding(self.declare_binding(&binding.identity, ty, mode), span),
+            },
             ResolvedPatternKind::Tuple(elements) => {
                 let TypeKind::Tuple(element_types) = self.types.kind(ty).clone() else {
                     return Err(self.error(
@@ -3627,16 +3627,14 @@ impl BodyChecker<'_> {
                     elements
                         .iter()
                         .zip(element_types)
-                        .map(|(element, element_ty)| {
-                            self.check_pattern(element, element_ty, mode, shared)
-                        })
+                        .map(|(element, element_ty)| self.check_pattern(element, element_ty, mode))
                         .collect::<Result<_, _>>()?,
                 )
             }
             ResolvedPatternKind::Or(alternatives) => {
                 let mut checked = Vec::new();
                 for alternative in alternatives {
-                    checked.push(self.check_pattern(alternative, ty, mode, shared)?);
+                    checked.push(self.check_pattern(alternative, ty, mode)?);
                 }
                 Pattern::Or(checked)
             }
@@ -3701,10 +3699,7 @@ impl BodyChecker<'_> {
                         for (index, (pattern, (_, field_ty))) in
                             patterns.iter().zip(&field_types).enumerate()
                         {
-                            checked.push((
-                                index,
-                                self.check_pattern(pattern, *field_ty, mode, shared)?,
-                            ));
+                            checked.push((index, self.check_pattern(pattern, *field_ty, mode)?));
                         }
                     }
                     Some(ResolvedPatternFields::Named {
@@ -3727,10 +3722,8 @@ impl BodyChecker<'_> {
                                 ));
                             };
                             let field_ty = field_types[index].1;
-                            checked.push((
-                                index,
-                                self.check_pattern(&field.pattern, field_ty, mode, shared)?,
-                            ));
+                            checked
+                                .push((index, self.check_pattern(&field.pattern, field_ty, mode)?));
                         }
                         if rest.is_none() && checked.len() != field_types.len() {
                             return Err(self.error(
@@ -3872,7 +3865,7 @@ impl BodyChecker<'_> {
         expected: Option<Type>,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let signatures = self.signatures;
-        let signature = match &callee.kind {
+        let function = match &callee.kind {
             ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => {
                 if let Some(&(declaration, variant)) = self.nominals.constructors.get(target) {
                     return self.check_variant(
@@ -3887,10 +3880,10 @@ impl BodyChecker<'_> {
                     let values = arguments.iter().collect::<Vec<_>>();
                     return self.check_intrinsic(span, &target.name, &values);
                 }
-                let Some(signature) = signatures.get(target) else {
+                let Some(&function) = self.function_ids.get(target) else {
                     return Err(self.unsupported(callee.span, "calls of this kind"));
                 };
-                signature
+                function
             }
             ResolvedExprKind::Path(ResolvedReference::Selection { base, members, .. })
                 if base.kind == EntityKind::LanguageType
@@ -3938,10 +3931,11 @@ impl BodyChecker<'_> {
                 self.require_visible(visibility, member.origin.span, || {
                     format!("the function `{}::{}`", base.name, member.name)
                 })?;
-                &signatures[identity]
+                self.function_ids[identity]
             }
             _ => return Err(self.unsupported(callee.span, "calls of computed functions")),
         };
+        let signature = &signatures[function];
         if arguments.len() != signature.parameters.len() {
             return Err(self.error(
                 CheckDiagnosticKind::ArgumentCount,
@@ -3954,8 +3948,13 @@ impl BodyChecker<'_> {
             ));
         }
         let arguments = arguments.iter().map(Argument::Written).collect();
-        let callee = Callee::Function(signature.index);
-        self.finish_call(span, callee, signature, arguments, expected)
+        self.finish_call(
+            span,
+            Callee::Function(function),
+            signature,
+            arguments,
+            expected,
+        )
     }
 
     /// Checks the arguments of a call of the function with `signature`. The
@@ -4131,7 +4130,7 @@ impl BodyChecker<'_> {
     ) -> Result<(Callee, Signature), CheckDiagnostic> {
         if let Some(methods) = self.trait_impls.get(&(trait_index, ty)) {
             let function = methods[method];
-            let signature = self.signatures[&self.identities[function]].clone();
+            let signature = self.signatures[function].clone();
             return Ok((Callee::Function(function), signature));
         }
         // Instantiation finds an impl for a type argument, or the built-in
