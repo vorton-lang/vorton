@@ -25,12 +25,15 @@ use std::collections::BTreeMap;
 
 use crate::diagnostic::CheckDiagnostic;
 use crate::mir::{Body, Instance, Operand, Place, Program, Rvalue, StatementKind};
+use crate::project::OriginRef;
 use crate::typed::{Callee, Impl, Impls};
 use crate::types::{InstantiationError, Type, Types};
 
-/// A checked function before instantiation: its name and its IR.
+/// A checked function before instantiation: its name, where it is declared,
+/// and its IR.
 pub(crate) struct Template {
     pub(crate) name: String,
+    pub(crate) origin: OriginRef,
     pub(crate) body: Body,
     pub(crate) generic: bool,
 }
@@ -64,7 +67,7 @@ pub(crate) fn instantiate(
         .map_err(|error| error.diagnostic(&types))?;
         functions.push(Instance {
             name: template.name.clone(),
-            template: index,
+            origin: template.origin.clone(),
             body,
         });
     }

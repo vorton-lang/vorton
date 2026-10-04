@@ -578,6 +578,8 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         calls.push(checker.calls);
         functions.push(Function {
             name: found.name.clone(),
+            origin: origin.clone(),
+            generic: !signature.type_parameters.is_empty(),
             parameters,
             locals: checker.locals,
             result: signature.result,
@@ -606,18 +608,10 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 .to_owned(),
         })?;
 
-    let generic = signatures
-        .iter()
-        .map(|signature| !signature.type_parameters.is_empty())
-        .collect::<Vec<_>>();
+    types.freeze();
     Ok(Program {
         types,
         functions,
-        origins: functions_found
-            .iter()
-            .map(|found| found.origin.clone())
-            .collect(),
-        generic,
         main,
         impls: trait_impls,
     })

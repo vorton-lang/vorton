@@ -29,7 +29,9 @@
 //! where a later step may depend on them. Both forward analyses keep, at the
 //! edges between blocks, only the locals that are live there, so the work
 //! follows the locals in use at each point rather than all the locals of
-//! the function.
+//! the function. What an index temporary is known to hold is kept while a
+//! loan of a place indexed by it may be compared; a change of a local looks
+//! only at the temporaries whose expression reads it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -700,8 +702,7 @@ impl Flow {
                 .or_default()
                 .extend(theirs.iter().copied());
         }
-        self.copies
-            .retain(|local, fact| other.copies.get(local) == Some(fact));
+        self.copies.join(&other.copies);
     }
 }
 
@@ -784,8 +785,58 @@ impl Values {
     }
 }
 
-/// The number of the expression each temporary is known to hold.
-type Copies = BTreeMap<Local, usize>;
+/// The number of the expression each temporary is known to hold, and the
+/// temporaries whose expression reads each local, so a change of a local
+/// forgets only what depends on it.
+#[derive(Clone, Default)]
+struct Copies {
+    known: BTreeMap<Local, usize>,
+    /// May also name temporaries that hold another expression by now; those
+    /// are skipped.
+    readers: BTreeMap<Local, BTreeSet<Local>>,
+}
+
+impl PartialEq for Copies {
+    fn eq(&self, other: &Self) -> bool {
+        self.known == other.known
+    }
+}
+
+impl Copies {
+    fn get(&self, temporary: &Local) -> Option<&usize> {
+        self.known.get(temporary)
+    }
+
+    fn insert(&mut self, temporary: Local, number: usize, values: &Values) {
+        for &read in &values.reads[number] {
+            self.readers.entry(read).or_default().insert(temporary);
+        }
+        self.known.insert(temporary, number);
+    }
+
+    /// Forgets what each temporary in `changed` holds, and every expression
+    /// that reads a local in `changed`.
+    fn change(&mut self, changed: &BTreeSet<Local>, values: &Values) {
+        for local in changed {
+            self.known.remove(local);
+            for reader in self.readers.remove(local).into_iter().flatten() {
+                if self
+                    .known
+                    .get(&reader)
+                    .is_some_and(|&number| values.reads[number].contains(local))
+                {
+                    self.known.remove(&reader);
+                }
+            }
+        }
+    }
+
+    /// Keeps what `other` knows too.
+    fn join(&mut self, other: &Self) {
+        self.known
+            .retain(|temporary, number| other.known.get(temporary) == Some(number));
+    }
+}
 
 /// Updates what the temporaries are known to hold after `statement`. It
 /// forgets every expression that reads a local the statement may change:
@@ -851,11 +902,7 @@ fn learn(
             through(receiver.local, &mut changed);
         }
     }
-    if !changed.is_empty() {
-        copies.retain(|local, number| {
-            !changed.contains(local) && values.reads[*number].is_disjoint(&changed)
-        });
-    }
+    copies.change(&changed, values);
     if let StatementKind::Assign(destination, value) = statement
         && destination.projections.is_empty()
         && body.locals[destination.local].temporary
@@ -875,7 +922,7 @@ fn learn(
             _ => None,
         };
         if let Some(number) = number {
-            copies.insert(destination.local, number);
+            copies.insert(destination.local, number, values);
         }
     }
 }

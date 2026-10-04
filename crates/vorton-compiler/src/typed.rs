@@ -19,10 +19,6 @@ use crate::types::{Type, Types};
 pub(crate) struct Program {
     pub(crate) types: Types,
     pub(crate) functions: Vec<Function>,
-    /// Where each function is declared.
-    pub(crate) origins: Vec<OriginRef>,
-    /// Whether each function has type parameters.
-    pub(crate) generic: Vec<bool>,
     /// The entry library's `main`.
     pub(crate) main: usize,
     pub(crate) impls: Impls,
@@ -40,9 +36,14 @@ pub(crate) enum Impl {
 
 /// The impl of each trait for each type that has one.
 pub(crate) type Impls = BTreeMap<(usize, Type), Impl>;
+
 #[derive(Clone)]
 pub(crate) struct Function {
     pub(crate) name: String,
+    /// Where the function is declared.
+    pub(crate) origin: OriginRef,
+    /// Whether it has type parameters.
+    pub(crate) generic: bool,
     pub(crate) parameters: Vec<usize>,
     pub(crate) locals: Vec<Local>,
     pub(crate) result: Type,

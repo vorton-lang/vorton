@@ -117,13 +117,12 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
     let typed::Program {
         types,
         functions,
-        origins,
-        generic,
         main,
         impls,
     } = checked;
     let mut templates = Vec::new();
-    for ((function, origin), generic) in functions.iter().zip(&origins).zip(generic) {
+    for function in &functions {
+        let origin = &function.origin;
         let (mut body, changes) = lower::lower(function, &types);
         verify::verify(&body, &types, &function.name, "lowering");
         let at = |span| origin.at(span);
@@ -135,13 +134,13 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
         verify::verify(&body, &types, &function.name, "borrow checking");
         templates.push(mono::Template {
             name: function.name.clone(),
+            origin: origin.clone(),
             body,
-            generic,
+            generic: function.generic,
         });
     }
     let mut program = mono::instantiate(types, &templates, main, &impls)?;
-
-    capabilities::check_drops(&program, &origins)?;
+    capabilities::check_drops(&program)?;
     tail::mark(&mut program);
     for instance in &program.functions {
         verify::verify(

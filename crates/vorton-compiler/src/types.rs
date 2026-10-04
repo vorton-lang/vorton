@@ -4,6 +4,7 @@
 //! and code generation compare types by index and never rebuild them from
 //! source spellings.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
@@ -80,6 +81,13 @@ pub(crate) enum Glue {
     /// It carries out these operations on parts of the value; none when the
     /// compiler handles the type directly, as for `Int` or `Str`.
     Parts(Vec<(Type, Operation)>),
+}
+
+/// A property of a type that [`Types::freeze`] lets the table remember.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Fact {
+    Entity,
+    Release,
 }
 
 /// What [`Types::search`] does with one type.
@@ -177,6 +185,8 @@ impl WrittenImpls {
 pub(crate) struct Types {
     /// The core enums whose values the compiler builds or reads.
     pub(crate) core: CoreEnums,
+    /// The facts found so far, once the table is frozen.
+    facts: Option<RefCell<HashMap<(Type, Fact), bool>>>,
     kinds: Vec<TypeKind>,
     /// Whether each type mentions a type parameter.
     generic: Vec<bool>,
@@ -239,6 +249,7 @@ impl Types {
     pub(crate) fn new(core: CoreEnums) -> Self {
         let mut types = Self {
             core,
+            facts: None,
             kinds: Vec::new(),
             generic: Vec::new(),
             lookup: HashMap::new(),
@@ -563,6 +574,10 @@ impl Types {
     /// Whether an owned value of `ty` must be released: it holds a counted
     /// `Str` or owns heap storage.
     pub(crate) fn needs_release(&self, ty: Type) -> bool {
+        self.fact(ty, Fact::Release, || self.search_release(ty))
+    }
+
+    fn search_release(&self, ty: Type) -> bool {
         self.search(ty, |ty| {
             if self.has_drop(ty) {
                 return Search::Found;
@@ -642,6 +657,10 @@ impl Types {
 
     /// Whether `ty` is an entity: it has identity and is moved, never copied.
     pub(crate) fn is_entity(&self, ty: Type) -> bool {
+        self.fact(ty, Fact::Entity, || self.search_entity(ty))
+    }
+
+    fn search_entity(&self, ty: Type) -> bool {
         self.search(ty, |ty| {
             if self.has_drop(ty) {
                 return Search::Found;
@@ -841,6 +860,26 @@ impl Types {
             }
         }
         functions
+    }
+
+    /// Lets the table remember whether each type is an entity and whether it
+    /// needs releasing. Those answers depend on the hand-written impls and
+    /// the fields of every type, so the checker freezes the table once all
+    /// of them are known; types made afterwards get their fields at once.
+    pub(crate) fn freeze(&mut self) {
+        self.facts = Some(RefCell::default());
+    }
+
+    fn fact(&self, ty: Type, fact: Fact, find: impl FnOnce() -> bool) -> bool {
+        let Some(facts) = &self.facts else {
+            return find();
+        };
+        if let Some(&answer) = facts.borrow().get(&(ty, fact)) {
+            return answer;
+        }
+        let answer = find();
+        facts.borrow_mut().insert((ty, fact), answer);
+        answer
     }
 
     /// Whether `step` finds something among the types it reaches from `ty`.

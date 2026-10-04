@@ -8,7 +8,6 @@
 use crate::ast::Span;
 use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::mir::{Body, Program, Rvalue, StatementKind};
-use crate::project::OriginRef;
 use crate::typed::{Callee, Intrinsic};
 use crate::types::Types;
 
@@ -16,7 +15,7 @@ use crate::types::Types;
 /// cannot use the console. It runs after instantiation, when every call,
 /// and every hand-written comparison or `clone` that an operation runs, is
 /// known.
-pub(crate) fn check_drops(program: &Program, origins: &[OriginRef]) -> Result<(), CheckDiagnostic> {
+pub(crate) fn check_drops(program: &Program) -> Result<(), CheckDiagnostic> {
     let types = &program.types;
     let bodies = program
         .functions
@@ -67,7 +66,7 @@ pub(crate) fn check_drops(program: &Program, origins: &[OriginRef]) -> Result<()
         };
         return Err(CheckDiagnostic {
             kind: CheckDiagnosticKind::ConsoleInDrop,
-            primary: Some(origins[program.functions[drop].template].at(span)),
+            primary: Some(program.functions[drop].origin.at(span)),
             message: format!(
                 "this {what}, but the `drop` of `{}` cannot use the console in 0.1",
                 types.name(ty)

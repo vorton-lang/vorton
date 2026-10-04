@@ -18,6 +18,7 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{BinaryOperator, BorrowKind, Span, UnaryOperator};
+use crate::project::OriginRef;
 use crate::typed::{Builtin, Callee, Intrinsic};
 use crate::types::{Operation, Type, TypeKind, Types};
 
@@ -34,8 +35,8 @@ pub(crate) struct Program {
 pub(crate) struct Instance {
     /// The name of the function it instantiates.
     pub(crate) name: String,
-    /// That function, by its index among the checked functions.
-    pub(crate) template: usize,
+    /// Where that function is declared.
+    pub(crate) origin: OriginRef,
     pub(crate) body: Body,
 }
 
