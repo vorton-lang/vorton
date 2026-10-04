@@ -17,6 +17,7 @@ mod resolver;
 mod tail;
 mod typed;
 mod types;
+mod verify;
 
 pub mod ast;
 pub mod diagnostic;
@@ -128,6 +129,7 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
         let mut body = lower::lower(function, &types);
         let checks = borrowck::check(&body, &types, &|span| checker::at(origin, span))?;
         body.insert_checks(checks);
+        verify::verify(&body, &types, &function.name, "lowering");
         templates.push(mono::Template {
             name: function.name.clone(),
             body,
@@ -144,6 +146,14 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
         })?;
     capabilities::check_drops(&program, &origins)?;
     tail::mark(&mut program);
+    for instance in &program.functions {
+        verify::verify(
+            &instance.body,
+            &program.types,
+            &instance.name,
+            "instantiation",
+        );
+    }
     Ok(program)
 }
 
