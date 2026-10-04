@@ -780,6 +780,9 @@ struct ResolverState {
     core: LibraryId,
     dependencies: BTreeMap<LibraryId, BTreeMap<String, LibraryId>>,
     entities: BTreeMap<EntityId, Entity>,
+    /// The language's own types, effects and functions, by name, so a name
+    /// is looked up without going through every entity.
+    language_names: BTreeMap<String, Vec<EntityId>>,
     core_bindings: BTreeMap<String, EntityId>,
     core_roles: Option<CoreRoles>,
     closed_member_owners: BTreeSet<EntityId>,
@@ -801,6 +804,7 @@ impl ResolverState {
             core,
             dependencies,
             entities: BTreeMap::new(),
+            language_names: BTreeMap::new(),
             core_bindings: BTreeMap::new(),
             core_roles: None,
             closed_member_owners: BTreeSet::new(),
@@ -1194,6 +1198,12 @@ impl ResolverState {
         owner: Option<OwnerKey>,
     ) {
         let id = language_id(namespace, kind, name, owner);
+        if id.owner.is_none() {
+            self.language_names
+                .entry(name.to_owned())
+                .or_default()
+                .push(id.clone());
+        }
         self.entities.insert(
             id,
             Entity {
@@ -1890,11 +1900,10 @@ impl ResolverState {
         terminal: bool,
         result: &mut ContainerOutcome,
     ) {
-        if let Some(table) = self.bindings.get(module) {
-            for ((namespace, spelling), deliveries) in table {
-                if spelling != name || *namespace == Namespace::Member {
-                    continue;
-                }
+        let table = self.bindings.get(module);
+        for namespace in [Namespace::Type, Namespace::Value, Namespace::Effect] {
+            let key = (namespace, name.to_owned());
+            if let Some(deliveries) = table.and_then(|table| table.get(&key)) {
                 for delivery in deliveries.values() {
                     let accessible =
                         delivery.public || requester.is_descendant_of(&delivery.owner_module);
@@ -1914,17 +1923,10 @@ impl ResolverState {
         if include_language {
             // A value the module declares or imports shadows a language
             // function of the same name.
-            let shadows_value = self.bindings.get(module).is_some_and(|table| {
-                table
-                    .keys()
-                    .any(|(namespace, spelling)| spelling == name && *namespace == Namespace::Value)
-            });
-            for entity in self.entities.keys() {
-                if entity.module.is_language()
-                    && entity.owner.is_none()
-                    && entity.name == name
-                    && !(shadows_value && entity.namespace == Namespace::Value)
-                {
+            let shadows_value =
+                table.is_some_and(|table| table.contains_key(&(Namespace::Value, name.to_owned())));
+            for entity in self.language_names.get(name).into_iter().flatten() {
+                if !(shadows_value && entity.namespace == Namespace::Value) {
                     result
                         .accessible
                         .insert(LookupContainer::Entity(entity.clone()));
