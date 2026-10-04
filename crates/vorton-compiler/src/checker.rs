@@ -3093,24 +3093,10 @@ impl BodyChecker<'_> {
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let nominals = self.nominals;
         let info = &nominals.declarations[declaration];
-        let written_fields: Vec<(String, &ResolvedType)> = match &info.shape {
-            Shape::Struct(fields) => fields
-                .iter()
-                .map(|field| (field.identity.name.clone(), &field.ty))
-                .collect(),
-            Shape::Enum(variants) => match &variants[variant].fields {
-                ResolvedVariantFields::Unit => Vec::new(),
-                ResolvedVariantFields::Positional(fields) => fields
-                    .iter()
-                    .enumerate()
-                    .map(|(index, ty)| (index.to_string(), ty))
-                    .collect(),
-                ResolvedVariantFields::Named(fields) => fields
-                    .iter()
-                    .map(|field| (field.identity.name.clone(), &field.ty))
-                    .collect(),
-            },
-        };
+        // The fields as declared: their types mention the declaration's type
+        // parameters, which the expected type, the base or the values bind.
+        let template = template(self.types, nominals, declaration)?;
+        let shape = self.types.variants(template)[variant].clone();
         let is_struct = matches!(info.shape, Shape::Struct(_));
         // Building a struct writes all its fields, so outside its module
         // every field must be public.
@@ -3132,21 +3118,17 @@ impl BodyChecker<'_> {
                 ),
             ));
         }
-        let mut substitution = BTreeMap::new();
-        if let Some(expected) = expected
-            && let TypeKind::Nominal {
-                declaration: expected_declaration,
+        // The type arguments of a value of this declaration.
+        let arguments_of = |types: &Types, ty: Type| match types.kind(ty) {
+            TypeKind::Nominal {
+                declaration: other,
                 arguments,
-            } = self.types.kind(expected)
-            && *expected_declaration == declaration
-        {
-            substitution = info
-                .type_parameters
-                .iter()
-                .cloned()
-                .zip(arguments.iter().copied())
-                .collect();
-        }
+            } if *other == declaration => Some(arguments.iter().copied().map(Some).collect()),
+            _ => None,
+        };
+        let mut bindings: Vec<Option<Type>> = expected
+            .and_then(|expected| arguments_of(self.types, expected))
+            .unwrap_or_else(|| vec![None; info.type_parameters.len()]);
 
         // Pair every given value with its field, in source order.
         let mut given: Vec<(usize, &ResolvedExpr, Span)> = Vec::new();
@@ -3155,19 +3137,15 @@ impl BodyChecker<'_> {
         match arguments {
             None => {}
             Some(Arguments::Positional(values)) => {
-                let positional = matches!(
-                    &info.shape,
-                    Shape::Enum(variants)
-                        if matches!(variants[variant].fields, ResolvedVariantFields::Positional(_))
-                );
-                if !positional || values.len() != written_fields.len() {
+                let positional = shape.positional;
+                if !positional || values.len() != shape.fields.len() {
                     return Err(self.error(
                         CheckDiagnosticKind::ArgumentCount,
                         span,
                         format!(
                             "`{}` takes {} positional values, found {}",
                             self.variant_name(declaration, variant),
-                            if positional { written_fields.len() } else { 0 },
+                            if positional { shape.fields.len() } else { 0 },
                             values.len()
                         ),
                     ));
@@ -3206,9 +3184,10 @@ impl BodyChecker<'_> {
                             value,
                             shorthand,
                         } => {
-                            let Some(index) = written_fields
+                            let Some(index) = shape
+                                .fields
                                 .iter()
-                                .position(|(name, _)| *name == member.name)
+                                .position(|field| field.name == member.name)
                             else {
                                 return Err(self.error(
                                     CheckDiagnosticKind::UnknownField,
@@ -3264,18 +3243,8 @@ impl BodyChecker<'_> {
                 if base.ty == Type::NEVER {
                     return Err(self.unsupported(expression.span, "diverging bases"));
                 }
-                if let TypeKind::Nominal {
-                    declaration: base_declaration,
-                    arguments,
-                } = self.types.kind(base.ty)
-                    && *base_declaration == declaration
-                {
-                    substitution = info
-                        .type_parameters
-                        .iter()
-                        .cloned()
-                        .zip(arguments.iter().copied())
-                        .collect();
+                if let Some(arguments) = arguments_of(self.types, base.ty) {
+                    bindings = arguments;
                 } else {
                     return Err(self.error(
                         CheckDiagnosticKind::TypeMismatch,
@@ -3294,12 +3263,8 @@ impl BodyChecker<'_> {
 
         let mut fields = Vec::new();
         for (index, value, value_span) in given {
-            let written = written_fields[index].1;
-            let field_expected = if mentions_only(written, &substitution, &info.type_parameters) {
-                Some(self.resolve_type(written, &substitution)?)
-            } else {
-                None
-            };
+            let field = shape.fields[index].ty;
+            let field_expected = self.instantiated(field, &bindings)?;
             let checked = self.check_expr(value, field_expected)?;
             if checked.ty == Type::NEVER {
                 return Err(self.unsupported(value_span, "diverging fields"));
@@ -3307,14 +3272,14 @@ impl BodyChecker<'_> {
             match field_expected {
                 Some(field_expected) => self.require(value_span, field_expected, checked.ty)?,
                 None => {
-                    if !self.bind(written, checked.ty, &mut substitution) {
+                    if !self.match_type(field, checked.ty, &mut bindings) {
                         return Err(self.error(
                             CheckDiagnosticKind::TypeMismatch,
                             value_span,
                             format!(
                                 "`{}` does not fit field `{}`",
                                 self.types.name(checked.ty),
-                                written_fields[index].0
+                                shape.fields[index].name
                             ),
                         ));
                     }
@@ -3323,18 +3288,18 @@ impl BodyChecker<'_> {
             fields.push((index, checked));
         }
         if base.is_none()
-            && let Some(position) = (0..written_fields.len())
+            && let Some(position) = (0..shape.fields.len())
                 .find(|position| fields.iter().all(|(index, _)| index != position))
         {
             return Err(self.error(
                 CheckDiagnosticKind::MissingField,
                 span,
-                format!("field `{}` has no value", written_fields[position].0),
+                format!("field `{}` has no value", shape.fields[position].name),
             ));
         }
         let mut type_arguments = Vec::new();
-        for parameter in &info.type_parameters {
-            let Some(&argument) = substitution.get(parameter) else {
+        for binding in bindings {
+            let Some(argument) = binding else {
                 return Err(self.error(
                     CheckDiagnosticKind::CannotInfer,
                     span,
@@ -3368,85 +3333,6 @@ impl BodyChecker<'_> {
         match &info.shape {
             Shape::Struct(_) => info.name.clone(),
             Shape::Enum(variants) => format!("{}::{}", info.name, variants[variant].identity.name),
-        }
-    }
-
-    /// Matches the written type `written` against `actual`, binding type
-    /// parameters in `substitution`. Returns whether they fit.
-    fn bind(
-        &mut self,
-        written: &ResolvedType,
-        actual: Type,
-        substitution: &mut BTreeMap<EntityId, Type>,
-    ) -> bool {
-        match &written.kind {
-            ResolvedTypeKind::Grouped(inner) => self.bind(inner, actual, substitution),
-            ResolvedTypeKind::Tuple(elements) => {
-                let TypeKind::Tuple(actual_elements) = self.types.kind(actual).clone() else {
-                    return false;
-                };
-                elements.len() == actual_elements.len()
-                    && elements
-                        .iter()
-                        .zip(actual_elements)
-                        .all(|(element, actual)| self.bind(element, actual, substitution))
-            }
-            ResolvedTypeKind::Named(named) => {
-                let ResolvedReference::Exact { target, .. } = &named.reference else {
-                    return false;
-                };
-                if target.kind == EntityKind::TypeParameter && named.arguments.is_empty() {
-                    return match substitution.get(target) {
-                        Some(&bound) => bound == actual,
-                        None => {
-                            substitution.insert(target.clone(), actual);
-                            true
-                        }
-                    };
-                }
-                let arguments = match (self.types.kind(actual).clone(), target.kind) {
-                    (
-                        TypeKind::Nominal {
-                            declaration,
-                            arguments,
-                        },
-                        _,
-                    ) if self.nominals.by_identity.get(target) == Some(&declaration) => {
-                        Some(arguments)
-                    }
-                    (TypeKind::List(element), EntityKind::LanguageType)
-                        if target.name == "List" =>
-                    {
-                        Some(vec![element])
-                    }
-                    (TypeKind::Set(element), EntityKind::LanguageType) if target.name == "Set" => {
-                        Some(vec![element])
-                    }
-                    (TypeKind::Map(key, value), EntityKind::LanguageType)
-                        if target.name == "Map" =>
-                    {
-                        Some(vec![key, value])
-                    }
-                    _ => None,
-                };
-                if let Some(arguments) = arguments {
-                    return named.arguments.len() == arguments.len()
-                        && named
-                            .arguments
-                            .iter()
-                            .zip(arguments)
-                            .all(|(written, actual)| {
-                                matches!(written, ResolvedTypeArgument::Type(written)
-                                if self.bind(written, actual, substitution))
-                            });
-                }
-                if self.nominals.by_identity.contains_key(target) {
-                    return false;
-                }
-                self.resolve_type(written, substitution)
-                    .is_ok_and(|resolved| resolved == actual)
-            }
-            ResolvedTypeKind::Function { .. } => false,
         }
     }
 
@@ -4577,38 +4463,6 @@ fn callee_name(callee: &ResolvedExpr) -> String {
     match &callee.kind {
         ResolvedExprKind::Path(ResolvedReference::Exact { target, .. }) => target.name.clone(),
         _ => "result".to_owned(),
-    }
-}
-
-/// Whether every type parameter that `ty` mentions is bound in `substitution`.
-fn mentions_only(
-    ty: &ResolvedType,
-    substitution: &BTreeMap<EntityId, Type>,
-    parameters: &[EntityId],
-) -> bool {
-    match &ty.kind {
-        ResolvedTypeKind::Grouped(inner) => mentions_only(inner, substitution, parameters),
-        ResolvedTypeKind::Tuple(elements) => elements
-            .iter()
-            .all(|element| mentions_only(element, substitution, parameters)),
-        ResolvedTypeKind::Named(named) => {
-            let parameter_bound = match &named.reference {
-                ResolvedReference::Exact { target, .. } if parameters.contains(target) => {
-                    substitution.contains_key(target)
-                }
-                _ => true,
-            };
-            parameter_bound
-                && named.arguments.iter().all(|argument| match argument {
-                    ResolvedTypeArgument::Type(argument) => {
-                        mentions_only(argument, substitution, parameters)
-                    }
-                    ResolvedTypeArgument::AssociatedType { value, .. } => {
-                        mentions_only(value, substitution, parameters)
-                    }
-                })
-        }
-        ResolvedTypeKind::Function { .. } => true,
     }
 }
 
