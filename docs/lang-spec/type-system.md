@@ -276,7 +276,19 @@ for_each_neighbor(&grid, here, fn(p) { if !blocked.contains(p) { ... } })
 print(blocked.len())          // blocked 只在那次调用期间被借出
 ```
 
-其他闭包只读外部的值，在创建时拷贝它们，是普通的函数值 `fn(A) -> B`：可以拷贝、移交、返回与存放。它不能修改自己拷贝来的变量。所以函数值都是值。存放的闭包如何共享可修改的状态尚未定稿，见[待定](#待定)。
+其他闭包只读外部的值，在创建时拷贝它们，是普通的函数值 `fn(A) -> B`：可以拷贝、移交、返回与存放。它不能修改自己拷贝来的变量。所以函数值都是值。
+
+存放的闭包不持有可修改的状态。回调要修改的状态由调用它的一方以 `&mut` 参数传入；要指向某个特定实体时，捕获它的 `Handle`，经参数[持有](#持有)它所在的 Region：
+
+```vorton
+struct World { score: Int, players: Region }
+
+fn on_click(button: &mut Button, handler: fn(&mut World)) { ... }
+
+on_click(&mut button, fn(world) { world.score += 1 })
+let target: Handle<Player> = world.players.insert(Player { hp: 10 })
+on_click(&mut button, fn(world) { target.hp -= 1 })   // 经 world 持有 players
+```
 
 存在字段中的函数值通过 `(value.field)(args)` 调用。
 
@@ -461,7 +473,6 @@ receiver 是 `Handle<T>` 时，先按 `Handle` 自身的方法查找，再按 `T
 
 ## 待定
 
-- 存放的闭包如何共享可修改的状态。存放的闭包只能拷贝值，而 `Shared` 是实体，计数加一要在代码里写成 `clone()`，所以不能捕获它；允许捕获 `Shared` 的话，类型 `fn(A) -> B` 看不出捕获了什么，所有含函数值的类型都要按可能成环处理。
 - effect 在函数签名中的写法（Milestone 4 定稿）。
 - 派生（derive）的写法。
 - 按类型遍历 Region 中全部实体的写法。
