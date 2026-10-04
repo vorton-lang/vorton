@@ -107,7 +107,8 @@ static vt_str *vt_str_join(int count, vt_str *const *parts) {
     return result;
 }
 
-static int vt_str_compare(const vt_str *left, const vt_str *right) {
+/* -1, 0 or 1 as left sorts before, with or after ight, by bytes. */
+static int vt_cmp_str(const vt_str *left, const vt_str *right) {
     int64_t shorter = left->len < right->len ? left->len : right->len;
     int order = memcmp(left->data, right->data, (size_t)shorter);
     if (order != 0) {
@@ -177,15 +178,16 @@ static vt_str *vt_int_to_str(int64_t value) {
     return vt_str_from_bytes(buffer, (size_t)len);
 }
 
-/* Formats a binary64 value like ECMAScript Number::toString: the shortest
- * digit string that reads back as the same value, in positional notation for
- * decimal exponents from -6 to 20 and in exponent notation otherwise. */
 /* Whether `mantissa` times ten to `exponent` reads back as `value`. */
 static bool vt_float_reads_back(uint64_t mantissa, int exponent, double value) {
     char text[40];
     snprintf(text, sizeof text, "%llue%d", (unsigned long long)mantissa, exponent);
     return strtod(text, NULL) == value;
 }
+
+/* Formats a binary64 value like ECMAScript Number::toString: the shortest
+ * digit string that reads back as the same value, in positional notation for
+ * decimal exponents from -6 to 20 and in exponent notation otherwise. */
 static vt_str *vt_float_to_str(double value) {
     char out[64];
     size_t len = 0;
@@ -448,7 +450,8 @@ static vt_str *vt_str_replace(const vt_str *text, const vt_str *from, const vt_s
     if (count > 0 && growth > 0 && growth > (INT64_MAX - text->len) / count) {
         vt_panic("string too long");
     }
-    vt_str *result = vt_str_alloc(text->len + count * growth);    char *out = (char *)result->data;
+    vt_str *result = vt_str_alloc(text->len + count * growth);
+    char *out = (char *)result->data;
     int64_t position = 0;
     for (int64_t at = vt_str_find_from(text, from, 0); at >= 0;
          at = vt_str_find_from(text, from, position)) {
@@ -553,11 +556,6 @@ static int vt_cmp_float(double left, double right) {
         return 1;
     }
     return left == right ? 0 : 2;
-}
-
-static int vt_cmp_str(const vt_str *left, const vt_str *right) {
-    int result = vt_str_compare(left, right);
-    return (result > 0) - (result < 0);
 }
 
 /* Hashes for map keys. */
@@ -765,9 +763,9 @@ static void vt_print(const vt_str *value) {
     fputc('\n', stdout);
 }
 
-/* Runs after the program's main returns normally. */
-/* Output is the bytes the program prints: on Windows, the standard streams
- * would otherwise turn every "\n" into "\r\n". */
+/* Runs before the program's main. Output is the bytes the program prints:
+ * on Windows, the standard streams would otherwise turn every "\n" into
+ * "\r\n". */
 static void vt_start(void) {
 #ifdef _WIN32
     _setmode(_fileno(stdout), _O_BINARY);
@@ -775,6 +773,7 @@ static void vt_start(void) {
 #endif
 }
 
+/* Runs after the program's main returns normally. */
 static void vt_finish(void) {
 #ifdef VT_CHECK_LEAKS
     if (vt_live_blocks != 0) {

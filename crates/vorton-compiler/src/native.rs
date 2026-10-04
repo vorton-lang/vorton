@@ -33,8 +33,8 @@ pub fn build_executable(compiler: &str, c_source: &Path, output: &Path) -> Resul
     build_with(compiler, c_source, output, &[])
 }
 
-/// Like [`build_executable`], but the program also reports at exit any string
-/// it did not release exactly once.
+/// Like [`build_executable`], but the program also reports at exit any heap
+/// block it did not release.
 pub fn build_leak_checked(compiler: &str, c_source: &Path, output: &Path) -> Result<(), String> {
     build_with(compiler, c_source, output, &["-DVT_CHECK_LEAKS"])
 }

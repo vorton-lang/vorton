@@ -1286,7 +1286,7 @@ fn comparison(
     };
     match types.kind(ty) {
         TypeKind::Int | TypeKind::Float | TypeKind::Bool => format!("({a} {symbol} {b})"),
-        TypeKind::Str => format!("(vt_str_compare({a}, {b}) {symbol} 0)"),
+        TypeKind::Str => format!("(vt_cmp_str({a}, {b}) {symbol} 0)"),
         _ => {
             // -1, 0 or 1, or 2 for values that are not ordered.
             let compare = compare_code(types, ty, a, b);

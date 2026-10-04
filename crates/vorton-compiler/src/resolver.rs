@@ -2229,29 +2229,6 @@ impl ResolverState {
             return Err(diagnostic);
         }
         let modules = resolved_modules.into_iter().collect::<BTreeMap<_, _>>();
-        let name_bindings = self
-            .bindings
-            .iter()
-            .map(|(module, table)| {
-                let table = table
-                    .iter()
-                    .filter(|((namespace, _), _)| {
-                        matches!(namespace, Namespace::Type | Namespace::Value)
-                    })
-                    .map(|(name, deliveries)| {
-                        let bindings = deliveries
-                            .values()
-                            .map(|delivery| ResolvedNameBinding {
-                                target: delivery.target.clone(),
-                                public: delivery.public,
-                            })
-                            .collect();
-                        (name.clone(), bindings)
-                    })
-                    .collect();
-                (module.clone(), table)
-            })
-            .collect();
         let core_roles = self
             .core_roles
             .take()
@@ -2264,7 +2241,6 @@ impl ResolverState {
             modules,
             entities: self.entities,
             core_roles,
-            name_bindings,
         })
     }
 }
@@ -2524,8 +2500,7 @@ fn validate_core_profile(
         &int_type,
     )?;
 
-    let iterator_item =
-        resolved_core_associated_type(iterator_members, &roles.iterator.item, "Iterator", core)?;
+    let iterator_item = resolved_core_associated_type(iterator_members, &roles.iterator.item);
     if !iterator_item.0.is_empty() {
         return Err(core_role_diagnostic(
             core,
@@ -2581,8 +2556,7 @@ fn validate_core_profile(
         },
     )?;
 
-    let iterable_item =
-        resolved_core_associated_type(iterable_members, &roles.iterable.item, "Iterable", core)?;
+    let iterable_item = resolved_core_associated_type(iterable_members, &roles.iterable.item);
     if !iterable_item.0.is_empty() {
         return Err(core_role_diagnostic(
             core,
@@ -2601,12 +2575,7 @@ fn validate_core_profile(
             &roles.iterable.item,
         ));
     }
-    let iterable_iter = resolved_core_associated_type(
-        iterable_members,
-        &roles.iterable.iter_type,
-        "Iterable",
-        core,
-    )?;
+    let iterable_iter = resolved_core_associated_type(iterable_members, &roles.iterable.iter_type);
     if iterable_iter.1.is_some() {
         return Err(core_role_diagnostic(
             core,
@@ -2729,13 +2698,7 @@ fn validate_core_method_header<'a>(
         .find(|member| member.identity == *identity)
         .expect("every indexed core member is resolved");
     let ResolvedTraitMemberKind::Method(signature) = &member.kind else {
-        return Err(core_role_diagnostic(
-            core,
-            role,
-            Some(member_name),
-            CoreRoleIssue::MemberKind,
-            identity,
-        ));
+        unreachable!("the kinds of core trait members are checked when they are indexed")
     };
     if !signature.type_parameters.is_empty() || !signature.effect_parameters.is_empty() {
         return Err(core_role_diagnostic(
@@ -2907,22 +2870,16 @@ fn validate_simple_core_method(
 fn resolved_core_associated_type<'a>(
     members: &'a [ResolvedTraitMember],
     identity: &EntityId,
-    role: &str,
-    core: LibraryId,
-) -> Result<(&'a [ResolvedNamedType], &'a Option<ResolvedType>), ProjectDiagnostic> {
+) -> (&'a [ResolvedNamedType], &'a Option<ResolvedType>) {
     let member = members
         .iter()
         .find(|member| member.identity == *identity)
         .expect("every indexed core member is resolved");
     match &member.kind {
-        ResolvedTraitMemberKind::AssociatedType { bounds, default } => Ok((bounds, default)),
-        ResolvedTraitMemberKind::Method(_) => Err(core_role_diagnostic(
-            core,
-            role,
-            Some(&identity.name),
-            CoreRoleIssue::MemberKind,
-            identity,
-        )),
+        ResolvedTraitMemberKind::AssociatedType { bounds, default } => (bounds, default),
+        ResolvedTraitMemberKind::Method(_) => {
+            unreachable!("the kinds of core trait members are checked when they are indexed")
+        }
     }
 }
 
@@ -6592,14 +6549,6 @@ mod tests {
         }
     }
 
-    fn parameter_type(annotation: &ResolvedType) -> &ResolvedType {
-        annotation
-    }
-
-    fn actual_return_type(annotation: &ResolvedType) -> &ResolvedType {
-        annotation
-    }
-
     #[test]
     fn validates_abstract_file_module_paths() {
         assert!(FileModulePath::new(["parser", "lexer"]).is_ok());
@@ -7097,15 +7046,15 @@ mod tests {
         assert_eq!(resolved.dependencies[&right]["shared"], shared);
 
         let keep = function(module_body_in(&resolved, app, &[]), "keep");
-        let parameter = exact(named_type_reference(parameter_type(
+        let parameter = exact(named_type_reference(
             keep.parameters[0]
                 .annotation
                 .as_ref()
                 .expect("parameter type"),
-        )));
-        let returned = exact(named_type_reference(actual_return_type(
+        ));
+        let returned = exact(named_type_reference(
             keep.return_type.as_ref().expect("return type"),
-        )));
+        ));
         assert_eq!(parameter, returned);
         assert_eq!(parameter.module.source_library(), Some(shared));
         assert_eq!(
@@ -7491,18 +7440,18 @@ mod tests {
         ))
         .expect("each library opens only its own same-key file source");
         let use_both = function(module_body_in(&resolved, app, &[]), "use_both");
-        let left = exact(named_type_reference(parameter_type(
+        let left = exact(named_type_reference(
             use_both.parameters[0]
                 .annotation
                 .as_ref()
                 .expect("local parameter type"),
-        )));
-        let right = exact(named_type_reference(parameter_type(
+        ));
+        let right = exact(named_type_reference(
             use_both.parameters[1]
                 .annotation
                 .as_ref()
                 .expect("dependency parameter type"),
-        )));
+        ));
         assert_eq!(left.module.source_library(), Some(app));
         assert_eq!(right.module.source_library(), Some(dependency));
         assert_eq!(left.module.path(), ["local"]);
@@ -7568,18 +7517,18 @@ mod tests {
             .expect("dependency root facade import");
         assert_eq!(root_facade.target, module_id(&ModuleRef::root(origin)));
         let make = function(module_body_in(&resolved, app, &[]), "make");
-        let left = exact(named_type_reference(parameter_type(
+        let left = exact(named_type_reference(
             make.parameters[0]
                 .annotation
                 .as_ref()
                 .expect("direct facade type"),
-        )));
-        let right = exact(named_type_reference(parameter_type(
+        ));
+        let right = exact(named_type_reference(
             make.parameters[1]
                 .annotation
                 .as_ref()
                 .expect("module facade type"),
-        )));
+        ));
         assert_eq!(left, right);
         assert_eq!(left.module.source_library(), Some(origin));
         let ResolvedExprKind::Call { callee, .. } =
@@ -7832,18 +7781,18 @@ mod tests {
         ))
         .expect("equal text and spans in two libraries remain distinct");
         let pair = function(module_body_in(&resolved, app, &[]), "pair");
-        let first_item = exact(named_type_reference(parameter_type(
+        let first_item = exact(named_type_reference(
             pair.parameters[0]
                 .annotation
                 .as_ref()
                 .expect("first item type"),
-        )));
-        let second_item = exact(named_type_reference(parameter_type(
+        ));
+        let second_item = exact(named_type_reference(
             pair.parameters[1]
                 .annotation
                 .as_ref()
                 .expect("second item type"),
-        )));
+        ));
         assert_ne!(first_item, second_item);
         assert_eq!(first_item.module, module_ref(first, &["same"]));
         assert_eq!(second_item.module, module_ref(second, &["same"]));
@@ -7969,12 +7918,12 @@ mod tests {
             base,
             members,
             ..
-        } = named_type_reference(parameter_type(
+        } = named_type_reference(
             choose.parameters[0]
                 .annotation
                 .as_ref()
                 .expect("selected parameter type"),
-        ))
+        )
         else {
             panic!("type-dependent member remains a Checker selection");
         };
@@ -8007,9 +7956,7 @@ mod tests {
             target: self_identity,
             self_reference: Some(self_reference),
             ..
-        } = named_type_reference(actual_return_type(
-            keep.return_type.as_ref().expect("Self return type"),
-        ))
+        } = named_type_reference(keep.return_type.as_ref().expect("Self return type"))
         else {
             panic!("Self keeps both its binder and exact impl target");
         };
@@ -8054,12 +8001,12 @@ mod tests {
         assert_eq!(wrapper_identity.module.source_library(), Some(app));
         assert_eq!(original.module.source_library(), Some(dependency));
         assert_ne!(wrapper_identity, original);
-        let language_int = exact(named_type_reference(parameter_type(
+        let language_int = exact(named_type_reference(
             wrapper.parameters[0]
                 .annotation
                 .as_ref()
                 .expect("wrapper parameter type"),
-        )));
+        ));
         assert!(language_int.module.is_language());
 
         let deferred = function(app_root, "deferred");
@@ -8068,12 +8015,12 @@ mod tests {
             base,
             members,
             ..
-        } = named_type_reference(parameter_type(
+        } = named_type_reference(
             deferred.parameters[0]
                 .annotation
                 .as_ref()
                 .expect("cross-library selected type"),
-        ))
+        )
         else {
             panic!("cross-library associated item remains a Checker selection");
         };
@@ -8600,9 +8547,9 @@ fn first() -> Ordering { Less }
         }));
         let make = function(module_body(&resolved, &[]), "make");
         assert_eq!(
-            exact(named_type_reference(actual_return_type(
+            exact(named_type_reference(
                 make.return_type.as_ref().expect("aliased Option return")
-            ))),
+            )),
             &resolved.core_roles.option.declaration
         );
         let first = function(module_body(&resolved, &[]), "first");
@@ -9055,7 +9002,7 @@ impl<T> Boxed<T> {
                     target: self_identity,
                     self_reference: Some(return_self),
                     ..
-                } = named_type_reference(actual_return_type(return_type))
+                } = named_type_reference(return_type)
                 else {
                     panic!("direct Self type retains its identity and target relation");
                 };
@@ -9091,7 +9038,7 @@ impl<T> Boxed<T> {
                     target: self_identity,
                     self_reference: Some(self_reference),
                     ..
-                } = named_type_reference(actual_return_type(return_type))
+                } = named_type_reference(return_type)
                 else {
                     panic!("generic Self retains its complete impl target");
                 };
@@ -9172,7 +9119,7 @@ fn language(value: Iterable::Item) {}
             .return_type
             .as_ref()
             .expect("return annotation");
-        let ResolvedTypeKind::Named(named) = &actual_return_type(return_type).kind else {
+        let ResolvedTypeKind::Named(named) = &return_type.kind else {
             panic!("named associated type");
         };
         let ResolvedReference::Selection { base, members, .. } = &named.reference else {
@@ -9201,13 +9148,11 @@ fn language(value: Iterable::Item) {}
         assert_eq!(base.kind, EntityKind::TypeParameter);
 
         let concrete = function(root, "concrete");
-        let ResolvedTypeKind::Named(concrete_selection) = &parameter_type(
-            concrete.parameters[0]
-                .annotation
-                .as_ref()
-                .expect("concrete parameter type"),
-        )
-        .kind
+        let ResolvedTypeKind::Named(concrete_selection) = &concrete.parameters[0]
+            .annotation
+            .as_ref()
+            .expect("concrete parameter type")
+            .kind
         else {
             panic!("concrete associated selection is named");
         };
@@ -9220,13 +9165,11 @@ fn language(value: Iterable::Item) {}
         assert!(members[0].declaration.is_none());
 
         let core = function(root, "language");
-        let ResolvedTypeKind::Named(core_selection) = &parameter_type(
-            core.parameters[0]
-                .annotation
-                .as_ref()
-                .expect("core associated type"),
-        )
-        .kind
+        let ResolvedTypeKind::Named(core_selection) = &core.parameters[0]
+            .annotation
+            .as_ref()
+            .expect("core associated type")
+            .kind
         else {
             panic!("core associated selection is named");
         };
@@ -9281,7 +9224,7 @@ trait Outer {
                 members,
                 self_reference,
                 ..
-            } = named_type_reference(parameter_type(annotation))
+            } = named_type_reference(annotation)
             else {
                 panic!("categorized member remains an explicit selection");
             };
@@ -9319,7 +9262,7 @@ trait Outer {
                 members,
                 self_reference,
                 ..
-            } = named_type_reference(parameter_type(annotation))
+            } = named_type_reference(annotation)
             else {
                 panic!("nested associated path is a selection");
             };
@@ -9488,10 +9431,7 @@ pub trait Fetch {
             .annotation
             .as_ref()
             .expect("nested callback type is present");
-        assert_eq!(
-            exact(named_type_reference(parameter_type(nested))).name,
-            "G"
-        );
+        assert_eq!(exact(named_type_reference(nested)).name, "G");
 
         let run = function(module_body(&resolved, &[]), "run");
         assert_eq!(run.type_parameters.len(), 2);

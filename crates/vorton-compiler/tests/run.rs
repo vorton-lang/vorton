@@ -9,7 +9,7 @@
 //!   that must not compile, such as `TypeMismatch 3`.
 //!
 //! Programs are built with the runtime's leak check, so a program that ends
-//! normally also fails if it did not release every string exactly once.
+//! normally also fails if it did not release every heap block.
 
 use std::fs;
 use std::path::{Path, PathBuf};

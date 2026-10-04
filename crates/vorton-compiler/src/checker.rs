@@ -1,24 +1,17 @@
 //! Type checking.
 //!
-//! The checker covers `Int`, `Float`, `Bool`, `Str` and `Unit` values,
-//! tuples, structs and enums (generic ones are instantiated at concrete type
-//! arguments), `List` and `Map` with their built-in methods, `match`, `if let` and tuple
-//! destructuring with exhaustiveness, named functions with written
-//! signatures, generic functions with `Copy` and `Clone` bounds, which are
-//! checked once and instantiated afterwards by [`crate::mono`], inherent
-//! methods and associated functions of non-generic
-//! types, local bindings, assignment to `let mut` locals and their parts,
-//! `if`, `while`, `loop`, `for` over ranges and lists, `break`, `continue`,
-//! `return`, string interpolation, and the `print`, `assert` and `panic`
-//! intrinsics. Every other construct reports
+//! The checker turns the resolved project into the typed program of
+//! [`crate::typed`]. It gives every expression a type, resolves method and
+//! trait calls, checks the bounds of generic functions and types, which are
+//! checked once and instantiated afterwards by [`crate::mono`], and checks
+//! that patterns are exhaustive. A construct it does not support yet reports
 //! [`CheckDiagnosticKind::Unsupported`] instead of being treated as checked.
 //!
-//! Entities (lists and the aggregates that contain them) are moved, never
-//! copied. The checker decides where values move and borrows begin, and
-//! rejects moves out of elements, borrows and `Drop` values. Which uses
-//! come after a move, and which accesses conflict with a live borrow, are
-//! checked on the IR of each function by [`crate::borrowck`], which follows
-//! every path of the control flow.
+//! The checker also decides where a value is copied or moved and where a
+//! borrow begins. Whether that move or borrow is allowed there, such as a
+//! use after a move, a move out of a part, or an access that conflicts with
+//! a live borrow, is checked on the IR of each function by
+//! [`crate::borrowck`], which follows every path of the control flow.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2804,8 +2797,8 @@ impl BodyChecker<'_> {
         instantiate(self.types, self.nominals, declaration, vec![element])
     }
 
-    /// Checks a method call: an inherent method of the receiver's type, or
-    /// else a built-in method.
+    /// Checks a method call: an inherent method of the receiver's type, a
+    /// method of a trait it implements, or else a built-in method.
     fn check_method(
         &mut self,
         span: Span,

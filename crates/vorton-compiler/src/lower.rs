@@ -11,10 +11,11 @@
 //! value goes, a discarded one included. Whether the place can be moved
 //! out of is the business of move checking on the IR.
 //!
-//! Every temporary belongs to the statement that makes it and is released
-//! when the statement ends; the locals of a block are released when the
-//! block ends, and `break`, `continue` and `return` release the scopes they
-//! leave.
+//! A temporary belongs to the statement that makes it and is released when
+//! the statement ends, except the index of a place, which belongs to the
+//! enclosing block so that a borrow of the place can be checked against it.
+//! The locals of a block are released when the block ends, and `break`,
+//! `continue` and `return` release the scopes they leave.
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span};
 use crate::mir::{

@@ -5,15 +5,12 @@ use crate::project::{
     ProjectDiagnosticKind, ResolvedDeclaration, ResolvedDeclarationKind, ResolvedEffectSet,
     ResolvedNamedType, ResolvedProject, ResolvedReference, SupertraitTargetKind,
 };
+
 /// An owned resolved project whose declaration graph invariants have been checked.
 ///
 /// This type does not represent a fully checked program, effective signatures,
 /// alias normalization, or typed HIR. Values can only be constructed by
 /// [`crate::prepare_project`].
-#[allow(
-    dead_code,
-    reason = "the opaque preparation state is the complete wrapped resolved project"
-)]
 pub struct PreparedProject(ResolvedProject);
 
 impl PreparedProject {

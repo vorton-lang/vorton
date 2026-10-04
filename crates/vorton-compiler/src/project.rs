@@ -340,7 +340,8 @@ pub enum CoreRoleIssue {
 
 /// An owned project whose lexical and nominal names have been resolved.
 ///
-/// Its carrier is intentionally opaque until the Checker API is introduced.
+/// Its contents are visible only inside the compiler.
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedProject {
     pub(crate) entry: LibraryId,
@@ -349,8 +350,6 @@ pub struct ResolvedProject {
     pub(crate) modules: BTreeMap<ModuleRef, ResolvedModule>,
     pub(crate) entities: BTreeMap<EntityId, Entity>,
     pub(crate) core_roles: CoreRoles,
-    pub(crate) name_bindings:
-        BTreeMap<ModuleRef, BTreeMap<(Namespace, String), Vec<ResolvedNameBinding>>>,
 }
 
 impl fmt::Debug for ResolvedProject {
@@ -622,16 +621,6 @@ pub(crate) struct ResolvedImport {
     pub(crate) public: bool,
     pub(crate) local_name: String,
     pub(crate) target: EntityId,
-}
-
-/// The exact target and visibility of one frozen module-namespace binding.
-///
-/// The Checker consumes this narrow carrier when binding contract paths. It is
-/// deliberately private so name lookup is not published as a second API.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedNameBinding {
-    pub(crate) target: EntityId,
-    pub(crate) public: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

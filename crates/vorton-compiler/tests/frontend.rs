@@ -653,8 +653,9 @@ fn preserves_precedence_and_associativity() {
 
 #[test]
 fn nested_expressions_fit_the_default_windows_stack() {
-    // The test harness normally gives its threads more than the failing
-    // Windows main thread's 1 MiB stack. Keep parse, observation, and Drop here.
+    // `parse` runs on a large stack of its own, but the caller walks and
+    // drops the tree it returns, possibly on the 1 MiB main thread stack of
+    // Windows.
     std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(|| {
@@ -666,9 +667,7 @@ fn nested_expressions_fit_the_default_windows_stack() {
                 ("\"前${", "}後\""),
             ] {
                 let source = format!("{header}{}1{} }}", prefix.repeat(32), suffix.repeat(32));
-                eprintln!("ENTER parse {prefix}");
                 let program = parse(&source).unwrap();
-                eprintln!("RETURN parse");
                 let DeclarationKind::Function(function) = &declaration(&program, 0).kind else {
                     panic!("function expected")
                 };
@@ -735,7 +734,6 @@ fn nested_expressions_fit_the_default_windows_stack() {
                 assert_eq!(expression.span, span);
                 assert!(matches!(&expression.kind, ExprKind::Integer(value) if value == "1"));
                 drop(program);
-                eprintln!("DROP parse");
 
                 let shallow = parse(&format!("{header}{prefix}+{suffix} }}")).unwrap_err();
                 let invalid = format!("{header}{}+{} }}", prefix.repeat(32), suffix.repeat(32));
