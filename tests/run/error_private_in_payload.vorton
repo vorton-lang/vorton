@@ -1,0 +1,9 @@
+// A private type cannot appear in a variant of a public enum.
+mod shapes {
+    struct Hidden { n: Int }
+    pub enum Shape {
+        Circle(Int),
+        Secret((Int, Hidden)),
+    }
+}
+fn main() {}

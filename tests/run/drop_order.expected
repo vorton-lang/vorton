@@ -1,37 +1,20 @@
 scope begin
 scope end
-drop scoped
 field begin
 field end
-drop outer o1
-drop inner
 enum begin
 enum end
-drop payload
 list begin
 list end
-drop in-list
-drop second
 move begin
 move end
-drop moved
 consuming temporary
-drop temporary
 reverse end
-drop second
-drop first
 replaced old
-drop old
-drop new
 clone counter 1
 ids 1 101
 clone counter 1
 clone counter 101
 copies 2
-drop counter 101
-drop counter 201
-drop counter 1
-drop counter 101
 matched
 done
-drop matched

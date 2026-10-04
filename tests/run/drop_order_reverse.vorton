@@ -1,0 +1,14 @@
+// Locals are released in the reverse order of their declarations; the first
+// `drop` to run panics with its tag.
+struct Guard { tag: Str }
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        assert(false, "dropped ${self.tag}")
+    }
+}
+fn main() {
+    let first = Guard { tag: "first" }
+    let second = Guard { tag: "second" }
+    print("end of main")
+}

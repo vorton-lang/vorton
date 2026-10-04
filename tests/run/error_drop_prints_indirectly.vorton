@@ -1,0 +1,19 @@
+// A `drop` cannot reach the console through the functions it calls either,
+// including a hand-written `clone` that cloning a list runs.
+struct Note { text: Str, tags: List<Str> }
+impl Clone for Note {
+    fn clone(&self) -> Note {
+        report(self.text)
+        Note { text: self.text, tags: self.tags.clone() }
+    }
+}
+fn report(text: Str) {
+    print(text)
+}
+struct D { notes: List<Note> }
+impl Drop for D {
+    fn drop(&mut self) {
+        let copies = self.notes.clone()
+    }
+}
+fn main() {}

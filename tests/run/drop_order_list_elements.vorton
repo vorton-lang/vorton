@@ -1,0 +1,12 @@
+// A list releases its elements from the first to the last.
+struct Guard { tag: Str }
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        assert(false, "dropped ${self.tag}")
+    }
+}
+fn main() {
+    let guards = [Guard { tag: "a" }, Guard { tag: "b" }]
+    print("listed")
+}

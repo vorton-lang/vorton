@@ -73,9 +73,10 @@ where
     Ok(types.intern(kind))
 }
 
-/// Returns the functions that code generation emits, and the index of
-/// `main` among them: every non-generic function of `templates`, in order,
-/// then the instances of generic ones as calls reach them.
+/// Returns the functions that code generation emits, the index of `main`
+/// among them, and the template of each: every non-generic function of
+/// `templates`, in order, then the instances of generic ones as calls reach
+/// them.
 pub(crate) fn instantiate_functions<F>(
     types: &mut Types,
     instantiate: &mut F,
@@ -84,7 +85,7 @@ pub(crate) fn instantiate_functions<F>(
     main: usize,
     impls: &Impls,
     display: usize,
-) -> Result<(Vec<Function>, usize), CheckDiagnostic>
+) -> Result<(Vec<Function>, usize, Vec<usize>), CheckDiagnostic>
 where
     F: FnMut(&mut Types, usize, Vec<Type>) -> Result<Type, CheckDiagnostic>,
 {
@@ -115,7 +116,12 @@ where
         }
     }
     let main = instances.index[&(main, Vec::new())];
-    Ok((functions, main))
+    let templates = instances
+        .list
+        .iter()
+        .map(|(template, _)| *template)
+        .collect();
+    Ok((functions, main, templates))
 }
 
 /// The instances made so far: a template and its type arguments.

@@ -1,0 +1,10 @@
+// Once the borrow of a value is no longer used, the map can change again.
+fn main() {
+    let mut m: Map<Int, Int> = Map::new()
+    m[0] = 42
+    let r = &m[0]
+    print(r)
+    m[1] = 1
+    m[0] = 7
+    print(m[0] + m[1])
+}

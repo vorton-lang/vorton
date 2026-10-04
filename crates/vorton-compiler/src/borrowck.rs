@@ -28,12 +28,17 @@ use crate::mir::{
     BlockId, Body, Operand, Place, Projection, RefKind, Rvalue, StatementKind, TerminatorKind,
 };
 use crate::project::OriginRef;
+use crate::types::Types;
 
-pub(crate) fn check(body: &Body, at: &dyn Fn(Span) -> OriginRef) -> Result<(), CheckDiagnostic> {
+pub(crate) fn check(
+    body: &Body,
+    types: &Types,
+    at: &dyn Fn(Span) -> OriginRef,
+) -> Result<(), CheckDiagnostic> {
     let graph = Graph::new(body);
     let mut errors = Vec::new();
     check_moves(body, &graph, &mut errors);
-    check_borrows(body, &graph, &mut errors);
+    check_borrows(body, types, &graph, &mut errors);
     match errors.into_iter().min_by_key(|error| error.span.start) {
         Some(error) => Err(CheckDiagnostic {
             kind: error.kind,
@@ -293,7 +298,7 @@ enum Access {
     Release,
 }
 
-fn check_borrows(body: &Body, graph: &Graph, errors: &mut Vec<Error>) {
+fn check_borrows(body: &Body, types: &Types, graph: &Graph, errors: &mut Vec<Error>) {
     // Every loan, by the statement that makes it.
     let mut loans = Vec::new();
     let mut loan_at = std::collections::BTreeMap::new();
@@ -365,6 +370,7 @@ fn check_borrows(body: &Body, graph: &Graph, errors: &mut Vec<Error>) {
             let own = loan_at.get(&(block, index)).copied();
             check_statement(
                 body,
+                types,
                 &loans,
                 &carried,
                 &live_after[index],
@@ -511,6 +517,7 @@ fn reference_uses(body: &Body, statement: &StatementKind) -> (Vec<usize>, Option
 #[allow(clippy::too_many_arguments)]
 fn check_statement(
     body: &Body,
+    types: &Types,
     loans: &[Loan],
     carried: &[BTreeSet<usize>],
     live_after: &BTreeSet<usize>,
@@ -526,7 +533,7 @@ fn check_statement(
     for reference in live_after.iter().chain(&uses) {
         live.extend(carried[*reference].iter().copied());
     }
-    let accesses = accesses(body, loans, carried, statement, own);
+    let accesses = accesses(body, types, loans, carried, statement, own);
     for access in accesses {
         for &loan_index in &live {
             if access.exempt.contains(&loan_index) {
@@ -551,6 +558,7 @@ struct Made {
 
 fn accesses(
     body: &Body,
+    types: &Types,
     loans: &[Loan],
     carried: &[BTreeSet<usize>],
     statement: &StatementKind,
@@ -592,7 +600,12 @@ fn accesses(
                 }
             }
             if !body.defines_pointer(destination, value) {
-                access(destination, Access::Write);
+                // Storing the value of a key may add the key, which changes
+                // the map as a whole.
+                match body.map_entry(types, destination) {
+                    Some((_, map)) => access(&map, Access::Write),
+                    None => access(destination, Access::Write),
+                }
             }
             // A `&mut` argument or receiver takes effect when the call runs.
             let activated = match value {

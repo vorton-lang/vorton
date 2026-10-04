@@ -1,10 +1,14 @@
+// Values with a hand-written `Drop` are released exactly once on every path:
+// at the end of a scope, inside fields, payloads and lists, after a move,
+// and when replaced. `drop` cannot print, so the leak check shows that each
+// string was released once; the drop_order_* programs show the order.
 struct Tracker {
     tag: Str,
 }
 
 impl Drop for Tracker {
     fn drop(&mut self) {
-        print("drop ${self.tag}")
+        assert(self.tag.len() > 0, "a tracker has a tag")
     }
 }
 
@@ -15,7 +19,7 @@ struct Outer {
 
 impl Drop for Outer {
     fn drop(&mut self) {
-        print("drop outer ${self.label}")
+        assert(self.label.len() > 0, "an outer value has a label")
     }
 }
 
@@ -30,7 +34,7 @@ struct Counter {
 
 impl Drop for Counter {
     fn drop(&mut self) {
-        print("drop counter ${self.id}")
+        assert(self.id > 0, "a counter has an id")
     }
 }
 

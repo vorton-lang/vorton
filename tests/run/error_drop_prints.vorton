@@ -1,0 +1,6 @@
+// A hand-written `drop` cannot use the console in 0.1.
+struct D { n: Int }
+impl Drop for D {
+    fn drop(&mut self) { print(self.n) }
+}
+fn main() { let d = D { n: 42 } }

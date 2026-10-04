@@ -1,0 +1,20 @@
+// A value's own `drop` runs before its fields are released.
+struct Guard { tag: Str }
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        assert(false, "dropped ${self.tag}")
+    }
+}
+struct Outer { inner: Guard }
+
+impl Drop for Outer {
+    fn drop(&mut self) {
+        assert(false, "dropped outer")
+    }
+}
+
+fn main() {
+    let outer = Outer { inner: Guard { tag: "inner" } }
+    print("built")
+}

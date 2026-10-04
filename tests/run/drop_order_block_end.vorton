@@ -1,0 +1,16 @@
+// A value is released when the block that owns it ends, before the code
+// after the block runs.
+struct Guard { tag: Str }
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        assert(false, "dropped ${self.tag}")
+    }
+}
+fn main() {
+    {
+        let inner = Guard { tag: "inner block" }
+        print("in block")
+    }
+    print("after block")
+}

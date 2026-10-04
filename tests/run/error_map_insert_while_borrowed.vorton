@@ -1,0 +1,9 @@
+// Storing the value of a key may add the key and grow the map, so it
+// conflicts with a borrow of any value in the map.
+fn main() {
+    let mut m: Map<Int, Int> = Map::new()
+    m[0] = 42
+    let r = &m[0]
+    m[1] = 1
+    print(r)
+}

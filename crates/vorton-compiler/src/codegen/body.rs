@@ -43,7 +43,7 @@ pub(super) fn function(
     literals: &mut Literals,
 ) -> String {
     let types = &program.types;
-    let body = crate::lower::lower(function, types);
+    let body = &program.bodies[index];
     let mut definitions = vec![Vec::new(); body.locals.len()];
     for block in &body.blocks {
         for statement in &block.statements {
@@ -58,7 +58,7 @@ pub(super) fn function(
         program,
         types,
         index,
-        body: &body,
+        body,
         definitions,
         literals,
         declarations: String::new(),
@@ -87,20 +87,6 @@ pub(super) fn function(
         emitter.declarations,
         emitter.code
     )
-}
-
-/// If `place` is the value of a key in a map, the key's projection and the
-/// map's place.
-fn map_entry(body: &Body, types: &Types, place: &Place) -> Option<(Projection, Place)> {
-    let (last, prefix) = place.projections.split_last()?;
-    if !matches!(last, Projection::Index(_) | Projection::ConstantIndex(_)) {
-        return None;
-    }
-    let map = Place {
-        local: place.local,
-        projections: prefix.to_vec(),
-    };
-    matches!(types.kind(body.place_type(types, &map)), TypeKind::Map(..)).then_some((*last, map))
 }
 
 struct Emitter<'a> {
@@ -396,7 +382,7 @@ impl<'a> Emitter<'a> {
             }
             return;
         }
-        if let Some((key, map)) = map_entry(body, self.types, destination) {
+        if let Some((key, map)) = body.map_entry(self.types, destination) {
             self.insert(&map, key, value, ty);
             return;
         }

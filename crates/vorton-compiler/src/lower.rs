@@ -64,7 +64,77 @@ pub(crate) fn lower(function: &Function, types: &Types) -> Body {
         }
         builder.return_(span);
     }
+    #[cfg(debug_assertions)]
+    assert_released(&builder.body, types, &function.name);
     builder.body
+}
+
+/// Checks that every path to a return releases each local that holds
+/// something to release, so no branch of lowering forgets a scope.
+#[cfg(debug_assertions)]
+fn assert_released(body: &Body, types: &Types, name: &str) {
+    use std::collections::BTreeSet;
+    let owning = |local: Local| {
+        body.locals[local].reference.is_none() && types.needs_release(body.locals[local].ty)
+    };
+    // The locals that may hold something at the start of each block.
+    let mut starts: Vec<Option<BTreeSet<Local>>> = vec![None; body.blocks.len()];
+    starts[0] = Some(
+        body.parameters
+            .iter()
+            .copied()
+            .filter(|&l| owning(l))
+            .collect(),
+    );
+    let mut work = vec![0];
+    while let Some(block) = work.pop() {
+        let mut filled = starts[block]
+            .clone()
+            .expect("a block on the worklist was reached");
+        for statement in &body.blocks[block].statements {
+            match &statement.kind {
+                StatementKind::Assign(destination, value) => {
+                    if let Rvalue::Use(Operand::Move(place)) = value
+                        && place.projections.is_empty()
+                    {
+                        filled.remove(&place.local);
+                    }
+                    if !body.defines_pointer(destination, value) && owning(destination.local) {
+                        filled.insert(destination.local);
+                    }
+                }
+                StatementKind::Release(local) => {
+                    filled.remove(local);
+                }
+            }
+        }
+        if let TerminatorKind::Return = body.blocks[block].terminator.kind {
+            let kept = filled
+                .iter()
+                .filter(|&&local| local != body.result)
+                .collect::<Vec<_>>();
+            assert!(
+                kept.is_empty(),
+                "`{name}` returns without releasing locals {kept:?}"
+            );
+        }
+        for successor in body.successors(block) {
+            let changed = match &mut starts[successor] {
+                Some(start) => {
+                    let before = start.len();
+                    start.extend(filled.iter().copied());
+                    start.len() != before
+                }
+                start @ None => {
+                    *start = Some(filled.clone());
+                    true
+                }
+            };
+            if changed {
+                work.push(successor);
+            }
+        }
+    }
 }
 
 /// A span for the synthetic steps of a function: its last expression, or
@@ -1477,9 +1547,12 @@ impl Builder<'_> {
                         guard.span,
                     );
                     // A rejected arm gives back what its bindings took, so
-                    // the next arms see the subject whole.
+                    // the next arms see the subject whole, and releases the
+                    // rest of its bindings and the guard's temporaries.
                     self.current = rejected;
                     self.unbind(alternative, &base, subject_ty, guard.span);
+                    let depth = self.scopes.len() - 1;
+                    self.release_from(depth, guard.span);
                     self.goto(next_arm, guard.span);
                     self.current = accepted;
                 }

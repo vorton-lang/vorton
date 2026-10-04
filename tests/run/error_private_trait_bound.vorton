@@ -1,0 +1,6 @@
+// A private trait cannot bound a type parameter of a public function.
+mod secret {
+    trait Quiet {}
+    pub fn hush<T: Quiet>(value: T) -> Int { 0 }
+}
+fn main() {}

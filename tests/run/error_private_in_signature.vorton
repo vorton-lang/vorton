@@ -1,0 +1,6 @@
+// A private type cannot appear in the signature of a public function.
+mod secret {
+    struct Hidden { pub n: Int }
+    pub fn expose() -> Hidden { Hidden { n: 42 } }
+}
+fn main() { print(secret::expose().n) }

@@ -271,6 +271,22 @@ impl Body {
             )
     }
 
+    /// If `place` is the value of a key in a map, the key's projection and
+    /// the map's place. Storing there may add the key, which changes the
+    /// map.
+    pub(crate) fn map_entry(&self, types: &Types, place: &Place) -> Option<(Projection, Place)> {
+        let (last, prefix) = place.projections.split_last()?;
+        if !matches!(last, Projection::Index(_) | Projection::ConstantIndex(_)) {
+            return None;
+        }
+        let map = Place {
+            local: place.local,
+            projections: prefix.to_vec(),
+        };
+        matches!(types.kind(self.place_type(types, &map)), TypeKind::Map(..))
+            .then_some((*last, map))
+    }
+
     /// The type of the value at `place`.
     pub(crate) fn place_type(&self, types: &Types, place: &Place) -> Type {
         let mut ty = self.locals[place.local].ty;

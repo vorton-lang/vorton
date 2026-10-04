@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::exhaustive;
+use crate::mir::{Body, Operand as MirOperand, Rvalue, StatementKind};
 use crate::project::{
     CoreRoles, EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
     ResolvedConstructEntry, ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedField,
@@ -93,6 +94,10 @@ pub enum CheckDiagnosticKind {
     AmbiguousMethod,
     /// A private field, method or trait used outside its module.
     InaccessibleMember,
+    /// A private type or trait in a public signature, field or payload.
+    PrivateInInterface,
+    /// A hand-written `drop` that can reach `print`.
+    ConsoleInDrop,
     /// A recursive call passes type arguments that could grow without end.
     PolymorphicRecursion,
 }
@@ -101,6 +106,8 @@ pub enum CheckDiagnosticKind {
 pub(crate) struct Program {
     pub(crate) types: Types,
     pub(crate) functions: Vec<Function>,
+    /// The IR of each function.
+    pub(crate) bodies: Vec<Body>,
     pub(crate) main: usize,
 }
 
@@ -560,6 +567,7 @@ struct NominalDeclaration<'a> {
     origin: OriginRef,
     /// The module that declares it, where its private fields are visible.
     module: ModuleRef,
+    public: bool,
 }
 
 /// Where an item may be used: anywhere if it is public, otherwise in the
@@ -597,6 +605,9 @@ struct FoundFunction<'a> {
     origin: OriginRef,
     /// The type a method belongs to.
     owner: Option<Type>,
+    /// Whether code outside its module can call it, so its signature is a
+    /// public interface.
+    public: bool,
 }
 
 /// The inherent methods and associated functions of each struct or enum
@@ -666,6 +677,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                     shape,
                     origin: declaration.origin.clone(),
                     module: identity.module.clone(),
+                    public: declaration.public,
                 });
                 continue;
             }
@@ -685,6 +697,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                         function,
                         origin: declaration.origin.clone(),
                         owner: None,
+                        public: declaration.public,
                     });
                 }
                 ResolvedDeclarationKind::InherentImpl(implementation) => {
@@ -787,12 +800,15 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                     message: format!("`{}` already has a method `{name}`", types.name(owner)),
                 });
             }
+            // A method of a private type cannot be reached from outside,
+            // whatever its own visibility.
             functions_found.push(FoundFunction {
                 name: format!("{}_{name}", types.name(owner)),
                 identity: member.identity.clone(),
                 function,
                 origin: member_origin,
                 owner: Some(owner),
+                public: member.public && nominals.declarations[declaration].public,
             });
         }
     }
@@ -833,6 +849,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         });
     }
     check_keys(&mut types, &nominals)?;
+    check_interfaces(&functions_found, &nominals, &traits, &traits_found)?;
 
     let mut signatures = BTreeMap::new();
     for (index, found) in functions_found.iter().enumerate() {
@@ -910,7 +927,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         };
         // Moves and borrows are checked on the IR, which follows every path.
         let body = crate::lower::lower(&function, &types);
-        crate::borrowck::check(&body, &|span| at(origin, span))?;
+        crate::borrowck::check(&body, &types, &|span| at(origin, span))?;
         functions.push(function);
     }
     check_recursion(&calls, &types)?;
@@ -938,7 +955,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         .iter()
         .map(|found| !signatures[&found.identity].type_parameters.is_empty())
         .collect::<Vec<_>>();
-    let (functions, main) = crate::mono::instantiate_functions(
+    let (functions, main, templates) = crate::mono::instantiate_functions(
         &mut types,
         &mut |types, declaration, arguments| {
             instantiate(types, &nominals, declaration, arguments, 0)
@@ -949,11 +966,173 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         &trait_impls,
         traits.display,
     )?;
+    let bodies = functions
+        .iter()
+        .map(|function| crate::lower::lower(function, &types))
+        .collect::<Vec<_>>();
+    let origins = templates
+        .iter()
+        .map(|&template| functions_found[template].origin.clone())
+        .collect::<Vec<_>>();
+    check_drops(&bodies, &types, &origins)?;
     Ok(Program {
         types,
         functions,
+        bodies,
         main,
     })
+}
+
+/// Rejects a hand-written `drop` that can reach `print`: in 0.1 a `Drop`
+/// cannot use the console. It runs after instantiation, when every call,
+/// and every hand-written comparison or `clone` that an operation runs, is
+/// known.
+fn check_drops(
+    bodies: &[Body],
+    types: &Types,
+    origins: &[OriginRef],
+) -> Result<(), CheckDiagnostic> {
+    // What each function does that can reach the console, in order: a
+    // `print` (`None`), or a call of another function.
+    let uses = bodies
+        .iter()
+        .map(|body| console_uses(body, types))
+        .collect::<Vec<_>>();
+    let mut console = uses
+        .iter()
+        .map(|uses| uses.iter().any(|(_, callee)| callee.is_none()))
+        .collect::<Vec<_>>();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (function, uses) in uses.iter().enumerate() {
+            if !console[function]
+                && uses
+                    .iter()
+                    .any(|(_, callee)| callee.is_some_and(|callee| console[callee]))
+            {
+                console[function] = true;
+                changed = true;
+            }
+        }
+    }
+    let mut drops = types
+        .written
+        .iter()
+        .filter_map(|(ty, written)| written.drop.map(|drop| (drop, *ty)))
+        .collect::<Vec<_>>();
+    drops.sort_unstable();
+    for (drop, ty) in drops {
+        let Some(&(span, callee)) = uses[drop]
+            .iter()
+            .find(|(_, callee)| callee.is_none_or(|callee| console[callee]))
+        else {
+            continue;
+        };
+        let what = if callee.is_none() {
+            "prints"
+        } else {
+            "can print"
+        };
+        return Err(CheckDiagnostic {
+            kind: CheckDiagnosticKind::ConsoleInDrop,
+            primary: Some(at(&origins[drop], span)),
+            message: format!(
+                "this {what}, but the `drop` of `{}` cannot use the console in 0.1",
+                types.name(ty)
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The steps of `body` that print, and the functions it calls, with their
+/// spans: named calls, and the hand-written comparisons and `clone`s that
+/// comparing or cloning a value runs, for the value's type and the types
+/// inside it.
+fn console_uses(body: &Body, types: &Types) -> Vec<(Span, Option<usize>)> {
+    let mut uses = Vec::new();
+    for block in &body.blocks {
+        for statement in &block.statements {
+            let StatementKind::Assign(_, value) = &statement.kind else {
+                continue;
+            };
+            let span = statement.span;
+            match value {
+                Rvalue::Intrinsic {
+                    intrinsic: Intrinsic::Print,
+                    ..
+                } => uses.push((span, None)),
+                Rvalue::Call {
+                    callee: Callee::Function(callee),
+                    ..
+                } => uses.push((span, Some(*callee))),
+                Rvalue::Binary(operator, left, _) if !is_arithmetic(*operator) => {
+                    let ty = match left {
+                        MirOperand::Copy(place) | MirOperand::Move(place) => {
+                            body.place_type(types, place)
+                        }
+                        _ => continue,
+                    };
+                    for callee in written_inside(types, ty) {
+                        uses.push((span, Some(callee)));
+                    }
+                }
+                Rvalue::Builtin {
+                    builtin: Builtin::Clone,
+                    receiver,
+                    ..
+                } => {
+                    for callee in written_inside(types, body.place_type(types, receiver)) {
+                        uses.push((span, Some(callee)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    uses
+}
+
+fn is_arithmetic(operator: BinaryOperator) -> bool {
+    matches!(
+        operator,
+        BinaryOperator::Add
+            | BinaryOperator::Subtract
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide
+            | BinaryOperator::Remainder
+            | BinaryOperator::LogicAnd
+            | BinaryOperator::LogicOr
+            | BinaryOperator::RangeExclusive
+            | BinaryOperator::RangeInclusive
+    )
+}
+
+/// The hand-written comparison and `clone` functions of `ty` and of the
+/// types stored inside it, which comparing or cloning it may run.
+fn written_inside(types: &Types, ty: Type) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        if !seen.insert(ty) {
+            continue;
+        }
+        if let Some(written) = types.written.get(&ty) {
+            found.extend(
+                [written.eq, written.partial_cmp, written.cmp, written.clone]
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        match types.kind(ty) {
+            TypeKind::List(element) | TypeKind::Set(element) => pending.push(*element),
+            TypeKind::Map(key, value) => pending.extend([*key, *value]),
+            _ => pending.extend(types.components(ty)),
+        }
+    }
+    found
 }
 
 /// Collects the trait declarations. `Self` in their method signatures is
@@ -1185,12 +1364,14 @@ fn collect_trait_impls<'a>(
                 });
             };
             methods[position] = Some(functions.len());
+            // The trait's declaration is the interface of its methods.
             functions.push(FoundFunction {
                 name: format!("{}_{name}", types.name(owner)),
                 identity: member.identity.clone(),
                 function,
                 origin: member_origin,
                 owner: Some(owner),
+                public: false,
             });
         }
         let methods = methods
@@ -1583,6 +1764,144 @@ fn contains_by_value(types: &Types, ty: Type, target: Type, seen: &mut BTreeSet<
     types.components(ty).into_iter().any(|component| {
         component == target
             || (seen.insert(component) && contains_by_value(types, component, target, seen))
+    })
+}
+
+/// Rejects a private type or trait in a public interface: the signature of
+/// a public function, of a public method of a public type, or of a method
+/// of a public trait; a public field of a public struct; and a field of a
+/// variant of a public enum. Code outside the module could otherwise hold
+/// or name what it cannot see.
+fn check_interfaces(
+    functions: &[FoundFunction],
+    nominals: &Nominals,
+    traits: &Traits,
+    traits_found: &[(EntityId, &crate::project::ResolvedDeclaration, bool)],
+) -> Result<(), CheckDiagnostic> {
+    let private = |ty: &ResolvedType| private_in(ty, nominals, traits);
+    let error = |origin: &OriginRef, (span, name): (Span, String), place: &str| CheckDiagnostic {
+        kind: CheckDiagnosticKind::PrivateInInterface,
+        primary: Some(at(origin, span)),
+        message: format!("`{name}` is private, so it cannot appear in {place}"),
+    };
+    let signature_private = |type_parameters: &[crate::project::ResolvedTypeParameter],
+                             parameters: &[crate::project::ResolvedParameter],
+                             return_type: &Option<ResolvedType>| {
+        type_parameters
+            .iter()
+            .flat_map(|parameter| &parameter.bounds)
+            .find_map(|bound| private_named(bound, nominals, traits))
+            .or_else(|| {
+                parameters
+                    .iter()
+                    .filter_map(|parameter| parameter.annotation.as_ref())
+                    .find_map(private)
+            })
+            .or_else(|| return_type.as_ref().and_then(private))
+    };
+    for function in functions.iter().filter(|function| function.public) {
+        let signature = function.function;
+        if let Some(found) = signature_private(
+            &signature.type_parameters,
+            &signature.parameters,
+            &signature.return_type,
+        ) {
+            let place = format!("the public signature of `{}`", function.identity.name);
+            return Err(error(&function.origin, found, &place));
+        }
+    }
+    for declaration in nominals
+        .declarations
+        .iter()
+        .filter(|declaration| declaration.public)
+    {
+        let found = match &declaration.shape {
+            Shape::Struct(fields) => fields
+                .iter()
+                .filter(|field| field.public)
+                .find_map(|field| private(&field.ty)),
+            Shape::Enum(variants) => variants.iter().find_map(|variant| match &variant.fields {
+                ResolvedVariantFields::Unit => None,
+                ResolvedVariantFields::Positional(fields) => fields.iter().find_map(private),
+                ResolvedVariantFields::Named(fields) => {
+                    fields.iter().find_map(|field| private(&field.ty))
+                }
+            }),
+        };
+        if let Some(found) = found {
+            let place = format!("the public fields of `{}`", declaration.name);
+            return Err(error(&declaration.origin, found, &place));
+        }
+    }
+    for (identity, declaration, core) in traits_found {
+        let ResolvedDeclarationKind::Trait { members, .. } = &declaration.kind else {
+            continue;
+        };
+        if *core || !declaration.public {
+            continue;
+        }
+        for member in members {
+            let ResolvedTraitMemberKind::Method(signature) = &member.kind else {
+                continue;
+            };
+            if let Some(found) = signature_private(
+                &signature.type_parameters,
+                &signature.parameters,
+                &signature.return_type,
+            ) {
+                let place = format!("the public trait `{}`", identity.name);
+                return Err(error(&declaration.origin, found, &place));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The span and name of the first private type or trait that `ty` names.
+fn private_in(ty: &ResolvedType, nominals: &Nominals, traits: &Traits) -> Option<(Span, String)> {
+    match &ty.kind {
+        ResolvedTypeKind::Named(named) => private_named(named, nominals, traits),
+        ResolvedTypeKind::Grouped(inner) => private_in(inner, nominals, traits),
+        ResolvedTypeKind::Tuple(elements) => elements
+            .iter()
+            .find_map(|element| private_in(element, nominals, traits)),
+        ResolvedTypeKind::Function {
+            parameters,
+            return_type,
+            ..
+        } => parameters
+            .iter()
+            .find_map(|parameter| private_in(&parameter.ty, nominals, traits))
+            .or_else(|| {
+                return_type
+                    .as_deref()
+                    .and_then(|result| private_in(result, nominals, traits))
+            }),
+    }
+}
+
+fn private_named(
+    named: &ResolvedNamedType,
+    nominals: &Nominals,
+    traits: &Traits,
+) -> Option<(Span, String)> {
+    if let ResolvedReference::Exact { target, .. } = &named.reference {
+        let public = if let Some(&index) = nominals.by_identity.get(target) {
+            Some(nominals.declarations[index].public)
+        } else {
+            traits
+                .by_identity
+                .get(target)
+                .map(|&index| traits.declarations[index].visibility.public)
+        };
+        if public == Some(false) {
+            return Some((named.span, target.name.clone()));
+        }
+    }
+    named.arguments.iter().find_map(|argument| match argument {
+        ResolvedTypeArgument::Type(ty) | ResolvedTypeArgument::AssociatedType { value: ty, .. } => {
+            private_in(ty, nominals, traits)
+        }
     })
 }
 

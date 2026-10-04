@@ -1,0 +1,15 @@
+// A private type may appear in a private field of a public struct, and in
+// the methods of a private type, whatever their own visibility.
+mod store {
+    struct Secret { code: Int }
+    impl Secret {
+        pub fn doubled(&self) -> Secret { Secret { code: self.code * 2 } }
+    }
+    pub struct Vault { secret: Secret }
+    pub fn open() -> Vault { Vault { secret: Secret { code: 21 } } }
+    pub fn peek(vault: &Vault) -> Int { vault.secret.doubled().code }
+}
+fn main() {
+    let vault = store::open()
+    print(store::peek(&vault))
+}

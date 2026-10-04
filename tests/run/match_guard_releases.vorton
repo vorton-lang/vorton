@@ -1,0 +1,27 @@
+// A guard that rejects its arm releases the arm's bindings and the
+// guard's temporaries before the next arm is tried.
+fn check(s: Str) -> Bool { false }
+
+fn main() {
+    match "${42}" {
+        s if false => print(s)
+        _ => print("fallback")
+    }
+    match 0 {
+        _ if check("${42}") => print("yes")
+        _ => print("fallback")
+    }
+    let pair = ("${1}", ["${2}"])
+    match pair {
+        (text, list) if text.len() > list.len() + 5 => print("long")
+        (text, list) => print("${text} ${list[0]}")
+    }
+    let mut i = 0
+    while i < 3 {
+        match "${i}" {
+            s if s == "1" => print("one")
+            _ => {}
+        }
+        i += 1
+    }
+}

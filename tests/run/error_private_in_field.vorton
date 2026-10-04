@@ -1,0 +1,8 @@
+// A private type cannot appear in a public field of a public struct.
+mod shapes {
+    struct Hidden { n: Int }
+    pub struct Open {
+        pub inner: List<Hidden>,
+    }
+}
+fn main() {}
