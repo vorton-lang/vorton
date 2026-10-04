@@ -14,6 +14,8 @@ const CORE_TRAITS: &[&str] = &[
     "PartialOrd",
     "Ord",
     "Drop",
+    "Clone",
+    "Copy",
     "Display",
     "Debug",
     "Hash",
@@ -905,6 +907,8 @@ impl ResolverState {
             partial_ord: self.require_core_method_trait("PartialOrd", "partial_cmp")?,
             ord: self.require_core_method_trait("Ord", "cmp")?,
             drop: self.require_core_method_trait("Drop", "drop")?,
+            clone: self.require_core_method_trait("Clone", "clone")?,
+            copy: self.require_core_empty_trait("Copy")?,
             display: self.require_core_method_trait("Display", "to_str")?,
             debug: self.require_core_method_trait("Debug", "debug")?,
             hash: self.require_core_method_trait("Hash", "hash")?,
@@ -2369,6 +2373,16 @@ fn validate_core_profile(
     )?;
     let drop_members =
         validate_core_trait_supertraits(core, body, "Drop", &roles.drop.declaration, &[])?;
+    let clone_members =
+        validate_core_trait_supertraits(core, body, "Clone", &roles.clone.declaration, &[])?;
+    let copy_members = validate_core_trait_supertraits(
+        core,
+        body,
+        "Copy",
+        &roles.copy,
+        &[&roles.clone.declaration],
+    )?;
+    debug_assert!(copy_members.is_empty());
     let display_members =
         validate_core_trait_supertraits(core, body, "Display", &roles.display.declaration, &[])?;
     let debug_members =
@@ -2467,6 +2481,19 @@ fn validate_core_profile(
         Some(BorrowKind::Mutable),
         &unit_type,
     )?;
+    let (parameters, result) = validate_core_method_header(
+        core,
+        "Clone",
+        "clone",
+        &roles.clone.method,
+        clone_members,
+        &[Some(BorrowKind::Shared)],
+        CoreMethodEffect::Inferred,
+    )?;
+    require_core_self_parameter(core, "Clone", "clone", &roles.clone, 0, parameters[0])?;
+    require_core_return_type(core, "Clone", "clone", &roles.clone.method, result, |ty| {
+        resolved_type_is_self(ty, &roles.clone.declaration)
+    })?;
     validate_simple_core_method(
         core,
         "Display",
@@ -6091,6 +6118,8 @@ fn core_role_bindings(roles: &CoreRoles) -> BTreeMap<String, EntityId> {
         ("PartialOrd", &roles.partial_ord.declaration),
         ("Ord", &roles.ord.declaration),
         ("Drop", &roles.drop.declaration),
+        ("Clone", &roles.clone.declaration),
+        ("Copy", &roles.copy),
         ("Display", &roles.display.declaration),
         ("Debug", &roles.debug.declaration),
         ("Hash", &roles.hash.declaration),
@@ -6579,6 +6608,8 @@ mod tests {
             &roles.partial_ord.declaration,
             &roles.ord.declaration,
             &roles.drop.declaration,
+            &roles.clone.declaration,
+            &roles.copy,
             &roles.display.declaration,
             &roles.debug.declaration,
             &roles.hash.declaration,
@@ -6613,7 +6644,7 @@ mod tests {
                 .iter()
                 .filter(|identity| identity.kind == EntityKind::Trait)
                 .count(),
-            10
+            12
         );
 
         let members = [
@@ -6626,6 +6657,7 @@ mod tests {
             (&roles.partial_ord.method, &roles.partial_ord.declaration),
             (&roles.ord.method, &roles.ord.declaration),
             (&roles.drop.method, &roles.drop.declaration),
+            (&roles.clone.method, &roles.clone.declaration),
             (&roles.display.method, &roles.display.declaration),
             (&roles.debug.method, &roles.debug.declaration),
             (&roles.hash.method, &roles.hash.declaration),

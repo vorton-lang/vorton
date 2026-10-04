@@ -27,6 +27,12 @@ pub trait Drop {
     fn drop(&mut self) -> Unit
 }
 
+pub trait Clone {
+    fn clone(&self) -> Self
+}
+
+pub trait Copy: Clone {}
+
 pub trait Display {
     fn to_str(&self) -> Str
 }

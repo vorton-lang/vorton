@@ -539,6 +539,8 @@ pub(crate) struct CoreRoles {
     pub(crate) partial_ord: CoreMethodRole,
     pub(crate) ord: CoreMethodRole,
     pub(crate) drop: CoreMethodRole,
+    pub(crate) clone: CoreMethodRole,
+    pub(crate) copy: EntityId,
     pub(crate) display: CoreMethodRole,
     pub(crate) debug: CoreMethodRole,
     pub(crate) hash: CoreMethodRole,
