@@ -289,6 +289,19 @@ pub(crate) enum Rvalue {
 }
 
 impl Rvalue {
+    /// Whether the rvalue is a borrow: a [`Rvalue::Ref`], or a call that
+    /// returns one. Only a [`StatementKind::Bind`] holds a borrow.
+    pub(crate) fn is_borrow(&self) -> bool {
+        matches!(
+            self,
+            Self::Ref(..)
+                | Self::Call {
+                    borrow: Some(_),
+                    ..
+                }
+        )
+    }
+
     /// The operands the rvalue reads or takes.
     pub(crate) fn operands(&self) -> Vec<&Operand> {
         match self {
@@ -505,24 +518,63 @@ impl Body {
             .projections
             .iter()
             .fold(self.locals[place.local].ty, |ty, projection| {
-                projection_type(types, ty, projection)
+                projection_type(types, ty, projection).expect("each step of a place fits its type")
             })
+    }
+
+    /// The type of the value `operand` gives.
+    pub(crate) fn operand_type(&self, types: &Types, operand: &Operand) -> Type {
+        match operand {
+            Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) => {
+                self.place_type(types, place)
+            }
+            Operand::Borrowed(reference) => self.locals[*reference].ty,
+            Operand::Constant(constant) => constant.ty(),
+        }
     }
 }
 
-/// The type of the part that `projection` reaches in a value of type `ty`.
-pub(crate) fn projection_type(types: &Types, ty: Type, projection: &Projection) -> Type {
-    match projection {
-        Projection::Field(index) => match types.kind(ty) {
-            TypeKind::Range => [Type::INT, Type::INT, Type::BOOL][*index],
-            _ => types.components(ty)[*index],
-        },
-        Projection::VariantField { variant, field } => {
-            types.variants(ty)[*variant].fields[*field].ty
+impl Constant {
+    pub(crate) fn ty(&self) -> Type {
+        match self {
+            Self::Int(_) => Type::INT,
+            Self::Float(_) => Type::FLOAT,
+            Self::Bool(_) => Type::BOOL,
+            Self::Str(_) => Type::STR,
+            Self::Unit => Type::UNIT,
         }
-        Projection::Index(_) | Projection::ConstantIndex(_) | Projection::Position(_) => {
-            element_type(types, ty)
+    }
+}
+
+/// The types of the fields of a `Range`: its start, its end, and whether it
+/// includes the end.
+pub(crate) const RANGE_FIELDS: [Type; 3] = [Type::INT, Type::INT, Type::BOOL];
+
+/// The type of the part that `projection` reaches in a value of type `ty`,
+/// or `None` if a value of that type has no such part.
+pub(crate) fn projection_type(types: &Types, ty: Type, projection: &Projection) -> Option<Type> {
+    match (projection, types.kind(ty)) {
+        (Projection::Field(index), TypeKind::Range) => RANGE_FIELDS.get(*index).copied(),
+        (Projection::Field(index), TypeKind::Tuple(_) | TypeKind::Nominal { .. })
+            if !types.is_enum(ty) =>
+        {
+            types.components(ty).get(*index).copied()
         }
+        (Projection::VariantField { variant, field }, TypeKind::Nominal { .. })
+            if types.is_enum(ty) =>
+        {
+            let fields = &types.variants(ty).get(*variant)?.fields;
+            fields.get(*field).map(|field| field.ty)
+        }
+        (
+            Projection::Index(_) | Projection::ConstantIndex(_),
+            TypeKind::List(element) | TypeKind::Map(_, element),
+        )
+        | (
+            Projection::Position(_),
+            TypeKind::List(element) | TypeKind::Map(_, element) | TypeKind::Set(element),
+        ) => Some(*element),
+        _ => None,
     }
 }
 

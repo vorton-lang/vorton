@@ -24,6 +24,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
+use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::exhaustive;
 use crate::project::{
     CoreRoles, EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
@@ -39,79 +40,7 @@ use crate::typed::{
     Arm, Block, BorrowTarget, Builtin, Callee, Expr, ExprKind, ForSource, Function, Impls,
     Intrinsic, Local, Pattern, Place, Program, Projection, Receiver, Statement, StrMethod,
 };
-pub(crate) use crate::types::{
-    Comparison, Field, InstantiationError, NominalInfo, Type, TypeKind, Types, Variant,
-};
-
-/// One deterministic failure from checking a resolved project.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckDiagnostic {
-    pub kind: CheckDiagnosticKind,
-    pub primary: Option<OriginRef>,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckDiagnosticKind {
-    /// Valid source outside the constructs the current checker supports.
-    Unsupported,
-    TypeMismatch,
-    ArgumentCount,
-    /// An assignment target is not rooted in a `let mut` local or `mut` parameter.
-    NotAssignable,
-    /// `break` or `continue` appears outside a loop.
-    OutsideLoop,
-    /// A numeric literal cannot be represented by its type.
-    LiteralOutOfRange,
-    /// The entry library root has no `fn main()` without parameters that returns `Unit`.
-    MissingMain,
-    /// A field or tuple element that the type does not have.
-    UnknownField,
-    /// A construction leaves a field without a value.
-    MissingField,
-    /// The type arguments of a generic construction cannot be determined.
-    CannotInfer,
-    /// A `match`, `if let` alternative or destructuring misses possible values.
-    NonExhaustive,
-    /// A local is used after its entity value may have been moved away.
-    UseAfterMove,
-    /// An entity is moved out of a field, an element or a borrow.
-    CannotMove,
-    /// A method that the receiver's type does not have.
-    UnknownMethod,
-    /// A place is changed while a loop or borrow still reads it.
-    BorrowConflict,
-    /// A returned borrow names a place that ends when the function returns.
-    BorrowOutlives,
-    /// Two impls give a type methods of the same name.
-    DuplicateMethod,
-    /// A struct, enum or tuple contains itself by value and has no finite
-    /// size.
-    RecursiveType,
-    /// A type argument does not satisfy a bound of its type parameter, or a
-    /// type lacks the supertrait impls of a trait it implements.
-    UnsatisfiedBound,
-    /// A trait is implemented twice for one type, or by hand where only the
-    /// compiler implements it.
-    DuplicateImpl,
-    /// A trait impl lacks a method of the trait.
-    MissingMethod,
-    /// Several traits give the receiver's type a method of the called name.
-    AmbiguousMethod,
-    /// A private field, method or trait used outside its module.
-    InaccessibleMember,
-    /// A private type or trait in a public signature, field or payload.
-    PrivateInInterface,
-    /// A hand-written `drop` that can reach `print`.
-    ConsoleInDrop,
-    /// A recursive call passes type arguments that could grow without end.
-    PolymorphicRecursion,
-    /// A bound that no type parameter can have, such as `Drop`.
-    InvalidBound,
-    /// A change of a `let mut` variable of a value type that is never read
-    /// afterwards.
-    UnreadChange,
-}
+use crate::types::{Comparison, Field, NominalInfo, Type, TypeKind, Types, Variant};
 
 #[derive(Clone)]
 struct Signature {
@@ -372,7 +301,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 };
                 if let Some(bound) = bound {
                     return Err(unsupported(
-                        Some(at(&declaration.origin, bound.span)),
+                        Some(declaration.origin.at(bound.span)),
                         "bounds on the type parameters of structs and enums",
                     ));
                 }
@@ -459,6 +388,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         types.nominals.push(NominalInfo {
             name: declaration.name.clone(),
             is_enum: matches!(declaration.shape, Shape::Enum(_)),
+            origin: declaration.origin.clone(),
         });
     }
     // Every non-generic declaration is instantiated, so its fields are checked
@@ -580,7 +510,6 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         &traits,
         &signatures,
         &functions_found,
-        &nominals,
         &mut types,
     )?;
 
@@ -673,13 +602,9 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         main,
         impls: trait_impls,
         display: traits.display,
-        nominal_origins: nominals
-            .declarations
-            .iter()
-            .map(|declaration| declaration.origin.clone())
-            .collect(),
     })
 }
+
 /// Collects the trait declarations. `Self` in their method signatures is
 /// the type parameter at index 0.
 fn collect_traits<'a>(
@@ -950,7 +875,6 @@ fn check_trait_impls(
     traits: &Traits,
     signatures: &BTreeMap<EntityId, Signature>,
     functions: &[FoundFunction],
-    nominals: &Nominals,
     types: &mut Types,
 ) -> Result<Impls, CheckDiagnostic> {
     let mut impls = Impls::new();
@@ -974,7 +898,6 @@ fn check_trait_impls(
         for (position, &function) in implementation.methods.iter().enumerate() {
             let expected = substitute_signature(
                 types,
-                nominals,
                 &traits.signatures[trait_index][position],
                 &[implementation.owner],
             )?;
@@ -1018,14 +941,13 @@ fn check_trait_impls(
 /// `signature` with its type parameters replaced by `arguments`.
 fn substitute_signature(
     types: &mut Types,
-    nominals: &Nominals,
     signature: &Signature,
     arguments: &[Type],
 ) -> Result<Signature, CheckDiagnostic> {
     let substitute = |types: &mut Types, ty| {
         types
             .substitute(ty, arguments)
-            .map_err(|error| instantiation_error(types, nominals, error))
+            .map_err(|error| error.diagnostic(types))
     };
     let mut result = signature.clone();
     for (ty, _) in &mut result.parameters {
@@ -1199,7 +1121,7 @@ fn instantiate(
     template(types, nominals, declaration)?;
     types
         .instantiate(declaration, arguments)
-        .map_err(|error| instantiation_error(types, nominals, error))
+        .map_err(|error| error.diagnostic(types))
 }
 
 /// The template of `declaration`: the declaration applied to its own type
@@ -1272,52 +1194,10 @@ fn template(
     };
     types
         .finish_template(declaration, variants)
-        .map_err(|error| instantiation_error(types, nominals, error))?;
+        .map_err(|error| error.diagnostic(types))?;
     Ok(template)
 }
 
-fn instantiation_error(
-    types: &Types,
-    nominals: &Nominals,
-    error: InstantiationError,
-) -> CheckDiagnostic {
-    instantiation_diagnostic(
-        types,
-        &|declaration| nominals.declarations[declaration].origin.clone(),
-        error,
-    )
-}
-
-/// The diagnostic of a struct or enum that cannot be instantiated; `origin`
-/// gives where each declaration is.
-pub(crate) fn instantiation_diagnostic(
-    types: &Types,
-    origin: &dyn Fn(usize) -> OriginRef,
-    error: InstantiationError,
-) -> CheckDiagnostic {
-    match error {
-        InstantiationError::TooDeep { declaration } => unsupported(
-            Some(origin(declaration)),
-            "generic types nested this deeply",
-        ),
-        // A type that contains itself by value has no finite size. It is
-        // rejected as soon as its fields are known, before anything walks
-        // them.
-        InstantiationError::ContainsItself(ty) => {
-            let TypeKind::Nominal { declaration, .. } = *types.kind(ty) else {
-                unreachable!("only structs and enums contain themselves")
-            };
-            CheckDiagnostic {
-                kind: CheckDiagnosticKind::RecursiveType,
-                primary: Some(origin(declaration)),
-                message: format!(
-                    "`{}` contains itself, so it has no finite size; keep the inner values in a `List` or a `Map`",
-                    types.name(ty)
-                ),
-            }
-        }
-    }
-}
 /// Rejects a private type or trait in a public interface: the signature and
 /// bounds of a public function, of a public method of a public type, or of
 /// a method of a public trait; an associated type of a public trait or of a
@@ -1381,7 +1261,7 @@ fn check_interfaces(
     let check = |origin: &OriginRef, found: Option<(Span, String)>, place: &str| match found {
         Some((span, name)) => Err(CheckDiagnostic {
             kind: CheckDiagnosticKind::PrivateInInterface,
-            primary: Some(at(origin, span)),
+            primary: Some(origin.at(span)),
             message: format!("`{name}` is private, so it cannot appear in {place}"),
         }),
         None => Ok(()),
@@ -1591,7 +1471,7 @@ fn check_signature(
                 if trait_index == traits.drop {
                     return Err(CheckDiagnostic {
                         kind: CheckDiagnosticKind::InvalidBound,
-                        primary: Some(at(origin, bound.span)),
+                        primary: Some(origin.at(bound.span)),
                         message:
                             "`Drop` cannot be a bound; `drop` runs only when a value is released"
                                 .to_owned(),
@@ -1599,13 +1479,13 @@ fn check_signature(
                 }
                 if !traits.supported(trait_index) {
                     return Err(unsupported(
-                        Some(at(origin, bound.span)),
+                        Some(origin.at(bound.span)),
                         &format!("bounds on `{}`", traits.declarations[trait_index].name),
                     ));
                 }
                 traits.closure(trait_index, &mut bounds.traits);
             } else {
-                return Err(unsupported(Some(at(origin, bound.span)), "this bound"));
+                return Err(unsupported(Some(origin.at(bound.span)), "this bound"));
             }
         }
         let ty = types.intern(TypeKind::Param {
@@ -1691,7 +1571,7 @@ fn resolve_type(
                 ..
             } = &named.reference
             else {
-                return Err(unsupported(Some(at(origin, ty.span)), "this type"));
+                return Err(unsupported(Some(origin.at(ty.span)), "this type"));
             };
             // `Self` in an impl stands for the impl's target type.
             if target.kind == EntityKind::SelfType
@@ -1717,7 +1597,7 @@ fn resolve_type(
             let mut arguments = Vec::new();
             for argument in &named.arguments {
                 let ResolvedTypeArgument::Type(argument) = argument else {
-                    return Err(unsupported(Some(at(origin, ty.span)), "this type"));
+                    return Err(unsupported(Some(origin.at(ty.span)), "this type"));
                 };
                 arguments.push(resolve_type(
                     types,
@@ -1744,7 +1624,7 @@ fn resolve_type(
             {
                 if *element != Type::INT {
                     return Err(unsupported(
-                        Some(at(origin, ty.span)),
+                        Some(origin.at(ty.span)),
                         "ranges of other types than `Int`",
                     ));
                 }
@@ -1757,9 +1637,9 @@ fn resolve_type(
                 let kind = match (target.name.as_str(), arguments.as_slice()) {
                     ("Map", [_, value]) => TypeKind::Map(*key, *value),
                     ("Set", [_]) => TypeKind::Set(*key),
-                    _ => return Err(unsupported(Some(at(origin, ty.span)), "this type")),
+                    _ => return Err(unsupported(Some(origin.at(ty.span)), "this type")),
                 };
-                nominals.require_key(types, *key, at(origin, ty.span))?;
+                nominals.require_key(types, *key, origin.at(ty.span))?;
                 return Ok(types.intern(kind));
             }
             if target.kind == EntityKind::LanguageType && arguments.is_empty() {
@@ -1781,7 +1661,7 @@ fn resolve_type(
                 if arguments.len() != expected {
                     return Err(CheckDiagnostic {
                         kind: CheckDiagnosticKind::ArgumentCount,
-                        primary: Some(at(origin, ty.span)),
+                        primary: Some(origin.at(ty.span)),
                         message: format!(
                             "`{}` takes {expected} type arguments, found {}",
                             target.name,
@@ -1791,19 +1671,11 @@ fn resolve_type(
                 }
                 return instantiate(types, nominals, declaration, arguments);
             }
-            Err(unsupported(Some(at(origin, ty.span)), "this type"))
+            Err(unsupported(Some(origin.at(ty.span)), "this type"))
         }
         ResolvedTypeKind::Function { .. } => {
-            Err(unsupported(Some(at(origin, ty.span)), "function types"))
+            Err(unsupported(Some(origin.at(ty.span)), "function types"))
         }
-    }
-}
-
-pub(crate) fn at(origin: &OriginRef, span: Span) -> OriginRef {
-    OriginRef {
-        library: origin.library,
-        source: origin.source.clone(),
-        span,
     }
 }
 
@@ -4397,7 +4269,6 @@ impl BodyChecker<'_> {
         }
         let signature = substitute_signature(
             self.types,
-            self.nominals,
             &self.traits.signatures[trait_index][method],
             &[ty],
         )?;
@@ -4479,7 +4350,7 @@ impl BodyChecker<'_> {
         }
         self.types
             .substitute(ty, arguments)
-            .map_err(|error| instantiation_error(self.types, self.nominals, error))
+            .map_err(|error| error.diagnostic(self.types))
     }
 
     /// The type a parameter of a generic callee expects, once `bindings`

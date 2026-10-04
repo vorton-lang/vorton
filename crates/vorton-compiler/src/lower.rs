@@ -80,30 +80,7 @@ pub(crate) fn lower(function: &Function, types: &Types) -> (Body, Vec<Change>) {
     if builder.block_into(Some(Place::local(result)), &function.body) {
         builder.return_(span);
     }
-    #[cfg(debug_assertions)]
-    assert_released(&builder.body, types, &function.name);
     (builder.body, builder.changes)
-}
-
-/// Checks that every path to a return releases each local that holds
-/// something to release, so no branch of lowering forgets a scope.
-#[cfg(debug_assertions)]
-fn assert_released(body: &Body, types: &Types, name: &str) {
-    let starts = body.maybe_filled(types);
-    for block in body.reverse_postorder() {
-        if !matches!(body.blocks[block].terminator.kind, TerminatorKind::Return) {
-            continue;
-        }
-        let mut filled = starts[block].clone();
-        for statement in &body.blocks[block].statements {
-            body.fill(types, &statement.kind, &mut filled);
-        }
-        filled.remove(&body.result);
-        assert!(
-            filled.is_empty(),
-            "`{name}` returns without releasing locals {filled:?}"
-        );
-    }
 }
 
 /// A span for the synthetic steps of a function: its last expression, or
@@ -156,29 +133,9 @@ impl Builder<'_> {
     /// a whole reference local makes it point there; anything else into a
     /// place rooted at a reference local writes where it points.
     fn assign(&mut self, place: Place, value: Rvalue, span: Span) {
-        let points = self.is_reference(&place)
-            && matches!(
-                value,
-                Rvalue::Ref(..)
-                    | Rvalue::Call {
-                        borrow: Some(_),
-                        ..
-                    }
-            );
-        let kind = if points {
+        let kind = if self.is_reference(&place) && value.is_borrow() {
             StatementKind::Bind(place.local, value)
         } else {
-            debug_assert!(
-                !matches!(
-                    value,
-                    Rvalue::Ref(..)
-                        | Rvalue::Call {
-                            borrow: Some(_),
-                            ..
-                        }
-                ),
-                "only a `Bind` holds a borrow"
-            );
             StatementKind::Assign(place, value)
         };
         self.push(kind, span);

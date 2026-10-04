@@ -27,8 +27,7 @@ pub mod native;
 use std::collections::BTreeMap;
 
 pub use ast::Program;
-pub use checker::{CheckDiagnostic, CheckDiagnosticKind};
-pub use diagnostic::FrontendDiagnostic;
+pub use diagnostic::{CheckDiagnostic, CheckDiagnosticKind, FrontendDiagnostic};
 pub use prepare::PreparedProject;
 pub use project::{
     CoreRoleDiagnostic, CoreRoleIssue, FileModulePath, FileModulePathError,
@@ -123,30 +122,26 @@ fn instantiate_checked(checked: typed::Program) -> Result<mir::Program, CheckDia
         main,
         impls,
         display,
-        nominal_origins,
     } = checked;
     let mut templates = Vec::new();
     for ((function, origin), generic) in functions.iter().zip(&origins).zip(generic) {
         let (mut body, changes) = lower::lower(function, &types);
-        let at = |span| checker::at(origin, span);
+        verify::verify(&body, &types, &function.name, "lowering");
+        let at = |span| origin.at(span);
+        // Both analyses name statements by position, so they run before
+        // the checks are inserted.
         let checks = borrowck::check(&body, &types, &at)?;
         unread::check(&body, &changes, &at)?;
         body.insert_checks(checks);
-        verify::verify(&body, &types, &function.name, "lowering");
+        verify::verify(&body, &types, &function.name, "borrow checking");
         templates.push(mono::Template {
             name: function.name.clone(),
             body,
             generic,
         });
     }
-    let mut program =
-        mono::instantiate(types, &templates, main, &impls, display, &|types, error| {
-            checker::instantiation_diagnostic(
-                types,
-                &|declaration| nominal_origins[declaration].clone(),
-                error,
-            )
-        })?;
+    let mut program = mono::instantiate(types, &templates, main, &impls, display)?;
+
     capabilities::check_drops(&program, &origins)?;
     tail::mark(&mut program);
     for instance in &program.functions {

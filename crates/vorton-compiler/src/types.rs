@@ -1,10 +1,13 @@
-//! The checker's type table.
+//! The type table of the whole pipeline.
 //!
 //! Every type is interned once and named by a [`Type`] index, so the checker
 //! and code generation compare types by index and never rebuild them from
 //! source spellings.
 
 use std::collections::{HashMap, HashSet};
+
+use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
+use crate::project::OriginRef;
 
 /// An interned type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -91,6 +94,8 @@ enum Search {
 pub(crate) struct NominalInfo {
     pub(crate) name: String,
     pub(crate) is_enum: bool,
+    /// Where the declaration is.
+    pub(crate) origin: OriginRef,
 }
 
 /// One way to build a nominal value. A struct has exactly one variant.
@@ -174,6 +179,34 @@ pub(crate) enum InstantiationError {
     TooDeep { declaration: usize },
     /// The instance contains itself by value, so it has no finite size.
     ContainsItself(Type),
+}
+
+impl InstantiationError {
+    pub(crate) fn diagnostic(self, types: &Types) -> CheckDiagnostic {
+        match self {
+            Self::TooDeep { declaration } => CheckDiagnostic {
+                kind: CheckDiagnosticKind::Unsupported,
+                primary: Some(types.nominals[declaration].origin.clone()),
+                message: "generic types nested this deeply are not supported yet".to_owned(),
+            },
+            // A type that contains itself by value has no finite size. It is
+            // rejected as soon as its fields are known, before anything walks
+            // them.
+            Self::ContainsItself(ty) => {
+                let TypeKind::Nominal { declaration, .. } = *types.kind(ty) else {
+                    unreachable!("only structs and enums contain themselves")
+                };
+                CheckDiagnostic {
+                    kind: CheckDiagnosticKind::RecursiveType,
+                    primary: Some(types.nominals[declaration].origin.clone()),
+                    message: format!(
+                        "`{}` contains itself, so it has no finite size; keep the inner values in a `List` or a `Map`",
+                        types.name(ty)
+                    ),
+                }
+            }
+        }
+    }
 }
 
 impl Types {

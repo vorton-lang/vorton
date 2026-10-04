@@ -142,6 +142,17 @@ pub struct OriginRef {
     pub span: Span,
 }
 
+impl OriginRef {
+    /// The range `span` of the same source.
+    pub(crate) fn at(&self, span: Span) -> Self {
+        Self {
+            library: self.library,
+            source: self.source.clone(),
+            span,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NameNamespace {
     Type,

@@ -29,8 +29,6 @@ pub(crate) struct Program {
     /// The core `Display` trait, which built-in types implement without an
     /// impl.
     pub(crate) display: usize,
-    /// Where each struct and enum is declared.
-    pub(crate) nominal_origins: Vec<OriginRef>,
 }
 
 /// The impl of each trait for each type: the function of each trait

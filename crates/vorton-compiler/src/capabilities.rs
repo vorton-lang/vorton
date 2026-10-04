@@ -6,7 +6,7 @@
 //! cannot use the console.
 
 use crate::ast::Span;
-use crate::checker::{CheckDiagnostic, CheckDiagnosticKind, at};
+use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::mir::{Body, Program, Rvalue, StatementKind};
 use crate::project::OriginRef;
 use crate::typed::{Callee, Intrinsic};
@@ -67,7 +67,7 @@ pub(crate) fn check_drops(program: &Program, origins: &[OriginRef]) -> Result<()
         };
         return Err(CheckDiagnostic {
             kind: CheckDiagnosticKind::ConsoleInDrop,
-            primary: Some(at(&origins[program.functions[drop].template], span)),
+            primary: Some(origins[program.functions[drop].template].at(span)),
             message: format!(
                 "this {what}, but the `drop` of `{}` cannot use the console in 0.1",
                 types.name(ty)

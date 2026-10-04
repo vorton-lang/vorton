@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::checker::CheckDiagnostic;
+use crate::diagnostic::CheckDiagnostic;
 use crate::mir::{Body, Instance, Operand, Place, Program, Rvalue, StatementKind};
 use crate::typed::{Callee, Impls};
 use crate::types::{InstantiationError, Type, Types};
@@ -37,14 +37,13 @@ pub(crate) struct Template {
 
 /// Returns the program that code generation emits: every non-generic
 /// function, in order, then the instances of generic ones as calls reach
-/// them. `error` reports a struct or enum that cannot be instantiated.
+/// them.
 pub(crate) fn instantiate(
     mut types: Types,
     templates: &[Template],
     main: usize,
     impls: &Impls,
     display: usize,
-    error: &dyn Fn(&Types, InstantiationError) -> CheckDiagnostic,
 ) -> Result<Program, CheckDiagnostic> {
     let mut instances = Instances::default();
     for (index, template) in templates.iter().enumerate() {
@@ -64,7 +63,7 @@ pub(crate) fn instantiate(
             display,
         }
         .body(&mut body)
-        .map_err(|failure| error(&types, failure))?;
+        .map_err(|error| error.diagnostic(&types))?;
         functions.push(Instance {
             name: template.name.clone(),
             template: index,

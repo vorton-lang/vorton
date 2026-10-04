@@ -34,7 +34,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::Span;
-use crate::checker::{CheckDiagnostic, CheckDiagnosticKind};
+use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::mir::{
     BlockId, Body, Check, Constant, Local, Operand, Place, Projection, RefKind, Rvalue,
     StatementKind, TerminatorKind, projection_type,
@@ -213,7 +213,7 @@ fn immovable(body: &Body, types: &Types, from_call: &[bool], place: &Place) -> O
             }
             Projection::Field(_) | Projection::VariantField { .. } => {}
         }
-        ty = projection_type(types, ty, projection);
+        ty = projection_type(types, ty, projection).expect("each step of a place fits its type");
     }
     None
 }

@@ -1,6 +1,78 @@
-//! Structured frontend diagnostics.
+//! Structured diagnostics: those of the frontend, and those of checking a
+//! resolved project, which every later pass reports.
 
 use crate::ast::Span;
+use crate::project::OriginRef;
+
+/// One deterministic failure from checking a resolved project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckDiagnostic {
+    pub kind: CheckDiagnosticKind,
+    pub primary: Option<OriginRef>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckDiagnosticKind {
+    /// Valid source outside the constructs the current checker supports.
+    Unsupported,
+    TypeMismatch,
+    ArgumentCount,
+    /// An assignment target is not rooted in a `let mut` local or `mut` parameter.
+    NotAssignable,
+    /// `break` or `continue` appears outside a loop.
+    OutsideLoop,
+    /// A numeric literal cannot be represented by its type.
+    LiteralOutOfRange,
+    /// The entry library root has no `fn main()` without parameters that returns `Unit`.
+    MissingMain,
+    /// A field or tuple element that the type does not have.
+    UnknownField,
+    /// A construction leaves a field without a value.
+    MissingField,
+    /// The type arguments of a generic construction cannot be determined.
+    CannotInfer,
+    /// A `match`, `if let` alternative or destructuring misses possible values.
+    NonExhaustive,
+    /// A local is used after its entity value may have been moved away.
+    UseAfterMove,
+    /// An entity is moved out of a field, an element or a borrow.
+    CannotMove,
+    /// A method that the receiver's type does not have.
+    UnknownMethod,
+    /// A place is changed while a loop or borrow still reads it.
+    BorrowConflict,
+    /// A returned borrow names a place that ends when the function returns.
+    BorrowOutlives,
+    /// Two impls give a type methods of the same name.
+    DuplicateMethod,
+    /// A struct, enum or tuple contains itself by value and has no finite
+    /// size.
+    RecursiveType,
+    /// A type argument does not satisfy a bound of its type parameter, or a
+    /// type lacks the supertrait impls of a trait it implements.
+    UnsatisfiedBound,
+    /// A trait is implemented twice for one type, or by hand where only the
+    /// compiler implements it.
+    DuplicateImpl,
+    /// A trait impl lacks a method of the trait.
+    MissingMethod,
+    /// Several traits give the receiver's type a method of the called name.
+    AmbiguousMethod,
+    /// A private field, method or trait used outside its module.
+    InaccessibleMember,
+    /// A private type or trait in a public signature, field or payload.
+    PrivateInInterface,
+    /// A hand-written `drop` that can reach `print`.
+    ConsoleInDrop,
+    /// A recursive call passes type arguments that could grow without end.
+    PolymorphicRecursion,
+    /// A bound that no type parameter can have, such as `Drop`.
+    InvalidBound,
+    /// A change of a `let mut` variable of a value type that is never read
+    /// afterwards.
+    UnreadChange,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontendDiagnostic {

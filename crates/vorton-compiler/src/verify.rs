@@ -6,13 +6,13 @@
 //! build, so a release build never emits code for an IR that a debug build
 //! would have rejected.
 
-use crate::mir::{Body, Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind};
+use crate::mir::{Body, Operand, Place, Rvalue, StatementKind, TerminatorKind, projection_type};
 use crate::types::{Type, TypeKind, Types};
 
 /// Panics if `body` breaks an invariant of the IR; `stage` names the pass
 /// that produced it.
 pub(crate) fn verify(body: &Body, types: &Types, name: &str, stage: &str) {
-    if let Err(problem) = check(body, types) {
+    if let Err(problem) = check(body, types).and_then(|()| released(body, types)) {
         panic!("internal error: the IR of `{name}` after {stage} is invalid: {problem}");
     }
 }
@@ -31,14 +31,7 @@ fn check(body: &Body, types: &Types) -> Result<(), String> {
             match &statement.kind {
                 StatementKind::Assign(destination, value) => {
                     place_type(body, types, destination).map_err(at)?;
-                    if matches!(
-                        value,
-                        Rvalue::Ref(..)
-                            | Rvalue::Call {
-                                borrow: Some(_),
-                                ..
-                            }
-                    ) {
+                    if value.is_borrow() {
                         return Err(at("a borrow is stored instead of bound".to_owned()));
                     }
                     rvalue(body, types, value).map_err(at)?;
@@ -47,15 +40,10 @@ fn check(body: &Body, types: &Types) -> Result<(), String> {
                     if local(*reference).map_err(at)?.reference.is_none() {
                         return Err(at("binds a local that is not a reference".to_owned()));
                     }
-                    match value {
-                        Rvalue::Ref(_, place) => {
-                            place_type(body, types, place).map_err(at)?;
-                        }
-                        Rvalue::Call {
-                            borrow: Some(_), ..
-                        } => rvalue(body, types, value).map_err(at)?,
-                        _ => return Err(at("binds something other than a borrow".to_owned())),
+                    if !value.is_borrow() {
+                        return Err(at("binds something other than a borrow".to_owned()));
                     }
+                    rvalue(body, types, value).map_err(at)?;
                 }
                 StatementKind::Unpack(taken) => {
                     for (target, place) in taken {
@@ -114,6 +102,28 @@ fn check(body: &Body, types: &Types) -> Result<(), String> {
                 }
             }
             TerminatorKind::Return | TerminatorKind::Unreachable => {}
+        }
+    }
+    Ok(())
+}
+
+/// Checks that every path to a return releases each local that holds
+/// something to release, so no branch of lowering forgets a scope.
+fn released(body: &Body, types: &Types) -> Result<(), String> {
+    let starts = body.maybe_filled(types);
+    for block in body.reverse_postorder() {
+        if !matches!(body.blocks[block].terminator.kind, TerminatorKind::Return) {
+            continue;
+        }
+        let mut filled = starts[block].clone();
+        for statement in &body.blocks[block].statements {
+            body.fill(types, &statement.kind, &mut filled);
+        }
+        filled.remove(&body.result);
+        if !filled.is_empty() {
+            return Err(format!(
+                "block {block} returns without releasing locals {filled:?}"
+            ));
         }
     }
     Ok(())
@@ -202,20 +212,12 @@ fn operand(body: &Body, types: &Types, operand: &Operand, stores: bool) -> Resul
     Ok(())
 }
 
+/// The type `operand` gives, once its place is known to fit.
 fn operand_type(body: &Body, types: &Types, operand: &Operand) -> Result<Type, String> {
-    Ok(match operand {
-        Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) => {
-            place_type(body, types, place)?
-        }
-        Operand::Borrowed(reference) => body.locals[*reference].ty,
-        Operand::Constant(constant) => match constant {
-            crate::mir::Constant::Int(_) => Type::INT,
-            crate::mir::Constant::Float(_) => Type::FLOAT,
-            crate::mir::Constant::Bool(_) => Type::BOOL,
-            crate::mir::Constant::Str(_) => Type::STR,
-            crate::mir::Constant::Unit => Type::UNIT,
-        },
-    })
+    if let Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) = operand {
+        place_type(body, types, place)?;
+    }
+    Ok(body.operand_type(types, operand))
 }
 
 /// The type at `place`, if each step of it fits the type it is taken in.
@@ -223,41 +225,11 @@ fn place_type(body: &Body, types: &Types, place: &Place) -> Result<Type, String>
     let Some(local) = body.locals.get(place.local) else {
         return Err(format!("local {} does not exist", place.local));
     };
-    let mut ty = local.ty;
-    for projection in &place.projections {
-        ty = match (projection, types.kind(ty)) {
-            (Projection::Field(index), TypeKind::Range) if *index < 3 => {
-                [Type::INT, Type::INT, Type::BOOL][*index]
-            }
-            (Projection::Field(index), TypeKind::Tuple(_) | TypeKind::Nominal { .. })
-                if !types.is_enum(ty) && *index < types.components(ty).len() =>
-            {
-                types.components(ty)[*index]
-            }
-            (Projection::VariantField { variant, field }, TypeKind::Nominal { .. })
-                if types.is_enum(ty)
-                    && types
-                        .variants(ty)
-                        .get(*variant)
-                        .is_some_and(|fields| *field < fields.fields.len()) =>
-            {
-                types.variants(ty)[*variant].fields[*field].ty
-            }
-            (
-                Projection::Index(_) | Projection::ConstantIndex(_),
-                TypeKind::List(element) | TypeKind::Map(_, element),
-            ) => *element,
-            (
-                Projection::Position(_),
-                TypeKind::List(element) | TypeKind::Map(_, element) | TypeKind::Set(element),
-            ) => *element,
-            _ => {
-                return Err(format!(
-                    "a step of a place does not fit `{}`",
-                    types.name(ty)
-                ));
-            }
-        };
-    }
-    Ok(ty)
+    place
+        .projections
+        .iter()
+        .try_fold(local.ty, |ty, projection| {
+            projection_type(types, ty, projection)
+                .ok_or_else(|| format!("a step of a place does not fit `{}`", types.name(ty)))
+        })
 }

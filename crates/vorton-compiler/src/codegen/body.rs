@@ -27,8 +27,8 @@ use super::{
 };
 use crate::ast::{BinaryOperator, UnaryOperator};
 use crate::mir::{
-    BlockId, Body, Constant, Local, Operand, Place, Program, Projection, Rvalue, StatementKind,
-    TerminatorKind,
+    BlockId, Body, Constant, Local, Operand, Place, Program, Projection, RANGE_FIELDS, Rvalue,
+    StatementKind, TerminatorKind,
 };
 use crate::typed::{Builtin, Callee, Intrinsic, StrMethod};
 use crate::types::{Operation, Type, TypeKind, Types};
@@ -384,7 +384,7 @@ impl<'a> Emitter<'a> {
             (ty, code) = match *projection {
                 Projection::Field(index) => match types.kind(ty) {
                     TypeKind::Range => (
-                        [Type::INT, Type::INT, Type::BOOL][index],
+                        RANGE_FIELDS[index],
                         format!("{code}.{}", ["start", "end", "inclusive"][index]),
                     ),
                     _ => (
@@ -459,19 +459,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn operand_type(&self, operand: &Operand) -> Type {
-        match operand {
-            Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) => {
-                self.body.place_type(self.types, place)
-            }
-            Operand::Borrowed(reference) => self.body.locals[*reference].ty,
-            Operand::Constant(constant) => match constant {
-                Constant::Int(_) => Type::INT,
-                Constant::Float(_) => Type::FLOAT,
-                Constant::Bool(_) => Type::BOOL,
-                Constant::Str(_) => Type::STR,
-                Constant::Unit => Type::UNIT,
-            },
-        }
+        self.body.operand_type(self.types, operand)
     }
 
     /// `operand` as an owned value: a copy of a counted value is retained,

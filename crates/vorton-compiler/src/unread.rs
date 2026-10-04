@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use crate::ast::Span;
 use crate::borrowck::{operand_places, rvalue_places};
-use crate::checker::{CheckDiagnostic, CheckDiagnosticKind};
+use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::lower::Change;
 use crate::mir::{Body, Local, Operand, Place, StatementKind, TerminatorKind};
 use crate::project::OriginRef;
