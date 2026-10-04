@@ -5134,53 +5134,9 @@ impl BodyChecker<'_> {
     /// Whether `clone()` applies to `ty`: every type parameter it mentions
     /// is bound by `Clone` or `Copy`.
     fn can_clone(&self, ty: Type) -> bool {
-        self.can_clone_in(ty, &mut Vec::new())
+        self.types
+            .clones(ty, &|index| self.type_parameters[index].clone)
     }
-
-    /// A type with a hand-written `Clone` has it; a type with a hand-written
-    /// `Drop` has no other; any other type has it when all its parts do.
-    /// `pending` holds the types being decided further up, as in
-    /// [`Types::compares`].
-    fn can_clone_in(&self, ty: Type, pending: &mut Vec<Type>) -> bool {
-        if let Some(written) = self.types.written.get(&ty) {
-            if written.clone.is_some() {
-                return true;
-            }
-            if written.drop.is_some() {
-                return false;
-            }
-        }
-        match self.types.kind(ty) {
-            TypeKind::Param { index, .. } => self.type_parameters[*index].clone,
-            TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
-                if pending.contains(&ty) {
-                    return true;
-                }
-                pending.push(ty);
-                let result = self
-                    .types
-                    .components(ty)
-                    .into_iter()
-                    .all(|part| self.can_clone_in(part, pending));
-                pending.pop();
-                result
-            }
-            TypeKind::List(element) | TypeKind::Set(element) => {
-                self.can_clone_in(*element, pending)
-            }
-            TypeKind::Map(key, value) => {
-                self.can_clone_in(*key, pending) && self.can_clone_in(*value, pending)
-            }
-            TypeKind::Int
-            | TypeKind::Float
-            | TypeKind::Bool
-            | TypeKind::Str
-            | TypeKind::Unit
-            | TypeKind::Never
-            | TypeKind::Range => true,
-        }
-    }
-
     /// Matches `pattern`, a type of a generic function's signature, against
     /// `actual`, binding the function's type parameters. Returns whether
     /// they fit. `Never` fits anything and binds nothing.

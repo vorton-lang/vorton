@@ -1,0 +1,39 @@
+// Deciding whether a type can be cloned looks at each type once, however
+// often the type's parts share a type: each level refers to the one below twice.
+struct S0 { n: List<Int> }
+struct S1 { a: List<S0>, b: List<S0> }
+struct S2 { a: List<S1>, b: List<S1> }
+struct S3 { a: List<S2>, b: List<S2> }
+struct S4 { a: List<S3>, b: List<S3> }
+struct S5 { a: List<S4>, b: List<S4> }
+struct S6 { a: List<S5>, b: List<S5> }
+struct S7 { a: List<S6>, b: List<S6> }
+struct S8 { a: List<S7>, b: List<S7> }
+struct S9 { a: List<S8>, b: List<S8> }
+struct S10 { a: List<S9>, b: List<S9> }
+struct S11 { a: List<S10>, b: List<S10> }
+struct S12 { a: List<S11>, b: List<S11> }
+struct S13 { a: List<S12>, b: List<S12> }
+struct S14 { a: List<S13>, b: List<S13> }
+struct S15 { a: List<S14>, b: List<S14> }
+struct S16 { a: List<S15>, b: List<S15> }
+struct S17 { a: List<S16>, b: List<S16> }
+struct S18 { a: List<S17>, b: List<S17> }
+struct S19 { a: List<S18>, b: List<S18> }
+struct S20 { a: List<S19>, b: List<S19> }
+struct S21 { a: List<S20>, b: List<S20> }
+struct S22 { a: List<S21>, b: List<S21> }
+struct S23 { a: List<S22>, b: List<S22> }
+struct S24 { a: List<S23>, b: List<S23> }
+struct S25 { a: List<S24>, b: List<S24> }
+struct S26 { a: List<S25>, b: List<S25> }
+struct S27 { a: List<S26>, b: List<S26> }
+struct S28 { a: List<S27>, b: List<S27> }
+struct S29 { a: List<S28>, b: List<S28> }
+struct S30 { a: List<S29>, b: List<S29> }
+fn main() {
+    let s = S30 { a: [], b: [] }
+    let t = s.clone()
+    print(t.a.len() + t.b.len())
+}
+

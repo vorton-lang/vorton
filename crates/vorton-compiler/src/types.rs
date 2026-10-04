@@ -503,6 +503,34 @@ impl Types {
         })
     }
 
+    /// Whether values of `ty` can be cloned: a type with a hand-written
+    /// `Clone` can, a type with a hand-written `Drop` and no `Clone` cannot,
+    /// and any other type can when its parts can, as [`Types::glue`] clones
+    /// them. `param` tells whether the type parameter at an index has
+    /// `Clone`. A recursive type can unless some part rules it out.
+    pub(crate) fn clones(&self, ty: Type, param: &dyn Fn(usize) -> bool) -> bool {
+        !self.search(ty, |ty| {
+            if let Some(written) = self.written.get(&ty) {
+                if written.clone.is_some() {
+                    return Search::Leaf;
+                }
+                if written.drop.is_some() {
+                    return Search::Found;
+                }
+            }
+            match self.kind(ty) {
+                TypeKind::Param { index, .. } if param(*index) => Search::Leaf,
+                TypeKind::Param { .. } => Search::Found,
+                _ => match self.glue(ty, Operation::Clone) {
+                    Glue::Parts(parts) => {
+                        Search::Into(parts.into_iter().map(|(part, _)| part).collect())
+                    }
+                    Glue::Written(_) => Search::Leaf,
+                },
+            }
+        })
+    }
+
     /// The hand-written functions that `operation` on a value of `ty` may
     /// run, directly or through the parts of the value.
     pub(crate) fn glue_functions(&self, ty: Type, operation: Operation) -> Vec<usize> {
