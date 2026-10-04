@@ -47,10 +47,8 @@ pub(super) fn function(
     let mut definitions = vec![Vec::new(); body.locals.len()];
     for block in &body.blocks {
         for statement in &block.statements {
-            if let StatementKind::Assign(destination, value) = &statement.kind
-                && body.defines_pointer(destination, value)
-            {
-                definitions[destination.local].push(value);
+            if let StatementKind::Bind(reference, value) = &statement.kind {
+                definitions[*reference].push(value);
             }
         }
     }
@@ -189,6 +187,7 @@ impl<'a> Emitter<'a> {
             }
             match &statement.kind {
                 StatementKind::Assign(destination, value) => self.assign(destination, value),
+                StatementKind::Bind(reference, value) => self.bind(*reference, value),
                 StatementKind::Release(local) => self.release(*local),
             }
         }
@@ -234,21 +233,23 @@ impl<'a> Emitter<'a> {
     fn tail_call(&self, block: BlockId, index: usize) -> Option<(&'a [Operand], Vec<Local>)> {
         let body = self.body;
         let data = &body.blocks[block];
-        let StatementKind::Assign(
-            destination,
-            Rvalue::Call {
-                callee: Callee::Function(callee),
-                arguments,
-                ..
-            },
-        ) = &data.statements[index].kind
+        let (destination, value) = match &data.statements[index].kind {
+            StatementKind::Assign(destination, value) => (destination.clone(), value),
+            StatementKind::Bind(reference, value) => (Place::local(*reference), value),
+            StatementKind::Release(_) => return None,
+        };
+        let Rvalue::Call {
+            callee: Callee::Function(callee),
+            arguments,
+            ..
+        } = value
         else {
             return None;
         };
         if *callee != self.index {
             return None;
         }
-        let ty = body.place_type(self.types, destination);
+        let ty = body.place_type(self.types, &destination);
         let releases = if ty == Type::NEVER {
             if index + 1 != data.statements.len()
                 || !matches!(data.terminator.kind, TerminatorKind::Unreachable)
@@ -257,7 +258,7 @@ impl<'a> Emitter<'a> {
             }
             (0..body.locals.len()).rev().collect()
         } else {
-            let result = *destination == Place::local(body.result);
+            let result = destination == Place::local(body.result);
             let unit = ty == Type::UNIT && body.locals[body.result].ty == Type::UNIT;
             if !result && !unit {
                 return None;
@@ -298,7 +299,7 @@ impl<'a> Emitter<'a> {
                         place,
                         Rvalue::Use(Operand::Constant(Constant::Unit)),
                     ) if body.place_type(self.types, place) == Type::UNIT => {}
-                    StatementKind::Assign(..) => return None,
+                    StatementKind::Assign(..) | StatementKind::Bind(..) => return None,
                 }
             }
             match body.blocks[current].terminator.kind {
@@ -370,33 +371,36 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Makes the reference local `reference` point at the place `value`
+    /// names.
+    fn bind(&mut self, reference: Local, value: &'a Rvalue) {
+        let ty = self.body.locals[reference].ty;
+        let pointer = match value {
+            Rvalue::Ref(_, place) => self.place(place).map(|code| format!("&{code}")),
+            Rvalue::Call {
+                callee, arguments, ..
+            } => {
+                let call = self.call(*callee, arguments);
+                if self.types.has_storage(ty) {
+                    Some(call)
+                } else {
+                    self.line(&format!("{call};"));
+                    None
+                }
+            }
+            _ => unreachable!("only borrows and calls make references point"),
+        };
+        if let Some(pointer) = pointer {
+            let name = self.variable(reference);
+            self.line(&format!("{name} = {pointer};"));
+        }
+    }
+
     /// Evaluates `value`, then checks that the destination exists, releases
     /// what it held, and stores the value.
     fn assign(&mut self, destination: &Place, value: &'a Rvalue) {
         let body = self.body;
         let ty = body.place_type(self.types, destination);
-        if body.defines_pointer(destination, value) {
-            let pointer = match value {
-                Rvalue::Ref(_, place) => self.place(place).map(|code| format!("&{code}")),
-                Rvalue::Call {
-                    callee, arguments, ..
-                } => {
-                    let call = self.call(*callee, arguments);
-                    if self.types.has_storage(ty) {
-                        Some(call)
-                    } else {
-                        self.line(&format!("{call};"));
-                        None
-                    }
-                }
-                _ => unreachable!("only borrows and calls define pointers"),
-            };
-            if let Some(pointer) = pointer {
-                let name = self.variable(destination.local);
-                self.line(&format!("{name} = {pointer};"));
-            }
-            return;
-        }
         if let Some((key, map)) = body.map_entry(self.types, destination) {
             self.insert(&map, key, value, ty);
             return;
@@ -553,7 +557,9 @@ impl<'a> Emitter<'a> {
 
     fn operand_type(&self, operand: &Operand) -> Type {
         match operand {
-            Operand::Copy(place) | Operand::Move(place) => self.body.place_type(self.types, place),
+            Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) => {
+                self.body.place_type(self.types, place)
+            }
             Operand::Borrowed(reference) => self.body.locals[*reference].ty,
             Operand::Constant(constant) => match constant {
                 Constant::Int(_) => Type::INT,
@@ -572,6 +578,7 @@ impl<'a> Emitter<'a> {
         match operand {
             Operand::Constant(constant) => self.constant(constant),
             Operand::Borrowed(reference) => self.pointer(*reference),
+            Operand::Inspect(_) => unreachable!("a step that stores a value is given a copy"),
             Operand::Copy(place) => {
                 let ty = self.body.place_type(self.types, place);
                 let code = self.place(place)?;
@@ -605,7 +612,9 @@ impl<'a> Emitter<'a> {
     fn read(&mut self, operand: &Operand) -> Option<String> {
         match operand {
             Operand::Constant(constant) => self.constant(constant),
-            Operand::Copy(place) | Operand::Move(place) => self.place(place),
+            Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) => {
+                self.place(place)
+            }
             Operand::Borrowed(reference) => self.pointer(*reference),
         }
     }

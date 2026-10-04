@@ -130,8 +130,30 @@ impl Builder<'_> {
             .push(Statement { kind, span });
     }
 
+    /// Stores `value` in `place`. A borrow, or a call that returns one, into
+    /// a whole reference local makes it point there; anything else into a
+    /// place rooted at a reference local writes where it points.
     fn assign(&mut self, place: Place, value: Rvalue, span: Span) {
-        self.push(StatementKind::Assign(place, value), span);
+        let points = place.projections.is_empty()
+            && self.body.locals[place.local].reference.is_some()
+            && matches!(
+                value,
+                Rvalue::Ref(..)
+                    | Rvalue::Call {
+                        borrow: Some(_),
+                        ..
+                    }
+            );
+        let kind = if points {
+            StatementKind::Bind(place.local, value)
+        } else {
+            debug_assert!(
+                !matches!(value, Rvalue::Ref(..)),
+                "only a `Bind` holds a borrow"
+            );
+            StatementKind::Assign(place, value)
+        };
+        self.push(kind, span);
     }
 
     /// Ends the current block with `kind`; code after it goes to a new block
@@ -1083,13 +1105,13 @@ impl Builder<'_> {
                 Rvalue::Ref(RefKind::Shared, place),
                 span,
             );
-            Some(Operand::Copy(Place::local(reference)))
+            Some(Operand::Inspect(Place::local(reference)))
         } else {
             let temporary = self.temporary(expression.ty);
             if !self.expr_into(Some(Place::local(temporary)), expression) {
                 return None;
             }
-            Some(Operand::Copy(Place::local(temporary)))
+            Some(Operand::Inspect(Place::local(temporary)))
         }
     }
 
@@ -1256,7 +1278,13 @@ impl Builder<'_> {
             _ => None,
         };
         if let Some(operation) = operation {
-            arguments.insert(0, Operand::Copy(receiver));
+            // An entity is looked at where it is; a value is read.
+            let receiver = if self.types.is_entity(receiver_ty) {
+                Operand::Inspect(receiver)
+            } else {
+                Operand::Copy(receiver)
+            };
+            arguments.insert(0, receiver);
             return Some(Rvalue::Glue {
                 operation,
                 operator: None,

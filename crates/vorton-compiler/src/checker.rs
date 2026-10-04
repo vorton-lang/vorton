@@ -713,7 +713,7 @@ fn console_uses(body: &Body, types: &Types) -> Vec<(Span, Option<usize>)> {
         for statement in &block.statements {
             let span = statement.span;
             let value = match &statement.kind {
-                StatementKind::Assign(_, value) => value,
+                StatementKind::Assign(_, value) | StatementKind::Bind(_, value) => value,
                 // A release may run a `drop`, which is checked on its own.
                 StatementKind::Release(_) => continue,
             };

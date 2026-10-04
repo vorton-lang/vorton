@@ -170,52 +170,53 @@ fn move_statement(
     state: &mut Empty,
     mut errors: Option<&mut Vec<Error>>,
 ) {
-    match statement {
-        StatementKind::Assign(destination, value) => {
-            if let Some(errors) = errors.as_deref_mut() {
-                for place in rvalue_places(value) {
-                    check_filled(body, state, &place, span, errors);
-                }
-            }
-            for operand in value.operands() {
-                if let Operand::Move(place) = operand {
-                    state.insert(moved_place(body, place));
-                }
-            }
-            if !body.defines_pointer(destination, value)
-                && !is_whole(body, destination)
-                && let Some(errors) = errors
-            {
-                // Writing through a reference needs it to point somewhere,
-                // and writing into a part needs the whole to be there.
-                let reference = body.locals[destination.local].reference.is_some();
-                let missing = state.iter().any(|empty| {
-                    if reference {
-                        *empty == Place::local(destination.local)
-                    } else {
-                        is_prefix(empty, destination)
-                            && empty.projections.len() < destination.projections.len()
-                    }
-                });
-                if missing {
-                    let local = &body.locals[destination.local];
-                    errors.push(Error {
-                        kind: CheckDiagnosticKind::UseAfterMove,
-                        span,
-                        message: format!(
-                            "`{}` is assigned to after its value may have been moved",
-                            local.name
-                        ),
-                    });
-                }
-            }
-            fill(state, destination);
-        }
+    let (written, value) = match statement {
+        StatementKind::Assign(destination, value) => (destination.clone(), value),
+        StatementKind::Bind(reference, value) => (Place::local(*reference), value),
         StatementKind::Release(local) => {
             state.retain(|place| place.local != *local);
             state.insert(Place::local(*local));
+            return;
+        }
+    };
+    if let Some(errors) = errors.as_deref_mut() {
+        for place in rvalue_places(value) {
+            check_filled(body, state, &place, span, errors);
         }
     }
+    for operand in value.operands() {
+        if let Operand::Move(place) = operand {
+            state.insert(moved_place(body, place));
+        }
+    }
+    if let StatementKind::Assign(destination, _) = statement
+        && !is_whole(body, destination)
+        && let Some(errors) = errors
+    {
+        // Writing through a reference needs it to point somewhere,
+        // and writing into a part needs the whole to be there.
+        let reference = body.locals[destination.local].reference.is_some();
+        let missing = state.iter().any(|empty| {
+            if reference {
+                *empty == Place::local(destination.local)
+            } else {
+                is_prefix(empty, destination)
+                    && empty.projections.len() < destination.projections.len()
+            }
+        });
+        if missing {
+            let local = &body.locals[destination.local];
+            errors.push(Error {
+                kind: CheckDiagnosticKind::UseAfterMove,
+                span,
+                message: format!(
+                    "`{}` is assigned to after its value may have been moved",
+                    local.name
+                ),
+            });
+        }
+    }
+    fill(state, &written);
 }
 
 /// What a move out of `place` leaves empty: the whole variable, or for a
@@ -304,15 +305,12 @@ fn check_borrows(body: &Body, types: &Types, graph: &Graph, errors: &mut Vec<Err
     let mut loan_at = std::collections::BTreeMap::new();
     for (block, data) in body.blocks.iter().enumerate() {
         for (index, statement) in data.statements.iter().enumerate() {
-            if let StatementKind::Assign(destination, value @ Rvalue::Ref(kind, place)) =
-                &statement.kind
-                && body.defines_pointer(destination, value)
-            {
+            if let StatementKind::Bind(reference, Rvalue::Ref(kind, place)) = &statement.kind {
                 loan_at.insert((block, index), loans.len());
                 loans.push(Loan {
                     place: place.clone(),
                     kind: *kind,
-                    reference: destination.local,
+                    reference: *reference,
                 });
             }
         }
@@ -404,7 +402,7 @@ fn carry(
     carried: &mut [BTreeSet<usize>],
 ) {
     match statement {
-        StatementKind::Assign(destination, value) if body.defines_pointer(destination, value) => {
+        StatementKind::Bind(reference, value) => {
             let mut loans = BTreeSet::new();
             match value {
                 Rvalue::Ref(_, place) => {
@@ -424,9 +422,9 @@ fn carry(
                         }
                     }
                 }
-                _ => unreachable!("only borrows and calls define pointers"),
+                _ => unreachable!("only borrows and calls make references point"),
             }
-            carried[destination.local] = loans;
+            carried[*reference] = loans;
         }
         StatementKind::Release(local) => carried[*local].clear(),
         StatementKind::Assign(..) => {}
@@ -485,28 +483,30 @@ fn terminator_uses(body: &Body, terminator: &TerminatorKind, live: &mut BTreeSet
 /// somewhere or ends.
 fn reference_uses(body: &Body, statement: &StatementKind) -> (Vec<usize>, Option<usize>) {
     let is_reference = |local: usize| body.locals[local].reference.is_some();
+    let value = match statement {
+        StatementKind::Assign(_, value) | StatementKind::Bind(_, value) => value,
+        StatementKind::Release(local) if is_reference(*local) => return (Vec::new(), Some(*local)),
+        StatementKind::Release(_) => return (Vec::new(), None),
+    };
+    let mut uses = rvalue_places(value)
+        .into_iter()
+        .map(|place| place.local)
+        .chain(value.operands().iter().filter_map(|operand| match operand {
+            Operand::Borrowed(local) => Some(*local),
+            _ => None,
+        }))
+        .filter(|&local| is_reference(local))
+        .collect::<Vec<_>>();
     match statement {
-        StatementKind::Assign(destination, value) => {
-            let mut uses = rvalue_places(value)
-                .into_iter()
-                .map(|place| place.local)
-                .chain(value.operands().iter().filter_map(|operand| match operand {
-                    Operand::Borrowed(local) => Some(*local),
-                    _ => None,
-                }))
-                .filter(|&local| is_reference(local))
-                .collect::<Vec<_>>();
-            if body.defines_pointer(destination, value) {
-                (uses, Some(destination.local))
-            } else {
-                if is_reference(destination.local) {
-                    uses.push(destination.local);
-                }
-                (uses, None)
+        StatementKind::Bind(reference, _) => (uses, Some(*reference)),
+        // Writing through a reference uses it.
+        StatementKind::Assign(destination, _) => {
+            if is_reference(destination.local) {
+                uses.push(destination.local);
             }
+            (uses, None)
         }
-        StatementKind::Release(local) if is_reference(*local) => (Vec::new(), Some(*local)),
-        StatementKind::Release(_) => (Vec::new(), None),
+        StatementKind::Release(_) => unreachable!("handled above"),
     }
 }
 
@@ -568,79 +568,112 @@ fn accesses(
             exempt: own.into_iter().collect(),
         });
     };
-    match statement {
+    let (destination, value) = match statement {
         StatementKind::Release(local) => {
             if body.locals[*local].reference.is_none() {
                 access(&Place::local(*local), Access::Release);
             }
+            return made;
         }
-        StatementKind::Assign(destination, value) => {
-            match value {
-                Rvalue::Ref(kind, place) => access(
-                    place,
-                    match kind {
-                        RefKind::Shared => Access::Share,
-                        RefKind::MutableArgument => Access::Reserve,
-                        RefKind::Mutable => Access::Borrow,
-                    },
-                ),
-                Rvalue::Discriminant(_) | Rvalue::Len(_) | Rvalue::Occupied { .. } => {}
-                _ => {
-                    for operand in value.operands() {
-                        match operand {
-                            Operand::Copy(place) => access(place, Access::ReadValue),
-                            Operand::Move(place) => access(place, Access::Move),
-                            Operand::Borrowed(_) | Operand::Constant(_) => {}
-                        }
+        StatementKind::Assign(destination, value) => (Some(destination), value),
+        StatementKind::Bind(_, value) => (None, value),
+    };
+    match value {
+        Rvalue::Ref(kind, place) => access(
+            place,
+            match kind {
+                RefKind::Shared => Access::Share,
+                RefKind::MutableArgument => Access::Reserve,
+                RefKind::Mutable => Access::Borrow,
+            },
+        ),
+        // Reading an enum's variant, a length or an occupied slot reads a
+        // value, which never conflicts.
+        Rvalue::Discriminant(_) | Rvalue::Len(_) | Rvalue::Occupied { .. } => {}
+        Rvalue::Use(_)
+        | Rvalue::Unary(..)
+        | Rvalue::Binary(..)
+        | Rvalue::Tuple(_)
+        | Rvalue::Construct { .. }
+        | Rvalue::List(_)
+        | Rvalue::EmptyMap
+        | Rvalue::Range { .. }
+        | Rvalue::Interpolate(_)
+        | Rvalue::Call { .. }
+        | Rvalue::Glue { .. }
+        | Rvalue::Builtin { .. }
+        | Rvalue::Intrinsic { .. }
+        | Rvalue::Take { .. } => {
+            for operand in value.operands() {
+                match operand {
+                    Operand::Copy(place) | Operand::Inspect(place) => {
+                        access(place, Access::ReadValue);
                     }
+                    Operand::Move(place) => access(place, Access::Move),
+                    Operand::Borrowed(_) | Operand::Constant(_) => {}
                 }
             }
-            if !body.defines_pointer(destination, value) {
-                // Storing the value of a key may add the key, which changes
-                // the map as a whole.
-                match body.map_entry(types, destination) {
-                    Some((_, map)) => access(&map, Access::Write),
-                    None => access(destination, Access::Write),
-                }
+        }
+    }
+    if let Some(destination) = destination {
+        // Storing the value of a key may add the key, which changes
+        // the map as a whole.
+        match body.map_entry(types, destination) {
+            Some((_, map)) => access(&map, Access::Write),
+            None => access(destination, Access::Write),
+        }
+    }
+    // A `&mut` argument or receiver takes effect when the call runs.
+    let activated = match value {
+        Rvalue::Call { arguments, .. } | Rvalue::Intrinsic { arguments, .. } => arguments
+            .iter()
+            .filter_map(|operand| match operand {
+                Operand::Borrowed(reference) => Some(*reference),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        Rvalue::Builtin { receiver, .. } => vec![receiver.local],
+        Rvalue::Use(_)
+        | Rvalue::Ref(..)
+        | Rvalue::Unary(..)
+        | Rvalue::Binary(..)
+        | Rvalue::Tuple(_)
+        | Rvalue::Construct { .. }
+        | Rvalue::List(_)
+        | Rvalue::EmptyMap
+        | Rvalue::Range { .. }
+        | Rvalue::Interpolate(_)
+        | Rvalue::Discriminant(_)
+        | Rvalue::Len(_)
+        | Rvalue::Occupied { .. }
+        | Rvalue::Glue { .. }
+        | Rvalue::Take { .. } => Vec::new(),
+    };
+    let siblings = activated
+        .iter()
+        .flat_map(|&reference| own_loans(loans, carried, reference))
+        .collect::<Vec<_>>();
+    for &reference in &activated {
+        for loan_index in own_loans(loans, carried, reference) {
+            let loan = &loans[loan_index];
+            if loan.kind != RefKind::MutableArgument {
+                continue;
             }
-            // A `&mut` argument or receiver takes effect when the call runs.
-            let activated = match value {
-                Rvalue::Call { arguments, .. } | Rvalue::Intrinsic { arguments, .. } => arguments
+            // The loans it is made through, and those of the other
+            // borrowed arguments that differ from it only in list
+            // indices, which are compared at run time.
+            let mut exempt = carried[reference].clone();
+            exempt.extend(
+                siblings
                     .iter()
-                    .filter_map(|operand| match operand {
-                        Operand::Borrowed(reference) => Some(*reference),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-                Rvalue::Builtin { receiver, .. } => vec![receiver.local],
-                _ => Vec::new(),
-            };
-            let siblings = activated
-                .iter()
-                .flat_map(|&reference| own_loans(loans, carried, reference))
-                .collect::<Vec<_>>();
-            for &reference in &activated {
-                for loan_index in own_loans(loans, carried, reference) {
-                    let loan = &loans[loan_index];
-                    if loan.kind != RefKind::MutableArgument {
-                        continue;
-                    }
-                    // The loans it is made through, and those of the other
-                    // borrowed arguments that differ from it only in list
-                    // indices, which are compared at run time.
-                    let mut exempt = carried[reference].clone();
-                    exempt.extend(
-                        siblings.iter().copied().filter(|&sibling| {
-                            differs_in_indices(&loans[sibling].place, &loan.place)
-                        }),
-                    );
-                    made.push(Made {
-                        place: loan.place.clone(),
-                        kind: Access::Borrow,
-                        exempt,
-                    });
-                }
-            }
+                    .copied()
+                    .filter(|&sibling| differs_in_indices(&loans[sibling].place, &loan.place)),
+            );
+            made.push(Made {
+                place: loan.place.clone(),
+                kind: Access::Borrow,
+                exempt,
+            });
         }
     }
     made
@@ -784,8 +817,10 @@ fn check_returned(
                 .statements
                 .iter()
                 .rev()
-                .find(|statement| {
-                    matches!(&statement.kind, StatementKind::Assign(destination, _) if destination.local == body.result)
+                .find(|statement| match &statement.kind {
+                    StatementKind::Assign(destination, _) => destination.local == body.result,
+                    StatementKind::Bind(reference, _) => *reference == body.result,
+                    StatementKind::Release(_) => false,
                 })
                 .map_or(block.terminator.span, |statement| statement.span);
             errors.push(Error {
@@ -831,14 +866,26 @@ fn rvalue_places(value: &Rvalue) -> Vec<Place> {
             places.push(Place::local(*container));
             places.push(Place::local(*position));
         }
-        _ => {}
+        // These read only their operands.
+        Rvalue::Use(_)
+        | Rvalue::Unary(..)
+        | Rvalue::Binary(..)
+        | Rvalue::Tuple(_)
+        | Rvalue::Construct { .. }
+        | Rvalue::List(_)
+        | Rvalue::EmptyMap
+        | Rvalue::Range { .. }
+        | Rvalue::Interpolate(_)
+        | Rvalue::Call { .. }
+        | Rvalue::Glue { .. }
+        | Rvalue::Intrinsic { .. } => {}
     }
     places
 }
 
 fn operand_places(operand: &Operand) -> Vec<Place> {
     match operand {
-        Operand::Copy(place) | Operand::Move(place) => {
+        Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) => {
             let mut places = vec![place.clone()];
             places.extend(index_locals(place));
             places

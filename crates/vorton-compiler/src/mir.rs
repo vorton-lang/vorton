@@ -3,8 +3,7 @@
 //! Each function is a control-flow graph of basic blocks. A block runs its
 //! statements in order and ends in one terminator that says where control
 //! goes. Every step names the places it reads and writes, every temporary
-//! is a local, and every borrow is an explicit `Ref` stored in a reference
-//! local. Branches of `if`, `match`, `&&`, `||`, guards and loops are edges,
+//! is a local, and every borrow is an explicit `Bind` of a reference local. Branches of `if`, `match`, `&&`, `||`, guards and loops are edges,
 //! so an analysis that follows the edges covers every construct alike.
 //!
 //! Every step that can run code the program wrote is a `Call` of a function
@@ -58,9 +57,13 @@ pub(crate) struct Statement {
 
 pub(crate) enum StatementKind {
     /// Evaluates the right side and stores it in the place, releasing what
-    /// an owning place held before. Storing the value of a key in a map
-    /// adds the key if it is absent.
+    /// an owning place held before. A place rooted at a reference local is
+    /// the place it points at, so this writes through it. Storing the value
+    /// of a key in a map adds the key if it is absent.
     Assign(Place, Rvalue),
+    /// Makes the reference local point at the place the right side names:
+    /// a `Ref` of a place, or a call that returns a borrow.
+    Bind(Local, Rvalue),
     /// The local's scope ends: what it owns is released, and it holds
     /// nothing afterwards.
     Release(Local),
@@ -129,8 +132,11 @@ pub(crate) enum Projection {
 
 #[derive(Clone)]
 pub(crate) enum Operand {
-    /// Reads the place: copies a value, and reads an entity where it is.
+    /// Copies the value at the place.
     Copy(Place),
+    /// Looks at the entity at the place where it is, for a step that only
+    /// reads it, such as a comparison or a search.
+    Inspect(Place),
     /// Takes the entity out of the place, which holds nothing afterwards.
     Move(Place),
     /// The pointer that a reference local holds, passed on to a borrowed
@@ -160,6 +166,7 @@ pub(crate) enum RefKind {
 
 pub(crate) enum Rvalue {
     Use(Operand),
+    /// A borrow of the place, which only a `Bind` holds.
     Ref(RefKind, Place),
     Unary(UnaryOperator, Operand),
     Binary(BinaryOperator, Operand, Operand),
@@ -190,8 +197,9 @@ pub(crate) enum Rvalue {
         container: Place,
         position: Local,
     },
-    /// A call. One that returns a borrow is stored in a reference local,
-    /// which then points where the result points.
+    /// A call. A `Bind` of one that returns a borrow makes the reference
+    /// local point where the result points; an `Assign` of it copies the
+    /// value there.
     Call {
         callee: Callee,
         arguments: Vec<Operand>,
@@ -306,21 +314,6 @@ impl Body {
         postorder
     }
 
-    /// Whether assigning `value` to `destination` makes a reference local
-    /// point somewhere, rather than write where it points.
-    pub(crate) fn defines_pointer(&self, destination: &Place, value: &Rvalue) -> bool {
-        destination.projections.is_empty()
-            && self.locals[destination.local].reference.is_some()
-            && matches!(
-                value,
-                Rvalue::Ref(..)
-                    | Rvalue::Call {
-                        borrow: Some(_),
-                        ..
-                    }
-            )
-    }
-
     /// Whether `local` owns what it holds, which must be released.
     pub(crate) fn owns(&self, types: &Types, local: Local) -> bool {
         self.locals[local].reference.is_none() && types.needs_release(self.locals[local].ty)
@@ -365,30 +358,32 @@ impl Body {
 
     /// Updates the owning locals that may hold something after `statement`:
     /// a move out of a whole local empties it, `Release` empties it, and an
-    /// assignment fills it.
+    /// assignment to an owning local fills it.
     pub(crate) fn fill(
         &self,
         types: &Types,
         statement: &StatementKind,
         filled: &mut BTreeSet<Local>,
     ) {
-        match statement {
-            StatementKind::Assign(destination, value) => {
-                for operand in value.operands() {
-                    if let Operand::Move(place) = operand
-                        && place.projections.is_empty()
-                    {
-                        filled.remove(&place.local);
-                    }
-                }
-                if !self.defines_pointer(destination, value) && self.owns(types, destination.local)
-                {
-                    filled.insert(destination.local);
-                }
-            }
+        let (destination, value) = match statement {
+            StatementKind::Assign(destination, value) => (Some(destination), value),
+            StatementKind::Bind(_, value) => (None, value),
             StatementKind::Release(local) => {
                 filled.remove(local);
+                return;
             }
+        };
+        for operand in value.operands() {
+            if let Operand::Move(place) = operand
+                && place.projections.is_empty()
+            {
+                filled.remove(&place.local);
+            }
+        }
+        if let Some(destination) = destination
+            && self.owns(types, destination.local)
+        {
+            filled.insert(destination.local);
         }
     }
 
