@@ -536,6 +536,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             locals: Vec::new(),
             local_ids: BTreeMap::new(),
             mutable: Vec::new(),
+            guarded: Vec::new(),
             loops: Vec::new(),
             result: signature.result,
             result_borrow: signature.result_borrow,
@@ -1748,6 +1749,9 @@ struct BodyChecker<'a> {
     /// not tracked again here.
     local_ids: BTreeMap<EntityId, usize>,
     mutable: Vec<bool>,
+    /// The `&mut` bindings of the arm whose guard is being checked, which
+    /// the guard only reads.
+    guarded: Vec<usize>,
     /// For each enclosing loop, whether a `break` leaves it.
     loops: Vec<bool>,
     result: Type,
@@ -1814,6 +1818,20 @@ impl BodyChecker<'_> {
         }
     }
 
+    /// Why `place` cannot be changed, as a clause, or `None` if it can.
+    fn unchangeable(&self, place: &Place) -> Option<String> {
+        let name = &self.locals[place.local].name;
+        if self.guarded.contains(&place.local) {
+            Some(format!("a guard only reads `{name}`"))
+        } else if self.mutable[place.local] {
+            None
+        } else if place.call.is_some() {
+            Some(format!("`{name}` returns `&`"))
+        } else {
+            Some(format!("`{name}` is not declared `mut`"))
+        }
+    }
+
     /// Checks that `place` may be borrowed with `kind`: `&mut` needs a
     /// changeable place. Conflicts with other borrows are checked on the IR.
     fn check_borrow(
@@ -1822,17 +1840,43 @@ impl BodyChecker<'_> {
         kind: BorrowKind,
         span: Span,
     ) -> Result<(), CheckDiagnostic> {
-        if kind == BorrowKind::Mutable && !self.mutable[place.local] {
-            let name = &self.locals[place.local].name;
-            let message = if place.call.is_some() {
-                format!("`{name}` returns `&`, so its result cannot be borrowed with `&mut`")
-            } else {
-                format!("`{name}` is not declared `mut`, so it cannot be borrowed with `&mut`")
-            };
-            return Err(self.error(CheckDiagnosticKind::NotAssignable, span, message));
+        if kind == BorrowKind::Mutable
+            && let Some(reason) = self.unchangeable(place)
+        {
+            return Err(self.error(
+                CheckDiagnosticKind::NotAssignable,
+                span,
+                format!("{reason}, so it cannot be borrowed with `&mut`"),
+            ));
         }
         Ok(())
     }
+
+    /// The borrow with `kind` of a checked operand: of a place, which `&mut`
+    /// needs to be changeable, or of a temporary.
+    fn borrow(
+        &self,
+        kind: BorrowKind,
+        operand: Operand,
+        span: Span,
+    ) -> Result<Expr, CheckDiagnostic> {
+        let (target, ty) = match operand {
+            Operand::Place((place, ty)) => {
+                self.check_borrow(&place, kind, span)?;
+                (BorrowTarget::Place(place), ty)
+            }
+            Operand::Value(value) => {
+                let ty = value.ty;
+                (BorrowTarget::Value(value), ty)
+            }
+        };
+        Ok(Expr {
+            ty,
+            span,
+            kind: ExprKind::Borrow(kind, Box::new(target)),
+        })
+    }
+
     /// Declares a local that points at a borrowed place; through `&mut` the
     /// place can be changed.
     fn declare_borrow(&mut self, identity: &EntityId, ty: Type, kind: BorrowKind) -> usize {
@@ -2100,12 +2144,7 @@ impl BodyChecker<'_> {
             if let Some(expected) = expected {
                 self.require(operand_span, expected, ty)?;
             }
-            self.check_borrow(&place, kind, operand_span)?;
-            let target = Expr {
-                ty,
-                span: operand_span,
-                kind: ExprKind::Borrow(kind, Box::new(BorrowTarget::Place(place))),
-            };
+            let target = self.borrow(kind, Operand::Place((place, ty)), operand_span)?;
             let statement = match pattern {
                 Some(pattern) => {
                     let pattern =
@@ -2184,7 +2223,7 @@ impl BodyChecker<'_> {
         value: &ResolvedExpr,
         kind: BorrowKind,
     ) -> Result<Expr, CheckDiagnostic> {
-        let (place, ty, span) = match &value.kind {
+        let (operand, span) = match &value.kind {
             ResolvedExprKind::If { .. }
             | ResolvedExprKind::Match { .. }
             | ResolvedExprKind::Block(_) => {
@@ -2203,28 +2242,16 @@ impl BodyChecker<'_> {
                         "the value borrows differently from the declared result".to_owned(),
                     ));
                 }
-                match self.check_operand(operand, None)? {
-                    Operand::Place((place, ty)) => (place, ty, operand.span),
-                    // A borrow of a temporary, which ends when the function
-                    // returns: move and borrow checking reports it, as it
-                    // does every returned borrow that does not come from a
-                    // parameter.
-                    Operand::Value(value) => {
-                        let (ty, span) = (value.ty, operand.span);
-                        self.require(span, self.result, ty)?;
-                        return Ok(Expr {
-                            ty,
-                            span,
-                            kind: ExprKind::Borrow(kind, Box::new(BorrowTarget::Value(value))),
-                        });
-                    }
-                }
+                // A borrow of a temporary ends when the function returns:
+                // move and borrow checking reports it, as it does every
+                // returned borrow that does not come from a parameter.
+                (self.check_operand(operand, None)?, operand.span)
             }
             _ => match self.check_operand(value, None)? {
                 Operand::Place((place, ty))
                     if place.call.is_some() && place.projections.is_empty() =>
                 {
-                    (place, ty, value.span)
+                    (Operand::Place((place, ty)), value.span)
                 }
                 Operand::Value(checked) if checked.ty == Type::NEVER => return Ok(checked),
                 _ => {
@@ -2236,13 +2263,8 @@ impl BodyChecker<'_> {
                 }
             },
         };
-        self.require(span, self.result, ty)?;
-        self.check_borrow(&place, kind, span)?;
-        Ok(Expr {
-            ty,
-            span,
-            kind: ExprKind::Borrow(kind, Box::new(BorrowTarget::Place(place))),
-        })
+        self.require(span, self.result, operand.ty())?;
+        self.borrow(kind, operand, span)
     }
 
     fn require_exhaustive(
@@ -2491,6 +2513,16 @@ impl BodyChecker<'_> {
                     .to_owned(),
             ));
         };
+        if self.guarded.contains(&local) {
+            return Err(self.error(
+                CheckDiagnosticKind::NotAssignable,
+                target.span,
+                format!(
+                    "a guard only reads `{}`, so it cannot be assigned",
+                    self.locals[local].name
+                ),
+            ));
+        }
         let mut ty = self.locals[local].ty;
         let mut projections = Vec::new();
         for projection in &target.projections {
@@ -2927,15 +2959,12 @@ impl BodyChecker<'_> {
         }; // A temporary can always be changed.
         if builtin.changes_receiver()
             && let Receiver::Place(place) = &receiver_value
-            && !self.mutable[place.local]
+            && let Some(reason) = self.unchangeable(place)
         {
             return Err(self.error(
                 CheckDiagnosticKind::NotAssignable,
                 receiver.span,
-                format!(
-                    "`{name}` changes `{}`, which is not declared `mut`",
-                    self.locals[place.local].name
-                ),
+                format!("`{name}` changes its receiver, but {reason}"),
             ));
         }
         if arguments.len() != parameters.len() {
@@ -3501,24 +3530,15 @@ impl BodyChecker<'_> {
             return Ok((self.check_expr(subject, None)?, None));
         };
         let kind = *kind;
-        let (target, ty) = match self.check_operand(operand, None)? {
-            Operand::Place((place, ty)) => {
-                self.check_borrow(&place, kind, operand.span)?;
-                (BorrowTarget::Place(place), ty)
-            }
-            Operand::Value(value) => {
-                if value.ty == Type::NEVER {
-                    return Ok((value, None));
-                }
-                let ty = value.ty;
-                (BorrowTarget::Value(value), ty)
-            }
+        let checked = match self.check_operand(operand, None)? {
+            Operand::Value(value) if value.ty == Type::NEVER => return Ok((value, None)),
+            checked => checked,
         };
+        let borrowed = self.borrow(kind, checked, operand.span)?;
         Ok((
             Expr {
-                ty,
                 span: subject.span,
-                kind: ExprKind::Borrow(kind, Box::new(target)),
+                ..borrowed
             },
             Some(kind),
         ))
@@ -3549,18 +3569,15 @@ impl BodyChecker<'_> {
             let pattern =
                 self.check_pattern(&arm.pattern, scrutinee.ty, mode, &mut BTreeMap::new())?;
             // A guard only reads the bindings; they become `&mut` once it holds.
-            let readonly = self.mutable_bindings(&pattern);
-            for &local in &readonly {
-                self.mutable[local] = false;
-            }
+            let mut guarded = self.guarded.clone();
+            guarded.extend(self.mutable_bindings(&pattern));
+            let outer = std::mem::replace(&mut self.guarded, guarded);
             let guard = arm
                 .guard
                 .as_ref()
                 .map(|guard| self.check_condition(guard))
                 .transpose()?;
-            for &local in &readonly {
-                self.mutable[local] = true;
-            }
+            self.guarded = outer;
             let body = self.check_expr(&arm.body, expected)?;
             if body.ty != Type::NEVER {
                 match ty {
@@ -4414,19 +4431,8 @@ impl BodyChecker<'_> {
                 checked_operand.ty(),
                 bindings,
             )?;
-            let target = match checked_operand {
-                Operand::Place((place, _)) => {
-                    self.check_borrow(&place, kind, operand.span)?;
-                    BorrowTarget::Place(place)
-                }
-                // A temporary can always be borrowed with `&mut`.
-                Operand::Value(value) => BorrowTarget::Value(value),
-            };
-            checked.push(Expr {
-                ty,
-                span: operand.span,
-                kind: ExprKind::Borrow(kind, Box::new(target)),
-            });
+            let borrowed = self.borrow(kind, checked_operand, operand.span)?;
+            checked.push(Expr { ty, ..borrowed });
         }
         Ok(checked)
     }
