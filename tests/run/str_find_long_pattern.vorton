@@ -1,0 +1,21 @@
+// Searching for patterns longer than 16 bytes, near misses included.
+fn at(found: Option<Int>) -> Int {
+    match found {
+        Option::Some(position) => position
+        Option::None => -1
+    }
+}
+
+fn main() {
+    let unit = "abcabcabcabcabcab"
+    let part = "${unit}d"
+    let text = "${unit}${unit}d--${unit}x${unit}d"
+    print(at(text.find(part)))
+    print(text.contains(part))
+    print(text.contains("${unit}x${unit}x"))
+    print(text.split(part).len())
+    print(text.replace(part, "#"))
+    let aas = "a".repeat(40)
+    print(at("${aas}b".find("${"a".repeat(20)}b")))
+    print("a".repeat(100000).contains("${"a".repeat(50000)}b"))
+}

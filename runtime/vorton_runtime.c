@@ -271,13 +271,52 @@ static void vt_check_index(int64_t index, int64_t len) {
 }
 
 /* `Str` methods. Positions and lengths count the bytes of UTF-8. */
+
+/* The first position at or after `from` where `part` occurs in `text`, or
+ * -1. A short pattern is compared at each position, a few bytes each; a
+ * longer one is searched with Knuth-Morris-Pratt, so the work stays linear
+ * in the lengths of the text and the pattern. */
 static int64_t vt_str_find_from(const vt_str *text, const vt_str *part, int64_t from) {
-    for (int64_t at = from; at + part->len <= text->len; at += 1) {
-        if (memcmp(text->data + at, part->data, (size_t)part->len) == 0) {
-            return at;
+    int64_t len = part->len;
+    if (len <= 16) {
+        for (int64_t at = from; at + len <= text->len; at += 1) {
+            if (memcmp(text->data + at, part->data, (size_t)len) == 0) {
+                return at;
+            }
+        }
+        return -1;
+    }
+    if (len > text->len - from) {
+        return -1;
+    }
+    /* border[i] is the length of the longest proper prefix of the first
+     * i + 1 bytes of `part` that is also their suffix. */
+    int64_t *border = vt_items_resize(NULL, len, sizeof(int64_t));
+    border[0] = 0;
+    for (int64_t i = 1, matched = 0; i < len; i += 1) {
+        while (matched > 0 && part->data[i] != part->data[matched]) {
+            matched = border[matched - 1];
+        }
+        if (part->data[i] == part->data[matched]) {
+            matched += 1;
+        }
+        border[i] = matched;
+    }
+    int64_t found = -1;
+    for (int64_t at = from, matched = 0; at < text->len; at += 1) {
+        while (matched > 0 && text->data[at] != part->data[matched]) {
+            matched = border[matched - 1];
+        }
+        if (text->data[at] == part->data[matched]) {
+            matched += 1;
+        }
+        if (matched == len) {
+            found = at - len + 1;
+            break;
         }
     }
-    return -1;
+    vt_items_free(border);
+    return found;
 }
 
 static bool vt_str_starts_with(const vt_str *text, const vt_str *prefix) {
