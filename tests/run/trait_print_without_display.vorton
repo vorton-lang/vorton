@@ -1,0 +1,7 @@
+struct P {
+    a: Int,
+}
+
+fn main() {
+    print(P { a: 1 })
+}

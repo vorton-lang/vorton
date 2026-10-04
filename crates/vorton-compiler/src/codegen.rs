@@ -16,8 +16,8 @@ use std::fmt::Write as _;
 
 use crate::ast::{AssignmentOperator, BinaryOperator, UnaryOperator};
 use crate::checker::{
-    Arm, Block, BorrowTarget, Builtin, Expr, ExprKind, ForSource, Function, Intrinsic, Pattern,
-    Place, Program, Projection, Receiver, Statement, StrMethod, Type, TypeKind, Types,
+    Arm, Block, BorrowTarget, Builtin, Callee, Expr, ExprKind, ForSource, Function, Intrinsic,
+    Pattern, Place, Program, Projection, Receiver, Statement, StrMethod, Type, TypeKind, Types,
 };
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
@@ -1581,13 +1581,16 @@ impl FunctionEmitter<'_> {
                 value
             }
             ExprKind::Call {
-                function,
+                callee,
                 arguments,
                 checks,
                 borrow,
                 ..
             } => self.call(
-                *function,
+                match callee {
+                    Callee::Function(function) => *function,
+                    Callee::Trait { .. } => unreachable!("{GENERIC}"),
+                },
                 arguments,
                 checks,
                 expression.ty,

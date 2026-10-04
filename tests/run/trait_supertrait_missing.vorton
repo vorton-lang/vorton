@@ -1,0 +1,19 @@
+trait Base {
+    fn base(&self) -> Int
+}
+
+trait Top: Base {
+    fn top(&self) -> Int
+}
+
+struct W {
+    v: Int,
+}
+
+impl Top for W {
+    fn top(&self) -> Int {
+        self.v
+    }
+}
+
+fn main() {}

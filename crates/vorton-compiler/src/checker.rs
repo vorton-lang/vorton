@@ -34,11 +34,12 @@ use crate::project::{
     CoreRoles, EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
     ResolvedConstructEntry, ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedField,
     ResolvedFunction, ResolvedImplMemberKind, ResolvedInterpolationPart, ResolvedMatchArm,
-    ResolvedPattern, ResolvedPatternFields, ResolvedPatternKind, ResolvedPlace,
+    ResolvedNamedType, ResolvedPattern, ResolvedPatternFields, ResolvedPatternKind, ResolvedPlace,
     ResolvedPlaceProjection, ResolvedProject, ResolvedReference, ResolvedStatement,
-    ResolvedStatementKind, ResolvedType, ResolvedTypeArgument, ResolvedTypeKind, ResolvedVariant,
-    ResolvedVariantFields, SourceRef,
+    ResolvedStatementKind, ResolvedTraitMember, ResolvedTraitMemberKind, ResolvedType,
+    ResolvedTypeArgument, ResolvedTypeKind, ResolvedVariant, ResolvedVariantFields, SourceRef,
 };
+use crate::resolver::owner_key_from_entity;
 pub(crate) use crate::types::{Field, NominalInfo, Type, TypeKind, Types, Variant};
 
 /// One deterministic failure from checking a resolved project.
@@ -86,8 +87,16 @@ pub enum CheckDiagnosticKind {
     /// A struct, enum or tuple contains itself by value and has no finite
     /// size.
     RecursiveType,
-    /// A type argument does not satisfy a bound of its type parameter.
+    /// A type argument does not satisfy a bound of its type parameter, or a
+    /// type lacks the supertrait impls of a trait it implements.
     UnsatisfiedBound,
+    /// A trait is implemented twice for one type, or by hand where only the
+    /// compiler implements it.
+    DuplicateImpl,
+    /// A trait impl lacks a method of the trait.
+    MissingMethod,
+    /// Several traits give the receiver's type a method of the called name.
+    AmbiguousMethod,
     /// A recursive call passes type arguments that could grow without end.
     PolymorphicRecursion,
 }
@@ -268,9 +277,9 @@ pub(crate) enum ExprKind {
     Unit,
     Local(usize),
     Call {
-        function: usize,
+        callee: Callee,
         /// The type arguments of a generic function; instantiation replaces
-        /// `function` with the instance and leaves this empty.
+        /// the callee with the instance and leaves this empty.
         type_arguments: Vec<Type>,
         arguments: Vec<Expr>,
         /// Pairs of borrowed arguments whose places must differ at run time.
@@ -345,6 +354,19 @@ pub(crate) enum ExprKind {
     /// returned result: a pointer to a place, or to a temporary that lives
     /// until the end of the enclosing statement.
     Borrow(Box<BorrowTarget>),
+}
+
+/// The function a call runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Callee {
+    Function(usize),
+    /// A method of a trait that bounds a type parameter. Instantiation
+    /// replaces it with the method of the impl for the type argument.
+    Trait {
+        trait_index: usize,
+        method: usize,
+        self_type: Type,
+    },
 }
 
 #[derive(Clone)]
@@ -432,6 +454,7 @@ pub(crate) enum Intrinsic {
     Swap,
 }
 
+#[derive(Clone)]
 struct Signature {
     index: usize,
     /// Whether the first parameter is the `self` of a method.
@@ -445,14 +468,58 @@ struct Signature {
     result_borrow: Option<BorrowKind>,
 }
 
-/// A type parameter of a generic function and the bounds the checker
-/// supports so far.
+/// A type parameter of a generic function and its bounds.
 #[derive(Clone)]
 struct TypeParameter {
     name: String,
     copy: bool,
     clone: bool,
+    /// The traits it is bound by, with their supertraits.
+    traits: BTreeSet<usize>,
 }
+
+/// A trait declaration.
+struct TraitDeclaration<'a> {
+    name: String,
+    /// The direct supertraits, by index.
+    supertraits: Vec<usize>,
+    methods: Vec<&'a ResolvedTraitMember>,
+    /// The checker does not support associated types yet, so such a trait
+    /// cannot be implemented or used as a bound.
+    associated_types: bool,
+    /// Whether the official core declares it.
+    core: bool,
+}
+
+/// The traits, and the signature of each trait method with `Self` as the
+/// type parameter at index 0.
+struct Traits<'a> {
+    declarations: Vec<TraitDeclaration<'a>>,
+    by_identity: BTreeMap<EntityId, usize>,
+    signatures: Vec<Vec<Signature>>,
+    display: usize,
+    copy: usize,
+    clone: usize,
+}
+
+impl Traits<'_> {
+    /// `trait_index` and its supertraits, transitively.
+    fn closure(&self, trait_index: usize, into: &mut BTreeSet<usize>) {
+        if into.insert(trait_index) {
+            for &supertrait in &self.declarations[trait_index].supertraits {
+                self.closure(supertrait, into);
+            }
+        }
+    }
+
+    fn method_name(&self, trait_index: usize, method: usize) -> &str {
+        &self.declarations[trait_index].methods[method].identity.name
+    }
+}
+
+/// The impl of each trait for each type: the function of each trait
+/// method, in the trait's order.
+pub(crate) type Impls = BTreeMap<(usize, Type), Vec<usize>>;
 
 enum Shape<'a> {
     Struct(&'a [ResolvedField]),
@@ -496,6 +563,8 @@ type Methods = BTreeMap<(usize, String), EntityId>;
 pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnostic> {
     let mut functions_found = Vec::new();
     let mut impls = Vec::new();
+    let mut traits_found = Vec::new();
+    let mut trait_impls_found = Vec::new();
     let mut nominals = Nominals {
         declarations: Vec::new(),
         by_identity: BTreeMap::new(),
@@ -556,6 +625,10 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 });
                 continue;
             }
+            if let ResolvedDeclarationKind::Trait { .. } = &declaration.kind {
+                traits_found.push((identity(), declaration, is_core));
+                continue;
+            }
             if is_core {
                 continue;
             }
@@ -572,6 +645,23 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 }
                 ResolvedDeclarationKind::InherentImpl(implementation) => {
                     impls.push((implementation, declaration.origin.clone()));
+                }
+                ResolvedDeclarationKind::TraitImpl {
+                    implementation,
+                    trait_type,
+                    where_clause,
+                } => {
+                    if where_clause.is_some() {
+                        return Err(unsupported(
+                            Some(declaration.origin.clone()),
+                            "`where` clauses",
+                        ));
+                    }
+                    trait_impls_found.push((
+                        implementation.as_ref(),
+                        trait_type,
+                        declaration.origin.clone(),
+                    ));
                 }
                 ResolvedDeclarationKind::Module(_) => {}
                 _ => {
@@ -656,6 +746,15 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         }
     }
 
+    let traits = collect_traits(&traits_found, &project.core_roles, &nominals, &mut types)?;
+    let found_impls = collect_trait_impls(
+        &trait_impls_found,
+        &traits,
+        &nominals,
+        &mut types,
+        &mut functions_found,
+    )?;
+
     let mut signatures = BTreeMap::new();
     for (index, found) in functions_found.iter().enumerate() {
         let signature = check_signature(
@@ -664,12 +763,24 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             &found.origin,
             found.owner,
             &nominals,
-            &project.core_roles,
+            &traits,
             &mut types,
         )?;
         signatures.insert(found.identity.clone(), signature);
     }
+    let trait_impls = check_trait_impls(
+        &found_impls,
+        &traits,
+        &signatures,
+        &functions_found,
+        &nominals,
+        &mut types,
+    )?;
 
+    let identities = functions_found
+        .iter()
+        .map(|found| found.identity.clone())
+        .collect::<Vec<_>>();
     let mut functions = Vec::new();
     let mut calls = Vec::new();
     for found in &functions_found {
@@ -679,7 +790,10 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             types: &mut types,
             nominals: &nominals,
             signatures: &signatures,
+            identities: &identities,
             methods: &methods,
+            traits: &traits,
+            trait_impls: &trait_impls,
             library: origin.library,
             source: origin.source.clone(),
             type_scope: signature.type_scope.clone(),
@@ -757,12 +871,402 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         functions,
         &generic,
         main,
+        &trait_impls,
+        traits.display,
     )?;
     Ok(Program {
         types,
         functions,
         main,
     })
+}
+
+/// Collects the trait declarations. `Self` in their method signatures is
+/// the type parameter at index 0.
+fn collect_traits<'a>(
+    found: &[(EntityId, &'a crate::project::ResolvedDeclaration, bool)],
+    roles: &CoreRoles,
+    nominals: &Nominals,
+    types: &mut Types,
+) -> Result<Traits<'a>, CheckDiagnostic> {
+    let by_identity = found
+        .iter()
+        .enumerate()
+        .map(|(index, (identity, _, _))| (identity.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let self_type = types.intern(TypeKind::Param {
+        index: 0,
+        name: "Self".to_owned(),
+        copy: false,
+    });
+    let mut declarations = Vec::new();
+    let mut signatures = Vec::new();
+    for (identity, declaration, core) in found {
+        let ResolvedDeclarationKind::Trait {
+            type_parameters,
+            supertraits,
+            members,
+        } = &declaration.kind
+        else {
+            unreachable!("only traits are collected here")
+        };
+        if !type_parameters.is_empty() {
+            return Err(unsupported(
+                Some(declaration.origin.clone()),
+                "generic traits",
+            ));
+        }
+        // The declaration check has made sure these name traits.
+        let supertraits = supertraits
+            .iter()
+            .filter_map(|supertrait| match &supertrait.reference {
+                ResolvedReference::Exact { target, .. } => by_identity.get(target).copied(),
+                ResolvedReference::Selection { .. } => None,
+            })
+            .collect();
+        let methods = members
+            .iter()
+            .filter(|member| matches!(member.kind, ResolvedTraitMemberKind::Method(_)))
+            .collect::<Vec<_>>();
+        let associated_types = methods.len() != members.len();
+        let mut method_signatures = Vec::new();
+        if !associated_types {
+            let scope = BTreeMap::from([(identity.clone(), self_type)]);
+            for member in &methods {
+                let ResolvedTraitMemberKind::Method(signature) = &member.kind else {
+                    unreachable!("only methods were kept")
+                };
+                let origin = match &member.identity.site {
+                    EntitySite::Source(site) => site.clone(),
+                    _ => declaration.origin.clone(),
+                };
+                method_signatures.push(trait_method_signature(
+                    signature, &scope, self_type, nominals, types, &origin,
+                )?);
+            }
+        }
+        declarations.push(TraitDeclaration {
+            name: identity.name.clone(),
+            supertraits,
+            methods,
+            associated_types,
+            core: *core,
+        });
+        signatures.push(method_signatures);
+    }
+    Ok(Traits {
+        display: by_identity[&roles.display.declaration],
+        copy: by_identity[&roles.copy],
+        clone: by_identity[&roles.clone.declaration],
+        declarations,
+        by_identity,
+        signatures,
+    })
+}
+
+/// The signature of a trait method, whose `self` has type `self_type`.
+fn trait_method_signature(
+    signature: &crate::project::ResolvedFunctionSignature,
+    scope: &BTreeMap<EntityId, Type>,
+    self_type: Type,
+    nominals: &Nominals,
+    types: &mut Types,
+    origin: &OriginRef,
+) -> Result<Signature, CheckDiagnostic> {
+    if !signature.type_parameters.is_empty() || !signature.effect_parameters.is_empty() {
+        return Err(unsupported(Some(origin.clone()), "generic trait methods"));
+    }
+    if signature
+        .parameters
+        .first()
+        .is_none_or(|parameter| parameter.binding.identity.name != "self")
+    {
+        return Err(unsupported(
+            Some(origin.clone()),
+            "trait functions without `self`",
+        ));
+    }
+    let mut parameters = Vec::new();
+    for parameter in &signature.parameters {
+        let ty = match &parameter.annotation {
+            Some(annotation) => resolve_type(types, nominals, annotation, scope, origin, 0)?,
+            None => self_type,
+        };
+        parameters.push((ty, parameter.borrow.map(|(_, kind)| kind)));
+    }
+    let result = match &signature.return_type {
+        Some(ty) => resolve_type(types, nominals, ty, scope, origin, 0)?,
+        None => Type::UNIT,
+    };
+    Ok(Signature {
+        index: usize::MAX,
+        receiver: true,
+        type_parameters: Vec::new(),
+        type_scope: BTreeMap::new(),
+        parameters,
+        result,
+        result_borrow: signature.return_borrow.map(|(_, kind)| kind),
+    })
+}
+
+/// An `impl Trait for Type` whose methods are added to the functions.
+struct FoundImpl {
+    trait_index: usize,
+    owner: Type,
+    /// The function of each trait method, in the trait's order.
+    methods: Vec<usize>,
+    origin: OriginRef,
+}
+
+/// Collects the trait impls and adds their methods to `functions`.
+fn collect_trait_impls<'a>(
+    found: &[(
+        &'a crate::project::ResolvedImpl,
+        &ResolvedNamedType,
+        OriginRef,
+    )],
+    traits: &Traits,
+    nominals: &Nominals,
+    types: &mut Types,
+    functions: &mut Vec<FoundFunction<'a>>,
+) -> Result<Vec<FoundImpl>, CheckDiagnostic> {
+    let mut impls = Vec::new();
+    for (implementation, trait_type, origin) in found {
+        let trait_index = match &trait_type.reference {
+            ResolvedReference::Exact { target, .. } => traits.by_identity.get(target).copied(),
+            ResolvedReference::Selection { .. } => None,
+        };
+        let Some(trait_index) = trait_index else {
+            return Err(unsupported(Some(origin.clone()), "impls of this trait"));
+        };
+        let declaration = &traits.declarations[trait_index];
+        if trait_index == traits.copy {
+            return Err(CheckDiagnostic {
+                kind: CheckDiagnosticKind::DuplicateImpl,
+                primary: Some(origin.clone()),
+                message: "only the compiler implements `Copy`, for value types".to_owned(),
+            });
+        }
+        if !implementation.type_parameters.is_empty() {
+            return Err(unsupported(Some(origin.clone()), "generic impls"));
+        }
+        if declaration.associated_types {
+            return Err(unsupported(Some(origin.clone()), "associated types"));
+        }
+        if declaration.core && trait_index != traits.display {
+            return Err(unsupported(
+                Some(origin.clone()),
+                &format!("impls of `{}`", declaration.name),
+            ));
+        }
+        let target_type = ResolvedType {
+            span: implementation.target.span,
+            kind: ResolvedTypeKind::Named(Box::new(implementation.target.clone())),
+        };
+        let owner = resolve_type(types, nominals, &target_type, &BTreeMap::new(), origin, 0)?;
+        let &TypeKind::Nominal {
+            declaration: nominal,
+            ..
+        } = types.kind(owner)
+        else {
+            return Err(unsupported(
+                Some(origin.clone()),
+                "impls for built-in types",
+            ));
+        };
+        if !nominals.declarations[nominal].type_parameters.is_empty() {
+            return Err(unsupported(Some(origin.clone()), "impls for generic types"));
+        }
+        let mut methods = vec![None; declaration.methods.len()];
+        for member in &implementation.members {
+            let member_origin = match &member.identity.site {
+                EntitySite::Source(site) => site.clone(),
+                _ => origin.clone(),
+            };
+            let ResolvedImplMemberKind::Function(function) = &member.kind else {
+                return Err(unsupported(Some(member_origin), "associated types"));
+            };
+            let name = &member.identity.name;
+            let Some(position) = declaration
+                .methods
+                .iter()
+                .position(|method| method.identity.name == *name)
+            else {
+                return Err(CheckDiagnostic {
+                    kind: CheckDiagnosticKind::UnknownMethod,
+                    primary: Some(member_origin),
+                    message: format!("`{}` has no method `{name}`", declaration.name),
+                });
+            };
+            methods[position] = Some(functions.len());
+            functions.push(FoundFunction {
+                name: format!("{}_{name}", types.name(owner)),
+                identity: member.identity.clone(),
+                function,
+                origin: member_origin,
+                owner: Some(owner),
+            });
+        }
+        let methods = methods
+            .into_iter()
+            .enumerate()
+            .map(|(position, method)| {
+                method.ok_or_else(|| CheckDiagnostic {
+                    kind: CheckDiagnosticKind::MissingMethod,
+                    primary: Some(origin.clone()),
+                    message: format!(
+                        "this impl of `{}` lacks the method `{}`",
+                        declaration.name,
+                        traits.method_name(trait_index, position)
+                    ),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        impls.push(FoundImpl {
+            trait_index,
+            owner,
+            methods,
+            origin: origin.clone(),
+        });
+    }
+    Ok(impls)
+}
+
+/// Checks that each impl is the only one of its trait for its type, that
+/// its methods have the trait's signatures, and that the type implements
+/// the trait's supertraits.
+fn check_trait_impls(
+    found: &[FoundImpl],
+    traits: &Traits,
+    signatures: &BTreeMap<EntityId, Signature>,
+    functions: &[FoundFunction],
+    nominals: &Nominals,
+    types: &mut Types,
+) -> Result<Impls, CheckDiagnostic> {
+    let mut impls = Impls::new();
+    for implementation in found {
+        let key = (implementation.trait_index, implementation.owner);
+        if impls.insert(key, implementation.methods.clone()).is_some() {
+            return Err(CheckDiagnostic {
+                kind: CheckDiagnosticKind::DuplicateImpl,
+                primary: Some(implementation.origin.clone()),
+                message: format!(
+                    "`{}` already implements `{}`",
+                    types.name(implementation.owner),
+                    traits.declarations[implementation.trait_index].name
+                ),
+            });
+        }
+    }
+    for implementation in found {
+        let trait_index = implementation.trait_index;
+        let declaration = &traits.declarations[trait_index];
+        for (position, &function) in implementation.methods.iter().enumerate() {
+            let expected = substitute_signature(
+                types,
+                nominals,
+                &traits.signatures[trait_index][position],
+                &[implementation.owner],
+            )?;
+            let actual = &signatures[&functions[function].identity];
+            if !actual.receiver
+                || !actual.type_parameters.is_empty()
+                || actual.parameters != expected.parameters
+                || actual.result != expected.result
+                || actual.result_borrow != expected.result_borrow
+            {
+                return Err(CheckDiagnostic {
+                    kind: CheckDiagnosticKind::TypeMismatch,
+                    primary: Some(functions[function].origin.clone()),
+                    message: format!(
+                        "`{}` of `{}` must be `{}`",
+                        traits.method_name(trait_index, position),
+                        declaration.name,
+                        signature_text(types, &expected)
+                    ),
+                });
+            }
+        }
+        for &supertrait in &declaration.supertraits {
+            if !implements(traits, &impls, &[], types, implementation.owner, supertrait) {
+                return Err(CheckDiagnostic {
+                    kind: CheckDiagnosticKind::UnsatisfiedBound,
+                    primary: Some(implementation.origin.clone()),
+                    message: format!(
+                        "`{}` implements `{}` but not its supertrait `{}`",
+                        types.name(implementation.owner),
+                        declaration.name,
+                        traits.declarations[supertrait].name
+                    ),
+                });
+            }
+        }
+    }
+    Ok(impls)
+}
+
+/// `signature` with its type parameters replaced by `arguments`.
+fn substitute_signature(
+    types: &mut Types,
+    nominals: &Nominals,
+    signature: &Signature,
+    arguments: &[Type],
+) -> Result<Signature, CheckDiagnostic> {
+    let mut instantiate = |types: &mut Types, declaration, arguments| {
+        instantiate(types, nominals, declaration, arguments, 0)
+    };
+    let mut result = signature.clone();
+    for (ty, _) in &mut result.parameters {
+        *ty = crate::mono::substitute(types, &mut instantiate, *ty, arguments)?;
+    }
+    result.result = crate::mono::substitute(types, &mut instantiate, result.result, arguments)?;
+    Ok(result)
+}
+
+/// A method signature as written, such as `fn(&self, other: &Point) -> Bool`.
+fn signature_text(types: &Types, signature: &Signature) -> String {
+    let borrow = |kind: Option<BorrowKind>| match kind {
+        None => "",
+        Some(BorrowKind::Shared) => "&",
+        Some(BorrowKind::Mutable) => "&mut ",
+    };
+    let parameters = signature
+        .parameters
+        .iter()
+        .enumerate()
+        .map(|(position, (ty, kind))| {
+            if position == 0 && signature.receiver {
+                format!("{}self", borrow(*kind))
+            } else {
+                format!("{}{}", borrow(*kind), types.name(*ty))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "fn({parameters}) -> {}{}",
+        borrow(signature.result_borrow),
+        types.name(signature.result)
+    )
+}
+
+/// Whether `ty` implements the trait: a type parameter through its bounds,
+/// another type through an impl or, for `Display`, as a built-in type.
+fn implements(
+    traits: &Traits,
+    impls: &Impls,
+    type_parameters: &[TypeParameter],
+    types: &Types,
+    ty: Type,
+    trait_index: usize,
+) -> bool {
+    match types.kind(ty) {
+        TypeKind::Param { index, .. } => type_parameters[*index].traits.contains(&trait_index),
+        _ => {
+            impls.contains_key(&(trait_index, ty))
+                || (trait_index == traits.display && is_printable(ty))
+        }
+    }
 }
 
 /// A call of a named function: the callee, its type arguments in the
@@ -959,7 +1463,7 @@ fn check_signature(
     origin: &OriginRef,
     self_type: Option<Type>,
     nominals: &Nominals,
-    roles: &CoreRoles,
+    traits: &Traits,
     types: &mut Types,
 ) -> Result<Signature, CheckDiagnostic> {
     if !function.effect_parameters.is_empty() {
@@ -978,17 +1482,31 @@ fn check_signature(
             name: parameter.binding.identity.name.clone(),
             copy: false,
             clone: false,
+            traits: BTreeSet::new(),
         };
         for bound in &parameter.bounds {
-            match &bound.reference {
-                ResolvedReference::Exact { target, .. } if *target == roles.copy => {
-                    bounds.copy = true;
-                    bounds.clone = true;
+            let trait_index = match &bound.reference {
+                ResolvedReference::Exact { target, .. } => traits.by_identity.get(target).copied(),
+                ResolvedReference::Selection { .. } => None,
+            };
+            if trait_index == Some(traits.copy) {
+                bounds.copy = true;
+                bounds.clone = true;
+            } else if trait_index == Some(traits.clone) {
+                bounds.clone = true;
+            } else if let Some(trait_index) = trait_index {
+                let declaration = &traits.declarations[trait_index];
+                if declaration.associated_types
+                    || (declaration.core && trait_index != traits.display)
+                {
+                    return Err(unsupported(
+                        Some(at(origin, bound.span)),
+                        &format!("bounds on `{}`", declaration.name),
+                    ));
                 }
-                ResolvedReference::Exact { target, .. } if *target == roles.clone.declaration => {
-                    bounds.clone = true;
-                }
-                _ => return Err(unsupported(Some(at(origin, bound.span)), "trait bounds")),
+                traits.closure(trait_index, &mut bounds.traits);
+            } else {
+                return Err(unsupported(Some(at(origin, bound.span)), "this bound"));
             }
         }
         let ty = types.intern(TypeKind::Param {
@@ -1088,6 +1606,15 @@ fn resolve_type(
                     kind: ResolvedTypeKind::Named(self_target.clone()),
                 };
                 return resolve_type(types, nominals, &self_type, substitution, origin, depth);
+            }
+            // `Self` in a trait stands for the implementing type, which
+            // `substitution` gives under the trait's identity.
+            if target.kind == EntityKind::SelfType
+                && let Some(&self_type) = substitution.iter().find_map(|(owner, ty)| {
+                    (target.owner.as_ref() == Some(&owner_key_from_entity(owner))).then_some(ty)
+                })
+            {
+                return Ok(self_type);
             }
             let mut arguments = Vec::new();
             for argument in &named.arguments {
@@ -1290,7 +1817,11 @@ struct BodyChecker<'a> {
     types: &'a mut Types,
     nominals: &'a Nominals<'a>,
     signatures: &'a BTreeMap<EntityId, Signature>,
+    /// The identity of each function, by index.
+    identities: &'a [EntityId],
     methods: &'a Methods,
+    traits: &'a Traits<'a>,
+    trait_impls: &'a Impls,
     library: LibraryId,
     source: SourceRef,
     /// The types of the function's type parameters, by identity.
@@ -2768,19 +3299,7 @@ impl BodyChecker<'_> {
                             }
                         }
                         ResolvedInterpolationPart::Expression(part) => {
-                            let part_span = part.span;
-                            let part = self.check_expr(part, None)?;
-                            if !is_printable(part.ty) {
-                                return Err(self.error(
-                                    CheckDiagnosticKind::TypeMismatch,
-                                    part_span,
-                                    format!(
-                                        "`{}` cannot be interpolated",
-                                        self.types.name(part.ty)
-                                    ),
-                                ));
-                            }
-                            checked.push(part);
+                            checked.push(self.check_displayed(part)?);
                         }
                     }
                 }
@@ -2980,21 +3499,14 @@ impl BodyChecker<'_> {
                     format!("`{owner}::{name}` has no `self`; call it as `{owner}::{name}(...)`"),
                 ));
             }
-            if arguments.len() + 1 != signature.parameters.len() {
-                return Err(self.error(
-                    CheckDiagnosticKind::ArgumentCount,
-                    span,
-                    format!(
-                        "`{name}` takes {} arguments, found {}",
-                        signature.parameters.len() - 1,
-                        arguments.len()
-                    ),
-                ));
-            }
-            let arguments = std::iter::once(Argument::Receiver(operand, receiver))
-                .chain(arguments.iter().map(Argument::Written))
-                .collect();
-            return self.finish_call(span, signature, arguments, None);
+            let callee = Callee::Function(signature.index);
+            return self.call_method(span, callee, signature, operand, receiver, arguments);
+        }
+        // The built-in `clone` comes before trait methods.
+        if !(name == "clone" && self.can_clone(ty))
+            && let Some((callee, signature)) = self.trait_method(ty, name, span)?
+        {
+            return self.call_method(span, callee, &signature, operand, receiver, arguments);
         }
         let (receiver_value, path) = match operand {
             Operand::Place((place, _, path)) => (Receiver::Place(place), Some(path)),
@@ -3178,6 +3690,65 @@ impl BodyChecker<'_> {
                 arguments: checked,
             },
         ))
+    }
+
+    /// Checks a value that `print` or interpolation shows: a built-in type
+    /// as it is, any other type through its `Display::to_str`, which borrows
+    /// the value.
+    fn check_displayed(&mut self, expression: &ResolvedExpr) -> Result<Expr, CheckDiagnostic> {
+        let span = expression.span;
+        let operand = self.check_operand(expression, None)?;
+        let ty = operand.ty();
+        if is_printable(ty) {
+            return Ok(match operand {
+                Operand::Place((place, _, _)) => self.place_value(place),
+                Operand::Value(value) => value,
+            });
+        }
+        let display = self.traits.display;
+        if !self.implements(ty, display) {
+            return Err(self.error(
+                CheckDiagnosticKind::UnsatisfiedBound,
+                span,
+                format!("`{}` does not implement `Display`", self.types.name(ty)),
+            ));
+        }
+        let (callee, signature) = self.trait_callee(ty, display, 0)?;
+        let (result, kind) = self.finish_call(
+            span,
+            callee,
+            &signature,
+            vec![Argument::Receiver(operand, expression)],
+            None,
+        )?;
+        Ok(Expr { ty: result, kind })
+    }
+
+    /// Calls a method with `signature` on the checked receiver `operand`.
+    fn call_method(
+        &mut self,
+        span: Span,
+        callee: Callee,
+        signature: &Signature,
+        operand: Operand,
+        receiver: &ResolvedExpr,
+        arguments: &[ResolvedExpr],
+    ) -> Result<(Type, ExprKind), CheckDiagnostic> {
+        if arguments.len() + 1 != signature.parameters.len() {
+            return Err(self.error(
+                CheckDiagnosticKind::ArgumentCount,
+                span,
+                format!(
+                    "this method takes {} arguments, found {}",
+                    signature.parameters.len() - 1,
+                    arguments.len()
+                ),
+            ));
+        }
+        let arguments = std::iter::once(Argument::Receiver(operand, receiver))
+            .chain(arguments.iter().map(Argument::Written))
+            .collect();
+        self.finish_call(span, callee, signature, arguments, None)
     }
 
     fn check_tuple(
@@ -4290,7 +4861,8 @@ impl BodyChecker<'_> {
             ));
         }
         let arguments = arguments.iter().map(Argument::Written).collect();
-        self.finish_call(span, signature, arguments, expected)
+        let callee = Callee::Function(signature.index);
+        self.finish_call(span, callee, signature, arguments, expected)
     }
 
     /// Checks the arguments of a call of the function with `signature`. The
@@ -4299,6 +4871,7 @@ impl BodyChecker<'_> {
     fn finish_call(
         &mut self,
         span: Span,
+        callee: Callee,
         signature: &Signature,
         arguments: Vec<Argument>,
         expected: Option<Type>,
@@ -4348,14 +4921,18 @@ impl BodyChecker<'_> {
             } else if parameter.clone && !self.can_clone(argument) {
                 Some("Clone")
             } else {
-                None
+                parameter
+                    .traits
+                    .iter()
+                    .find(|&&trait_index| !self.implements(argument, trait_index))
+                    .map(|&trait_index| self.traits.declarations[trait_index].name.as_str())
             };
             if let Some(bound) = unsatisfied {
                 return Err(self.error(
                     CheckDiagnosticKind::UnsatisfiedBound,
                     span,
                     format!(
-                        "`{}` is not `{bound}`, which the type parameter `{}` of this function requires",
+                        "`{}` does not implement `{bound}`, which the type parameter `{}` of this function requires",
                         self.types.name(argument),
                         parameter.name
                     ),
@@ -4364,17 +4941,112 @@ impl BodyChecker<'_> {
             type_arguments.push(argument);
         }
         let result = self.substitute(signature.result, &type_arguments)?;
-        self.calls
-            .push((signature.index, type_arguments.clone(), self.at(span)));
+        if let Callee::Function(function) = callee {
+            self.calls
+                .push((function, type_arguments.clone(), self.at(span)));
+        }
         Ok((
             result,
             ExprKind::Call {
-                function: signature.index,
+                callee,
                 type_arguments,
                 arguments,
                 checks,
                 borrow,
             },
+        ))
+    }
+
+    fn implements(&self, ty: Type, trait_index: usize) -> bool {
+        implements(
+            self.traits,
+            self.trait_impls,
+            &self.type_parameters,
+            self.types,
+            ty,
+            trait_index,
+        )
+    }
+
+    /// Finds the trait method `name` of a receiver of type `ty`: a method of
+    /// the impls for a concrete type, or of the bounds of a type parameter.
+    /// Returns the callee and its signature for this receiver.
+    fn trait_method(
+        &mut self,
+        ty: Type,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<(Callee, Signature)>, CheckDiagnostic> {
+        let traits = self.traits;
+        let candidates: Vec<usize> = match self.types.kind(ty) {
+            TypeKind::Param { index, .. } => self.type_parameters[*index]
+                .traits
+                .iter()
+                .copied()
+                .collect(),
+            _ => self
+                .trait_impls
+                .keys()
+                .filter(|(_, target)| *target == ty)
+                .map(|(trait_index, _)| *trait_index)
+                .collect(),
+        };
+        let found = candidates
+            .into_iter()
+            .filter_map(|trait_index| {
+                traits.declarations[trait_index]
+                    .methods
+                    .iter()
+                    .position(|method| method.identity.name == name)
+                    .map(|method| (trait_index, method))
+            })
+            .collect::<Vec<_>>();
+        let (trait_index, method) = match found.as_slice() {
+            [] => return Ok(None),
+            [found] => *found,
+            [(first, _), (second, _), ..] => {
+                return Err(self.error(
+                    CheckDiagnosticKind::AmbiguousMethod,
+                    span,
+                    format!(
+                        "`{name}` is a method of both `{}` and `{}` for `{}`",
+                        traits.declarations[*first].name,
+                        traits.declarations[*second].name,
+                        self.types.name(ty)
+                    ),
+                ));
+            }
+        };
+        self.trait_callee(ty, trait_index, method).map(Some)
+    }
+
+    /// The callee and signature of `method` of `trait_index` for a receiver
+    /// of type `ty`, which implements the trait: the impl's function for a
+    /// concrete type, or the trait method for a type parameter.
+    fn trait_callee(
+        &mut self,
+        ty: Type,
+        trait_index: usize,
+        method: usize,
+    ) -> Result<(Callee, Signature), CheckDiagnostic> {
+        if let Some(methods) = self.trait_impls.get(&(trait_index, ty)) {
+            let function = methods[method];
+            let signature = self.signatures[&self.identities[function]].clone();
+            return Ok((Callee::Function(function), signature));
+        }
+        let signature = substitute_signature(
+            self.types,
+            self.nominals,
+            &self.traits.signatures[trait_index][method],
+            &[ty],
+        )?;
+        Ok((
+            Callee::Trait {
+                trait_index,
+                method,
+                self_type: ty,
+            },
+            signature,
         ))
     }
 
@@ -4782,18 +5454,14 @@ impl BodyChecker<'_> {
         }
         let mut arguments = Vec::new();
         for (value, expected) in values.iter().zip(parameters) {
-            let argument = self.check_expr(value, *expected)?;
-            match expected {
-                Some(expected) => self.require(value.span, *expected, argument.ty)?,
-                None if !is_printable(argument.ty) => {
-                    return Err(self.error(
-                        CheckDiagnosticKind::TypeMismatch,
-                        value.span,
-                        format!("`{}` cannot be printed", self.types.name(argument.ty)),
-                    ));
+            let argument = match expected {
+                Some(expected) => {
+                    let argument = self.check_expr(value, Some(*expected))?;
+                    self.require(value.span, *expected, argument.ty)?;
+                    argument
                 }
-                None => {}
-            }
+                None => self.check_displayed(value)?,
+            };
             arguments.push(argument);
         }
         Ok((

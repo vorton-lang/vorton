@@ -1,0 +1,15 @@
+trait Show {
+    fn show(&self) -> Str
+}
+
+struct Blob {
+    data: Int,
+}
+
+fn display<T: Show>(x: &T) -> Str {
+    x.show()
+}
+
+fn main() {
+    print(display(&Blob { data: 1 }))
+}

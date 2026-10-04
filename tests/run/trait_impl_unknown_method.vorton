@@ -1,0 +1,19 @@
+trait Show {
+    fn show(&self) -> Str
+}
+
+struct Blob {
+    data: Int,
+}
+
+impl Show for Blob {
+    fn show(&self) -> Str {
+        "blob"
+    }
+
+    fn extra(&self) -> Int {
+        1
+    }
+}
+
+fn main() {}

@@ -1,0 +1,135 @@
+trait Describable {
+    fn describe(&self) -> Str
+}
+
+trait Printable: Describable {
+    fn label(&self) -> Str
+}
+
+trait Counter {
+    fn bump(&mut self, by: Int)
+    fn total(&self) -> Int
+}
+
+trait Consume {
+    fn finish(self) -> List<Str>
+}
+
+struct Item {
+    name: Str,
+    value: Int,
+}
+
+enum Shape {
+    Circle(Int),
+    Square(Int),
+}
+
+struct Tally {
+    seen: List<Int>,
+}
+
+impl Describable for Item {
+    fn describe(&self) -> Str {
+        self.name
+    }
+}
+
+impl Printable for Item {
+    fn label(&self) -> Str {
+        "${self.describe()}:${self.value}"
+    }
+}
+
+impl Display for Item {
+    fn to_str(&self) -> Str {
+        "Item(${self.name})"
+    }
+}
+
+impl Describable for Shape {
+    fn describe(&self) -> Str {
+        match self {
+            Shape::Circle(r) => "circle ${r}"
+            Shape::Square(s) => "square ${s}"
+        }
+    }
+}
+
+impl Counter for Tally {
+    fn bump(&mut self, by: Int) {
+        self.seen.push(by)
+    }
+
+    fn total(&self) -> Int {
+        let mut sum = 0
+        for n in &self.seen {
+            sum += n
+        }
+        sum
+    }
+}
+
+impl Consume for Tally {
+    fn finish(self) -> List<Str> {
+        let mut out: List<Str> = []
+        for n in self.seen {
+            out.push("#${n}")
+        }
+        out
+    }
+}
+
+fn show_desc<T: Printable>(x: &T) -> Str {
+    x.describe()
+}
+
+fn show_both<T: Printable>(x: &T) -> Str {
+    "${x.describe()} (${x.label()})"
+}
+
+fn all_descriptions<T: Describable>(xs: &List<T>) -> List<Str> {
+    let mut out: List<Str> = []
+    for x in &xs {
+        out.push(x.describe())
+    }
+    out
+}
+
+fn count_up<C: Counter>(counter: &mut C, n: Int) -> Int {
+    for i in 1..=n {
+        counter.bump(i)
+    }
+    counter.total()
+}
+
+fn drain<C: Consume>(c: C) -> List<Str> {
+    c.finish()
+}
+
+fn shout<T: Display>(x: &T) -> Str {
+    "${x}!"
+}
+
+fn main() {
+    let item = Item { name: "widget", value: 42 }
+    print(item.describe())
+    print(item.label())
+    print(show_desc(&item))
+    print(show_both(&item))
+    print(item)
+    print("got ${item}")
+    print(shout(&item))
+    print(shout(&7))
+    print(shout(&"text"))
+    print(shout(&2.5))
+    let shapes = [Shape::Circle(1), Shape::Square(2)]
+    let texts = all_descriptions(&shapes)
+    print(texts[1])
+    let mut tally = Tally { seen: [] }
+    print(count_up(&mut tally, 4))
+    tally.bump(10)
+    print(tally.total())
+    let marks = drain(tally)
+    print(marks[4])
+}

@@ -1,0 +1,16 @@
+trait Pair {
+    fn left(&self) -> Int
+    fn right(&self) -> Int
+}
+
+struct P {
+    a: Int,
+}
+
+impl Pair for P {
+    fn left(&self) -> Int {
+        self.a
+    }
+}
+
+fn main() {}

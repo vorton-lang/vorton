@@ -1,0 +1,28 @@
+trait A {
+    fn name(&self) -> Str
+}
+
+trait B {
+    fn name(&self) -> Str
+}
+
+struct S {
+    v: Int,
+}
+
+impl A for S {
+    fn name(&self) -> Str {
+        "a"
+    }
+}
+
+impl B for S {
+    fn name(&self) -> Str {
+        "b"
+    }
+}
+
+fn main() {
+    let s = S { v: 1 }
+    print(s.name())
+}

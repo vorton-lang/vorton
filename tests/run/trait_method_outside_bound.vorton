@@ -1,0 +1,13 @@
+trait A {
+    fn a(&self) -> Int
+}
+
+trait B {
+    fn b(&self) -> Int
+}
+
+fn f<T: A>(x: &T) -> Int {
+    x.b()
+}
+
+fn main() {}

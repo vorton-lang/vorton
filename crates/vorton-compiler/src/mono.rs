@@ -12,12 +12,17 @@
 //! type, the copy reads the place instead: the checker has made sure the
 //! moved place is not used again, and reading leaves the place to be
 //! released as usual.
+//!
+//! A trait method called on a type parameter becomes a call of the method
+//! of the impl for the type argument. The checker has made sure that the
+//! impl exists; `Display` of a built-in type has none and becomes string
+//! interpolation of the value.
 
 use std::collections::BTreeMap;
 
 use crate::checker::{
-    Block, BorrowTarget, CheckDiagnostic, Expr, ExprKind, ForSource, Function, Place, Projection,
-    Receiver, Statement,
+    Block, BorrowTarget, Callee, CheckDiagnostic, Expr, ExprKind, ForSource, Function, Impls,
+    Place, Projection, Receiver, Statement,
 };
 use crate::types::{Type, TypeKind, Types};
 
@@ -77,6 +82,8 @@ pub(crate) fn instantiate_functions<F>(
     templates: Vec<Function>,
     generic: &[bool],
     main: usize,
+    impls: &Impls,
+    display: usize,
 ) -> Result<(Vec<Function>, usize), CheckDiagnostic>
 where
     F: FnMut(&mut Types, usize, Vec<Type>) -> Result<Type, CheckDiagnostic>,
@@ -95,6 +102,8 @@ where
             instantiate: &mut *instantiate,
             arguments: &arguments,
             instances: &mut instances,
+            impls,
+            display,
         }
         .function(&mut function)?;
         functions.push(function);
@@ -128,6 +137,9 @@ struct Instantiation<'a, F> {
     instantiate: &'a mut F,
     arguments: &'a [Type],
     instances: &'a mut Instances,
+    impls: &'a Impls,
+    /// The core `Display`, which built-in types implement without an impl.
+    display: usize,
 }
 
 impl<F> Instantiation<'_, F>
@@ -230,7 +242,7 @@ where
             | ExprKind::Local(_)
             | ExprKind::EmptyMap => {}
             ExprKind::Call {
-                function,
+                callee,
                 type_arguments,
                 arguments,
                 ..
@@ -238,10 +250,47 @@ where
                 for argument in type_arguments.iter_mut() {
                     self.ty(argument)?;
                 }
-                *function = self
-                    .instances
-                    .get(*function, std::mem::take(type_arguments));
                 self.exprs(arguments, locals)?;
+                let function = match *callee {
+                    Callee::Function(function) => Some(function),
+                    Callee::Trait {
+                        trait_index,
+                        method,
+                        mut self_type,
+                    } => {
+                        self.ty(&mut self_type)?;
+                        let function = self
+                            .impls
+                            .get(&(trait_index, self_type))
+                            .map(|methods| methods[method]);
+                        assert!(
+                            function.is_some() || trait_index == self.display,
+                            "the checker found an impl for every bound"
+                        );
+                        function
+                    }
+                };
+                match function {
+                    Some(function) => {
+                        *callee = Callee::Function(
+                            self.instances.get(function, std::mem::take(type_arguments)),
+                        );
+                    }
+                    // `Display::to_str` of a built-in type.
+                    None => {
+                        let [receiver] = std::mem::take(arguments)
+                            .try_into()
+                            .unwrap_or_else(|_| unreachable!("`to_str` takes `&self`"));
+                        let ExprKind::Borrow(target) = receiver.kind else {
+                            unreachable!("`to_str` borrows its receiver")
+                        };
+                        let value = match *target {
+                            BorrowTarget::Place(place) => self.read(place, locals),
+                            BorrowTarget::Value(value) => value,
+                        };
+                        expression.kind = ExprKind::Interpolate(vec![value]);
+                    }
+                }
             }
             ExprKind::Intrinsic { arguments, .. }
             | ExprKind::Interpolate(arguments)
@@ -321,21 +370,28 @@ where
         Ok(())
     }
 
-    /// An expression that reads `place`, a local and fields of it.
+    /// An expression that reads `place`.
     fn read(&self, place: Place, locals: &[Type]) -> Expr {
-        let mut value = Expr {
-            ty: locals[place.local],
-            kind: ExprKind::Local(place.local),
+        let mut value = match place.call {
+            Some(call) => *call,
+            None => Expr {
+                ty: locals[place.local],
+                kind: ExprKind::Local(place.local),
+            },
         };
         for projection in place.projections {
-            let Projection::Field(index) = projection else {
-                unreachable!("only locals and their fields are moved")
-            };
-            value = Expr {
-                ty: self.types.components(value.ty)[index],
-                kind: ExprKind::Field {
-                    base: Box::new(value),
-                    index,
+            let base = Box::new(value);
+            value = match projection {
+                Projection::Field(index) => Expr {
+                    ty: self.types.components(base.ty)[index],
+                    kind: ExprKind::Field { base, index },
+                },
+                Projection::Index(index) => Expr {
+                    ty: match self.types.kind(base.ty) {
+                        TypeKind::List(element) | TypeKind::Map(_, element) => *element,
+                        _ => unreachable!("only lists and maps are indexed"),
+                    },
+                    kind: ExprKind::Index { base, index },
                 },
             };
         }

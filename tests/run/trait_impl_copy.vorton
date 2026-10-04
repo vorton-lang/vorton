@@ -1,0 +1,7 @@
+struct P {
+    a: Int,
+}
+
+impl Copy for P {}
+
+fn main() {}

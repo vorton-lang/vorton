@@ -6077,7 +6077,7 @@ fn source_id(
     }
 }
 
-fn owner_key_from_entity(entity: &EntityId) -> OwnerKey {
+pub(crate) fn owner_key_from_entity(entity: &EntityId) -> OwnerKey {
     let (source, span) = match &entity.site {
         EntitySite::Source(origin) => (origin.source.clone(), origin.span),
         EntitySite::Language => (SourceRef::Root, Span::new(0, 0)),
