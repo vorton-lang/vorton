@@ -1,0 +1,11 @@
+struct Bag { xs: List<Int>, s: Str }
+
+fn main() {
+    let mut b = Bag { xs: [1], s: "${42}" }
+    let c = b
+    let ok = false && {
+        b = Bag { xs: [2], s: "${43}" }
+        true
+    }
+    print(b.s)
+}

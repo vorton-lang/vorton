@@ -1,0 +1,15 @@
+fn consume(xs: List<Int>) -> Bool {
+    xs.len() > 5
+}
+
+fn main() {
+    let mut xs = [1]
+    let ok = xs.len() > 0 && consume(xs)
+    xs = [2, 3]
+    print(xs.len())
+    match 0 {
+        _ if consume([4]) => print(1)
+        _ => print(xs.len() + 1)
+    }
+    print(ok)
+}

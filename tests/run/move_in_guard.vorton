@@ -1,0 +1,11 @@
+fn consume(xs: List<Int>) -> Bool {
+    false
+}
+
+fn main() {
+    let xs = [1]
+    match 0 {
+        _ if consume(xs) => print(1)
+        _ => print(xs.len())
+    }
+}

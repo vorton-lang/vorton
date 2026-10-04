@@ -4450,9 +4450,9 @@ impl BodyChecker<'_> {
         let has_frozen = frozen.is_some();
         self.frozen.extend(frozen);
         let scope = self.local_ids.clone();
-        let before = self.moved.clone();
-        // Every arm starts from the conflicts before the `match` and those of
-        // the guards before it, which may fail and fall through.
+        // Every arm starts from the moves and conflicts before the `match`
+        // and those of the guards before it, which may fail and fall through.
+        let mut before = self.moved.clone();
         let mut conflicts = self.held_conflicts();
         let mut arm_conflicts = Vec::new();
         let mut ends = Vec::new();
@@ -4477,6 +4477,7 @@ impl BodyChecker<'_> {
                 self.mutable[local] = true;
             }
             conflicts = self.held_conflicts();
+            before.extend(self.moved.iter().copied());
             // Each arm's value is stored when the arm ends.
             let frozen_before = self.frozen.len();
             let body = self.check_consumed(&arm.body, expected)?;
@@ -4863,7 +4864,14 @@ impl BodyChecker<'_> {
         use BinaryOperator as Op;
         let left = self.check_expr(left, None)?;
         let right_span = right.span;
+        // The right operand of `&&` and `||` may not run, so the state after
+        // it joins the state before it, as after an `if` without `else`.
+        let skipped = matches!(operator, Op::LogicAnd | Op::LogicOr).then(|| self.moved.clone());
         let right = self.check_expr(right, Some(left.ty))?;
+        if let Some(skipped) = skipped {
+            let ran = self.moved.clone();
+            self.merge_moved([(Type::BOOL, skipped), (right.ty, ran)]);
+        }
         if left.ty != right.ty {
             return Err(self.mismatch(right_span, left.ty, right.ty));
         }

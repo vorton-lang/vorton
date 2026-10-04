@@ -1,0 +1,10 @@
+fn main() {
+    let mut xs = [1]
+    let ys = xs
+    let ok = true || {
+        xs = [2]
+        false
+    }
+    print(xs.len())
+    print(ys.len())
+}
