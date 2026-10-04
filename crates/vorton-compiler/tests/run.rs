@@ -14,6 +14,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use vorton_compiler::diagnostic::FrontendDiagnosticKind;
 use vorton_compiler::{
@@ -39,13 +42,25 @@ fn run_programs_match_their_expectations() {
     programs.sort();
     assert!(!programs.is_empty(), "no programs under {}", root.display());
 
-    let mut failures = Vec::new();
-    for program in &programs {
-        if let Err(failure) = run_one(&compiler, &work, program) {
-            let name = program.file_name().unwrap().to_string_lossy();
-            failures.push(format!("{name}: {failure}"));
+    // Almost all of the time goes to the C compiler and linker, one process
+    // per program, so the programs are spread over a worker per core.
+    let next = AtomicUsize::new(0);
+    let failures = Mutex::new(Vec::new());
+    let workers = thread::available_parallelism().map_or(1, |count| count.get());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while let Some(program) = programs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    if let Err(failure) = run_one(&compiler, &work, program) {
+                        let name = program.file_name().unwrap().to_string_lossy();
+                        failures.lock().unwrap().push(format!("{name}: {failure}"));
+                    }
+                }
+            });
         }
-    }
+    });
+    let mut failures = failures.into_inner().unwrap();
+    failures.sort();
     let _ = fs::remove_dir_all(&work);
     assert!(
         failures.is_empty(),
