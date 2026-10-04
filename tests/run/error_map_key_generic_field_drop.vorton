@@ -1,0 +1,21 @@
+struct Key {
+    n: Int,
+}
+
+struct Wrap<T> {
+    map: Map<Key, T>,
+}
+
+struct Force {
+    w: Wrap<Int>,
+}
+
+impl Drop for Key {
+    fn drop(&mut self) {}
+}
+
+fn f(w: &mut Wrap<Int>, k: Key) {
+    w.map[k] = 7
+}
+
+fn main() {}

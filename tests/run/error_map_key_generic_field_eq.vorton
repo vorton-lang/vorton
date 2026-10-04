@@ -1,0 +1,19 @@
+struct Key {
+    n: Int,
+}
+
+struct Wrap<T> {
+    map: Map<Key, T>,
+}
+
+struct Force {
+    w: Wrap<Int>,
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> Bool {
+        true
+    }
+}
+
+fn main() {}
