@@ -1820,9 +1820,6 @@ impl Operand {
     }
 }
 
-/// A checked arm pattern and the locals visible in its arm.
-type ArmPattern = (Pattern, BTreeMap<EntityId, usize>);
-
 /// The values given to a variant or struct, in source order.
 enum Arguments<'r> {
     Positional(&'r [ResolvedExpr]),
@@ -1849,6 +1846,9 @@ struct BodyChecker<'a> {
     /// Every call of a named function, for the recursion check.
     calls: Vec<NamedCall>,
     locals: Vec<Local>,
+    /// The local of each binding. Name resolution has given every binding
+    /// its own identity and decided where each name refers, so scopes are
+    /// not tracked again here.
     local_ids: BTreeMap<EntityId, usize>,
     mutable: Vec<bool>,
     /// For each enclosing loop, whether a `break` leaves it.
@@ -1991,7 +1991,6 @@ impl BodyChecker<'_> {
         block: &ResolvedBlock,
         expected: Option<Type>,
     ) -> Result<Block, CheckDiagnostic> {
-        let scope = self.local_ids.clone();
         let mut statements = Vec::new();
         let mut diverges = false;
         self.depth += 1;
@@ -2025,7 +2024,6 @@ impl BodyChecker<'_> {
             self.require(span, expected, ty)?;
         }
         self.depth -= 1;
-        self.local_ids = scope;
         Ok(Block {
             statements,
             tail,
@@ -2440,7 +2438,6 @@ impl BodyChecker<'_> {
                 }
             }
         };
-        let scope = self.local_ids.clone();
         self.loops.push(false);
         let binding = match bindings {
             [single] => Ok(Pattern::Binding(
@@ -2473,7 +2470,6 @@ impl BodyChecker<'_> {
         let body =
             binding.and_then(|checked| Ok((checked, self.check_block(body, Some(Type::UNIT))?)));
         self.loops.pop();
-        self.local_ids = scope;
         let (binding, body) = body?;
         Ok((
             Statement::For {
@@ -3692,26 +3688,6 @@ impl BodyChecker<'_> {
         ))
     }
 
-    /// Checks the patterns of `arms` against `ty`, binding with `mode`;
-    /// returns each pattern with the locals visible in its arm.
-    fn check_arm_patterns<'p>(
-        &mut self,
-        patterns: impl IntoIterator<Item = &'p ResolvedPattern>,
-        ty: Type,
-        mode: Option<BorrowKind>,
-    ) -> Result<Vec<ArmPattern>, CheckDiagnostic> {
-        let scope = self.local_ids.clone();
-        let mut checked = Vec::new();
-        for pattern in patterns {
-            let pattern = self.check_pattern(pattern, ty, mode, &mut BTreeMap::new())?;
-            checked.push((
-                pattern,
-                std::mem::replace(&mut self.local_ids, scope.clone()),
-            ));
-        }
-        Ok(checked)
-    }
-
     /// Checks the subject of a `match` or `if let`. A subject written `&e`
     /// or `&mut e` is borrowed, and its borrow mode is returned.
     fn check_subject(
@@ -3767,14 +3743,12 @@ impl BodyChecker<'_> {
         if scrutinee.ty == Type::NEVER {
             return Ok((Type::NEVER, scrutinee.kind));
         }
-        let patterns =
-            self.check_arm_patterns(arms.iter().map(|arm| &arm.pattern), scrutinee.ty, mode)?;
-        let scope = self.local_ids.clone();
         let mut expected = expected;
         let mut ty = None;
         let mut checked = Vec::new();
-        for (arm, (pattern, visible)) in arms.iter().zip(patterns) {
-            self.local_ids = visible;
+        for arm in arms {
+            let pattern =
+                self.check_pattern(&arm.pattern, scrutinee.ty, mode, &mut BTreeMap::new())?;
             // A guard only reads the bindings; they become `&mut` once it holds.
             let readonly = self.mutable_bindings(&pattern);
             for &local in &readonly {
@@ -3805,7 +3779,6 @@ impl BodyChecker<'_> {
                 body,
             });
         }
-        self.local_ids = scope;
         let unguarded = checked
             .iter()
             .filter(|arm| arm.guard.is_none())
@@ -3844,11 +3817,8 @@ impl BodyChecker<'_> {
         if scrutinee.ty == Type::NEVER {
             return Ok(scrutinee);
         }
-        let mut patterns = self.check_arm_patterns([pattern], scrutinee.ty, mode)?;
-        let (pattern, visible) = patterns.pop().expect("one pattern was checked");
-        let scope = std::mem::replace(&mut self.local_ids, visible);
+        let pattern = self.check_pattern(pattern, scrutinee.ty, mode, &mut BTreeMap::new())?;
         let then_branch = self.check_block(then_branch, Some(Type::UNIT))?;
-        self.local_ids = scope;
         let else_body = match else_branch {
             Some(block) => self.check_block(block, Some(Type::UNIT))?,
             None => Block {
