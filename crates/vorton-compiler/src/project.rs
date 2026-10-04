@@ -989,7 +989,6 @@ pub(crate) enum ResolvedExprKind {
     },
     List(Vec<ResolvedExpr>),
     Unit,
-    Parenthesized(Box<ResolvedExpr>),
     Tuple(Vec<ResolvedExpr>),
     Block(ResolvedBlock),
     If {

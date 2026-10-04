@@ -1,0 +1,26 @@
+fn get(x: &List<Int>) -> &List<Int> {
+    (&x)
+}
+
+fn show(x: &Int) {
+    print(x)
+}
+
+fn main() {
+    let xs = [1]
+    let ys = (get(&xs))
+    print(ys.len())
+    let x = 1
+    show((&x))
+    let mut y = 1
+    let r = (&mut y)
+    r = 2
+    print(y)
+    match (&xs) {
+        zs => print(zs.len())
+    }
+    for z in (&xs) {
+        print(z)
+    }
+    print(-(9223372036854775808))
+}

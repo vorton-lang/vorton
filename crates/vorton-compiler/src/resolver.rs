@@ -5106,6 +5106,11 @@ impl BodyResolver<'_> {
     // Return branch results directly so only the selected branch keeps its
     // temporaries alive across child resolution in unoptimized builds.
     fn resolve_expr(&mut self, expression: &Expr) -> Result<ResolvedExpr, ProjectDiagnostic> {
+        // Parentheses only group. The resolved program has no node for them,
+        // so no later stage can tell `(e)` from `e`.
+        if let ExprKind::Parenthesized(inner) = &expression.kind {
+            return self.resolve_expr(inner);
+        }
         let kind = match &expression.kind {
             ExprKind::Integer(value) => Ok(ResolvedExprKind::Integer(value.clone())),
             ExprKind::Float(value) => Ok(ResolvedExprKind::Float(value.clone())),
@@ -5142,9 +5147,7 @@ impl BodyResolver<'_> {
                 .collect::<Result<Vec<_>, _>>()
                 .map(ResolvedExprKind::List),
             ExprKind::Unit => Ok(ResolvedExprKind::Unit),
-            ExprKind::Parenthesized(inner) => self
-                .resolve_expr(inner)
-                .map(|inner| ResolvedExprKind::Parenthesized(Box::new(inner))),
+            ExprKind::Parenthesized(_) => unreachable!("parentheses are resolved above"),
             ExprKind::Tuple(elements) => elements
                 .iter()
                 .map(|element| self.resolve_expr(element))

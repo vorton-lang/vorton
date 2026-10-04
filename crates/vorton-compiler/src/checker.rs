@@ -2382,9 +2382,6 @@ impl BodyChecker<'_> {
         kind: BorrowKind,
     ) -> Result<Expr, CheckDiagnostic> {
         let (place, ty, span) = match &value.kind {
-            ResolvedExprKind::Parenthesized(inner) => {
-                return self.check_returned_borrow(inner, kind);
-            }
             ResolvedExprKind::Borrow {
                 kind: (_, written),
                 operand,
@@ -2625,7 +2622,6 @@ impl BodyChecker<'_> {
                 let call = self.check_expr(expression, expected)?;
                 Ok(self.call_operand(call, method.name.clone()))
             }
-            ResolvedExprKind::Parenthesized(inner) => self.check_operand(inner, expected),
             ResolvedExprKind::Field { receiver, field } => {
                 let base = self.check_operand(receiver, None)?;
                 let (index, ty) = self.named_field(base.ty(), &field.name, field.origin.span)?;
@@ -2949,14 +2945,6 @@ impl BodyChecker<'_> {
                 } else {
                     return Err(self.unsupported(span, "values other than local variables"));
                 }
-            }
-            ResolvedExprKind::Parenthesized(inner) => {
-                if let ResolvedExprKind::Integer(_) = inner.kind {
-                    // Keep `-(9223372036854775808)` a literal of the minimum `Int`.
-                    return self.check_expr(inner, expected);
-                }
-                let inner = self.check_expr(inner, expected)?;
-                (inner.ty, inner.kind)
             }
             ResolvedExprKind::Block(block) => {
                 let block = self.check_block(block, expected)?;
@@ -4268,7 +4256,7 @@ impl BodyChecker<'_> {
         operand: &ResolvedExpr,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         if operator == UnaryOperator::Negate
-            && let Some(text) = integer_literal(operand)
+            && let ResolvedExprKind::Integer(text) = &operand.kind
             && text == "9223372036854775808"
         {
             return Ok((Type::INT, ExprKind::Int(i64::MIN)));
@@ -5057,12 +5045,4 @@ fn mentions_only(
 /// Whether `ty` has a built-in text form and built-in ordering.
 fn is_printable(ty: Type) -> bool {
     matches!(ty, Type::INT | Type::FLOAT | Type::BOOL | Type::STR)
-}
-
-fn integer_literal(expression: &ResolvedExpr) -> Option<&str> {
-    match &expression.kind {
-        ResolvedExprKind::Integer(text) => Some(text),
-        ResolvedExprKind::Parenthesized(inner) => integer_literal(inner),
-        _ => None,
-    }
 }
