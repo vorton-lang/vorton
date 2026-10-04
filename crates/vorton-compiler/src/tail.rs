@@ -10,6 +10,7 @@
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
 
+use crate::dataflow;
 use crate::mir::{
     BlockId, Body, Constant, Local, Operand, Place, Program, Rvalue, StatementKind, Terminator,
     TerminatorKind,
@@ -136,7 +137,9 @@ impl<'a> TailCalls<'a> {
         });
         // A value whose `drop` runs after the call returns makes it no tail
         // call; releasing anything else early is not observable.
-        let starts = self.filled.get_or_init(|| body.maybe_filled(self.types));
+        let starts = self
+            .filled
+            .get_or_init(|| dataflow::maybe_filled(body, self.types));
         let mut filled = starts[block].clone();
         for statement in &data.statements[..=index] {
             body.fill(self.types, &statement.kind, &mut filled);
@@ -158,8 +161,10 @@ impl<'a> TailCalls<'a> {
         let mut seen = BTreeSet::from([block]);
         loop {
             for statement in statements {
+                // Only releases, and steps that do nothing at run time.
                 match &statement.kind {
                     StatementKind::Release(local) => releases.push(*local),
+                    StatementKind::Keep(_) => {}
                     StatementKind::Assign(
                         place,
                         Rvalue::Use(Operand::Constant(Constant::Unit)),
@@ -167,8 +172,7 @@ impl<'a> TailCalls<'a> {
                     StatementKind::Assign(..)
                     | StatementKind::Bind(..)
                     | StatementKind::Unpack(_)
-                    | StatementKind::Distinct { .. }
-                    | StatementKind::Keep(_) => return None,
+                    | StatementKind::Distinct { .. } => return None,
                 }
             }
             match body.blocks[current].terminator.kind {

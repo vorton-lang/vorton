@@ -6,6 +6,7 @@
 //! build, so a release build never emits code for an IR that a debug build
 //! would have rejected.
 
+use crate::dataflow;
 use crate::mir::{Body, Operand, Place, Rvalue, StatementKind, TerminatorKind, projection_type};
 use crate::types::{Type, Types};
 
@@ -110,7 +111,7 @@ fn check(body: &Body, types: &Types) -> Result<(), String> {
 /// Checks that every path to a return releases each local that holds
 /// something to release, so no branch of lowering forgets a scope.
 fn released(body: &Body, types: &Types) -> Result<(), String> {
-    let starts = body.maybe_filled(types);
+    let starts = dataflow::maybe_filled(body, types);
     for block in body.reverse_postorder() {
         if !matches!(body.blocks[block].terminator.kind, TerminatorKind::Return) {
             continue;

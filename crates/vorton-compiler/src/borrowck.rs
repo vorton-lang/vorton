@@ -36,10 +36,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::Span;
+use crate::dataflow::{self, Graph, Sets};
 use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::mir::{
-    BlockId, Body, Check, Constant, Local, Operand, Place, Projection, RefKind, Rvalue,
-    StatementKind, TerminatorKind, projection_type,
+    Body, Check, Constant, Local, Operand, Place, Projection, RefKind, Rvalue, StatementKind,
+    TerminatorKind, projection_type,
 };
 use crate::project::OriginRef;
 use crate::types::Types;
@@ -53,7 +54,7 @@ pub(crate) fn check(
     at: &dyn Fn(Span) -> OriginRef,
 ) -> Result<Vec<Check>, CheckDiagnostic> {
     let graph = Graph::new(body);
-    let live = liveness(body, &graph);
+    let live = dataflow::liveness(body, &graph);
     let mut errors = Vec::new();
     let mut checks = Vec::new();
     check_move_sources(body, types, &mut errors);
@@ -73,70 +74,6 @@ struct Error {
     kind: CheckDiagnosticKind,
     span: Span,
     message: String,
-}
-
-/// The reachable blocks in reverse postorder, and the edges between them.
-struct Graph {
-    order: Vec<BlockId>,
-    predecessors: Vec<Vec<BlockId>>,
-    successors: Vec<Vec<BlockId>>,
-}
-
-impl Graph {
-    fn new(body: &Body) -> Self {
-        let count = body.blocks.len();
-        let successors = (0..count)
-            .map(|block| body.successors(block))
-            .collect::<Vec<_>>();
-        let order = body.reverse_postorder();
-        let mut predecessors = vec![Vec::new(); count];
-        for &block in order.iter().rev() {
-            for &successor in &successors[block] {
-                predecessors[successor].push(block);
-            }
-        }
-        Self {
-            order,
-            predecessors,
-            successors,
-        }
-    }
-}
-
-/// Runs a forward analysis to its fixed point and returns the state at the
-/// start of each block.
-fn forward<S: Clone + PartialEq>(
-    graph: &Graph,
-    entry: S,
-    bottom: &S,
-    join: impl Fn(&mut S, &S),
-    mut transfer: impl FnMut(BlockId, &mut S),
-) -> Vec<S> {
-    let count = graph.predecessors.len();
-    let mut starts = vec![bottom.clone(); count];
-    let mut ends = vec![bottom.clone(); count];
-    starts[graph.order[0]] = entry.clone();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &block in &graph.order {
-            let mut state = if block == graph.order[0] {
-                entry.clone()
-            } else {
-                bottom.clone()
-            };
-            for &predecessor in &graph.predecessors[block] {
-                join(&mut state, &ends[predecessor]);
-            }
-            starts[block] = state.clone();
-            transfer(block, &mut state);
-            if state != ends[block] {
-                ends[block] = state;
-                changed = true;
-            }
-        }
-    }
-    starts
 }
 
 // Where entities can be moved out of.
@@ -301,26 +238,20 @@ impl Empty {
     }
 }
 
-fn check_moves(body: &Body, graph: &Graph, live: &Liveness, errors: &mut Vec<Error>) {
+fn check_moves(body: &Body, graph: &Graph, live: &Sets, errors: &mut Vec<Error>) {
     let mut entry = Empty::default();
     for local in (0..body.locals.len()).filter(|local| !body.parameters.contains(local)) {
         entry.insert(Place::local(local));
     }
-    let starts = forward(
-        graph,
-        entry,
-        &Empty::default(),
-        Empty::join,
-        |block, state| {
-            state.retain(&live.starts[block]);
-            for statement in &body.blocks[block].statements {
-                move_statement(body, &statement.kind, statement.span, state, None);
-            }
-            state.retain(&live.ends[block]);
-        },
-    );
+    let starts = dataflow::forward(graph, entry, Empty::join, |block, state| {
+        state.retain(&live.starts[block]);
+        for statement in &body.blocks[block].statements {
+            move_statement(body, &statement.kind, statement.span, state, None);
+        }
+        state.retain(&live.ends[block]);
+    });
     for &block in &graph.order {
-        let mut state = starts[block].clone();
+        let mut state = starts[block].clone().expect("a reachable block is reached");
         state.retain(&live.starts[block]);
         for statement in &body.blocks[block].statements {
             move_statement(
@@ -332,15 +263,7 @@ fn check_moves(body: &Body, graph: &Graph, live: &Liveness, errors: &mut Vec<Err
             );
         }
         let terminator = &body.blocks[block].terminator;
-        let used = match &terminator.kind {
-            TerminatorKind::Branch { condition, .. } => operand_places(condition),
-            TerminatorKind::Return => vec![Place::local(body.result)],
-            TerminatorKind::TailCall { arguments, .. } => {
-                arguments.iter().flat_map(operand_places).collect()
-            }
-            TerminatorKind::Goto(_) | TerminatorKind::Unreachable => Vec::new(),
-        };
-        for place in used {
+        for place in terminator.kind.places(body) {
             check_filled(body, &state, &place, terminator.span, errors);
         }
     }
@@ -363,7 +286,7 @@ fn move_statement(
         StatementKind::Unpack(taken) => {
             if let Some(errors) = errors {
                 for (_, place) in taken {
-                    for used in operand_places(&Operand::Move(place.clone())) {
+                    for used in place.with_indices() {
                         check_filled(body, state, &used, span, errors);
                     }
                 }
@@ -385,7 +308,7 @@ fn move_statement(
         StatementKind::Distinct { pairs, .. } => {
             if let Some(errors) = errors {
                 for (left, right) in pairs {
-                    for used in operand_places(left).iter().chain(&operand_places(right)) {
+                    for used in left.places().iter().chain(&right.places()) {
                         check_filled(body, state, used, span, errors);
                     }
                 }
@@ -394,7 +317,7 @@ fn move_statement(
         }
     };
     if let Some(errors) = errors.as_deref_mut() {
-        for place in rvalue_places(value) {
+        for place in value.places() {
             check_filled(body, state, &place, span, errors);
         }
     }
@@ -506,7 +429,7 @@ fn check_borrows(
     body: &Body,
     types: &Types,
     graph: &Graph,
-    live: &Liveness,
+    live: &Sets,
     errors: &mut Vec<Error>,
     checks: &mut Vec<Check>,
 ) {
@@ -542,55 +465,49 @@ fn check_borrows(
     // The loans each reference local may carry, and what the temporaries are
     // known to hold.
     let mut values = Values::new(body);
-    let starts = forward(
-        graph,
-        Flow {
-            reached: true,
-            ..Flow::default()
-        },
-        &Flow::default(),
-        Flow::join,
-        |block, state| {
-            if !state.reached {
-                return;
-            }
-            state
-                .carried
-                .retain(|reference, _| live.starts[block].contains(reference));
-            for (index, statement) in body.blocks[block].statements.iter().enumerate() {
-                let own = loan_at.get(&(block, index)).copied();
-                learn(
-                    body,
-                    &loans,
-                    &statement.kind,
-                    &state.carried,
-                    &mut state.copies,
-                    &mut values,
-                );
-                carry(body, &statement.kind, own, &active, &mut state.carried);
-            }
-            state
-                .carried
-                .retain(|reference, _| live.ends[block].contains(reference));
-        },
-    );
+    let starts = dataflow::forward(graph, Flow::default(), Flow::join, |block, state| {
+        state
+            .carried
+            .retain(|reference, _| live.starts[block].contains(reference));
+        for (index, statement) in body.blocks[block].statements.iter().enumerate() {
+            let own = loan_at.get(&(block, index)).copied();
+            learn(
+                body,
+                &loans,
+                &statement.kind,
+                &state.carried,
+                &mut state.copies,
+                &mut values,
+            );
+            carry(body, &statement.kind, own, &active, &mut state.carried);
+        }
+        state
+            .carried
+            .retain(|reference, _| live.ends[block].contains(reference));
+    });
     let is_reference = |local: &Local| body.locals[*local].reference.is_some();
     for &block in &graph.order {
         let Flow {
             mut carried,
             mut copies,
-            ..
-        } = starts[block].clone();
+        } = starts[block].clone().expect("a reachable block is reached");
         carried.retain(|reference, _| live.starts[block].contains(reference));
         // The references that each statement is the last to use, or that it
         // makes point somewhere no later step looks: they are dead after it.
         let statements = &body.blocks[block].statements;
         let mut dying = vec![Vec::new(); statements.len()];
         let mut references = live.ends[block].clone();
-        terminator_uses(body, &body.blocks[block].terminator.kind, &mut references);
+        let terminator = &body.blocks[block].terminator.kind;
+        references.extend(terminator.places(body).into_iter().map(|place| place.local));
         references.retain(is_reference);
         for (index, statement) in statements.iter().enumerate().rev() {
-            let (uses, defines) = local_uses(body, &statement.kind);
+            let effects = statement.kind.effects(body);
+            let uses = effects
+                .reads
+                .into_iter()
+                .chain(effects.changes)
+                .collect::<Vec<_>>();
+            let defines = effects.replaces;
             dying[index] = uses
                 .iter()
                 .chain(&defines)
@@ -677,11 +594,9 @@ fn check_borrows(
 type Carried = BTreeMap<Local, BTreeSet<usize>>;
 
 /// The state of the forward analysis of borrows at a point: the loans the
-/// references carry, and what the index locals are known to hold. A block
-/// that no edge has reached yet constrains nothing.
+/// references carry, and what the index locals are known to hold.
 #[derive(Clone, PartialEq, Default)]
 struct Flow {
-    reached: bool,
     carried: Carried,
     copies: Copies,
 }
@@ -689,13 +604,6 @@ struct Flow {
 impl Flow {
     /// The loans either side may carry; the copies both sides know.
     fn join(&mut self, other: &Self) {
-        if !other.reached {
-            return;
-        }
-        if !self.reached {
-            *self = other.clone();
-            return;
-        }
         for (reference, theirs) in &other.carried {
             self.carried
                 .entry(*reference)
@@ -749,7 +657,7 @@ impl Values {
                 match &statement.kind {
                     StatementKind::Assign(destination, value) => {
                         places.push(destination.clone());
-                        places.extend(rvalue_places(value));
+                        places.extend(value.places());
                         if destination.projections.is_empty() {
                             let read =
                                 value
@@ -764,7 +672,7 @@ impl Values {
                             sources.entry(destination.local).or_default().extend(read);
                         }
                     }
-                    StatementKind::Bind(_, value) => places.extend(rvalue_places(value)),
+                    StatementKind::Bind(_, value) => places.extend(value.places()),
                     StatementKind::Unpack(taken) => {
                         places.extend(taken.iter().map(|(_, place)| place.clone()));
                     }
@@ -773,15 +681,7 @@ impl Values {
                     | StatementKind::Distinct { .. } => {}
                 }
             }
-            match &data.terminator.kind {
-                TerminatorKind::Branch { condition, .. } => {
-                    places.extend(operand_places(condition));
-                }
-                TerminatorKind::TailCall { arguments, .. } => {
-                    places.extend(arguments.iter().flat_map(operand_places));
-                }
-                TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
-            }
+            places.extend(data.terminator.kind.places(body));
         }
         for place in &places {
             for projection in &place.projections {
@@ -1160,99 +1060,6 @@ fn carry(
     }
 }
 
-// Liveness.
-
-/// The locals live at the start and at the end of each block: those whose
-/// content a later step may depend on before something replaces it.
-struct Liveness {
-    starts: Vec<BTreeSet<Local>>,
-    ends: Vec<BTreeSet<Local>>,
-}
-
-fn liveness(body: &Body, graph: &Graph) -> Liveness {
-    let count = body.blocks.len();
-    let mut starts = vec![BTreeSet::new(); count];
-    let mut ends = vec![BTreeSet::new(); count];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &block in graph.order.iter().rev() {
-            let mut live = BTreeSet::new();
-            for &successor in &graph.successors[block] {
-                live.extend(starts[successor].iter().copied());
-            }
-            ends[block] = live.clone();
-            terminator_uses(body, &body.blocks[block].terminator.kind, &mut live);
-            for statement in body.blocks[block].statements.iter().rev() {
-                let (uses, defines) = local_uses(body, &statement.kind);
-                for defined in defines {
-                    live.remove(&defined);
-                }
-                live.extend(uses);
-            }
-            if live != starts[block] {
-                starts[block] = live;
-                changed = true;
-            }
-        }
-    }
-    Liveness { starts, ends }
-}
-
-/// Adds the locals a terminator uses to `live`. A borrow that the function
-/// returns lives on in the caller.
-fn terminator_uses(body: &Body, terminator: &TerminatorKind, live: &mut BTreeSet<Local>) {
-    let used = match terminator {
-        TerminatorKind::Branch { condition, .. } => operand_places(condition),
-        TerminatorKind::Return => vec![Place::local(body.result)],
-        TerminatorKind::TailCall { arguments, .. } => {
-            arguments.iter().flat_map(operand_places).collect()
-        }
-        TerminatorKind::Goto(_) | TerminatorKind::Unreachable => Vec::new(),
-    };
-    live.extend(used.into_iter().map(|place| place.local));
-}
-
-/// The locals whose content `statement` depends on: those whose places it
-/// reads, takes or borrows, writes into a part of, or writes through; and
-/// those it gives new content regardless of what they held: filled whole,
-/// made to point somewhere, or released.
-fn local_uses(body: &Body, statement: &StatementKind) -> (Vec<Local>, Vec<Local>) {
-    let locals = |places: Vec<Place>| places.into_iter().map(|place| place.local);
-    match statement {
-        StatementKind::Release(local) => (Vec::new(), vec![*local]),
-        StatementKind::Keep(reference) => (vec![*reference], Vec::new()),
-        StatementKind::Distinct { pairs, .. } => (
-            pairs
-                .iter()
-                .flat_map(|(left, right)| {
-                    locals(operand_places(left)).chain(locals(operand_places(right)))
-                })
-                .collect(),
-            Vec::new(),
-        ),
-        StatementKind::Unpack(taken) => (
-            taken
-                .iter()
-                .flat_map(|(_, place)| locals(operand_places(&Operand::Move(place.clone()))))
-                .collect(),
-            taken.iter().map(|(local, _)| *local).collect(),
-        ),
-        StatementKind::Bind(reference, value) => {
-            (locals(rvalue_places(value)).collect(), vec![*reference])
-        }
-        StatementKind::Assign(destination, value) => {
-            let mut uses = locals(rvalue_places(value)).collect::<Vec<_>>();
-            if is_whole(body, destination) {
-                (uses, vec![destination.local])
-            } else {
-                uses.extend(locals(operand_places(&Operand::Move(destination.clone()))));
-                (uses, Vec::new())
-            }
-        }
-    }
-}
-
 /// The loans in force while a block is checked: those that some reference
 /// carries that the statement being checked uses or a later step uses.
 /// They are kept by the local of their place, so an access looks only at
@@ -1578,77 +1385,4 @@ fn check_returned(
             return;
         }
     }
-}
-
-// Places in IR steps.
-
-/// Every place an rvalue reads, takes or borrows, and the locals it reads
-/// through: index locals and borrowed references.
-pub(crate) fn rvalue_places(value: &Rvalue) -> Vec<Place> {
-    let mut places = Vec::new();
-    for operand in value.operands() {
-        places.extend(operand_places(operand));
-    }
-    match value {
-        Rvalue::Ref(_, place) | Rvalue::Discriminant(place) | Rvalue::Len(place) => {
-            places.push(place.clone());
-            places.extend(index_locals(place));
-        }
-        Rvalue::Builtin { receiver, .. } => {
-            places.push(receiver.clone());
-            places.extend(index_locals(receiver));
-        }
-        Rvalue::Occupied {
-            container,
-            position,
-        } => {
-            places.push(container.clone());
-            places.extend(index_locals(container));
-            places.push(Place::local(*position));
-        }
-        Rvalue::Take {
-            container,
-            position,
-        } => {
-            places.push(Place::local(*container));
-            places.push(Place::local(*position));
-        }
-        // These read only their operands.
-        Rvalue::Use(_)
-        | Rvalue::Unary(..)
-        | Rvalue::Binary(..)
-        | Rvalue::Tuple(_)
-        | Rvalue::Construct { .. }
-        | Rvalue::List(_)
-        | Rvalue::EmptyMap
-        | Rvalue::Range { .. }
-        | Rvalue::Interpolate(_)
-        | Rvalue::Call { .. }
-        | Rvalue::Glue { .. }
-        | Rvalue::Intrinsic { .. } => {}
-    }
-    places
-}
-
-pub(crate) fn operand_places(operand: &Operand) -> Vec<Place> {
-    match operand {
-        Operand::Copy(place) | Operand::Inspect(place) | Operand::Move(place) => {
-            let mut places = vec![place.clone()];
-            places.extend(index_locals(place));
-            places
-        }
-        Operand::Borrowed(local) => vec![Place::local(*local)],
-        Operand::Constant(_) => Vec::new(),
-    }
-}
-
-fn index_locals(place: &Place) -> Vec<Place> {
-    place
-        .projections
-        .iter()
-        .filter_map(|projection| match projection {
-            Projection::Index(local) | Projection::Position(local) => Some(Place::local(*local)),
-            _ => None,
-        })
-        .collect()
 }

@@ -4,6 +4,7 @@ mod borrowck;
 mod capabilities;
 mod checker;
 mod codegen;
+mod dataflow;
 mod depth;
 mod exhaustive;
 mod lexer;

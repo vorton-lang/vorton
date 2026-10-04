@@ -10,10 +10,10 @@
 use std::collections::BTreeSet;
 
 use crate::ast::Span;
-use crate::borrowck::{operand_places, rvalue_places};
+use crate::dataflow::{self, Graph, Sets, Summary};
 use crate::diagnostic::{CheckDiagnostic, CheckDiagnosticKind};
 use crate::lower::Change;
-use crate::mir::{Body, Local, Operand, Place, StatementKind, TerminatorKind};
+use crate::mir::{Body, Local};
 use crate::project::OriginRef;
 
 pub(crate) fn check(
@@ -28,24 +28,28 @@ pub(crate) fn check(
         .iter()
         .map(|change| change.local)
         .collect::<BTreeSet<_>>();
-    let read_later = reads_after_blocks(body, &tracked);
+    let read_later = reads_after(body, &tracked);
     for change in changes {
         let data = &body.blocks[change.block];
         let mut read = None;
         for statement in &data.statements[change.statement + 1..] {
-            let (reads, ends) = effect(&statement.kind);
-            if reads.contains(&change.local) {
+            let effects = statement.kind.effects(body);
+            if effects.reads.contains(&change.local) {
                 read = Some(true);
                 break;
             }
-            if ends.contains(&change.local) {
+            if effects.replaces.contains(&change.local) {
                 read = Some(false);
                 break;
             }
         }
         let read = read.unwrap_or_else(|| {
-            terminator_reads(body, &data.terminator.kind).contains(&change.local)
-                || read_later[change.block].contains(&change.local)
+            data.terminator
+                .kind
+                .places(body)
+                .iter()
+                .any(|place| place.local == change.local)
+                || read_later.ends[change.block].contains(&change.local)
         });
         if !read {
             let name = &body.locals[change.local].name;
@@ -61,91 +65,31 @@ pub(crate) fn check(
     Ok(())
 }
 
-/// The locals a statement reads, and those it gives a new value whole or
-/// ends. Writing into a part of a local does neither.
-fn effect(statement: &StatementKind) -> (Vec<Local>, Vec<Local>) {
-    let locals = |places: Vec<Place>| places.into_iter().map(|place| place.local).collect();
-    match statement {
-        StatementKind::Assign(destination, value) => {
-            let mut reads: Vec<Local> = locals(rvalue_places(value));
-            reads.extend(
-                operand_places(&Operand::Move(destination.clone()))
-                    .into_iter()
-                    .skip(1)
-                    .map(|place| place.local),
-            );
-            let ends = if destination.projections.is_empty() {
-                vec![destination.local]
-            } else {
-                Vec::new()
-            };
-            (reads, ends)
-        }
-        StatementKind::Bind(reference, value) => (locals(rvalue_places(value)), vec![*reference]),
-        StatementKind::Unpack(taken) => (
-            taken.iter().map(|(_, place)| place.local).collect(),
-            taken.iter().map(|(local, _)| *local).collect(),
-        ),
-        StatementKind::Release(local) => (Vec::new(), vec![*local]),
-        StatementKind::Distinct { pairs, .. } => (
-            pairs
-                .iter()
-                .flat_map(|(left, right)| [left, right])
-                .flat_map(operand_places)
-                .map(|place| place.local)
-                .collect(),
-            Vec::new(),
-        ),
-        StatementKind::Keep(reference) => (vec![*reference], Vec::new()),
-    }
-}
-
-fn terminator_reads(body: &Body, terminator: &TerminatorKind) -> Vec<Local> {
-    let places = match terminator {
-        TerminatorKind::Branch { condition, .. } => operand_places(condition),
-        TerminatorKind::Return => vec![Place::local(body.result)],
-        TerminatorKind::TailCall { arguments, .. } => {
-            arguments.iter().flat_map(operand_places).collect()
-        }
-        TerminatorKind::Goto(_) | TerminatorKind::Unreachable => Vec::new(),
+/// For each block, the tracked locals that a step may read before they get
+/// a new value or end. Writing into a part of a local does not read it.
+fn reads_after(body: &Body, tracked: &BTreeSet<Local>) -> Sets {
+    let tracked_only = |locals: Vec<Local>| {
+        locals
+            .into_iter()
+            .filter(|local| tracked.contains(local))
+            .collect::<Vec<_>>()
     };
-    places.into_iter().map(|place| place.local).collect()
-}
-
-/// For each block, the tracked locals that a step after it may read before
-/// they get a new value or end.
-fn reads_after_blocks(body: &Body, tracked: &BTreeSet<Local>) -> Vec<BTreeSet<Local>> {
-    let count = body.blocks.len();
-    let mut starts = vec![BTreeSet::new(); count];
-    let mut ends = vec![BTreeSet::new(); count];
-    let order = body.reverse_postorder();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &block in order.iter().rev() {
-            let mut live = BTreeSet::new();
-            for successor in body.successors(block) {
-                live.extend(starts[successor].iter().copied());
-            }
-            ends[block] = live.clone();
-            let data = &body.blocks[block];
-            live.extend(
-                terminator_reads(body, &data.terminator.kind)
-                    .into_iter()
-                    .filter(|local| tracked.contains(local)),
+    let summaries = body
+        .blocks
+        .iter()
+        .map(|data| {
+            let mut summary = Summary::default();
+            let reads = data.terminator.kind.places(body);
+            summary.step_before(
+                tracked_only(reads.into_iter().map(|place| place.local).collect()),
+                [],
             );
             for statement in data.statements.iter().rev() {
-                let (reads, gone) = effect(&statement.kind);
-                for local in gone {
-                    live.remove(&local);
-                }
-                live.extend(reads.into_iter().filter(|local| tracked.contains(local)));
+                let effects = statement.kind.effects(body);
+                summary.step_before(tracked_only(effects.reads), effects.replaces);
             }
-            if live != starts[block] {
-                starts[block] = live;
-                changed = true;
-            }
-        }
-    }
-    ends
+            summary
+        })
+        .collect::<Vec<_>>();
+    dataflow::backward(&Graph::new(body), &summaries)
 }

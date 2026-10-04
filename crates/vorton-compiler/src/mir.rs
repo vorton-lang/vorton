@@ -334,8 +334,163 @@ impl Rvalue {
             | Self::Take { .. } => Vec::new(),
         }
     }
+
+    /// Every place the rvalue reads, takes or borrows, and the locals it
+    /// reads through: index locals and borrowed references, as whole places.
+    pub(crate) fn places(&self) -> Vec<Place> {
+        let mut places = self
+            .operands()
+            .into_iter()
+            .flat_map(Operand::places)
+            .collect::<Vec<_>>();
+        match self {
+            Self::Ref(_, place)
+            | Self::Discriminant(place)
+            | Self::Len(place)
+            | Self::Builtin {
+                receiver: place, ..
+            } => places.extend(place.with_indices()),
+            Self::Occupied {
+                container,
+                position,
+            } => {
+                places.extend(container.with_indices());
+                places.push(Place::local(*position));
+            }
+            Self::Take {
+                container,
+                position,
+            } => {
+                places.push(Place::local(*container));
+                places.push(Place::local(*position));
+            }
+            // These read only their operands.
+            Self::Use(_)
+            | Self::Unary(..)
+            | Self::Binary(..)
+            | Self::Tuple(_)
+            | Self::Construct { .. }
+            | Self::List(_)
+            | Self::EmptyMap
+            | Self::Range { .. }
+            | Self::Interpolate(_)
+            | Self::Call { .. }
+            | Self::Glue { .. }
+            | Self::Intrinsic { .. } => {}
+        }
+        places
+    }
 }
 
+impl Operand {
+    /// The place the operand reads or takes and the locals it reads through,
+    /// as whole places: its index locals, or the reference it passes on.
+    pub(crate) fn places(&self) -> Vec<Place> {
+        match self {
+            Self::Copy(place) | Self::Inspect(place) | Self::Move(place) => place.with_indices(),
+            Self::Borrowed(local) => vec![Place::local(*local)],
+            Self::Constant(_) => Vec::new(),
+        }
+    }
+}
+
+impl Place {
+    /// The locals that hold the indices, keys or positions the place steps
+    /// through.
+    pub(crate) fn index_locals(&self) -> impl Iterator<Item = Local> + '_ {
+        self.projections
+            .iter()
+            .filter_map(|projection| match projection {
+                Projection::Index(local) | Projection::Position(local) => Some(*local),
+                Projection::Field(_)
+                | Projection::VariantField { .. }
+                | Projection::ConstantIndex(_) => None,
+            })
+    }
+
+    /// The place, and its index locals as whole places.
+    pub(crate) fn with_indices(&self) -> Vec<Place> {
+        let mut places = vec![self.clone()];
+        places.extend(self.index_locals().map(Place::local));
+        places
+    }
+}
+
+impl TerminatorKind {
+    /// The places the terminator reads: a branch's condition, the result
+    /// that a return gives the caller, a tail call's arguments.
+    pub(crate) fn places(&self, body: &Body) -> Vec<Place> {
+        match self {
+            Self::Branch { condition, .. } => condition.places(),
+            Self::Return => vec![Place::local(body.result)],
+            Self::TailCall { arguments, .. } => {
+                arguments.iter().flat_map(Operand::places).collect()
+            }
+            Self::Goto(_) | Self::Unreachable => Vec::new(),
+        }
+    }
+}
+
+/// What a statement does to the locals it names, as an analysis of locals
+/// sees it.
+pub(crate) struct Effects {
+    /// The locals whose content the statement observes: read, taken or
+    /// borrowed, or read through as an index or a reference passed on.
+    pub(crate) reads: Vec<Local>,
+    /// The locals it writes a part of, or writes through; the rest of what
+    /// they hold stays.
+    pub(crate) changes: Vec<Local>,
+    /// The locals it gives new content as a whole, makes point somewhere,
+    /// or ends, whatever they held.
+    pub(crate) replaces: Vec<Local>,
+}
+
+impl StatementKind {
+    pub(crate) fn effects(&self, body: &Body) -> Effects {
+        let locals = |places: Vec<Place>| places.into_iter().map(|place| place.local).collect();
+        let (reads, changes, replaces) = match self {
+            Self::Assign(destination, value) => {
+                let mut reads: Vec<Local> = locals(value.places());
+                reads.extend(destination.index_locals());
+                if destination.projections.is_empty()
+                    && body.locals[destination.local].reference.is_none()
+                {
+                    (reads, Vec::new(), vec![destination.local])
+                } else {
+                    (reads, vec![destination.local], Vec::new())
+                }
+            }
+            Self::Bind(reference, value) => (locals(value.places()), Vec::new(), vec![*reference]),
+            Self::Unpack(taken) => (
+                taken
+                    .iter()
+                    .flat_map(|(_, place)| place.with_indices())
+                    .map(|place| place.local)
+                    .collect(),
+                Vec::new(),
+                taken.iter().map(|(local, _)| *local).collect(),
+            ),
+            Self::Release(local) => (Vec::new(), Vec::new(), vec![*local]),
+            Self::Keep(reference) => (vec![*reference], Vec::new(), Vec::new()),
+            Self::Distinct { pairs, .. } => (
+                locals(
+                    pairs
+                        .iter()
+                        .flat_map(|(left, right)| [left, right])
+                        .flat_map(Operand::places)
+                        .collect(),
+                ),
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+        Effects {
+            reads,
+            changes,
+            replaces,
+        }
+    }
+}
 /// A run-time check that borrow checking asks for before statement `index`
 /// of `block`, as a [`StatementKind::Distinct`].
 #[derive(PartialEq)]
@@ -417,43 +572,6 @@ impl Body {
     /// Whether `local` owns what it holds, which must be released.
     pub(crate) fn owns(&self, types: &Types, local: Local) -> bool {
         self.locals[local].reference.is_none() && types.needs_release(self.locals[local].ty)
-    }
-
-    /// The owning locals that may hold something at the start of each
-    /// reachable block.
-    pub(crate) fn maybe_filled(&self, types: &Types) -> Vec<BTreeSet<Local>> {
-        let mut starts: Vec<Option<BTreeSet<Local>>> = vec![None; self.blocks.len()];
-        starts[0] = Some(
-            self.parameters
-                .iter()
-                .copied()
-                .filter(|&local| self.owns(types, local))
-                .collect(),
-        );
-        let mut work = vec![0];
-        while let Some(block) = work.pop() {
-            let mut filled = starts[block].clone().unwrap_or_default();
-            for statement in &self.blocks[block].statements {
-                self.fill(types, &statement.kind, &mut filled);
-            }
-            for successor in self.successors(block) {
-                let changed = match &mut starts[successor] {
-                    Some(start) => {
-                        let before = start.len();
-                        start.extend(filled.iter().copied());
-                        start.len() != before
-                    }
-                    start @ None => {
-                        *start = Some(filled.clone());
-                        true
-                    }
-                };
-                if changed {
-                    work.push(successor);
-                }
-            }
-        }
-        starts.into_iter().map(Option::unwrap_or_default).collect()
     }
 
     /// Updates the owning locals that may hold something after `statement`:
