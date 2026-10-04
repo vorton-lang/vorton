@@ -1,0 +1,11 @@
+struct P {
+    x: Int,
+}
+
+impl Clone for P {
+    fn clone(&self) -> P {
+        P { x: self.x }
+    }
+}
+
+fn main() {}

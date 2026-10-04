@@ -1,0 +1,13 @@
+struct C {
+    id: Int,
+}
+
+impl Drop for C {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let a = C { id: 1 }
+    let b = a
+    print(a.id)
+}

@@ -83,7 +83,9 @@ pub trait Iterable {
 
 `Display` 与 `Debug` 是不同的方法 identity。`Iterator`／`Iterable` 的关联类型与方法引用必须保持上述 owner 关系。`Iterator` 产出拥有的元素：迭代器是普通实体，不能保存借出，所以 `iter` 返回的迭代器必须自己持有所需的状态，例如下标、句柄或拷贝。
 
-`Copy` 只由编译器为值类型实现，用户写 `impl Copy` 是错误。`Clone` 对值类型就是拷贝；对不实现 `Drop` 的实体，编译器在全部字段都实现 `Clone` 时提供结构实现；实现 `Drop` 的类型默认不能复制，需要时显式 `impl Clone`。
+`Copy` 只由编译器为值类型实现，用户写 `impl Copy` 是错误。`Clone` 对值类型就是拷贝，为值类型写 `impl Clone` 也是错误；对不实现 `Drop` 的实体，编译器在全部字段都实现 `Clone` 时提供结构实现；实现 `Drop` 的类型默认不能复制，需要时显式 `impl Clone`。
+
+`Drop::drop` 在值释放时由编译器调用，代码中不能直接调用它；`Drop` 也不能作为 bound。
 
 ## 比较 trait
 

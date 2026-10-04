@@ -1,0 +1,14 @@
+struct Res {
+    id: Int,
+    name: Str,
+    items: List<Int>,
+}
+
+impl Drop for Res {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let mut r = Res { id: 1, name: "r", items: [] }
+    r.drop()
+}

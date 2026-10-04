@@ -1,0 +1,125 @@
+struct Tracker {
+    tag: Str,
+}
+
+impl Drop for Tracker {
+    fn drop(&mut self) {
+        print("drop ${self.tag}")
+    }
+}
+
+struct Outer {
+    label: Str,
+    inner: Tracker,
+}
+
+impl Drop for Outer {
+    fn drop(&mut self) {
+        print("drop outer ${self.label}")
+    }
+}
+
+enum Holder {
+    Wrapped { t: Tracker },
+    Empty,
+}
+
+struct Counter {
+    id: Int,
+}
+
+impl Drop for Counter {
+    fn drop(&mut self) {
+        print("drop counter ${self.id}")
+    }
+}
+
+impl Clone for Counter {
+    fn clone(&self) -> Counter {
+        print("clone counter ${self.id}")
+        Counter { id: self.id + 100 }
+    }
+}
+
+fn scope_end() {
+    print("scope begin")
+    let t = Tracker { tag: "scoped" }
+    print("scope end")
+}
+
+fn field_recursion() {
+    print("field begin")
+    let o = Outer { label: "o1", inner: Tracker { tag: "inner" } }
+    print("field end")
+}
+
+fn enum_payload() {
+    print("enum begin")
+    let h = Holder::Wrapped { t: Tracker { tag: "payload" } }
+    let e = Holder::Empty
+    print("enum end")
+}
+
+fn list_containment() {
+    print("list begin")
+    let l = [Tracker { tag: "in-list" }, Tracker { tag: "second" }]
+    print("list end")
+}
+
+fn move_no_double() {
+    print("move begin")
+    let a = Tracker { tag: "moved" }
+    let b = a
+    print("move end")
+}
+
+fn consume(t: Tracker) {
+    print("consuming ${t.tag}")
+}
+
+fn make(tag: Str) -> Tracker {
+    Tracker { tag }
+}
+
+fn reverse_order() {
+    let first = make("first")
+    let second = make("second")
+    consume(make("temporary"))
+    print("reverse end")
+}
+
+fn replaced() {
+    let mut slot = make("old")
+    let previous = replace(&mut slot, make("new"))
+    print("replaced ${previous.tag}")
+}
+
+fn cloned() {
+    let c = Counter { id: 1 }
+    let d = c.clone()
+    print("ids ${c.id} ${d.id}")
+    let both = [c, d]
+    let copies = both.clone()
+    print("copies ${copies.len()}")
+}
+
+fn borrowed_match(h: &Holder) -> Str {
+    match &h {
+        Holder::Wrapped { t } => t.tag
+        Holder::Empty => "empty"
+    }
+}
+
+fn main() {
+    scope_end()
+    field_recursion()
+    enum_payload()
+    list_containment()
+    move_no_double()
+    reverse_order()
+    replaced()
+    cloned()
+    let h = Holder::Wrapped { t: make("matched") }
+    print(borrowed_match(&h))
+    print("done")
+}

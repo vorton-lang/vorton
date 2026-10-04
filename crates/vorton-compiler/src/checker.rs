@@ -500,6 +500,7 @@ struct Traits<'a> {
     display: usize,
     copy: usize,
     clone: usize,
+    drop: usize,
     /// `PartialEq`, `Eq`, `PartialOrd` and `Ord`.
     comparisons: [usize; 4],
 }
@@ -539,7 +540,7 @@ impl Traits<'_> {
         let declaration = &self.declarations[trait_index];
         !declaration.associated_types
             && (!declaration.core
-                || trait_index == self.display
+                || [self.display, self.clone, self.drop].contains(&trait_index)
                 || self.comparison(trait_index).is_some())
     }
 }
@@ -782,17 +783,31 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         &mut functions_found,
     )?;
     for implementation in &found_impls {
-        let Some(comparison) = traits.comparison(implementation.trait_index) else {
-            continue;
-        };
-        let written = types.comparisons.entry(implementation.owner).or_default();
+        let trait_index = implementation.trait_index;
+        let written = types.written.entry(implementation.owner).or_default();
         let method = implementation.methods.first().copied();
-        match comparison {
-            Comparison::PartialEq => written.eq = method,
-            Comparison::Eq => written.total_eq = true,
-            Comparison::PartialOrd => written.partial_cmp = method,
-            Comparison::Ord => written.cmp = method,
+        match traits.comparison(trait_index) {
+            Some(Comparison::PartialEq) => written.eq = method,
+            Some(Comparison::Eq) => written.total_eq = true,
+            Some(Comparison::PartialOrd) => written.partial_cmp = method,
+            Some(Comparison::Ord) => written.cmp = method,
+            None if trait_index == traits.clone => written.clone = method,
+            None if trait_index == traits.drop => written.drop = method,
+            None => {}
         }
+    }
+    // Value types are copied, which is their `Clone`.
+    if let Some(implementation) = found_impls.iter().find(|implementation| {
+        implementation.trait_index == traits.clone && !types.is_entity(implementation.owner)
+    }) {
+        return Err(CheckDiagnostic {
+            kind: CheckDiagnosticKind::DuplicateImpl,
+            primary: Some(implementation.origin.clone()),
+            message: format!(
+                "`{}` is a value type, which is copied; its `Clone` is the copy",
+                types.name(implementation.owner)
+            ),
+        });
     }
     check_keys(&mut types, &nominals)?;
 
@@ -999,6 +1014,7 @@ fn collect_traits<'a>(
         display: by_identity[&roles.display.declaration],
         copy: by_identity[&roles.copy],
         clone: by_identity[&roles.clone.declaration],
+        drop: by_identity[&roles.drop.declaration],
         comparisons: [
             by_identity[&roles.partial_eq.declaration],
             by_identity[&roles.eq],
@@ -1586,7 +1602,7 @@ fn check_signature(
             } else if trait_index == Some(traits.clone) {
                 bounds.clone = true;
             } else if let Some(trait_index) = trait_index {
-                if !traits.supported(trait_index) {
+                if !traits.supported(trait_index) || trait_index == traits.drop {
                     return Err(unsupported(
                         Some(at(origin, bound.span)),
                         &format!("bounds on `{}`", traits.declarations[trait_index].name),
@@ -2181,6 +2197,15 @@ impl BodyChecker<'_> {
                 ),
             )),
             ExprKind::Local(local) => Ok((*local, Vec::new())),
+            ExprKind::Field { base, .. } if self.types.has_drop(base.ty) => Err(self.error(
+                CheckDiagnosticKind::CannotMove,
+                span,
+                format!(
+                    "`{}` implements `Drop`, so its `{}` cannot be moved out; use `replace`",
+                    self.types.name(base.ty),
+                    name()
+                ),
+            )),
             ExprKind::Field { base, index } => {
                 let (local, mut fields) = self.movable_part(base, ty, span)?;
                 fields.push(*index);
@@ -4112,6 +4137,16 @@ impl BodyChecker<'_> {
             type_arguments.push(argument);
         }
         let ty = instantiate(self.types, nominals, declaration, type_arguments, 0)?;
+        if base.is_some() && self.types.has_drop(ty) {
+            return Err(self.error(
+                CheckDiagnosticKind::CannotMove,
+                span,
+                format!(
+                    "`{}` implements `Drop`, so `..` cannot take the other fields out of a value",
+                    self.types.name(ty)
+                ),
+            ));
+        }
         for (index, value) in &fields {
             let field_ty = self.types.variants(ty)[variant].fields[*index].ty;
             if value.ty != field_ty {
@@ -4763,6 +4798,19 @@ impl BodyChecker<'_> {
                         }
                     }
                 }
+                if mode.is_none()
+                    && self.types.has_drop(ty)
+                    && checked.iter().any(|(_, field)| self.binds_entity(field))
+                {
+                    return Err(self.error(
+                        CheckDiagnosticKind::CannotMove,
+                        span,
+                        format!(
+                            "`{}` implements `Drop`, so no part of it can be moved out; match it with `&`",
+                            self.types.name(ty)
+                        ),
+                    ));
+                }
                 Pattern::Variant {
                     variant,
                     fields: checked,
@@ -5107,6 +5155,13 @@ impl BodyChecker<'_> {
             .collect::<Vec<_>>();
         let (trait_index, method) = match found.as_slice() {
             [] => return Ok(None),
+            [(trait_index, _)] if *trait_index == traits.drop => {
+                return Err(self.error(
+                    CheckDiagnosticKind::UnknownMethod,
+                    span,
+                    "`drop` runs when the value is released; it cannot be called".to_owned(),
+                ));
+            }
             [found] => *found,
             [(first, _), (second, _), ..] => {
                 return Err(self.error(
@@ -5167,14 +5222,43 @@ impl BodyChecker<'_> {
     /// Whether `clone()` applies to `ty`: every type parameter it mentions
     /// is bound by `Clone` or `Copy`.
     fn can_clone(&self, ty: Type) -> bool {
+        self.can_clone_in(ty, &mut Vec::new())
+    }
+
+    /// A type with a hand-written `Clone` has it; a type with a hand-written
+    /// `Drop` has no other; any other type has it when all its parts do.
+    /// `pending` holds the types being decided further up, as in
+    /// [`Types::compares`].
+    fn can_clone_in(&self, ty: Type, pending: &mut Vec<Type>) -> bool {
+        if let Some(written) = self.types.written.get(&ty) {
+            if written.clone.is_some() {
+                return true;
+            }
+            if written.drop.is_some() {
+                return false;
+            }
+        }
         match self.types.kind(ty) {
             TypeKind::Param { index, .. } => self.type_parameters[*index].clone,
-            TypeKind::Tuple(parts)
-            | TypeKind::Nominal {
-                arguments: parts, ..
-            } => parts.iter().all(|part| self.can_clone(*part)),
-            TypeKind::List(element) | TypeKind::Set(element) => self.can_clone(*element),
-            TypeKind::Map(key, value) => self.can_clone(*key) && self.can_clone(*value),
+            TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
+                if pending.contains(&ty) {
+                    return true;
+                }
+                pending.push(ty);
+                let result = self
+                    .types
+                    .components(ty)
+                    .into_iter()
+                    .all(|part| self.can_clone_in(part, pending));
+                pending.pop();
+                result
+            }
+            TypeKind::List(element) | TypeKind::Set(element) => {
+                self.can_clone_in(*element, pending)
+            }
+            TypeKind::Map(key, value) => {
+                self.can_clone_in(*key, pending) && self.can_clone_in(*value, pending)
+            }
             TypeKind::Int
             | TypeKind::Float
             | TypeKind::Bool

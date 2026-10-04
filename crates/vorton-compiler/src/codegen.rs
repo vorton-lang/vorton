@@ -128,10 +128,14 @@ fn define(types: &Types, ty: Type, done: &mut [bool], output: &mut String) {
                     stored += 1;
                 }
             }
-            if stored == 0 {
+            if stored == 0 && !types.has_drop(ty) {
                 output.push_str("    char vt_empty;\n");
             }
         }
+    }
+    // A value with a hand-written `Drop` is live until it is moved away.
+    if types.has_drop(ty) {
+        output.push_str("    bool vt_live;\n");
     }
     writeln!(output, "}} {name};").unwrap();
 }
@@ -150,7 +154,7 @@ fn item_type(types: &Types, element: Type) -> String {
 
 fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut String) {
     let types = &program.types;
-    let written = types.comparisons.get(&ty);
+    let written = types.written.get(&ty);
     let name = c_type(types, ty);
     let n = ty.index();
     let mut function = |signature: String, body: String| {
@@ -200,7 +204,7 @@ fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut St
         body
     };
     if types.needs_release(ty) {
-        let body = per_field(
+        let mut body = per_field(
             &|field, code| {
                 types
                     .needs_release(field)
@@ -208,6 +212,12 @@ fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut St
             },
             "v",
         );
+        // A hand-written `drop` runs first, on a value that has not been
+        // moved away, and then the fields are released.
+        if let Some(drop) = written.and_then(|written| written.drop) {
+            let user = function_name(drop, &program.functions[drop]);
+            body = format!("    if (!v.vt_live) return;\n    {user}(&v);\n{body}");
+        }
         function(format!("void vt_release_T{n}({name} v)"), body);
         if !types.is_entity(ty) {
             let body = per_field(
@@ -221,7 +231,10 @@ fn helpers(program: &Program, ty: Type, prototypes: &mut String, bodies: &mut St
             function(format!("void vt_retain_T{n}({name} v)"), body);
         }
     }
-    let clone_body = if types.is_entity(ty) {
+    let clone_body = if let Some(clone) = written.and_then(|written| written.clone) {
+        let user = function_name(clone, &program.functions[clone]);
+        format!("    return {user}(&v);\n")
+    } else if types.is_entity(ty) {
         let body = per_field(
             &|field, code| {
                 types
@@ -1750,6 +1763,9 @@ impl FunctionEmitter<'_> {
         }
         if self.types.is_enum(ty) {
             self.line(&format!("{result}.tag = {variant};"));
+        }
+        if self.types.has_drop(ty) {
+            self.line(&format!("{result}.vt_live = true;"));
         }
         for (index, field_ty, value) in values {
             if matches!(value, Value::Unit) {

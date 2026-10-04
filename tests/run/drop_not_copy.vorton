@@ -1,0 +1,15 @@
+struct C {
+    id: Int,
+}
+
+impl Drop for C {
+    fn drop(&mut self) {}
+}
+
+fn twice<T: Copy>(x: T) -> (T, T) {
+    (x, x)
+}
+
+fn main() {
+    let p = twice(C { id: 1 })
+}

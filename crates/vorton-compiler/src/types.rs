@@ -82,15 +82,33 @@ pub(crate) enum Comparison {
     Ord,
 }
 
-/// The hand-written comparison impls of a type: the function of each
-/// method, which instantiation renumbers to its instance.
+/// The hand-written impls of core traits that change how the compiler
+/// treats a type: the function of each method, which instantiation
+/// renumbers to its instance.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct ComparisonImpls {
+pub(crate) struct WrittenImpls {
     pub(crate) eq: Option<usize>,
     /// `impl Eq`, which has no method.
     pub(crate) total_eq: bool,
     pub(crate) partial_cmp: Option<usize>,
     pub(crate) cmp: Option<usize>,
+    pub(crate) clone: Option<usize>,
+    pub(crate) drop: Option<usize>,
+}
+
+impl WrittenImpls {
+    /// The functions of the written methods, to renumber them.
+    pub(crate) fn functions(&mut self) -> impl Iterator<Item = &mut usize> {
+        [
+            &mut self.eq,
+            &mut self.partial_cmp,
+            &mut self.cmp,
+            &mut self.clone,
+            &mut self.drop,
+        ]
+        .into_iter()
+        .flatten()
+    }
 }
 
 pub(crate) struct Types {
@@ -100,7 +118,8 @@ pub(crate) struct Types {
     lookup: HashMap<TypeKind, Type>,
     pub(crate) nominals: Vec<NominalInfo>,
     shapes: HashMap<Type, Vec<Variant>>,
-    pub(crate) comparisons: HashMap<Type, ComparisonImpls>,
+    /// The hand-written impls of core traits, by type.
+    pub(crate) written: HashMap<Type, WrittenImpls>,
 }
 
 impl Types {
@@ -111,7 +130,7 @@ impl Types {
             lookup: HashMap::new(),
             nominals: Vec::new(),
             shapes: HashMap::new(),
-            comparisons: HashMap::new(),
+            written: HashMap::new(),
         };
         for kind in [
             TypeKind::Int,
@@ -270,6 +289,9 @@ impl Types {
     /// Whether an owned value of `ty` must be released: it holds a counted
     /// `Str` or owns heap storage.
     pub(crate) fn needs_release(&self, ty: Type) -> bool {
+        if self.has_drop(ty) {
+            return true;
+        }
         match self.kind(ty) {
             TypeKind::Str
             | TypeKind::List(_)
@@ -289,8 +311,18 @@ impl Types {
         }
     }
 
+    /// Whether `ty` has a hand-written `Drop`.
+    pub(crate) fn has_drop(&self, ty: Type) -> bool {
+        self.written
+            .get(&ty)
+            .is_some_and(|written| written.drop.is_some())
+    }
+
     /// Whether `ty` is an entity: it has identity and is moved, never copied.
     pub(crate) fn is_entity(&self, ty: Type) -> bool {
+        if self.has_drop(ty) {
+            return true;
+        }
         match self.kind(ty) {
             TypeKind::List(_) | TypeKind::Map(..) | TypeKind::Set(_) => true,
             TypeKind::Param { copy, .. } => !copy,
@@ -343,7 +375,7 @@ impl Types {
         param: &dyn Fn(usize) -> bool,
         pending: &mut Vec<Type>,
     ) -> bool {
-        if let Some(written) = self.comparisons.get(&ty) {
+        if let Some(written) = self.written.get(&ty) {
             let (own, overriding) = match comparison {
                 Comparison::PartialEq => (written.eq.is_some(), false),
                 Comparison::Eq => (written.total_eq, written.eq.is_some()),
@@ -387,7 +419,7 @@ impl Types {
     /// hash agrees with its equality.
     pub(crate) fn is_key(&self, ty: Type) -> bool {
         if self
-            .comparisons
+            .written
             .get(&ty)
             .is_some_and(|written| written.eq.is_some())
         {

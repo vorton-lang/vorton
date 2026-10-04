@@ -1,0 +1,20 @@
+struct T {
+    v: List<Int>,
+}
+
+enum E {
+    A(T),
+    B,
+}
+
+impl Drop for E {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let e = E::A(T { v: [] })
+    match e {
+        E::A(t) => print(t.v.len())
+        E::B => print(0)
+    }
+}

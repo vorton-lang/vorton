@@ -108,12 +108,9 @@ where
         .function(&mut function)?;
         functions.push(function);
     }
-    // Hand-written comparisons are methods of non-generic types.
-    for written in types.comparisons.values_mut() {
-        for function in [&mut written.eq, &mut written.partial_cmp, &mut written.cmp]
-            .into_iter()
-            .flatten()
-        {
+    // Hand-written impls of core traits are methods of non-generic types.
+    for written in types.written.values_mut() {
+        for function in written.functions() {
             *function = instances.index[&(*function, Vec::new())];
         }
     }
