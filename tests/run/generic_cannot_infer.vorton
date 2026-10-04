@@ -1,0 +1,7 @@
+fn nothing<T>() -> Option<T> {
+    Option::None
+}
+
+fn main() {
+    nothing()
+}

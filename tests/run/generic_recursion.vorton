@@ -1,0 +1,20 @@
+fn count_down<T>(x: T, n: Int) -> T {
+    if n == 0 {
+        x
+    } else {
+        count_down(x, n - 1)
+    }
+}
+
+fn ping<T>(x: T, n: Int) -> Int {
+    if n > 0 { pong(n - 1) } else { 0 }
+}
+
+fn pong(n: Int) -> Int {
+    ping("s", n) + 1
+}
+
+fn main() {
+    print(count_down([1, 2], 3).len())
+    print(ping(true, 4))
+}

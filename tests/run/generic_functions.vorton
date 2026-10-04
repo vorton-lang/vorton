@@ -1,0 +1,72 @@
+struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+fn id<T>(x: T) -> T {
+    x
+}
+
+fn swap_pair<A, B>(p: (A, B)) -> Pair<B, A> {
+    let (a, b) = p
+    Pair { first: b, second: a }
+}
+
+fn first<T: Copy>(xs: &List<T>) -> Option<T> {
+    if xs.len() > 0 {
+        Option::Some(xs[0])
+    } else {
+        Option::None
+    }
+}
+
+fn wrap<T>(x: T) -> List<T> {
+    let mut xs: List<T> = []
+    xs.push(x)
+    xs
+}
+
+fn count<T>(xs: &List<T>) -> Int {
+    xs.len()
+}
+
+fn dup<T: Clone>(x: &T) -> (T, T) {
+    (x.clone(), x.clone())
+}
+
+fn nothing<T>() -> Option<T> {
+    Option::None
+}
+
+fn main() {
+    print(id(5))
+    print(id("five"))
+    let s = id("heap ${1 + 2}")
+    print(s)
+    let names = id(["a", "b"])
+    print(names.len())
+    let p = swap_pair((1, "one"))
+    print(p.first)
+    print(p.second)
+    match first(&[7, 8]) {
+        Option::Some(v) => print(v)
+        Option::None => print("none")
+    }
+    match first(&["x"]) {
+        Option::Some(v) => print(v)
+        Option::None => print("none")
+    }
+    let lists = wrap([1, 2, 3])
+    print(lists[0][2])
+    print(count(&lists))
+    let (a, b) = dup(&["p", "q"])
+    print(a[1])
+    print(b[0])
+    let n: Option<Int> = nothing()
+    match n {
+        Option::Some(v) => print(v)
+        Option::None => print("nothing")
+    }
+    let text = wrap("w${4}")
+    print(text[0])
+}

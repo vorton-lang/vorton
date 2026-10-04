@@ -1,0 +1,5 @@
+fn same<T>(a: T, b: T) {}
+
+fn main() {
+    same(1, "a")
+}

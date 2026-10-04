@@ -21,6 +21,7 @@ use crate::checker::{
 };
 
 const RUNTIME: &str = include_str!("../../../runtime/vorton_runtime.c");
+const GENERIC: &str = "generic functions are instantiated before code generation";
 
 /// Generates one self-contained C11 translation unit for `program`.
 pub(crate) fn emit(program: &Program) -> String {
@@ -597,6 +598,8 @@ fn field_code(types: &Types, ty: Type, variant: usize, index: usize, base: &str)
     }
 }
 
+/// Whether `ty` is defined as a C struct. A type that mentions a type
+/// parameter is not; only its instances are.
 fn is_aggregate(types: &Types, ty: Type) -> bool {
     matches!(
         types.kind(ty),
@@ -605,7 +608,7 @@ fn is_aggregate(types: &Types, ty: Type) -> bool {
             | TypeKind::List(_)
             | TypeKind::Map(..)
             | TypeKind::Set(_)
-    )
+    ) && !types.is_generic(ty)
 }
 
 /// A C expression that compares two values of type `ty`.
@@ -619,6 +622,7 @@ fn equal_code(types: &Types, ty: Type, a: &str, b: &str) -> String {
         TypeKind::Map(..) | TypeKind::Set(_) | TypeKind::Range => {
             unreachable!("maps, sets and ranges have no ==")
         }
+        TypeKind::Param { .. } => unreachable!("{GENERIC}"),
         TypeKind::Int | TypeKind::Float | TypeKind::Bool => format!("({a} == {b})"),
     }
 }
@@ -688,6 +692,7 @@ fn c_type(types: &Types, ty: Type) -> String {
         | TypeKind::List(_)
         | TypeKind::Map(..)
         | TypeKind::Set(_) => format!("vt_T{}", ty.index()),
+        TypeKind::Param { .. } => unreachable!("{GENERIC}"),
     }
 }
 
@@ -705,6 +710,7 @@ fn zero(types: &Types, ty: Type) -> &'static str {
         | TypeKind::Set(_)
         | TypeKind::Range => "{0}",
         TypeKind::Unit | TypeKind::Never => unreachable!("unit values have no storage"),
+        TypeKind::Param { .. } => unreachable!("{GENERIC}"),
     }
 }
 
@@ -1579,6 +1585,7 @@ impl FunctionEmitter<'_> {
                 arguments,
                 checks,
                 borrow,
+                ..
             } => self.call(
                 *function,
                 arguments,

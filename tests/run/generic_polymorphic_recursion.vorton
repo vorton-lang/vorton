@@ -1,0 +1,9 @@
+fn grow<T>(x: T, n: Int) {
+    if n > 0 {
+        grow([x], n - 1)
+    }
+}
+
+fn main() {
+    grow(1, 3)
+}

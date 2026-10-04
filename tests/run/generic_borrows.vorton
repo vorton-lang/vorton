@@ -1,0 +1,94 @@
+struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+enum Tree<T> {
+    Leaf(T),
+    Node(List<Tree<T>>),
+}
+
+fn first_of<A, B>(p: &Pair<A, B>) -> &A {
+    &p.first
+}
+
+fn set_second<A, B>(p: &mut Pair<A, B>, value: B) {
+    p.second = value
+}
+
+fn keep<T>(xs: List<T>, x: T) -> List<T> {
+    let mut ys = xs
+    ys.push(x)
+    ys
+}
+
+fn take_all<T>(xs: List<T>) -> List<T> {
+    let mut out: List<T> = []
+    for x in xs {
+        out.insert(0, x)
+    }
+    out
+}
+
+fn size<T>(tree: &Tree<T>) -> Int {
+    match &tree {
+        Tree::Leaf(_) => 1
+        Tree::Node(children) => {
+            let mut total = 0
+            for child in &children {
+                total += size(&child)
+            }
+            total
+        }
+    }
+}
+
+fn leaves<T: Copy>(tree: &Tree<T>, out: &mut List<T>) {
+    match &tree {
+        Tree::Leaf(value) => out.push(value)
+        Tree::Node(children) => {
+            for child in &children {
+                leaves(&child, &mut out)
+            }
+        }
+    }
+}
+
+fn unwrap_or<T>(value: Option<T>, fallback: T) -> T {
+    match value {
+        Option::Some(inner) => inner
+        Option::None => fallback
+    }
+}
+
+fn last<T>(xs: &mut List<T>) -> Option<T> {
+    xs.pop()
+}
+
+fn main() {
+    let mut p = Pair { first: "a${1}", second: [1] }
+    print(first_of(&p))
+    set_second(&mut p, [2, 3])
+    print(p.second.len())
+    let words = keep(["x"], "y${2}")
+    print(words[1])
+    let units = keep([(), ()], ())
+    print(units.len())
+    let back = take_all(["one", "two${3}", "three"])
+    print(back[0])
+    let nested = take_all([[1], [2, 2]])
+    print(nested[0].len())
+    let tree = Tree::Node([Tree::Leaf("l1"), Tree::Node([Tree::Leaf("l2"), Tree::Leaf("l3")])])
+    print(size(&tree))
+    let mut found: List<Str> = []
+    leaves(&tree, &mut found)
+    print(found[2])
+    print(unwrap_or(Option::Some("s${5}"), "none"))
+    let none: Option<List<Int>> = Option::None
+    print(unwrap_or(none, [9]).len())
+    let mut stack = [[1], [2, 3]]
+    match last(&mut stack) {
+        Option::Some(top) => print(top.len())
+        Option::None => print(0)
+    }
+}

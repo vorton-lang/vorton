@@ -4,7 +4,9 @@
 //! tuples, structs and enums (generic ones are instantiated at concrete type
 //! arguments), `List` and `Map` with their built-in methods, `match`, `if let` and tuple
 //! destructuring with exhaustiveness, named functions with written
-//! signatures, inherent methods and associated functions of non-generic
+//! signatures, generic functions with `Copy` and `Clone` bounds, which are
+//! checked once and instantiated afterwards by [`crate::mono`], inherent
+//! methods and associated functions of non-generic
 //! types, local bindings, assignment to `let mut` locals and their parts,
 //! `if`, `while`, `loop`, `for` over ranges and lists, `break`, `continue`,
 //! `return`, string interpolation, and the `print`, `assert` and `panic`
@@ -29,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ast::{AssignmentOperator, BinaryOperator, BorrowKind, Span, UnaryOperator};
 use crate::exhaustive;
 use crate::project::{
-    EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
+    CoreRoles, EntityId, EntityKind, EntitySite, LibraryId, ModuleRef, OriginRef, ResolvedBlock,
     ResolvedConstructEntry, ResolvedDeclarationKind, ResolvedExpr, ResolvedExprKind, ResolvedField,
     ResolvedFunction, ResolvedImplMemberKind, ResolvedInterpolationPart, ResolvedMatchArm,
     ResolvedPattern, ResolvedPatternFields, ResolvedPatternKind, ResolvedPlace,
@@ -84,6 +86,10 @@ pub enum CheckDiagnosticKind {
     /// A struct, enum or tuple contains itself by value and has no finite
     /// size.
     RecursiveType,
+    /// A type argument does not satisfy a bound of its type parameter.
+    UnsatisfiedBound,
+    /// A recursive call passes type arguments that could grow without end.
+    PolymorphicRecursion,
 }
 
 /// A checked program ready for code generation.
@@ -93,6 +99,7 @@ pub(crate) struct Program {
     pub(crate) main: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct Function {
     pub(crate) name: String,
     pub(crate) parameters: Vec<usize>,
@@ -103,6 +110,7 @@ pub(crate) struct Function {
     pub(crate) body: Block,
 }
 
+#[derive(Clone)]
 pub(crate) struct Local {
     pub(crate) name: String,
     pub(crate) ty: Type,
@@ -110,12 +118,14 @@ pub(crate) struct Local {
     pub(crate) borrow: Option<BorrowKind>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Block {
     pub(crate) statements: Vec<Statement>,
     pub(crate) tail: Option<Box<Expr>>,
     pub(crate) ty: Type,
 }
 
+#[derive(Clone)]
 pub(crate) enum Statement {
     Let {
         local: usize,
@@ -147,6 +157,7 @@ pub(crate) enum Statement {
     },
 }
 
+#[derive(Clone)]
 pub(crate) enum ForSource {
     /// `start..end` or `start..=end` over `Int`.
     Range {
@@ -164,6 +175,7 @@ pub(crate) enum ForSource {
 }
 
 /// A local and a path of parts inside it.
+#[derive(Clone)]
 pub(crate) struct Place {
     pub(crate) local: usize,
     /// A call that returns a borrow, made first; the borrowed `local` then
@@ -172,6 +184,7 @@ pub(crate) struct Place {
     pub(crate) projections: Vec<Projection>,
 }
 
+#[derive(Clone)]
 pub(crate) enum Projection {
     /// A struct field or tuple element, by index.
     Field(usize),
@@ -181,6 +194,7 @@ pub(crate) enum Projection {
 
 /// The receiver of a built-in method: a place it reads or changes, or a
 /// value it reads and then releases.
+#[derive(Clone)]
 pub(crate) enum Receiver {
     Place(Place),
     Value(Box<Expr>),
@@ -239,11 +253,13 @@ pub(crate) enum StrMethod {
     ParseInt,
 }
 
+#[derive(Clone)]
 pub(crate) struct Expr {
     pub(crate) ty: Type,
     pub(crate) kind: ExprKind,
 }
 
+#[derive(Clone)]
 pub(crate) enum ExprKind {
     Int(i64),
     Float(f64),
@@ -253,6 +269,9 @@ pub(crate) enum ExprKind {
     Local(usize),
     Call {
         function: usize,
+        /// The type arguments of a generic function; instantiation replaces
+        /// `function` with the instance and leaves this empty.
+        type_arguments: Vec<Type>,
         arguments: Vec<Expr>,
         /// Pairs of borrowed arguments whose places must differ at run time.
         checks: Vec<DisjointCheck>,
@@ -328,6 +347,7 @@ pub(crate) enum ExprKind {
     Borrow(Box<BorrowTarget>),
 }
 
+#[derive(Clone)]
 pub(crate) enum BorrowTarget {
     Place(Place),
     Value(Expr),
@@ -335,11 +355,13 @@ pub(crate) enum BorrowTarget {
 
 /// Two borrowed arguments of one call whose places have the same shape and
 /// differ only in list indices; they must not name the same element.
+#[derive(Clone)]
 pub(crate) struct DisjointCheck {
     pub(crate) first: usize,
     pub(crate) second: usize,
 }
 
+#[derive(Clone)]
 pub(crate) struct Arm {
     pub(crate) pattern: Pattern,
     pub(crate) guard: Option<Expr>,
@@ -414,9 +436,22 @@ struct Signature {
     index: usize,
     /// Whether the first parameter is the `self` of a method.
     receiver: bool,
+    /// The parameter and result types mention these as [`TypeKind::Param`].
+    type_parameters: Vec<TypeParameter>,
+    /// The type of each type parameter, by its identity.
+    type_scope: BTreeMap<EntityId, Type>,
     parameters: Vec<(Type, Option<BorrowKind>)>,
     result: Type,
     result_borrow: Option<BorrowKind>,
+}
+
+/// A type parameter of a generic function and the bounds the checker
+/// supports so far.
+#[derive(Clone)]
+struct TypeParameter {
+    name: String,
+    copy: bool,
+    clone: bool,
 }
 
 enum Shape<'a> {
@@ -629,12 +664,14 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             &found.origin,
             found.owner,
             &nominals,
+            &project.core_roles,
             &mut types,
         )?;
         signatures.insert(found.identity.clone(), signature);
     }
 
     let mut functions = Vec::new();
+    let mut calls = Vec::new();
     for found in &functions_found {
         let (function, origin) = (found.function, &found.origin);
         let signature = &signatures[&found.identity];
@@ -645,6 +682,9 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             methods: &methods,
             library: origin.library,
             source: origin.source.clone(),
+            type_scope: signature.type_scope.clone(),
+            type_parameters: signature.type_parameters.clone(),
+            calls: Vec::new(),
             locals: Vec::new(),
             local_ids: BTreeMap::new(),
             mutable: Vec::new(),
@@ -674,6 +714,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             });
         }
         let body = checker.check_block(&function.body, Some(signature.result))?;
+        calls.push(checker.calls);
         functions.push(Function {
             name: found.name.clone(),
             parameters,
@@ -683,6 +724,7 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
             body,
         });
     }
+    check_recursion(&calls, &types)?;
     let main = functions_found
         .iter()
         .position(|found| {
@@ -692,7 +734,9 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
         })
         .filter(|&index| {
             let signature = &signatures[&functions_found[index].identity];
-            signature.parameters.is_empty() && signature.result == Type::UNIT
+            signature.type_parameters.is_empty()
+                && signature.parameters.is_empty()
+                && signature.result == Type::UNIT
         })
         .ok_or_else(|| CheckDiagnostic {
             kind: CheckDiagnosticKind::MissingMain,
@@ -701,11 +745,122 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 .to_owned(),
         })?;
 
+    let generic = functions_found
+        .iter()
+        .map(|found| !signatures[&found.identity].type_parameters.is_empty())
+        .collect::<Vec<_>>();
+    let (functions, main) = crate::mono::instantiate_functions(
+        &mut types,
+        &mut |types, declaration, arguments| {
+            instantiate(types, &nominals, declaration, arguments, 0)
+        },
+        functions,
+        &generic,
+        main,
+    )?;
     Ok(Program {
         types,
         functions,
         main,
     })
+}
+
+/// A call of a named function: the callee, its type arguments in the
+/// caller's type parameters (none unless it is generic), and where the call
+/// is.
+type NamedCall = (usize, Vec<Type>, OriginRef);
+
+/// Rejects polymorphic recursion. Inside a group of functions that call
+/// each other, every type argument must be one of the caller's own type
+/// parameters or a type without type parameters; then the instances of the
+/// group draw from a finite set of types, and instantiation ends.
+fn check_recursion(calls: &[Vec<NamedCall>], types: &Types) -> Result<(), CheckDiagnostic> {
+    let edges = calls
+        .iter()
+        .map(|calls| calls.iter().map(|(callee, _, _)| *callee).collect())
+        .collect::<Vec<Vec<usize>>>();
+    let component = strongly_connected(&edges);
+    for (caller, calls) in calls.iter().enumerate() {
+        for (callee, arguments, origin) in calls {
+            if component[*callee] != component[caller] {
+                continue;
+            }
+            if let Some(argument) = arguments.iter().find(|argument| {
+                types.is_generic(**argument)
+                    && !matches!(types.kind(**argument), TypeKind::Param { .. })
+            }) {
+                return Err(CheckDiagnostic {
+                    kind: CheckDiagnosticKind::PolymorphicRecursion,
+                    primary: Some(origin.clone()),
+                    message: format!(
+                        "this recursive call passes `{}` as a type argument; inside recursion a type argument must be a type parameter itself or mention none",
+                        types.name(*argument)
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Tarjan's algorithm: the strongly connected component of each node.
+fn strongly_connected(edges: &[Vec<usize>]) -> Vec<usize> {
+    struct State<'e> {
+        edges: &'e [Vec<usize>],
+        index: Vec<Option<usize>>,
+        low: Vec<usize>,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        component: Vec<usize>,
+        next: usize,
+        components: usize,
+    }
+    fn visit(state: &mut State, node: usize) {
+        state.index[node] = Some(state.next);
+        state.low[node] = state.next;
+        state.next += 1;
+        state.stack.push(node);
+        state.on_stack[node] = true;
+        for &next in &state.edges[node] {
+            match state.index[next] {
+                None => {
+                    visit(state, next);
+                    state.low[node] = state.low[node].min(state.low[next]);
+                }
+                Some(index) if state.on_stack[next] => {
+                    state.low[node] = state.low[node].min(index);
+                }
+                Some(_) => {}
+            }
+        }
+        if Some(state.low[node]) == state.index[node] {
+            while let Some(member) = state.stack.pop() {
+                state.on_stack[member] = false;
+                state.component[member] = state.components;
+                if member == node {
+                    break;
+                }
+            }
+            state.components += 1;
+        }
+    }
+    let count = edges.len();
+    let mut state = State {
+        edges,
+        index: vec![None; count],
+        low: vec![0; count],
+        stack: Vec::new(),
+        on_stack: vec![false; count],
+        component: vec![0; count],
+        next: 0,
+        components: 0,
+    };
+    for node in 0..count {
+        if state.index[node].is_none() {
+            visit(&mut state, node);
+        }
+    }
+    state.component
 }
 
 /// Interns `declaration` applied to `arguments` and, the first time, computes
@@ -804,13 +959,45 @@ fn check_signature(
     origin: &OriginRef,
     self_type: Option<Type>,
     nominals: &Nominals,
+    roles: &CoreRoles,
     types: &mut Types,
 ) -> Result<Signature, CheckDiagnostic> {
-    if !function.type_parameters.is_empty() || !function.effect_parameters.is_empty() {
-        return Err(unsupported(Some(origin.clone()), "generic functions"));
+    if !function.effect_parameters.is_empty() {
+        return Err(unsupported(Some(origin.clone()), "effect parameters"));
     }
     if function.effects.is_some() {
         return Err(unsupported(Some(origin.clone()), "effect annotations"));
+    }
+    if !function.type_parameters.is_empty() && self_type.is_some() {
+        return Err(unsupported(Some(origin.clone()), "generic methods"));
+    }
+    let mut type_parameters = Vec::new();
+    let mut type_scope = BTreeMap::new();
+    for (position, parameter) in function.type_parameters.iter().enumerate() {
+        let mut bounds = TypeParameter {
+            name: parameter.binding.identity.name.clone(),
+            copy: false,
+            clone: false,
+        };
+        for bound in &parameter.bounds {
+            match &bound.reference {
+                ResolvedReference::Exact { target, .. } if *target == roles.copy => {
+                    bounds.copy = true;
+                    bounds.clone = true;
+                }
+                ResolvedReference::Exact { target, .. } if *target == roles.clone.declaration => {
+                    bounds.clone = true;
+                }
+                _ => return Err(unsupported(Some(at(origin, bound.span)), "trait bounds")),
+            }
+        }
+        let ty = types.intern(TypeKind::Param {
+            index: position,
+            name: bounds.name.clone(),
+            copy: bounds.copy,
+        });
+        type_scope.insert(parameter.binding.identity.clone(), ty);
+        type_parameters.push(bounds);
     }
     let mut parameters = Vec::new();
     let mut receiver = false;
@@ -828,7 +1015,7 @@ fn check_signature(
         // Only the `self` of a method has no written type.
         let ty = match (&parameter.annotation, self_type) {
             (Some(annotation), _) => {
-                resolve_type(types, nominals, annotation, &BTreeMap::new(), origin, 0)?
+                resolve_type(types, nominals, annotation, &type_scope, origin, 0)?
             }
             (None, Some(self_type)) => {
                 receiver = true;
@@ -839,7 +1026,7 @@ fn check_signature(
         parameters.push((ty, parameter.borrow.map(|(_, kind)| kind)));
     }
     let result = match &function.return_type {
-        Some(ty) => resolve_type(types, nominals, ty, &BTreeMap::new(), origin, 0)?,
+        Some(ty) => resolve_type(types, nominals, ty, &type_scope, origin, 0)?,
         None => Type::UNIT,
     };
     let result_borrow = function.return_borrow.map(|(_, kind)| kind);
@@ -852,6 +1039,8 @@ fn check_signature(
     Ok(Signature {
         index,
         receiver,
+        type_parameters,
+        type_scope,
         parameters,
         result,
         result_borrow,
@@ -1104,6 +1293,11 @@ struct BodyChecker<'a> {
     methods: &'a Methods,
     library: LibraryId,
     source: SourceRef,
+    /// The types of the function's type parameters, by identity.
+    type_scope: BTreeMap<EntityId, Type>,
+    type_parameters: Vec<TypeParameter>,
+    /// Every call of a named function, for the recursion check.
+    calls: Vec<NamedCall>,
     locals: Vec<Local>,
     local_ids: BTreeMap<EntityId, usize>,
     mutable: Vec<bool>,
@@ -1811,7 +2005,7 @@ impl BodyChecker<'_> {
             unreachable!("only `let` statements are checked here")
         };
         let expected = match annotation {
-            Some(annotation) => Some(self.resolve_type(annotation, &BTreeMap::new())?),
+            Some(annotation) => Some(self.resolve_type(annotation, &self.type_scope.clone())?),
             None => None,
         };
         // `&place`, `&mut place`, or a call that returns a borrow, binds a
@@ -2800,7 +2994,7 @@ impl BodyChecker<'_> {
             let arguments = std::iter::once(Argument::Receiver(operand, receiver))
                 .chain(arguments.iter().map(Argument::Written))
                 .collect();
-            return self.finish_call(span, signature, arguments);
+            return self.finish_call(span, signature, arguments, None);
         }
         let (receiver_value, path) = match operand {
             Operand::Place((place, _, path)) => (Receiver::Place(place), Some(path)),
@@ -2814,7 +3008,7 @@ impl BodyChecker<'_> {
             )
         };
         let (builtin, parameters, result, mutates): (Builtin, Vec<(Type, bool)>, Type, bool) =
-            if name == "clone" {
+            if name == "clone" && self.can_clone(ty) {
                 (Builtin::Clone, Vec::new(), ty, false)
             } else if let TypeKind::List(element) = *self.types.kind(ty) {
                 match name {
@@ -3316,16 +3510,33 @@ impl BodyChecker<'_> {
                         }
                     };
                 }
-                if let Some(&declaration) = self.nominals.by_identity.get(target) {
-                    let TypeKind::Nominal {
-                        declaration: actual_declaration,
-                        arguments,
-                    } = self.types.kind(actual).clone()
-                    else {
-                        return false;
-                    };
-                    return declaration == actual_declaration
-                        && named.arguments.len() == arguments.len()
+                let arguments = match (self.types.kind(actual).clone(), target.kind) {
+                    (
+                        TypeKind::Nominal {
+                            declaration,
+                            arguments,
+                        },
+                        _,
+                    ) if self.nominals.by_identity.get(target) == Some(&declaration) => {
+                        Some(arguments)
+                    }
+                    (TypeKind::List(element), EntityKind::LanguageType)
+                        if target.name == "List" =>
+                    {
+                        Some(vec![element])
+                    }
+                    (TypeKind::Set(element), EntityKind::LanguageType) if target.name == "Set" => {
+                        Some(vec![element])
+                    }
+                    (TypeKind::Map(key, value), EntityKind::LanguageType)
+                        if target.name == "Map" =>
+                    {
+                        Some(vec![key, value])
+                    }
+                    _ => None,
+                };
+                if let Some(arguments) = arguments {
+                    return named.arguments.len() == arguments.len()
                         && named
                             .arguments
                             .iter()
@@ -3334,6 +3545,9 @@ impl BodyChecker<'_> {
                                 matches!(written, ResolvedTypeArgument::Type(written)
                                 if self.bind(written, actual, substitution))
                             });
+                }
+                if self.nominals.by_identity.contains_key(target) {
+                    return false;
                 }
                 self.resolve_type(written, substitution)
                     .is_ok_and(|resolved| resolved == actual)
@@ -4076,21 +4290,25 @@ impl BodyChecker<'_> {
             ));
         }
         let arguments = arguments.iter().map(Argument::Written).collect();
-        self.finish_call(span, signature, arguments)
+        self.finish_call(span, signature, arguments, expected)
     }
 
-    /// Checks the arguments of a call of the function with `signature`.
+    /// Checks the arguments of a call of the function with `signature`. The
+    /// type arguments of a generic function come from the arguments, in
+    /// order, and then from the type the call is expected to have.
     fn finish_call(
         &mut self,
         span: Span,
         signature: &Signature,
         arguments: Vec<Argument>,
+        expected: Option<Type>,
     ) -> Result<(Type, ExprKind), CheckDiagnostic> {
         let borrow = signature.result_borrow;
+        let mut bindings = vec![None; signature.type_parameters.len()];
         // The borrowed arguments of a call that returns a borrow stay
         // borrowed until the statement ends, or longer if a `let` binds it.
         let frozen_before = self.frozen.len();
-        let checked = self.check_arguments(arguments, signature.parameters.clone());
+        let checked = self.check_arguments(arguments, signature.parameters.clone(), &mut bindings);
         if borrow.is_none() {
             self.frozen.truncate(frozen_before);
         }
@@ -4103,15 +4321,180 @@ impl BodyChecker<'_> {
         {
             return Err(self.unsupported(span, "borrowed results of calls that borrow temporaries"));
         }
+        if let Some(expected) = expected
+            && bindings.iter().any(Option::is_none)
+        {
+            // A failed match leaves the parameters unbound, which is
+            // reported below.
+            let mut tentative = bindings.clone();
+            if self.match_type(signature.result, expected, &mut tentative) {
+                bindings = tentative;
+            }
+        }
+        let mut type_arguments = Vec::new();
+        for (parameter, binding) in signature.type_parameters.iter().zip(&bindings) {
+            let Some(argument) = *binding else {
+                return Err(self.error(
+                    CheckDiagnosticKind::CannotInfer,
+                    span,
+                    format!(
+                        "the type argument `{}` of this call cannot be inferred here; write the expected type",
+                        parameter.name
+                    ),
+                ));
+            };
+            let unsatisfied = if parameter.copy && self.types.is_entity(argument) {
+                Some("Copy")
+            } else if parameter.clone && !self.can_clone(argument) {
+                Some("Clone")
+            } else {
+                None
+            };
+            if let Some(bound) = unsatisfied {
+                return Err(self.error(
+                    CheckDiagnosticKind::UnsatisfiedBound,
+                    span,
+                    format!(
+                        "`{}` is not `{bound}`, which the type parameter `{}` of this function requires",
+                        self.types.name(argument),
+                        parameter.name
+                    ),
+                ));
+            }
+            type_arguments.push(argument);
+        }
+        let result = self.substitute(signature.result, &type_arguments)?;
+        self.calls
+            .push((signature.index, type_arguments.clone(), self.at(span)));
         Ok((
-            signature.result,
+            result,
             ExprKind::Call {
                 function: signature.index,
+                type_arguments,
                 arguments,
                 checks,
                 borrow,
             },
         ))
+    }
+
+    /// Whether `clone()` applies to `ty`: every type parameter it mentions
+    /// is bound by `Clone` or `Copy`.
+    fn can_clone(&self, ty: Type) -> bool {
+        match self.types.kind(ty) {
+            TypeKind::Param { index, .. } => self.type_parameters[*index].clone,
+            TypeKind::Tuple(parts)
+            | TypeKind::Nominal {
+                arguments: parts, ..
+            } => parts.iter().all(|part| self.can_clone(*part)),
+            TypeKind::List(element) | TypeKind::Set(element) => self.can_clone(*element),
+            TypeKind::Map(key, value) => self.can_clone(*key) && self.can_clone(*value),
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::Str
+            | TypeKind::Unit
+            | TypeKind::Never
+            | TypeKind::Range => true,
+        }
+    }
+
+    /// Matches `pattern`, a type of a generic function's signature, against
+    /// `actual`, binding the function's type parameters. Returns whether
+    /// they fit. `Never` fits anything and binds nothing.
+    fn match_type(&self, pattern: Type, actual: Type, bindings: &mut [Option<Type>]) -> bool {
+        if actual == Type::NEVER {
+            return true;
+        }
+        match (self.types.kind(pattern), self.types.kind(actual)) {
+            (&TypeKind::Param { index, .. }, _) => match bindings[index] {
+                Some(bound) => bound == actual,
+                None => {
+                    bindings[index] = Some(actual);
+                    true
+                }
+            },
+            _ if !self.types.is_generic(pattern) => pattern == actual,
+            (TypeKind::Tuple(patterns), TypeKind::Tuple(actuals))
+            | (
+                TypeKind::Nominal {
+                    arguments: patterns,
+                    ..
+                },
+                TypeKind::Nominal {
+                    arguments: actuals, ..
+                },
+            ) => {
+                let same_declaration = match (self.types.kind(pattern), self.types.kind(actual)) {
+                    (
+                        TypeKind::Nominal { declaration, .. },
+                        TypeKind::Nominal {
+                            declaration: actual_declaration,
+                            ..
+                        },
+                    ) => declaration == actual_declaration,
+                    _ => true,
+                };
+                same_declaration
+                    && patterns.len() == actuals.len()
+                    && patterns
+                        .clone()
+                        .iter()
+                        .zip(actuals.clone())
+                        .all(|(pattern, actual)| self.match_type(*pattern, actual, bindings))
+            }
+            (&TypeKind::List(pattern), &TypeKind::List(actual))
+            | (&TypeKind::Set(pattern), &TypeKind::Set(actual)) => {
+                self.match_type(pattern, actual, bindings)
+            }
+            (&TypeKind::Map(key, value), &TypeKind::Map(actual_key, actual_value)) => {
+                self.match_type(key, actual_key, bindings)
+                    && self.match_type(value, actual_value, bindings)
+            }
+            _ => false,
+        }
+    }
+
+    /// `ty` with the type parameters of a callee's signature replaced by
+    /// `arguments`.
+    fn substitute(&mut self, ty: Type, arguments: &[Type]) -> Result<Type, CheckDiagnostic> {
+        if arguments.is_empty() {
+            return Ok(ty);
+        }
+        let nominals = self.nominals;
+        crate::mono::substitute(
+            self.types,
+            &mut |types, declaration, arguments| {
+                instantiate(types, nominals, declaration, arguments, 0)
+            },
+            ty,
+            arguments,
+        )
+    }
+
+    /// The type a parameter of a generic callee expects, once `bindings`
+    /// give every type parameter it mentions.
+    fn instantiated(
+        &mut self,
+        ty: Type,
+        bindings: &[Option<Type>],
+    ) -> Result<Option<Type>, CheckDiagnostic> {
+        if bindings.is_empty() {
+            return Ok(Some(ty));
+        }
+        let mut arguments = Vec::new();
+        for binding in bindings {
+            // An unbound parameter that `ty` does not mention is never read.
+            arguments.push(binding.unwrap_or(Type::NEVER));
+        }
+        let mentioned_unbound = bindings
+            .iter()
+            .enumerate()
+            .any(|(index, binding)| binding.is_none() && self.types.mentions_param(ty, index));
+        if mentioned_unbound {
+            return Ok(None);
+        }
+        self.substitute(ty, &arguments).map(Some)
     }
 
     /// Whether every borrowed argument of `call` reaches only places of the
@@ -4131,11 +4514,14 @@ impl BodyChecker<'_> {
 
     /// Checks call arguments in order. A borrowed argument stays borrowed
     /// while the later ones are checked; two borrows of one place that
-    /// differ only in list indices are checked at run time.
+    /// differ only in list indices are checked at run time. The parameter
+    /// types of a generic callee mention its type parameters, which each
+    /// argument binds in `bindings` as far as it can.
     fn check_arguments(
         &mut self,
         values: Vec<Argument>,
         parameters: Vec<(Type, Option<BorrowKind>)>,
+        bindings: &mut [Option<Type>],
     ) -> Result<(Vec<Expr>, Vec<DisjointCheck>), CheckDiagnostic> {
         let mut checked = Vec::new();
         let mut borrows: Vec<ArgumentBorrow> = Vec::new();
@@ -4143,11 +4529,14 @@ impl BodyChecker<'_> {
         // arguments, which are compared with each other below.
         let mut own = Vec::new();
         let mut checks = Vec::new();
-        for (position, (value, (ty, borrow))) in values.into_iter().zip(parameters).enumerate() {
+        for (position, (value, (parameter, borrow))) in
+            values.into_iter().zip(parameters).enumerate()
+        {
+            let expected = self.instantiated(parameter, bindings)?;
             let (checked_operand, operand, is_receiver) = match (value, borrow) {
                 (Argument::Written(value), None) => {
-                    let argument = self.check_consumed(value, Some(ty))?;
-                    self.require(value.span, ty, argument.ty)?;
+                    let argument = self.check_consumed(value, expected)?;
+                    self.fit(value.span, parameter, expected, argument.ty, bindings)?;
                     checked.push(argument);
                     continue;
                 }
@@ -4188,16 +4577,22 @@ impl BodyChecker<'_> {
                         ));
                     }
                     (
-                        self.check_operand(operand, Some(ty))?,
+                        self.check_operand(operand, expected)?,
                         operand.as_ref(),
                         false,
                     )
                 }
             };
             let kind = borrow.expect("only borrowed arguments get here");
+            let ty = self.fit(
+                operand.span,
+                parameter,
+                expected,
+                checked_operand.ty(),
+                bindings,
+            )?;
             let target = match checked_operand {
-                Operand::Place((place, place_ty, path)) => {
-                    self.require(operand.span, ty, place_ty)?;
+                Operand::Place((place, _, path)) => {
                     self.check_borrow_except(&own, &place, &path, kind, operand.span)?;
                     let keys = index_keys(operand);
                     for earlier in &borrows {
@@ -4254,7 +4649,6 @@ impl BodyChecker<'_> {
                             "a method with `&mut self` changes its receiver, which must be a variable or a part of one".to_owned(),
                         ));
                     }
-                    self.require(operand.span, ty, value.ty)?;
                     BorrowTarget::Value(value)
                 }
             };
@@ -4264,6 +4658,28 @@ impl BodyChecker<'_> {
             });
         }
         Ok((checked, checks))
+    }
+
+    /// Checks that an argument of type `actual` fits `parameter`: it must be
+    /// `expected` if that is known, and otherwise binds the type parameters
+    /// that `parameter` mentions. Returns the parameter type in the caller's
+    /// terms.
+    fn fit(
+        &mut self,
+        span: Span,
+        parameter: Type,
+        expected: Option<Type>,
+        actual: Type,
+        bindings: &mut [Option<Type>],
+    ) -> Result<Type, CheckDiagnostic> {
+        if let Some(expected) = expected {
+            self.require(span, expected, actual)?;
+            return Ok(expected);
+        }
+        if !self.match_type(parameter, actual, bindings) {
+            return Err(self.mismatch(span, parameter, actual));
+        }
+        Ok(self.instantiated(parameter, bindings)?.unwrap_or(actual))
     }
 
     /// Checks `replace(&mut place, value)` or `swap(&mut a, &mut b)`, whose
@@ -4305,6 +4721,7 @@ impl BodyChecker<'_> {
                 Argument::Written(second),
             ],
             vec![(ty, Some(BorrowKind::Mutable)), (ty, second_parameter)],
+            &mut [],
         );
         self.frozen.truncate(frozen_before);
         let (arguments, checks) = checked?;

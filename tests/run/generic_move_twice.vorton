@@ -1,0 +1,7 @@
+fn twice<T>(x: T) -> (T, T) {
+    (x, x)
+}
+
+fn main() {
+    let p = twice(1)
+}

@@ -1,0 +1,13 @@
+fn ping<T>(x: T, n: Int) {
+    if n > 0 {
+        pong((x, 1), n - 1)
+    }
+}
+
+fn pong<U>(x: U, n: Int) {
+    ping(x, n)
+}
+
+fn main() {
+    ping(1, 3)
+}

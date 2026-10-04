@@ -46,6 +46,14 @@ pub(crate) enum TypeKind {
         declaration: usize,
         arguments: Vec<Type>,
     },
+    /// The type parameter at `index` of the generic function being checked.
+    /// A `Copy` bound makes it a value; without one it is an entity. Code
+    /// generation sees only the types that replace it.
+    Param {
+        index: usize,
+        name: String,
+        copy: bool,
+    },
 }
 
 pub(crate) struct NominalInfo {
@@ -66,6 +74,8 @@ pub(crate) struct Field {
 
 pub(crate) struct Types {
     kinds: Vec<TypeKind>,
+    /// Whether each type mentions a type parameter.
+    generic: Vec<bool>,
     lookup: HashMap<TypeKind, Type>,
     pub(crate) nominals: Vec<NominalInfo>,
     shapes: HashMap<Type, Vec<Variant>>,
@@ -75,6 +85,7 @@ impl Types {
     pub(crate) fn new() -> Self {
         let mut types = Self {
             kinds: Vec::new(),
+            generic: Vec::new(),
             lookup: HashMap::new(),
             nominals: Vec::new(),
             shapes: HashMap::new(),
@@ -98,9 +109,53 @@ impl Types {
             return (ty, false);
         }
         let ty = Type(u32::try_from(self.kinds.len()).expect("fewer than 2^32 types"));
+        let generic = match &kind {
+            TypeKind::Param { .. } => true,
+            TypeKind::Tuple(parts)
+            | TypeKind::Nominal {
+                arguments: parts, ..
+            } => parts.iter().any(|part| self.is_generic(*part)),
+            TypeKind::List(element) | TypeKind::Set(element) => self.is_generic(*element),
+            TypeKind::Map(key, value) => self.is_generic(*key) || self.is_generic(*value),
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::Str
+            | TypeKind::Unit
+            | TypeKind::Never
+            | TypeKind::Range => false,
+        };
         self.kinds.push(kind.clone());
+        self.generic.push(generic);
         self.lookup.insert(kind, ty);
         (ty, true)
+    }
+
+    /// Whether `ty` mentions a type parameter, so only its instances reach
+    /// code generation.
+    pub(crate) fn is_generic(&self, ty: Type) -> bool {
+        self.generic[ty.index()]
+    }
+
+    /// Whether `ty` mentions the type parameter at `index`.
+    pub(crate) fn mentions_param(&self, ty: Type, index: usize) -> bool {
+        if !self.is_generic(ty) {
+            return false;
+        }
+        match self.kind(ty) {
+            TypeKind::Param { index: param, .. } => *param == index,
+            TypeKind::Tuple(parts)
+            | TypeKind::Nominal {
+                arguments: parts, ..
+            } => parts.iter().any(|part| self.mentions_param(*part, index)),
+            TypeKind::List(element) | TypeKind::Set(element) => {
+                self.mentions_param(*element, index)
+            }
+            TypeKind::Map(key, value) => {
+                self.mentions_param(*key, index) || self.mentions_param(*value, index)
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn intern(&mut self, kind: TypeKind) -> Type {
@@ -172,6 +227,7 @@ impl Types {
                     format!("{name}<{}>", self.names(arguments))
                 }
             }
+            TypeKind::Param { name, .. } => name.clone(),
         }
     }
 
@@ -192,7 +248,11 @@ impl Types {
     /// `Str` or owns heap storage.
     pub(crate) fn needs_release(&self, ty: Type) -> bool {
         match self.kind(ty) {
-            TypeKind::Str | TypeKind::List(_) | TypeKind::Map(..) | TypeKind::Set(_) => true,
+            TypeKind::Str
+            | TypeKind::List(_)
+            | TypeKind::Map(..)
+            | TypeKind::Set(_)
+            | TypeKind::Param { .. } => true,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .components(ty)
                 .into_iter()
@@ -210,6 +270,7 @@ impl Types {
     pub(crate) fn is_entity(&self, ty: Type) -> bool {
         match self.kind(ty) {
             TypeKind::List(_) | TypeKind::Map(..) | TypeKind::Set(_) => true,
+            TypeKind::Param { copy, .. } => !copy,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => self
                 .components(ty)
                 .into_iter()
@@ -238,7 +299,11 @@ impl Types {
             TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Str | TypeKind::Unit => {
                 true
             }
-            TypeKind::Never | TypeKind::Map(..) | TypeKind::Set(_) | TypeKind::Range => false,
+            TypeKind::Never
+            | TypeKind::Map(..)
+            | TypeKind::Set(_)
+            | TypeKind::Range
+            | TypeKind::Param { .. } => false,
             TypeKind::List(element) => self.has_equality_in(*element, pending),
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
                 if pending.contains(&ty) {
@@ -270,7 +335,8 @@ impl Types {
             | TypeKind::List(_)
             | TypeKind::Map(..)
             | TypeKind::Set(_)
-            | TypeKind::Range => false,
+            | TypeKind::Range
+            | TypeKind::Param { .. } => false,
             TypeKind::Tuple(_) | TypeKind::Nominal { .. } => {
                 if pending.contains(&ty) {
                     return true;
@@ -302,7 +368,8 @@ impl Types {
             | TypeKind::List(_)
             | TypeKind::Map(..)
             | TypeKind::Set(_)
-            | TypeKind::Range => false,
+            | TypeKind::Range
+            | TypeKind::Param { .. } => false,
         }
     }
 

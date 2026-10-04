@@ -1,0 +1,7 @@
+fn equal<T>(a: &T, b: &T) -> Bool {
+    a == b
+}
+
+fn main() {
+    print(equal(&1, &2))
+}

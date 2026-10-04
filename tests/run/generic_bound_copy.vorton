@@ -1,0 +1,7 @@
+fn first<T: Copy>(xs: &List<T>) -> T {
+    xs[0]
+}
+
+fn main() {
+    let x = first(&[[1]])
+}

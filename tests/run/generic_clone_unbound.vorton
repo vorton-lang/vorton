@@ -1,0 +1,7 @@
+fn copy_of<T>(x: &T) -> T {
+    x.clone()
+}
+
+fn main() {
+    let p = copy_of(&1)
+}

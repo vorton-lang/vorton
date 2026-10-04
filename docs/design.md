@@ -18,7 +18,7 @@
 ## 编译管线
 
 ```text
-source → token → AST → 名称解析 → 声明检查 → 类型检查 → C11 → native
+source → token → AST → 名称解析 → 声明检查 → 类型检查 → 实例化 → C11 → native
 ```
 
 | 阶段 | 模块 | 职责 |
@@ -28,6 +28,7 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 | 名称解析 | `resolver.rs` | 解析纯内存的多库项目，给每个声明、绑定与引用一个包含库归属的精确 identity |
 | 声明检查 | `prepare.rs` | 检查 supertrait 目标与 trait、effect alias 的声明图无环 |
 | 类型检查 | `checker.rs`、`types.rs`、`exhaustive.rs` | 局部双向推断：签名给出参数与返回类型，函数体内推断；每个类型在类型表中只登记一次，按编号比较；模式的穷尽性按 Maranget 算法检查；产出带类型的程序 |
+| 实例化 | `mono.rs` | 泛型函数按调用到达的每组类型实参复制一份，把类型参数换成实参 |
 | 代码生成 | `codegen.rs` | 把带类型的程序展开成使用临时变量的 C11 代码，为 tuple 与 struct 生成 C 结构体，并插入计数操作 |
 | 构建 | `native.rs` | 调用系统 C 编译器生成可执行文件 |
 
@@ -37,7 +38,7 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 
 ### 当前支持范围
 
-类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`Str` 的[方法](lang-spec/type-system.md#字符串)、`List`、`Map` 与 `Set` 及其[规范列出的方法](lang-spec/type-system.md#容器)、任意类型的 `clone`、下标读写、`for` 遍历 range、列表、Map 与 Set（拿走，或用 `&`／`&mut` 借出）、`match`、`if let` 与解构（含穷尽性检查，可按值或借出）、结构化 `==` 与 `<` `>` `<=` `>=`、`Range<Int>` 值、函数、非泛型类型的固有方法与关联函数、`let`/`let mut`、`mut` 按值参数、借出的参数、绑定与返回、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`、`replace`、`swap`。其他构造都报告 `Unsupported`。
+类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`Str` 的[方法](lang-spec/type-system.md#字符串)、`List`、`Map` 与 `Set` 及其[规范列出的方法](lang-spec/type-system.md#容器)、任意类型的 `clone`、下标读写、`for` 遍历 range、列表、Map 与 Set（拿走，或用 `&`／`&mut` 借出）、`match`、`if let` 与解构（含穷尽性检查，可按值或借出）、结构化 `==` 与 `<` `>` `<=` `>=`、`Range<Int>` 值、函数与泛型函数（bound 只支持 `Copy` 与 `Clone`）、非泛型类型的固有方法与关联函数、`let`/`let mut`、`mut` 按值参数、借出的参数、绑定与返回、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`、`replace`、`swap`。其他构造都报告 `Unsupported`。
 
 `Str` 是不可变的值，用引用计数实现 O(1) 拷贝。`Map` 由运行时里一个通用的按插入顺序的哈希表实现：条目按插入顺序存放，删除留下空位，空位多于条目时整体压实；开放寻址的索引按键找到条目。每个具体的 `Map<K, V>` 只生成键的哈希、判等与释放、复制；`Set<T>` 是值为 `Unit` 的 Map。`List`、`Map` 与含有它们的聚合值是实体：
 
@@ -49,6 +50,8 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 - **`let` 借出持续到最后一次使用。** 对 `let` 借出的位置的冲突访问先记录下来，绑定之后再被使用时才报错；分支各自记录、汇合时合并，不到达汇合处的分支（`return`、`panic`）不计，`break` 带到循环之后，`continue` 与循环末尾带到下一轮，下一轮仍使用该绑定的循环里出现冲突也报错。这与 Rust 的 NLL 对照一致。
 - **同一调用的借出冲突。** 两个实参借出同一局部变量的重叠位置且至少一个是 `&mut` 时：路径上有不同字段就不冲突；只差在列表下标、且下标不能证明相同时，调用前比较这些下标，全部相等就 panic；下标是同一个字面量或同一个变量时是编译错误。
 - **返回借出。** 返回的位置必须只经以借出方式传入的参数到达；检查器为每个借出局部变量记录这一点。返回借出的调用结果是位置，通过一个指向结果的局部指针访问。
+
+泛型函数只检查一次：类型参数在类型表中是独立的类型，没有 `Copy` bound 的按实体对待。调用处从左到右用实参的类型确定类型实参，仍未确定的再用调用的期望类型。检查之后，实例化阶段从非泛型函数出发，为调用到达的每组类型实参复制一份函数体并代入实参；代入后成为值类型的移交改为读取，因为检查器已保证被移走的位置不再使用。规范对多态递归的限制保证实例只有有限个。代码生成只看到实例。
 
 ## Runtime
 

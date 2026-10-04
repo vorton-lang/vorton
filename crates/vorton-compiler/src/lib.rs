@@ -4,6 +4,7 @@ mod checker;
 mod codegen;
 mod exhaustive;
 mod lexer;
+mod mono;
 mod parser;
 mod prepare;
 mod project;
