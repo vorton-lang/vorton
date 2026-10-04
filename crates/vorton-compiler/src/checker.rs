@@ -3054,17 +3054,18 @@ impl BodyChecker<'_> {
                 return Err(unknown(self));
             };
         // A temporary can always be changed.
-        if mutates && let Receiver::Place(place) = &receiver_value {
-            if !self.mutable[place.local] {
-                return Err(self.error(
-                    CheckDiagnosticKind::NotAssignable,
-                    receiver.span,
-                    format!(
-                        "`{name}` changes `{}`, which is not declared `mut`",
-                        self.locals[place.local].name
-                    ),
-                ));
-            }
+        if mutates
+            && let Receiver::Place(place) = &receiver_value
+            && !self.mutable[place.local]
+        {
+            return Err(self.error(
+                CheckDiagnosticKind::NotAssignable,
+                receiver.span,
+                format!(
+                    "`{name}` changes `{}`, which is not declared `mut`",
+                    self.locals[place.local].name
+                ),
+            ));
         }
         if arguments.len() != parameters.len() {
             return Err(self.error(
