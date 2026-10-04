@@ -1,0 +1,10 @@
+fn main() {
+    let mut xs = [1]
+    match &xs {
+        ys if {
+            xs.push(2)
+            false
+        } => print("no")
+        _ => print("other")
+    }
+}

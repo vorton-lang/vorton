@@ -130,7 +130,8 @@ impl Instantiation<'_> {
                     }
                     StatementKind::Release(_)
                     | StatementKind::Unpack(_)
-                    | StatementKind::Distinct { .. } => {}
+                    | StatementKind::Distinct { .. }
+                    | StatementKind::Keep(_) => {}
                 }
             }
         }

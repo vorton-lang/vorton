@@ -1,0 +1,12 @@
+fn main() {
+    let mut xs = [1, 2]
+    match &mut xs {
+        ys if ys.len() > 1 => {
+            ys.push(3)
+            print(ys.len())
+        }
+        _ => print(0)
+    }
+    xs.push(4)
+    print(xs.len())
+}

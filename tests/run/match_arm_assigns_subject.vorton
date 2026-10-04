@@ -1,0 +1,11 @@
+fn main() {
+    let mut x = 1
+    match x {
+        1 if x < 5 => {
+            x = 2
+            print("one")
+        }
+        _ => print("other")
+    }
+    print(x)
+}

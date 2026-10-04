@@ -1,0 +1,12 @@
+fn main() {
+    let mut x = 1
+    match x {
+        1 if {
+            x = 2
+            false
+        } => print("unreachable")
+        1 => print("one")
+        _ => print("other")
+    }
+    print(x)
+}

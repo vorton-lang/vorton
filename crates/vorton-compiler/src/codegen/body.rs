@@ -170,6 +170,7 @@ impl<'a> Emitter<'a> {
                 }
                 StatementKind::Release(local) => self.release(*local),
                 StatementKind::Distinct { pairs, message } => self.distinct(pairs, message),
+                StatementKind::Keep(_) => {}
             }
         }
         match &data.terminator.kind {

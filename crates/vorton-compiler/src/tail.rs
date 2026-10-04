@@ -97,7 +97,8 @@ impl<'a> TailCalls<'a> {
             StatementKind::Bind(reference, value) => (Place::local(*reference), value),
             StatementKind::Release(_)
             | StatementKind::Unpack(_)
-            | StatementKind::Distinct { .. } => return None,
+            | StatementKind::Distinct { .. }
+            | StatementKind::Keep(_) => return None,
         };
         let Rvalue::Call {
             callee: Callee::Function(callee),
@@ -166,7 +167,8 @@ impl<'a> TailCalls<'a> {
                     StatementKind::Assign(..)
                     | StatementKind::Bind(..)
                     | StatementKind::Unpack(_)
-                    | StatementKind::Distinct { .. } => return None,
+                    | StatementKind::Distinct { .. }
+                    | StatementKind::Keep(_) => return None,
                 }
             }
             match body.blocks[current].terminator.kind {

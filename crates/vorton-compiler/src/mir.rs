@@ -95,6 +95,10 @@ pub(crate) enum StatementKind {
     /// The local's scope ends: what it owns is released, and it holds
     /// nothing afterwards.
     Release(Local),
+    /// Uses the reference local and does nothing else: the borrow it carries
+    /// lasts at least until here. A `match` keeps its subject borrowed this
+    /// way until it has chosen an arm, so a guard cannot change the subject.
+    Keep(Local),
     /// Panics with `message` if every pair of operands is equal: the indices
     /// and keys of a borrowed place and of a place that a step is about to
     /// reach, where only their values tell whether the two are the same.
@@ -454,7 +458,7 @@ impl Body {
                 filled.remove(local);
                 return;
             }
-            StatementKind::Distinct { .. } => return,
+            StatementKind::Distinct { .. } | StatementKind::Keep(_) => return,
             // Only parts are taken, so the variables may still hold the rest.
             StatementKind::Unpack(moves) => {
                 for (local, _) in moves {

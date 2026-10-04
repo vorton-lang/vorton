@@ -164,7 +164,9 @@ fn check_move_sources(body: &Body, types: &Types, errors: &mut Vec<Error>) {
                     })
                     .collect(),
                 StatementKind::Unpack(taken) => taken.iter().map(|(_, place)| place).collect(),
-                StatementKind::Release(_) | StatementKind::Distinct { .. } => Vec::new(),
+                StatementKind::Release(_)
+                | StatementKind::Distinct { .. }
+                | StatementKind::Keep(_) => Vec::new(),
             };
             for place in moved {
                 if let Some(message) = immovable(body, types, &from_call, place) {
@@ -369,6 +371,12 @@ fn move_statement(
             }
             for (local, _) in taken {
                 state.fill(&Place::local(*local));
+            }
+            return;
+        }
+        StatementKind::Keep(reference) => {
+            if let Some(errors) = errors {
+                check_filled(body, state, &Place::local(*reference), span, errors);
             }
             return;
         }
@@ -634,7 +642,8 @@ fn check_borrows(
                 }
                 StatementKind::Assign(..)
                 | StatementKind::Unpack(_)
-                | StatementKind::Distinct { .. } => None,
+                | StatementKind::Distinct { .. }
+                | StatementKind::Keep(_) => None,
             };
             if let Some(reference) = changed {
                 in_force.forget(carried.get(&reference));
@@ -824,7 +833,7 @@ fn learn(
             changed.insert(*local);
             None
         }
-        StatementKind::Distinct { .. } => None,
+        StatementKind::Distinct { .. } | StatementKind::Keep(_) => None,
     };
     if let Some(value) = value {
         for operand in value.operands() {
@@ -1015,7 +1024,10 @@ fn carry(
         StatementKind::Release(local) => {
             carried.remove(local);
         }
-        StatementKind::Assign(..) | StatementKind::Unpack(_) | StatementKind::Distinct { .. } => {}
+        StatementKind::Assign(..)
+        | StatementKind::Unpack(_)
+        | StatementKind::Distinct { .. }
+        | StatementKind::Keep(_) => {}
     }
 }
 
@@ -1080,6 +1092,7 @@ fn local_uses(body: &Body, statement: &StatementKind) -> (Vec<Local>, Vec<Local>
     let locals = |places: Vec<Place>| places.into_iter().map(|place| place.local);
     match statement {
         StatementKind::Release(local) => (Vec::new(), vec![*local]),
+        StatementKind::Keep(reference) => (vec![*reference], Vec::new()),
         StatementKind::Distinct { pairs, .. } => (
             pairs
                 .iter()
@@ -1253,7 +1266,7 @@ fn accesses(
             return made;
         }
         // Reads indices, which are values.
-        StatementKind::Distinct { .. } => return made,
+        StatementKind::Distinct { .. } | StatementKind::Keep(_) => return made,
         StatementKind::Assign(destination, value) => (Some(destination), value),
         StatementKind::Bind(_, value) => (None, value),
     };
@@ -1424,7 +1437,8 @@ fn check_returned(
                     StatementKind::Bind(reference, _) => *reference == body.result,
                     StatementKind::Release(_)
                     | StatementKind::Unpack(_)
-                    | StatementKind::Distinct { .. } => false,
+                    | StatementKind::Distinct { .. }
+                    | StatementKind::Keep(_) => false,
                 })
                 .map_or(block.terminator.span, |statement| statement.span);
             errors.push(Error {

@@ -1522,6 +1522,11 @@ impl Builder<'_> {
         let Some((base, subject_ty)) = self.subject(scrutinee) else {
             return false;
         };
+        let hold = arms
+            .iter()
+            .any(|arm| arm.guard.is_some())
+            .then(|| self.hold(&base, subject_ty, span))
+            .flatten();
         let join = self.body.new_block();
         let mut reaches = false;
         for arm in arms {
@@ -1562,6 +1567,9 @@ impl Builder<'_> {
                         self.current = fail;
                         continue;
                     };
+                    if let Some(hold) = hold {
+                        self.push(StatementKind::Keep(hold), guard.span);
+                    }
                     let accepted = self.body.new_block();
                     let rejected = self.body.new_block();
                     self.terminate(
@@ -1603,6 +1611,25 @@ impl Builder<'_> {
             self.unreachable(span);
         }
         reaches
+    }
+
+    /// The reference that keeps the subject at `base` borrowed until a match
+    /// with guards has chosen an arm, so a guard cannot change, borrow with
+    /// `&mut` or move what the arms match: the borrow the match is written
+    /// with, or a new `&` of a place. A value the match holds in a temporary
+    /// needs none, as no guard can name it.
+    fn hold(&mut self, base: &Place, ty: Type, span: Span) -> Option<Local> {
+        let local = &self.body.locals[base.local];
+        if local.temporary && base.projections.is_empty() {
+            return local.reference.is_some().then_some(base.local);
+        }
+        let hold = self.reference(ty, BorrowKind::Shared);
+        self.assign(
+            Place::local(hold),
+            Rvalue::Ref(RefKind::Shared, base.clone()),
+            span,
+        );
+        Some(hold)
     }
 
     /// Branches to `fail` unless the value at `place` matches `pattern`,
