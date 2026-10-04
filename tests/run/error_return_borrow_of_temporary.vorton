@@ -1,0 +1,6 @@
+// A returned borrow cannot point at a temporary, which ends when the function
+// returns.
+fn first(xs: &List<Int>) -> &Int {
+    &(xs[0] + 1)
+}
+fn main() {}

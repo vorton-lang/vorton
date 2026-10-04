@@ -2391,13 +2391,18 @@ impl BodyChecker<'_> {
                 }
                 match self.check_operand(operand, None)? {
                     Operand::Place((place, ty)) => (place, ty, operand.span),
-                    Operand::Value(_) => {
-                        return Err(self.error(
-                            CheckDiagnosticKind::BorrowOutlives,
-                            operand.span,
-                            "a returned borrow cannot name a temporary, which ends when the function returns"
-                                .to_owned(),
-                        ));
+                    // A borrow of a temporary, which ends when the function
+                    // returns: move and borrow checking reports it, as it
+                    // does every returned borrow that does not come from a
+                    // parameter.
+                    Operand::Value(value) => {
+                        let (ty, span) = (value.ty, operand.span);
+                        self.require(span, self.result, ty)?;
+                        return Ok(Expr {
+                            ty,
+                            span,
+                            kind: ExprKind::Borrow(kind, Box::new(BorrowTarget::Value(value))),
+                        });
                     }
                 }
             }
