@@ -419,8 +419,11 @@ static vt_str *vt_str_replace(const vt_str *text, const vt_str *from, const vt_s
          at = vt_str_find_from(text, from, at + from->len)) {
         count += 1;
     }
-    vt_str *result = vt_str_alloc(text->len + count * (to->len - from->len));
-    char *out = (char *)result->data;
+    int64_t growth = to->len - from->len;
+    if (count > 0 && growth > 0 && growth > (INT64_MAX - text->len) / count) {
+        vt_panic("string too long");
+    }
+    vt_str *result = vt_str_alloc(text->len + count * growth);    char *out = (char *)result->data;
     int64_t position = 0;
     for (int64_t at = vt_str_find_from(text, from, 0); at >= 0;
          at = vt_str_find_from(text, from, position)) {
