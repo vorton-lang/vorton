@@ -546,6 +546,40 @@ impl Types {
             .is_some_and(|written| written.drop.is_some())
     }
 
+    /// Whether `ty` has any values. `Never` has none, nor does an enum whose
+    /// every variant has a field without values, nor a struct or tuple with
+    /// such a field. A type cannot contain itself by value, so the search
+    /// ends; each type is looked at once.
+    pub(crate) fn is_inhabited(&self, ty: Type) -> bool {
+        fn inhabited(types: &Types, ty: Type, known: &mut HashMap<Type, bool>) -> bool {
+            if let Some(&answer) = known.get(&ty) {
+                return answer;
+            }
+            let all = |parts: &[Type], known: &mut HashMap<Type, bool>| {
+                parts.iter().all(|&part| inhabited(types, part, known))
+            };
+            let answer = match types.kind(ty) {
+                TypeKind::Never => false,
+                TypeKind::Tuple(parts) => all(&parts.clone(), known),
+                TypeKind::Nominal { .. } if types.is_enum(ty) => {
+                    types.variants(ty).iter().any(|variant| {
+                        let fields = variant
+                            .fields
+                            .iter()
+                            .map(|field| field.ty)
+                            .collect::<Vec<_>>();
+                        all(&fields, known)
+                    })
+                }
+                TypeKind::Nominal { .. } => all(&types.components(ty), known),
+                _ => true,
+            };
+            known.insert(ty, answer);
+            answer
+        }
+        inhabited(self, ty, &mut HashMap::new())
+    }
+
     /// Whether `ty` is an entity: it has identity and is moved, never copied.
     pub(crate) fn is_entity(&self, ty: Type) -> bool {
         self.search(ty, |ty| {

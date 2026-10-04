@@ -28,7 +28,17 @@ fn useful(types: &Types, rows: Vec<Vec<Pattern>>, tys: &[Type]) -> Option<Vec<St
     for row in rows {
         expand(row, &mut expanded);
     }
-    let count = constructors(types, first);
+    // Only the constructors that can make a value need covering: a variant
+    // with a field that has no values never occurs.
+    let possible = constructors(types, first).map(|count| {
+        (0..count)
+            .filter(|&constructor| {
+                field_types(types, first, constructor)
+                    .into_iter()
+                    .all(|field| types.is_inhabited(field))
+            })
+            .collect::<Vec<_>>()
+    });
     let present = expanded
         .iter()
         .filter_map(|row| head_constructor(&row[0]))
@@ -36,10 +46,12 @@ fn useful(types: &Types, rows: Vec<Vec<Pattern>>, tys: &[Type]) -> Option<Vec<St
     // When the first column names every constructor, each one is checked
     // with the rows that match it. Otherwise only the rows with a wildcard
     // there can cover a missing constructor, and the column is done.
-    if let Some(count) = count
-        && present.len() == count
+    if let Some(possible) = &possible
+        && possible
+            .iter()
+            .all(|constructor| present.contains(constructor))
     {
-        return (0..count).find_map(|constructor| {
+        return possible.iter().find_map(|&constructor| {
             let fields = field_types(types, first, constructor);
             let arity = fields.len();
             let specialized = expanded
@@ -62,8 +74,11 @@ fn useful(types: &Types, rows: Vec<Vec<Pattern>>, tys: &[Type]) -> Option<Vec<St
         .map(|row| row[1..].to_vec())
         .collect();
     useful(types, default, rest).map(|witness| {
-        let missing =
-            count.and_then(|count| (0..count).find(|constructor| !present.contains(constructor)));
+        let missing = possible.and_then(|possible| {
+            possible
+                .into_iter()
+                .find(|constructor| !present.contains(constructor))
+        });
         let head = match missing {
             Some(constructor) => {
                 let arity = field_types(types, first, constructor).len();

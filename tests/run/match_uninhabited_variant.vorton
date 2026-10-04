@@ -1,0 +1,27 @@
+enum Empty {}
+
+struct Wrapped {
+    inner: Empty,
+}
+
+enum Choice {
+    Real(Int),
+    Never(Wrapped),
+}
+
+fn describe(o: Option<Empty>) -> Int {
+    match o {
+        Option::None => 0
+    }
+}
+
+fn pick(c: Choice) -> Int {
+    match c {
+        Choice::Real(n) => n
+    }
+}
+
+fn main() {
+    print(describe(Option::None))
+    print(pick(Choice::Real(4)))
+}
