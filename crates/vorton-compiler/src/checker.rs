@@ -661,6 +661,23 @@ pub(crate) fn check(project: &ResolvedProject) -> Result<Program, CheckDiagnosti
                 _ => None,
             };
             if let Some((type_parameters, shape)) = shape {
+                let bound = match &declaration.kind {
+                    ResolvedDeclarationKind::Struct {
+                        type_parameters, ..
+                    }
+                    | ResolvedDeclarationKind::Enum {
+                        type_parameters, ..
+                    } => type_parameters
+                        .iter()
+                        .find_map(|parameter| parameter.bounds.first()),
+                    _ => None,
+                };
+                if let Some(bound) = bound {
+                    return Err(unsupported(
+                        Some(at(&declaration.origin, bound.span)),
+                        "bounds on the type parameters of structs and enums",
+                    ));
+                }
                 let identity = identity();
                 let index = nominals.declarations.len();
                 if let Shape::Enum(variants) = &shape {
@@ -1047,9 +1064,8 @@ fn check_drops(
 }
 
 /// The steps of `body` that print, and the functions it calls, with their
-/// spans: named calls, and the hand-written comparisons and `clone`s that
-/// comparing or cloning a value runs, for the value's type and the types
-/// inside it.
+/// spans: named calls, and the hand-written `eq`, `partial_cmp` and `clone`
+/// that comparing, ordering, finding or cloning a value runs.
 fn console_uses(body: &Body, types: &Types) -> Vec<(Span, Option<usize>)> {
     let mut uses = Vec::new();
     for block in &body.blocks {
@@ -1058,60 +1074,71 @@ fn console_uses(body: &Body, types: &Types) -> Vec<(Span, Option<usize>)> {
                 continue;
             };
             let span = statement.span;
-            match value {
+            let (ty, operation) = match value {
                 Rvalue::Intrinsic {
                     intrinsic: Intrinsic::Print,
                     ..
-                } => uses.push((span, None)),
+                } => {
+                    uses.push((span, None));
+                    continue;
+                }
                 Rvalue::Call {
                     callee: Callee::Function(callee),
                     ..
-                } => uses.push((span, Some(*callee))),
-                Rvalue::Binary(operator, left, _) if !is_arithmetic(*operator) => {
-                    let ty = match left {
-                        MirOperand::Copy(place) | MirOperand::Move(place) => {
-                            body.place_type(types, place)
-                        }
+                } => {
+                    uses.push((span, Some(*callee)));
+                    continue;
+                }
+                Rvalue::Binary(operator, MirOperand::Copy(place) | MirOperand::Move(place), _) => {
+                    let operation = match operator {
+                        BinaryOperator::Equal | BinaryOperator::NotEqual => Operation::Equal,
+                        BinaryOperator::Less
+                        | BinaryOperator::Greater
+                        | BinaryOperator::LessEqual
+                        | BinaryOperator::GreaterEqual => Operation::Order,
                         _ => continue,
                     };
-                    for callee in written_inside(types, ty) {
-                        uses.push((span, Some(callee)));
-                    }
+                    (body.place_type(types, place), operation)
                 }
                 Rvalue::Builtin {
                     builtin: Builtin::Clone,
                     receiver,
                     ..
-                } => {
-                    for callee in written_inside(types, body.place_type(types, receiver)) {
-                        uses.push((span, Some(callee)));
-                    }
-                }
-                _ => {}
+                } => (body.place_type(types, receiver), Operation::Clone),
+                // `contains` compares the elements of a list with `==`.
+                Rvalue::Builtin {
+                    builtin: Builtin::Contains,
+                    receiver,
+                    ..
+                } => match types.kind(body.place_type(types, receiver)) {
+                    TypeKind::List(element) => (*element, Operation::Equal),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            for callee in written_runs(types, ty, operation) {
+                uses.push((span, Some(callee)));
             }
         }
     }
     uses
 }
 
-fn is_arithmetic(operator: BinaryOperator) -> bool {
-    matches!(
-        operator,
-        BinaryOperator::Add
-            | BinaryOperator::Subtract
-            | BinaryOperator::Multiply
-            | BinaryOperator::Divide
-            | BinaryOperator::Remainder
-            | BinaryOperator::LogicAnd
-            | BinaryOperator::LogicOr
-            | BinaryOperator::RangeExclusive
-            | BinaryOperator::RangeInclusive
-    )
+/// An operation on values that the compiler implements by calling the
+/// hand-written impls of the values' types.
+#[derive(Clone, Copy)]
+enum Operation {
+    /// `==` and `!=`: `PartialEq::eq`.
+    Equal,
+    /// `<`, `>`, `<=` and `>=`: `PartialOrd::partial_cmp`.
+    Order,
+    Clone,
 }
 
-/// The hand-written comparison and `clone` functions of `ty` and of the
-/// types stored inside it, which comparing or cloning it may run.
-fn written_inside(types: &Types, ty: Type) -> Vec<usize> {
+/// The hand-written functions that `operation` on a value of `ty` runs: the
+/// type's own impl of it if there is one, and otherwise those of the parts
+/// that the compiler's impl works through.
+fn written_runs(types: &Types, ty: Type, operation: Operation) -> Vec<usize> {
     let mut found = Vec::new();
     let mut seen = BTreeSet::new();
     let mut pending = vec![ty];
@@ -1119,17 +1146,23 @@ fn written_inside(types: &Types, ty: Type) -> Vec<usize> {
         if !seen.insert(ty) {
             continue;
         }
-        if let Some(written) = types.written.get(&ty) {
-            found.extend(
-                [written.eq, written.partial_cmp, written.cmp, written.clone]
-                    .into_iter()
-                    .flatten(),
-            );
+        let own = types.written.get(&ty).and_then(|written| match operation {
+            Operation::Equal => written.eq,
+            Operation::Order => written.partial_cmp,
+            Operation::Clone => written.clone,
+        });
+        if let Some(function) = own {
+            found.push(function);
+            continue;
         }
-        match types.kind(ty) {
-            TypeKind::List(element) | TypeKind::Set(element) => pending.push(*element),
-            TypeKind::Map(key, value) => pending.extend([*key, *value]),
-            _ => pending.extend(types.components(ty)),
+        match (operation, types.kind(ty)) {
+            (_, TypeKind::Tuple(_) | TypeKind::Nominal { .. }) => {
+                pending.extend(types.components(ty));
+            }
+            (Operation::Equal | Operation::Clone, TypeKind::List(element))
+            | (Operation::Clone, TypeKind::Set(element)) => pending.push(*element),
+            (Operation::Clone, TypeKind::Map(key, value)) => pending.extend([*key, *value]),
+            _ => {}
         }
     }
     found
@@ -1769,8 +1802,8 @@ fn contains_by_value(types: &Types, ty: Type, target: Type, seen: &mut BTreeSet<
 
 /// Rejects a private type or trait in a public interface: the signature of
 /// a public function, of a public method of a public type, or of a method
-/// of a public trait; a public field of a public struct; and a field of a
-/// variant of a public enum. Code outside the module could otherwise hold
+/// of a public trait; a supertrait of a public trait; a public field of a
+/// public struct; and a field of a variant of a public enum. Code outside the module could otherwise hold
 /// or name what it cannot see.
 fn check_interfaces(
     functions: &[FoundFunction],
@@ -1834,11 +1867,24 @@ fn check_interfaces(
         }
     }
     for (identity, declaration, core) in traits_found {
-        let ResolvedDeclarationKind::Trait { members, .. } = &declaration.kind else {
+        let ResolvedDeclarationKind::Trait {
+            members,
+            supertraits,
+            ..
+        } = &declaration.kind
+        else {
             continue;
         };
         if *core || !declaration.public {
             continue;
+        }
+        // Implementing the trait means implementing its supertraits too.
+        if let Some(found) = supertraits
+            .iter()
+            .find_map(|supertrait| private_named(supertrait, nominals, traits))
+        {
+            let place = format!("the supertraits of the public trait `{}`", identity.name);
+            return Err(error(&declaration.origin, found, &place));
         }
         for member in members {
             let ResolvedTraitMemberKind::Method(signature) = &member.kind else {

@@ -1,0 +1,16 @@
+// `contains` compares elements with `==`, which runs a hand-written `eq`; a
+// `drop` cannot reach the console that way either.
+struct X { n: Int }
+impl PartialEq for X {
+    fn eq(&self, other: &Self) -> Bool {
+        print("eq-console")
+        self.n == other.n
+    }
+}
+struct D { xs: List<X> }
+impl Drop for D {
+    fn drop(&mut self) {
+        assert(self.xs.contains(X { n: 1 }), "missing")
+    }
+}
+fn main() { let d = D { xs: [X { n: 1 }] } }

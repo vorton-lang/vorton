@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use vorton_compiler::{
     CompileError, OriginRef, SINGLE_FILE_LIBRARY, compile_to_c, native, single_file_project,
@@ -42,9 +43,7 @@ fn run(arguments: &[String]) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         ("run", [file]) => {
-            let work = std::env::temp_dir().join(format!("vorton-{}", std::process::id()));
-            std::fs::create_dir_all(&work)
-                .map_err(|error| format!("cannot create {}: {error}", work.display()))?;
+            let work = scratch_directory()?;
             let executable = work
                 .join("program")
                 .with_extension(std::env::consts::EXE_EXTENSION);
@@ -72,16 +71,33 @@ fn compile_file(file: &Path) -> Result<String, String> {
     compile_to_c(&single_file_project(&source)).map_err(|error| render(file, &source, &error))
 }
 
+/// Builds `file` into the executable `output`. The generated C goes into a
+/// directory of its own, so no file next to `output` is touched.
 fn build(file: &Path, output: &Path) -> Result<(), String> {
     let c_source = compile_file(file)?;
     let compiler = native::find_c_compiler()
         .ok_or("no C compiler found; install clang or gcc, or set VORTON_CC")?;
-    let c_file: PathBuf = output.with_extension("c");
-    std::fs::write(&c_file, c_source)
-        .map_err(|error| format!("cannot write {}: {error}", c_file.display()))?;
-    let result = native::build_executable(&compiler, &c_file, output);
-    let _ = std::fs::remove_file(&c_file);
+    let work = scratch_directory()?;
+    let c_file = work.join("program.c");
+    let result = std::fs::write(&c_file, c_source)
+        .map_err(|error| format!("cannot write {}: {error}", c_file.display()))
+        .and_then(|()| native::build_executable(&compiler, &c_file, output));
+    let _ = std::fs::remove_dir_all(&work);
     result
+}
+
+/// A new directory under the system's temporary directory that only this
+/// process uses.
+fn scratch_directory() -> Result<PathBuf, String> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let work = std::env::temp_dir().join(format!(
+        "vorton-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&work)
+        .map_err(|error| format!("cannot create {}: {error}", work.display()))?;
+    Ok(work)
 }
 
 fn render(file: &Path, source: &str, error: &CompileError) -> String {

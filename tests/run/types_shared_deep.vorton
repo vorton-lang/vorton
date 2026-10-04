@@ -1,0 +1,72 @@
+// Types that share parts many times over are checked in time in proportion
+// to the number of types: each level refers to the one below twice.
+struct S0 { n: Int }
+struct S1 { a: List<S0>, b: List<S0> }
+struct S2 { a: List<S1>, b: List<S1> }
+struct S3 { a: List<S2>, b: List<S2> }
+struct S4 { a: List<S3>, b: List<S3> }
+struct S5 { a: List<S4>, b: List<S4> }
+struct S6 { a: List<S5>, b: List<S5> }
+struct S7 { a: List<S6>, b: List<S6> }
+struct S8 { a: List<S7>, b: List<S7> }
+struct S9 { a: List<S8>, b: List<S8> }
+struct S10 { a: List<S9>, b: List<S9> }
+struct S11 { a: List<S10>, b: List<S10> }
+struct S12 { a: List<S11>, b: List<S11> }
+struct S13 { a: List<S12>, b: List<S12> }
+struct S14 { a: List<S13>, b: List<S13> }
+struct S15 { a: List<S14>, b: List<S14> }
+struct S16 { a: List<S15>, b: List<S15> }
+struct S17 { a: List<S16>, b: List<S16> }
+struct S18 { a: List<S17>, b: List<S17> }
+struct S19 { a: List<S18>, b: List<S18> }
+struct S20 { a: List<S19>, b: List<S19> }
+struct S21 { a: List<S20>, b: List<S20> }
+struct S22 { a: List<S21>, b: List<S21> }
+struct S23 { a: List<S22>, b: List<S22> }
+struct S24 { a: List<S23>, b: List<S23> }
+struct S25 { a: List<S24>, b: List<S24> }
+struct S26 { a: List<S25>, b: List<S25> }
+struct S27 { a: List<S26>, b: List<S26> }
+struct S28 { a: List<S27>, b: List<S27> }
+struct S29 { a: List<S28>, b: List<S28> }
+struct S30 { a: List<S29>, b: List<S29> }
+enum E0 { A(Int), B(Int) }
+enum E1 { A(E0), B(E0) }
+enum E2 { A(E1), B(E1) }
+enum E3 { A(E2), B(E2) }
+enum E4 { A(E3), B(E3) }
+enum E5 { A(E4), B(E4) }
+enum E6 { A(E5), B(E5) }
+enum E7 { A(E6), B(E6) }
+enum E8 { A(E7), B(E7) }
+enum E9 { A(E8), B(E8) }
+enum E10 { A(E9), B(E9) }
+enum E11 { A(E10), B(E10) }
+enum E12 { A(E11), B(E11) }
+enum E13 { A(E12), B(E12) }
+enum E14 { A(E13), B(E13) }
+enum E15 { A(E14), B(E14) }
+enum E16 { A(E15), B(E15) }
+enum E17 { A(E16), B(E16) }
+enum E18 { A(E17), B(E17) }
+enum E19 { A(E18), B(E18) }
+enum E20 { A(E19), B(E19) }
+enum E21 { A(E20), B(E20) }
+enum E22 { A(E21), B(E21) }
+enum E23 { A(E22), B(E22) }
+enum E24 { A(E23), B(E23) }
+enum E25 { A(E24), B(E24) }
+enum E26 { A(E25), B(E25) }
+enum E27 { A(E26), B(E26) }
+enum E28 { A(E27), B(E27) }
+enum E29 { A(E28), B(E28) }
+enum E30 { A(E29), B(E29) }
+fn main() {
+    let s = S1 { a: [S0 { n: 1 }], b: [] }
+    let e = E2::B(E1::A(E0::B(2)))
+    print(s.a.len() + s.b.len())
+    print(s == s)
+    print(e == e)
+}
+

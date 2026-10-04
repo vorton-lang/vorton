@@ -43,7 +43,7 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 
 ### 当前支持范围
 
-类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化；不能按值包含自身）、`Str` 的[方法](lang-spec/type-system.md#字符串)、`List`、`Map` 与 `Set` 及其[规范列出的方法](lang-spec/type-system.md#容器)、任意类型的 `clone`、下标读写、`for` 遍历 range、列表、Map 与 Set（拿走，或用 `&`／`&mut` 借出）、`match`、`if let` 与解构（含穷尽性检查，可按值或借出）、结构化 `==` 与 `<` `>` `<=` `>=`、`Range<Int>` 值、函数与泛型函数、非泛型类型的固有方法与关联函数、trait 声明、非泛型 struct 与 enum 的 `impl Trait for Type`（core trait 中可以实现 `Display`、`PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Clone`、`Drop`）、经 bound 或具体类型调用 trait 方法（含 supertrait 的方法；比较 trait 的方法只能调用手写的，其余用运算符）、`print`、插值与内建类型的 `to_str()` 经 `Display` 显示、比较运算符经比较 trait 分派、字段、固有方法与 trait 的模块可见性、`let`/`let mut`、`mut` 按值参数、借出的参数、绑定与返回、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`、`replace`、`swap`。其他构造都报告 `Unsupported`。
+类型检查与代码生成按 Milestone 扩展。目前支持 `Int`、`Float`、`Bool`、`Str`、`Unit`、tuple、struct 与 enum（泛型的按具体类型实参实例化，类型参数暂不能带约束；不能按值包含自身）、`Str` 的[方法](lang-spec/type-system.md#字符串)、`List`、`Map` 与 `Set` 及其[规范列出的方法](lang-spec/type-system.md#容器)、任意类型的 `clone`、下标读写、`for` 遍历 range、列表、Map 与 Set（拿走，或用 `&`／`&mut` 借出）、`match`、`if let` 与解构（含穷尽性检查，可按值或借出）、结构化 `==` 与 `<` `>` `<=` `>=`、`Range<Int>` 值、函数与泛型函数、非泛型类型的固有方法与关联函数、trait 声明、非泛型 struct 与 enum 的 `impl Trait for Type`（core trait 中可以实现 `Display`、`PartialEq`、`Eq`、`PartialOrd`、`Ord`、`Clone`、`Drop`）、经 bound 或具体类型调用 trait 方法（含 supertrait 的方法；比较 trait 的方法只能调用手写的，其余用运算符）、`print`、插值与内建类型的 `to_str()` 经 `Display` 显示、比较运算符经比较 trait 分派、字段、固有方法与 trait 的模块可见性、`let`/`let mut`、`mut` 按值参数、借出的参数、绑定与返回、对变量及其字段的赋值、`if`、`while`、`loop`、`break`、`continue`、`return`、字符串插值，以及 `print`、`assert`、`panic`、`replace`、`swap`。其他构造都报告 `Unsupported`。
 
 `Str` 是不可变的值，用引用计数实现 O(1) 拷贝。`Map` 由运行时里一个通用的按插入顺序的哈希表实现：条目按插入顺序存放，删除留下空位，空位多于条目时整体压实；开放寻址的索引按键找到条目。每个具体的 `Map<K, V>` 只生成键的哈希、判等与释放、复制；`Set<T>` 是值为 `Unit` 的 Map。`List`、`Map` 与含有它们的聚合值是实体：
 
@@ -61,11 +61,13 @@ source → token → AST → 名称解析 → 声明检查 → 类型检查 → 
 
 Trait 方法的调用在检查时就确定到 impl：具体类型直接调用其 impl 的函数；类型参数上的调用记为“该 trait 的第几个方法”，实例化时按类型实参换成对应 impl 的函数。检查器在每个调用处核对类型实参满足 bound，所以实例化时 impl 一定存在；内建类型的 `Display` 没有 impl，`to_str` 实例化为字符串插值。
 
+类型的性质（是否实体、是否需要释放、能否比较、能否作 Map 键、释放时会不会运行 `drop`）都从这个类型出发，把能到达的类型各看一次来判定，所以共享或递归的类型图也只花线性时间。递归类型能否比较取规范要求的最大不动点，它等价于“能到达的类型各自都不排除比较”。
+
 比较运算符不经过方法调用：`==` 与 `<` 等对每个具体类型生成一个比较函数，有手写 impl 的类型由它调用手写的 `eq` 或 `partial_cmp`，其余逐字段比较。类型表记录每个类型手写的比较 impl，结构化比较也因此在字段处调用手写的比较。手写的 `Clone` 与 `Drop` 同样记在类型表里：复制与释放该类型的函数调用它们，所以容器与外层结构复制、释放元素和字段时也会调用。
 
-实现 `Drop` 的类型在 C 结构里多一个存活标记：构造时置位，移交时随源一起清零，释放函数只在标记置位时先调用 `drop` 再释放字段。字段全是值的这种类型因此也能区分“已移走”和“值恰好为零”。规范不许 `drop` 在 0.1 使用 console：实例化之后，检查器沿实例的 IR 找出每个函数会调用的函数，包括比较与 `clone` 在字段和元素处调用的手写实现，`drop` 能到达 `print` 就是错误。
+实现 `Drop` 的类型在 C 结构里多一个存活标记：构造时置位，移交时随源一起清零，释放函数只在标记置位时先调用 `drop` 再释放字段。字段全是值的这种类型因此也能区分“已移走”和“值恰好为零”。规范不许 `drop` 在 0.1 使用 console：实例化之后，检查器沿实例的 IR 找出每个函数会调用的函数，包括运算在字段和元素处调用的手写实现：`==` 与 `contains` 调用 `eq`，排序调用 `partial_cmp`，`clone` 调用 `clone`；`drop` 能到达 `print` 就是错误。
 
-公开接口不能出现私有的类型或 trait：`pub` 函数的签名与 bound、`pub` 类型的 `pub` 方法签名、`pub` trait 的方法签名、`pub` struct 的 `pub` 字段，以及 `pub` enum 的 payload。私有类型的方法不论自身是否 `pub` 都到不了模块之外，所以不检查。
+公开接口不能出现私有的类型或 trait：`pub` 函数的签名与 bound、`pub` 类型的 `pub` 方法签名、`pub` trait 的方法签名与 supertrait、`pub` struct 的 `pub` 字段，以及 `pub` enum 的 payload。私有类型的方法不论自身是否 `pub` 都到不了模块之外，所以不检查。
 
 ## Runtime
 
@@ -82,6 +84,6 @@ C 编译参数固定为 `-std=c11 -O2 -ffp-contract=off -fno-fast-math`，保证
 
 ## 命令行与测试
 
-- `vorton run <file>`：编译并运行；`vorton build <file> [-o <output>]`：生成可执行文件；`vorton c <file>`：输出生成的 C。
+- `vorton run <file>`：编译并运行；`vorton build <file> [-o <output>]`：生成可执行文件，中间的 C 文件写在临时目录里，不碰输出路径旁的文件；`vorton c <file>`：输出生成的 C。
 - C 编译器取 `VORTON_CC`，否则依次尝试 `clang`、`gcc`、`cc`。
 - `cargo test` 除了编译器自身的测试，还运行仓库根目录 [`tests/run/`](../tests/run) 下的每个程序：`<name>.expected` 是期望的标准输出，`<name>.panic` 是期望的 panic 信息。这些程序大多移植自旧版本的测试语料。

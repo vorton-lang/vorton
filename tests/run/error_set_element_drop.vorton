@@ -1,0 +1,8 @@
+// Nor can it be a set element, alone or inside a tuple.
+struct X { n: Int }
+impl Drop for X {
+    fn drop(&mut self) {}
+}
+fn main() {
+    let mut s: Set<(Int, X)> = Set::new()
+}

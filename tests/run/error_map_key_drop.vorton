@@ -1,0 +1,10 @@
+// A type with a hand-written `Drop` is an entity, so it cannot be a map key,
+// even when all its fields are values.
+struct X { n: Int }
+impl Drop for X {
+    fn drop(&mut self) { assert(self.n != 1, "drop-key") }
+}
+fn main() {
+    let mut m: Map<X, Int> = Map::new()
+    m[X { n: 1 }] = 3
+}

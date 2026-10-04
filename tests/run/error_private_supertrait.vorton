@@ -1,0 +1,5 @@
+// A public trait cannot require a private supertrait: implementing it means
+// implementing the supertrait too.
+trait Hidden { fn hidden(&self) -> Int }
+pub trait Open: Hidden { fn open(&self) -> Int }
+fn main() {}

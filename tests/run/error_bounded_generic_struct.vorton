@@ -1,0 +1,8 @@
+// Bounds on the type parameters of structs and enums are not checked yet, so
+// they are reported rather than dropped.
+trait Allowed { fn n(&self) -> Int }
+struct Box<T: Allowed> { value: T }
+fn main() {
+    let b = Box { value: 7 }
+    print(b.value)
+}

@@ -1,0 +1,39 @@
+// A `drop` may compare and clone values whose other impls print: `==` runs
+// only `eq`, ordering only `partial_cmp`, and `clone` only `clone`.
+struct X { xs: List<Int> }
+impl Clone for X {
+    fn clone(&self) -> Self {
+        print("clone-console")
+        X { xs: self.xs.clone() }
+    }
+}
+struct Score { n: Int }
+impl PartialEq for Score {
+    fn eq(&self, other: &Self) -> Bool { self.n == other.n }
+}
+impl PartialOrd for Score {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        print("order-console")
+        Option::Some(Ordering::Equal)
+    }
+}
+struct Loud { n: Int }
+impl PartialEq for Loud {
+    fn eq(&self, other: &Self) -> Bool {
+        print("eq-console")
+        self.n == other.n
+    }
+}
+struct D { x: X, score: Score, values: List<Int>, louds: List<Loud> }
+impl Drop for D {
+    fn drop(&mut self) {
+        assert(self.x == self.x, "equality")
+        assert(self.score == self.score, "score")
+        let copy = self.values.clone()
+        assert(copy.len() == self.louds.len(), "lengths")
+    }
+}
+fn main() {
+    let d = D { x: X { xs: [1] }, score: Score { n: 1 }, values: [1], louds: [Loud { n: 2 }] }
+    print("done")
+}
